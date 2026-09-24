@@ -59,8 +59,12 @@ in 93.17 ms with the default store and 22.04 ms with the selected page store
 (24 saves per profile). The 256 B case was 8.54 versus 9.23 ms. The selected
 source TUI adds 4,958 B linked `text`; its [CLI+TUI archive](prototypes/connections/results/2026-09-24-native-save/pure-document-hybrid-cli-tui-linux-aarch64.tar.gz)
 is 57,788 B compressed and passed a relocated app check. Large documents use
-an incompatible on-disk page format, so this remains an opt-in Linux/16 KiB-page
-research profile; the default core and storage path are unchanged.
+an incompatible on-disk page format, so this remains an opt-in Linux storage
+research profile. Its 16 KiB logical pages now admit OS page sizes that divide
+16 KiB, but only the 16 KiB host has passed the real storage suite so far;
+the default core and storage path are unchanged. The
+[alignment and verification boundary](docs/research/071-logical-page-portability.md)
+records the 32 B selected-code cost and the unrun 4 KiB/macOS checks.
 
 The current execution profile has separate `core`, `fixed-editor`, `editor`, and
 `server` build targets. `make all` produces the core and the parser-free CLI

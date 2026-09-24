@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -Werror
 BUILD ?= build
 
-.PHONY: all core async-core editor fixed-editor fixed-server fixed-tui source-tui compiler mirror window server async-server document-peer document-server check check-policy check-policy-peer check-portable check-portable-tui check-portable-peer check-native-checkpoint check-mirror check-core check-async check-async-server check-async-service-scale check-profile check-fixed-profile check-fixed-server check-service-scale check-tui-profile check-source-tui-profile check-tui check-source-tui check-release check-micro-memory check-hybrid check-flat-export check-copy-range check-peer-profile check-document-server-profile check-window-profile check-document-peer check-document-server FORCE
+.PHONY: all core async-core editor fixed-editor fixed-server fixed-tui source-tui compiler mirror window server async-server document-peer document-server check check-policy check-policy-peer check-portable check-portable-tui check-paged-portable check-portable-peer check-native-checkpoint check-mirror check-core check-async check-async-server check-async-service-scale check-profile check-fixed-profile check-fixed-server check-service-scale check-tui-profile check-source-tui-profile check-tui check-source-tui check-release check-micro-memory check-hybrid check-flat-export check-copy-range check-peer-profile check-document-server-profile check-window-profile check-document-peer check-document-server FORCE
 CORE = runtime.c
 STORE ?= store.c
 FIXED_PROGRAM ?= examples/editor.pure
@@ -242,6 +242,12 @@ check-portable: $(BUILD)/test-flow $(BUILD)/test-program $(BUILD)/test-fields $(
 check-portable-tui: fixed-editor fixed-tui editor source-tui
 	python3 check_tui.py --build $(BUILD) --portable $(if $(PORTABLE_FIXED_TUI_EVIDENCE),--output "$(PORTABLE_FIXED_TUI_EVIDENCE)")
 	python3 check_tui.py --build $(BUILD) --source --portable $(if $(PORTABLE_SOURCE_TUI_EVIDENCE),--output "$(PORTABLE_SOURCE_TUI_EVIDENCE)")
+
+# Exercise the selected logical-page store without Linux-only size/RSS gates.
+# The CI runner separately asserts its real OS page size before this target.
+check-paged-portable:
+	$(MAKE) BUILD=build/paged-portable STORE=store-paged.c check-portable check-portable-tui check build/paged-portable/test-paged-store
+	build/paged-portable/test-paged-store
 
 # Host-native behavior plus the same real document workload on both CLI variants.
 # RSS is recorded on macOS and Linux; only check-micro-memory enforces the

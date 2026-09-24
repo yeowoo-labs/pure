@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* Selected Linux/16 KiB-page storage experiment. Small values retain the
+/* Selected Linux storage experiment with 16 KiB logical pages. Small values retain the
  * existing PUREB001 inline file. Large roots name an append-only page
  * generation. Both forms expose one immutable, contiguous mapped read. */
 enum { PAGE = 16384, INLINE_BYTES = 24, ROOT_BYTES = 48,
@@ -167,7 +167,11 @@ static PureResult open_locked(const char *path, bool writer, int *directory, int
 }
 
 PureResult pure_store_init(const char *path) {
-    if (!path || !*path || sysconf(_SC_PAGESIZE) != PAGE) return PURE_STORE_ERROR;
+    long host_page = sysconf(_SC_PAGESIZE);
+    /* Every file offset and MAP_FIXED address uses a PAGE-sized step, so a
+     * smaller OS page works when its size divides the logical page. */
+    if (!path || !*path || host_page <= 0 || PAGE % host_page)
+        return PURE_STORE_ERROR;
     bool created = mkdir(path, 0700) == 0;
     if (!created && errno != EEXIST) return PURE_STORE_ERROR;
     int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);

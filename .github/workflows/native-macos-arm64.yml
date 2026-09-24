@@ -20,7 +20,8 @@ jobs:
         run: |
           make -C prototypes/connections BUILD=build/mac-default all
           test -f prototypes/connections/build/mac-default/libpure-execution.a
-          test -x prototypes/connections/build/mac-default/pure-edit
+          test -x prototypes/connections/build/mac-default/pure-edit-fixed
+          test ! -e prototypes/connections/build/mac-default/pure-edit
           test ! -e prototypes/connections/build/mac-default/pure-connections
           test ! -e prototypes/connections/build/mac-default/pure-document-peer
           test ! -e prototypes/connections/build/mac-default/pure-edit-window
@@ -37,6 +38,10 @@ jobs:
         run: |
           make -C prototypes/connections BUILD=build/mac-native check-policy \
             POLICY_EVIDENCE="$RUNNER_TEMP/policy.json"
+      - name: Exercise selected logical-page storage
+        run: |
+          getconf PAGESIZE
+          make -C prototypes/connections check-paged-portable
       - name: Show whole-process results
         if: always()
         run: |

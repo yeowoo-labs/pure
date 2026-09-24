@@ -72,7 +72,7 @@ Writers may receive `busy` until it finishes; schedule this as maintenance.
 The destination must not exist. `make -C prototypes/connections check-flat-export`
 exercises the conversion with real mixed-size and repeatedly edited documents.
 
-On a Linux host with 16 KiB OS pages, the selected hybrid store can also run
+On a Linux host whose OS page size divides the 16 KiB logical page, the selected hybrid store can also run
 the source-loaded native terminal editor without adding it to the default app:
 
 ```sh

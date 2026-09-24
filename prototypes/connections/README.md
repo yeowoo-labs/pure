@@ -145,7 +145,9 @@ python3 prototypes/connections/export_flat_store.py \
 [기본 형식으로 내보내는 검증](../../docs/research/062-paged-store-rollback.md).
 
 같은 `.pure` 문서 편집기를 선택형 페이지 저장소와 함께 터미널에서 사용하려면
-Linux의 16 KiB OS 페이지 환경에서 새 저장 디렉터리를 지정한다. CLI와 TUI를
+새 저장 디렉터리를 지정한다. 논리 페이지는 16 KiB이며 OS 페이지가 이를
+나눌 때만 초기화한다. 현재 실제 검사는 Linux 16 KiB 환경에서만 통과했고,
+4 KiB Linux와 macOS는 CI 실행 결과가 아직 없다. CLI와 TUI를
 함께 담은 [선택형 묶음](results/2026-09-24-native-save/pure-document-hybrid-cli-tui-linux-aarch64.tar.gz)은
 다음 빌드로 만들며, 기본 `make all`과 기본 저장 형식은 유지된다.
 

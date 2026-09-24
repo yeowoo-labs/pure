@@ -1,0 +1,17 @@
+name: Native Linux 4 KiB page store
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  page-store:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a real 4 KiB OS page
+        run: test "$(getconf PAGESIZE)" = 4096
+      - name: Exercise the selected 16 KiB logical-page store
+        run: make -C prototypes/connections check-paged-portable
