@@ -1,0 +1,39 @@
+1/37 core.test.blank program, no hidden application behavior, and reset...OK
+2/37 core.test.arbitrary input counter and unused events...OK
+3/37 core.test.charge and release behavior exists only in the authored instruction program...OK
+4/37 core.test.forward condition executes once and assignments and handlers are ordered...OK
+5/37 core.test.branch to program end is valid...OK
+6/37 core.test.one event rolls back writes from all handlers on arithmetic failure...OK
+7/37 core.test.nonfinite arithmetic and invalid clamp fail atomically...OK
+8/37 core.test.stack underflow overflow and leftover values reject the event...OK
+9/37 core.test.failed candidates leave active values program revision and diagnostics unchanged...OK
+10/37 core.test.state preservation mapping reads active values at commit and reset uses new initials...OK
+11/37 core.test.capacity boundaries and sticky load errors...OK
+12/37 core.test.invalid declaration values state mappings event ids and handler ranges...OK
+13/37 core.test.backward self out-of-handler branches and stores without handlers are rejected...OK
+14/37 core.test.event inputs and dt enforce deterministic frame contract...OK
+15/37 core.test.binding evaluation is pure on both success and failure...OK
+16/37 core.test.arithmetic comparison logical min max and clamp expression semantics...OK
+17/37 core.test.diagnostic counters wrap without affecting scalar values...OK
+18/37 core.test.memory accounting separates reserved storage used IR and stack capacity...OK
+19/37 core.test.point coordinates are ephemeral event operands and unavailable to pure evaluation...OK
+20/37 core.test.point event ranges reject holes and invalid payloads without committing...OK
+21/37 core.test.point event failure rolls back writes from earlier matching handlers...OK
+22/37 core.test.loading shares storage with records while old events and bindings remain executable...OK
+23/37 core.test.failed and abandoned candidates restore empty reuse storage without changing active work...OK
+24/37 core.test.full pending program survives repeated evaluation configuration record loss and reset...OK
+25/37 core.test.restored definition and values commit together without changing reset initializers...OK
+26/37 core.test.missing duplicate nonfinite or invalid restored candidates leave active work untouched...OK
+27/37 core.test.empty and full restored programs validate all values and discard old display records...OK
+28/37 core.test.shared handler bodies access their own bound state slots in source order...OK
+29/37 core.test.failure in a later shared binding rolls back all earlier bindings...OK
+30/37 core.test.shared bindings reject missing arguments partial overlaps and invalid slot mappings...OK
+31/37 core.test.one routed handler changes only its event target and rejects missing or foreign routes...OK
+32/37 core.test.routes reject invalid mappings and bindings without replacing active work...OK
+33/37 core.test.routed event rollback includes globals and earlier handlers and survives staged route replacement...OK
+34/37 core.test.scalar inputs carry a finite ephemeral value without adding state or pointer ownership...OK
+35/37 core.test.scalar input failure rolls back earlier writes and old scalar events survive staging...OK
+36/37 evaluation.test.record loss cannot authorize an old memo; unrelated changes can...OK
+37/37 evaluation.test.budget, collisions, invalid settings, and disabled history are conservative...OK
+All 37 tests passed.
+Built /home/eunhhu/work/pure/prototypes/workbench/web/core.wasm (61,072 bytes)

@@ -1,0 +1,463 @@
+{
+  "profile": "native-cli-durable-one-mib-document-last-byte-edit",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "filesystem": "ext4 /dev/mmcblk0p2[/home/eunhhu/work/pure]",
+  "trials_per_variant": 18,
+  "final_body_sha256": "06cb5e32505f66804f6e8c79e3230105ca4769444e1389ee36f6f11fd61f2d3a",
+  "scope": "Each sample starts a new CLI process; create and edit each include program parsing, store initialization, file and directory synchronization. Show verifies the final revision but is outside the timed operations. The host page cache, filesystem and device remain uncontrolled.",
+  "variants": {
+    "flat": {
+      "binary_sha256": "23ebc0ce1df9c49216511bee658fd5b9e373509e296bd2c2f8e76e6d3081cded",
+      "median_create_ms": 83.556,
+      "median_edit_ms": 78.805,
+      "samples": [
+        {
+          "trial": 0,
+          "create_ms": 93.308,
+          "edit_ms": 86.265,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 1,
+          "create_ms": 66.85,
+          "edit_ms": 81.315,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 2,
+          "create_ms": 83.243,
+          "edit_ms": 26.218,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 3,
+          "create_ms": 25.734,
+          "edit_ms": 81.636,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 4,
+          "create_ms": 80.359,
+          "edit_ms": 22.923,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 5,
+          "create_ms": 84.855,
+          "edit_ms": 77.624,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 6,
+          "create_ms": 83.516,
+          "edit_ms": 24.882,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 7,
+          "create_ms": 100.653,
+          "edit_ms": 65.551,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 8,
+          "create_ms": 87.547,
+          "edit_ms": 88.306,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 9,
+          "create_ms": 100.781,
+          "edit_ms": 89.489,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 10,
+          "create_ms": 29.332,
+          "edit_ms": 79.987,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 11,
+          "create_ms": 80.05,
+          "edit_ms": 26.629,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 12,
+          "create_ms": 79.751,
+          "edit_ms": 24.165,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 13,
+          "create_ms": 85.309,
+          "edit_ms": 23.163,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 14,
+          "create_ms": 83.597,
+          "edit_ms": 82.171,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 15,
+          "create_ms": 97.909,
+          "edit_ms": 85.934,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 16,
+          "create_ms": 25.638,
+          "edit_ms": 82.514,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 17,
+          "create_ms": 86.699,
+          "edit_ms": 23.813,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        }
+      ]
+    },
+    "copy": {
+      "binary_sha256": "52c2b828b0cba3564a37e3874f60bec793d1dd7031aff77ba850cee7683977f9",
+      "median_create_ms": 81.672,
+      "median_edit_ms": 77.908,
+      "samples": [
+        {
+          "trial": 0,
+          "create_ms": 29.767,
+          "edit_ms": 78.001,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 1,
+          "create_ms": 89.789,
+          "edit_ms": 91.286,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 2,
+          "create_ms": 83.106,
+          "edit_ms": 77.868,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 3,
+          "create_ms": 84.346,
+          "edit_ms": 47.881,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 4,
+          "create_ms": 29.06,
+          "edit_ms": 78.142,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 5,
+          "create_ms": 29.801,
+          "edit_ms": 52.17,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 6,
+          "create_ms": 81.026,
+          "edit_ms": 77.948,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 7,
+          "create_ms": 30.027,
+          "edit_ms": 87.974,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 8,
+          "create_ms": 45.522,
+          "edit_ms": 87.955,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 9,
+          "create_ms": 80.228,
+          "edit_ms": 22.863,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 10,
+          "create_ms": 82.319,
+          "edit_ms": 77.564,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 11,
+          "create_ms": 94.951,
+          "edit_ms": 46.186,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 12,
+          "create_ms": 84.607,
+          "edit_ms": 80.2,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 13,
+          "create_ms": 29.82,
+          "edit_ms": 86.258,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 14,
+          "create_ms": 94.36,
+          "edit_ms": 31.893,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 15,
+          "create_ms": 97.289,
+          "edit_ms": 44.737,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 16,
+          "create_ms": 60.805,
+          "edit_ms": 80.635,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        },
+        {
+          "trial": 17,
+          "create_ms": 85.887,
+          "edit_ms": 77.182,
+          "store_files": 2,
+          "store_file_bytes": 1048600,
+          "store_allocated_bytes": 1052672
+        }
+      ]
+    },
+    "paged": {
+      "binary_sha256": "e1c12a2f5e736bb86737ceff7849fe95b1a9d13136e8c5eb3f3398cb3971c6f5",
+      "median_create_ms": 88.948,
+      "median_edit_ms": 14.473,
+      "samples": [
+        {
+          "trial": 0,
+          "create_ms": 117.897,
+          "edit_ms": 565.484,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 1,
+          "create_ms": 47.619,
+          "edit_ms": 13.102,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 2,
+          "create_ms": 89.46,
+          "edit_ms": 14.779,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 3,
+          "create_ms": 30.501,
+          "edit_ms": 15.016,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 4,
+          "create_ms": 89.223,
+          "edit_ms": 13.383,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 5,
+          "create_ms": 88.518,
+          "edit_ms": 12.718,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 6,
+          "create_ms": 88.992,
+          "edit_ms": 13.681,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 7,
+          "create_ms": 116.568,
+          "edit_ms": 23.607,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 8,
+          "create_ms": 100.547,
+          "edit_ms": 24.497,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 9,
+          "create_ms": 54.374,
+          "edit_ms": 13.896,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 10,
+          "create_ms": 84.894,
+          "edit_ms": 13.607,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 11,
+          "create_ms": 92.673,
+          "edit_ms": 14.166,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 12,
+          "create_ms": 34.961,
+          "edit_ms": 78.767,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 13,
+          "create_ms": 88.903,
+          "edit_ms": 13.656,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 14,
+          "create_ms": 57.426,
+          "edit_ms": 13.968,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 15,
+          "create_ms": 38.675,
+          "edit_ms": 14.937,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 16,
+          "create_ms": 90.664,
+          "edit_ms": 15.344,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        },
+        {
+          "trial": 17,
+          "create_ms": 90.055,
+          "edit_ms": 14.926,
+          "store_files": 3,
+          "store_file_bytes": 1065520,
+          "store_allocated_bytes": 1069056
+        }
+      ]
+    }
+  }
+}

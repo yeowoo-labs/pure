@@ -1,0 +1,62 @@
+[
+  {
+    "file": "prototypes/workbench/baseline.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 reference begins with the authored states and matching scene (8.045605ms)\n\u2714 press, hold, release, and frame order produce exact expected values (0.643315ms)\n\u2714 charge clamps at one and explicit floor restores rest (1.415832ms)\n\u2714 repeat and concurrent physical sources produce only logical edges (0.440981ms)\n\u2714 airborne presses cannot charge or cause another jump (0.296037ms)\n\u2714 releaseAll emits release and reset clears latches without a jump (0.460666ms)\n\u2714 unknown inputs and invalid frame counts reject without mutation (0.833592ms)\n\u2139 tests 7\n\u2139 suites 0\n\u2139 pass 7\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 104.998545\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/cli.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 terminal starts empty and produces the same charge trace as the shared runtime (132.23208ms)\n\u2714 invalid terminal commands do not alter state and fail piped execution (55.4384ms)\n\u2714 terminal replays authored pointer movement and cancellation through the shared runtime (72.766738ms)\n\u2714 file load preserves by name, rejected load preserves active work, and save never overwrites (60.705193ms)\n\u2714 terminal exposes arithmetic rollback and retains failure through matching release (57.574139ms)\n\u2714 terminal configures and discards evaluation records and recovers from a display limit (51.583977ms)\n\u2714 terminal saves and restores placement independently of reset and preserves a browser draft (214.094236ms)\n\u2714 invalid restoration leaves terminal code and state unchanged (64.081708ms)\n\u2139 tests 8\n\u2139 suites 0\n\u2139 pass 8\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 791.095627\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/compiler.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 a blank document is an empty program with no implied behavior (4.437219ms)\n\u2714 forward references and separate state/input namespaces preserve declaration IDs (2.043572ms)\n\u2714 ordered assignments, repeated handlers, and condition evaluation once (0.933296ms)\n\u2714 nested branches use absolute forward targets and skip correct bodies (1.152407ms)\n\u2714 operator precedence, associativity, unary and builtin function lowering (2.408572ms)\n\u2714 multiline parentheses, scientific literals, comments, and string escapes (0.938277ms)\n\u2714 all instruction fields are numeric and carry original source line (0.394222ms)\n\u2714 contextual declaration words remain valid names outside reserved builtins (0.313389ms)\n\u2714 unknown and reserved symbols have useful one-based locations (1.743147ms)\n\u2714 duplicates, unsupported keys, initializers, and invalid syntax are rejected (1.464017ms)\n\u2714 document, declaration, instruction, and nesting limits reject overflow (6.69505ms)\n\u2714 every supported input maps to a bounded ordered event ID (1.028536ms)\n\u2714 optional examples compile and charge behavior is entirely authored (20.773687ms)\n\u2139 tests 13\n\u2139 suites 0\n\u2139 pass 13\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 120.580868\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/evaluation.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 cache reuse, unrelated changes and discarded records preserve authored values (20.981335ms)\n\u2714 committed changes only: failed events and failed edits preserve reusable output (4.493144ms)\n\u2714 program edits, state reordering and reset cannot reuse old definitions (3.96033ms)\n\u2714 finite float semantics include signed zero, high state bit and arithmetic errors (4.212293ms)\n\u2714 one budget covers the whole scene; failures publish no partial scene or state rollback (2.07635ms)\n\u2714 small caches, no history and every small work limit give exact results or explicit failure (28.417737ms)\n\u2714 invalid settings and forget names preserve policy and state (2.441665ms)\n\u2139 tests 7\n\u2139 suites 0\n\u2139 pass 7\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 151.059416\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/pointer.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 pointer declarations resolve forward targets and reject ambiguous or contextless inputs (9.304659ms)\n\u2714 authored drag keeps grab offset and commits the displayed position even if release coordinates differ (11.38525ms)\n\u2714 ownership, duplicate downs, stale moves, cancellation and focus cleanup cannot leave held input (3.902664ms)\n\u2714 invalid coordinates and modes do not mutate a held gesture; arithmetic failure rolls back one event (3.549423ms)\n\u2714 independent targets share the event pipeline and publication remains non-reentrant (3.036349ms)\n\u2714 failing down, up and cancel never prevent terminal ownership cleanup (3.723978ms)\n\u2139 tests 6\n\u2139 suites 0\n\u2139 pass 6\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 118.292424\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/presentation.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 direct publication matches archived snapshots and work counts through authored changes (58.271083ms)\n\u2714 whole-scene budget failure never publishes partial bindings and recovers exactly (8.306901ms)\n\u2714 latched event rollback, nonfinite bindings, reset and signed zero keep their semantics (3.417886ms)\n\u2714 publication rejects reentrant runtime changes and reads before they affect the scene (4.134738ms)\n\u2714 invalid or throwing output adapters do not strand the runtime or alter authored state (2.927572ms)\n\u2139 tests 5\n\u2139 suites 0\n\u2139 pass 5\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 170.584957\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/project.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 multiple authored placements and a separate invalid draft survive a fresh runtime restore (35.665731ms)\n\u2714 malformed files reject before changing active code, values, diagnostics or warm display records (12.678175ms)\n\u2714 restoration matches names rather than ordering and never reuses stale cached values (4.795756ms)\n\u2714 finite float values including negative zero round trip without changing authored reset values (3.274775ms)\n\u2714 held and failed interactions cannot be saved and restoration cannot steal an active input (12.313916ms)\n\u2714 empty and full documents restore without imposing a new source size or state count (4.861367ms)\n\u2714 document APIs respect the output callback boundary and export independent values (9.588011ms)\n\u2139 tests 7\n\u2139 suites 0\n\u2139 pass 7\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 197.019695\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/rules.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 binding more objects shares one VM body instead of expanding its instructions (8.572475ms)\n\u2714 records and rules resolve forward names and reject invalid types fields and bindings (8.254919ms)\n\u2714 shared layout matches the existing authored layout across independent and simultaneous gestures (32.486364ms)\n\u2714 field names retain identity across schema and instance reorder, removal and restoration (6.508144ms)\n\u2714 bindings share one event transaction including global effects and multiple uses of one item (2.478183ms)\n\u2714 bound writes invalidate affected display caches and failed edits preserve active bindings (2.754313ms)\n\u2714 generated qualified names cannot make a valid exported document unreadable by its own loader (10.14301ms)\n\u2139 tests 7\n\u2139 suites 0\n\u2139 pass 7\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 159.341189\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/runtime.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 blank startup and applied empty source contain no application objects or behavior (12.167268ms)\n\u2714 author can add unrelated states inputs views and behavior entirely through source (5.777903ms)\n\u2714 keyboard and pointer sources aggregate first down and last up; repeats are ignored (2.04235ms)\n\u2714 held input rejects apply without changing applied source, metadata, or values (2.22159ms)\n\u2714 invalid syntax, unknown references and capacity overflow preserve the previous program (2.604239ms)\n\u2714 state preservation follows names across reorder/add/remove; reset uses new initializers (2.888331ms)\n\u2714 callers cannot mutate active metadata and corrupt name-based state preservation (1.489535ms)\n\u2714 conditions execute once, and assignments and multiple handlers follow source order (1.677591ms)\n\u2714 a failed event rolls back all handlers and keeps its source diagnostic through release (1.809258ms)\n\u2714 reset clears held inputs and latched errors; invalid frame counts have no effects (2.023887ms)\n\u2714 render evaluation is pure and invalid binding is distinct from an event rollback (5.592051ms)\n\u2714 independent adapters replay the same author program without sharing live state (3.838849ms)\n\u2714 Wasm has no imports and reports fixed memory and exact active IR/state storage (7.566272ms)\n\u2139 tests 13\n\u2139 suites 0\n\u2139 pass 13\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 129.686452\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/workspace.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 Wasm executes old events and output during staged replacement without corrupting either phase (10.164529ms)\n\u2714 workspace accounting reports shared payload and safety tag without double-counting (3.272442ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 92.159223\n",
+    "stderr": ""
+  }
+]

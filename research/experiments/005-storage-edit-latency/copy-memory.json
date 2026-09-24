@@ -1,0 +1,43 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "portable-measurement-no-budget",
+  "variant": "source-program",
+  "scope": "Child-process peak RSS for native CLI document creation, read and one-byte revision edit; includes libc and the selected program form, excludes filesystem cache, kernel buffers, TLS, GUI and other apps. No cross-platform memory ceiling is asserted.",
+  "samples": {
+    "small_edit_rss_kib": 1056,
+    "one_mib_edit_rss_kib": 2080,
+    "one_mib_show_rss_kib": 1104,
+    "one_mib_splice_rss_kib": 1056
+  },
+  "raw_samples": {
+    "small_edit_rss_kib": {
+      "exit_code": 0,
+      "max_rss_kib": 1056,
+      "raw_max_rss": 1056,
+      "raw_unit": "KiB"
+    },
+    "one_mib_edit_rss_kib": {
+      "exit_code": 0,
+      "max_rss_kib": 2080,
+      "raw_max_rss": 2080,
+      "raw_unit": "KiB"
+    },
+    "one_mib_show_rss_kib": {
+      "exit_code": 0,
+      "max_rss_kib": 1104,
+      "raw_max_rss": 1104,
+      "raw_unit": "KiB"
+    },
+    "one_mib_splice_rss_kib": {
+      "exit_code": 0,
+      "max_rss_kib": 1056,
+      "raw_max_rss": 1056,
+      "raw_unit": "KiB"
+    }
+  },
+  "budget_sha256": null,
+  "binary_sha256": "52c2b828b0cba3564a37e3874f60bec793d1dd7031aff77ba850cee7683977f9",
+  "binary_bytes": 178824,
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41"
+}

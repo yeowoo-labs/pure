@@ -1,0 +1,4006 @@
+[
+  {
+    "case": "metadata_heavy",
+    "variant": "borrow",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 1208192,
+      "min": 1208192,
+      "max": 1208192
+    },
+    "source_peak_bytes": {
+      "median": 1059888,
+      "min": 1059888,
+      "max": 1059888
+    },
+    "output_peak_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "parser_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "rss_peak_bytes": {
+      "median": 2785280,
+      "min": 2768896,
+      "max": 2801664
+    },
+    "elapsed_ns": {
+      "median": 66395496,
+      "min": 66302663,
+      "max": 66397387
+    },
+    "cpu_ns": {
+      "median": 14840713,
+      "min": 14680433,
+      "max": 14949295
+    },
+    "parse_call_ns": {
+      "median": 10710339,
+      "min": 10679603,
+      "max": 10748920
+    },
+    "selection_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "reader_copy_bytes": {
+      "median": 6312628,
+      "min": 6312628,
+      "max": 6312628
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 14086144,
+      "min": 14086144,
+      "max": 14086144
+    },
+    "source_byte_seconds": {
+      "median": 67622.063537,
+      "min": 67603.216745,
+      "max": 67632.156584
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 26533.881,
+        "latency_p99_upper_ns": 36864
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5055556.934,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8039215.434,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "metadata_heavy",
+    "variant": "compact",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 1209200,
+      "min": 1209200,
+      "max": 1209200
+    },
+    "source_peak_bytes": {
+      "median": 1059888,
+      "min": 1059888,
+      "max": 1059888
+    },
+    "output_peak_bytes": {
+      "median": 7168,
+      "min": 7168,
+      "max": 7168
+    },
+    "parser_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "rss_peak_bytes": {
+      "median": 2916352,
+      "min": 2899968,
+      "max": 2932736
+    },
+    "elapsed_ns": {
+      "median": 66425702,
+      "min": 66346982,
+      "max": 66647996
+    },
+    "cpu_ns": {
+      "median": 15174956,
+      "min": 15115580,
+      "max": 15645769
+    },
+    "parse_call_ns": {
+      "median": 10767457,
+      "min": 10730381,
+      "max": 10897093
+    },
+    "selection_copy_bytes": {
+      "median": 28672,
+      "min": 28672,
+      "max": 28672
+    },
+    "reader_copy_bytes": {
+      "median": 6312628,
+      "min": 6312628,
+      "max": 6312628
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 14086144,
+      "min": 14086144,
+      "max": 14086144
+    },
+    "source_byte_seconds": {
+      "median": 42524.965388,
+      "min": 42518.234312,
+      "max": 42539.689103
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 512,
+      "min": 512,
+      "max": 512
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 26833.023,
+        "latency_p99_upper_ns": 36864
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5056115.033,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8039588.77,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "metadata_heavy",
+    "variant": "copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 187312,
+      "min": 187312,
+      "max": 187312
+    },
+    "source_peak_bytes": {
+      "median": 24672,
+      "min": 24672,
+      "max": 24672
+    },
+    "output_peak_bytes": {
+      "median": 14896,
+      "min": 14896,
+      "max": 14896
+    },
+    "parser_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "rss_peak_bytes": {
+      "median": 1835008,
+      "min": 1818624,
+      "max": 1835008
+    },
+    "elapsed_ns": {
+      "median": 66358054,
+      "min": 66338315,
+      "max": 66437867
+    },
+    "cpu_ns": {
+      "median": 14754424,
+      "min": 14688841,
+      "max": 14887131
+    },
+    "parse_call_ns": {
+      "median": 10588699,
+      "min": 10558757,
+      "max": 10719986
+    },
+    "selection_copy_bytes": {
+      "median": 319488,
+      "min": 319488,
+      "max": 319488
+    },
+    "reader_copy_bytes": {
+      "median": 6312628,
+      "min": 6312628,
+      "max": 6312628
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 14086144,
+      "min": 14086144,
+      "max": 14086144
+    },
+    "source_byte_seconds": {
+      "median": 190.767691,
+      "min": 190.237303,
+      "max": 192.97609
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 26285.051,
+        "latency_p99_upper_ns": 36864
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5055200.059,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8039957.693,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "metadata_heavy",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 170672,
+      "min": 170672,
+      "max": 170672
+    },
+    "source_peak_bytes": {
+      "median": 24672,
+      "min": 24672,
+      "max": 24672
+    },
+    "output_peak_bytes": {
+      "median": 14896,
+      "min": 14896,
+      "max": 14896
+    },
+    "parser_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "rss_peak_bytes": {
+      "median": 1835008,
+      "min": 1835008,
+      "max": 1851392
+    },
+    "elapsed_ns": {
+      "median": 66421906,
+      "min": 66367572,
+      "max": 69246534
+    },
+    "cpu_ns": {
+      "median": 14937944,
+      "min": 14844612,
+      "max": 16610834
+    },
+    "parse_call_ns": {
+      "median": 10714630,
+      "min": 10626817,
+      "max": 11758115
+    },
+    "selection_copy_bytes": {
+      "median": 319488,
+      "min": 319488,
+      "max": 319488
+    },
+    "reader_copy_bytes": {
+      "median": 6312628,
+      "min": 6312628,
+      "max": 6312628
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 14086144,
+      "min": 14086144,
+      "max": 14086144
+    },
+    "source_byte_seconds": {
+      "median": 193.34471,
+      "min": 191.787957,
+      "max": 215.365911
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 26630.812,
+        "latency_p99_upper_ns": 40960
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5055539.021,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8039399.533,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "metadata_heavy",
+    "variant": "shared_copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 180144,
+      "min": 180144,
+      "max": 180144
+    },
+    "source_peak_bytes": {
+      "median": 24672,
+      "min": 24672,
+      "max": 24672
+    },
+    "output_peak_bytes": {
+      "median": 7728,
+      "min": 7728,
+      "max": 7728
+    },
+    "parser_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "rss_peak_bytes": {
+      "median": 1835008,
+      "min": 1835008,
+      "max": 1835008
+    },
+    "elapsed_ns": {
+      "median": 66509552,
+      "min": 66340017,
+      "max": 67338922
+    },
+    "cpu_ns": {
+      "median": 14641398,
+      "min": 14565611,
+      "max": 15543047
+    },
+    "parse_call_ns": {
+      "median": 10583202,
+      "min": 10558947,
+      "max": 10965512
+    },
+    "selection_copy_bytes": {
+      "median": 290816,
+      "min": 290816,
+      "max": 290816
+    },
+    "reader_copy_bytes": {
+      "median": 6312628,
+      "min": 6312628,
+      "max": 6312628
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 14086144,
+      "min": 14086144,
+      "max": 14086144
+    },
+    "source_byte_seconds": {
+      "median": 189.850967,
+      "min": 189.196651,
+      "max": 198.833427
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 512,
+      "min": 512,
+      "max": 512
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 26126.43,
+        "latency_p99_upper_ns": 32768
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5054896.006,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8039936.652,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "metadata_heavy",
+    "variant": "threshold2",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 180144,
+      "min": 180144,
+      "max": 180144
+    },
+    "source_peak_bytes": {
+      "median": 24672,
+      "min": 24672,
+      "max": 24672
+    },
+    "output_peak_bytes": {
+      "median": 7728,
+      "min": 7728,
+      "max": 7728
+    },
+    "parser_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "rss_peak_bytes": {
+      "median": 1835008,
+      "min": 1835008,
+      "max": 1851392
+    },
+    "elapsed_ns": {
+      "median": 66354498,
+      "min": 66341459,
+      "max": 66675868
+    },
+    "cpu_ns": {
+      "median": 14610428,
+      "min": 14573003,
+      "max": 15617313
+    },
+    "parse_call_ns": {
+      "median": 10568715,
+      "min": 10552983,
+      "max": 10794500
+    },
+    "selection_copy_bytes": {
+      "median": 290816,
+      "min": 290816,
+      "max": 290816
+    },
+    "reader_copy_bytes": {
+      "median": 6312628,
+      "min": 6312628,
+      "max": 6312628
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 14086144,
+      "min": 14086144,
+      "max": 14086144
+    },
+    "source_byte_seconds": {
+      "median": 189.501318,
+      "min": 189.19959,
+      "max": 196.368374
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 512,
+      "min": 512,
+      "max": 512
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 26103.785,
+        "latency_p99_upper_ns": 30720
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5054791.455,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8037890.609,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "metadata_heavy",
+    "variant": "threshold8",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 180144,
+      "min": 180144,
+      "max": 180144
+    },
+    "source_peak_bytes": {
+      "median": 24672,
+      "min": 24672,
+      "max": 24672
+    },
+    "output_peak_bytes": {
+      "median": 7728,
+      "min": 7728,
+      "max": 7728
+    },
+    "parser_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "rss_peak_bytes": {
+      "median": 1835008,
+      "min": 1835008,
+      "max": 1851392
+    },
+    "elapsed_ns": {
+      "median": 66346091,
+      "min": 66342183,
+      "max": 66620533
+    },
+    "cpu_ns": {
+      "median": 14678765,
+      "min": 14624958,
+      "max": 15009658
+    },
+    "parse_call_ns": {
+      "median": 10599246,
+      "min": 10558072,
+      "max": 10663838
+    },
+    "selection_copy_bytes": {
+      "median": 290816,
+      "min": 290816,
+      "max": 290816
+    },
+    "reader_copy_bytes": {
+      "median": 6312628,
+      "min": 6312628,
+      "max": 6312628
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 14086144,
+      "min": 14086144,
+      "max": 14086144
+    },
+    "source_byte_seconds": {
+      "median": 190.199351,
+      "min": 189.596919,
+      "max": 191.566293
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 512,
+      "min": 512,
+      "max": 512
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 26178.92,
+        "latency_p99_upper_ns": 36864
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5054797.43,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8038718.686,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "borrow",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 2097024,
+      "min": 2097024,
+      "max": 2097072
+    },
+    "source_peak_bytes": {
+      "median": 2047296,
+      "min": 2047296,
+      "max": 2047296
+    },
+    "output_peak_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "parser_peak_bytes": {
+      "median": 524336,
+      "min": 524336,
+      "max": 524336
+    },
+    "rss_peak_bytes": {
+      "median": 3719168,
+      "min": 3702784,
+      "max": 3719168
+    },
+    "elapsed_ns": {
+      "median": 516876187,
+      "min": 516415971,
+      "max": 519737827
+    },
+    "cpu_ns": {
+      "median": 58189132,
+      "min": 56956626,
+      "max": 63401151
+    },
+    "parse_call_ns": {
+      "median": 413462854,
+      "min": 410873515,
+      "max": 414175159
+    },
+    "selection_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "reader_copy_bytes": {
+      "median": 114814580,
+      "min": 114814580,
+      "max": 114814580
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 866155.703795,
+      "min": 865936.173669,
+      "max": 869390.688093
+    },
+    "budget_waits": {
+      "median": 1258,
+      "min": 1250,
+      "max": 1267
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 496219.126,
+        "latency_p99_upper_ns": 7864320
+      },
+      {
+        "peak_count": 30,
+        "latency_mean_ns": 5528237.536,
+        "latency_p99_upper_ns": 12582912
+      },
+      {
+        "peak_count": 30,
+        "latency_mean_ns": 8542682.03,
+        "latency_p99_upper_ns": 15728640
+      }
+    ]
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "compact",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 2096656,
+      "min": 2095936,
+      "max": 2097104
+    },
+    "source_peak_bytes": {
+      "median": 2047296,
+      "min": 2047296,
+      "max": 2047296
+    },
+    "output_peak_bytes": {
+      "median": 3360,
+      "min": 3360,
+      "max": 3360
+    },
+    "parser_peak_bytes": {
+      "median": 524336,
+      "min": 524336,
+      "max": 524336
+    },
+    "rss_peak_bytes": {
+      "median": 3719168,
+      "min": 3702784,
+      "max": 3833856
+    },
+    "elapsed_ns": {
+      "median": 330507221,
+      "min": 330325402,
+      "max": 332809762
+    },
+    "cpu_ns": {
+      "median": 57227425,
+      "min": 56526552,
+      "max": 64506702
+    },
+    "parse_call_ns": {
+      "median": 257390641,
+      "min": 255295188,
+      "max": 258042238
+    },
+    "selection_copy_bytes": {
+      "median": 57344,
+      "min": 57344,
+      "max": 57344
+    },
+    "reader_copy_bytes": {
+      "median": 114814580,
+      "min": 114814580,
+      "max": 114814580
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 542286.835871,
+      "min": 542057.64214,
+      "max": 544031.993873
+    },
+    "budget_waits": {
+      "median": 1246,
+      "min": 1227,
+      "max": 1262
+    },
+    "compacted": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 314160.033,
+        "latency_p99_upper_ns": 4718592
+      },
+      {
+        "peak_count": 30,
+        "latency_mean_ns": 5361784.028,
+        "latency_p99_upper_ns": 10485760
+      },
+      {
+        "peak_count": 49,
+        "latency_mean_ns": 8345801.06,
+        "latency_p99_upper_ns": 12582912
+      }
+    ]
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 1104848,
+      "min": 1104736,
+      "max": 1104848
+    },
+    "source_peak_bytes": {
+      "median": 393312,
+      "min": 393312,
+      "max": 393312
+    },
+    "output_peak_bytes": {
+      "median": 79920,
+      "min": 79920,
+      "max": 79920
+    },
+    "parser_peak_bytes": {
+      "median": 524336,
+      "min": 524336,
+      "max": 524336
+    },
+    "rss_peak_bytes": {
+      "median": 1884160,
+      "min": 1884160,
+      "max": 1900544
+    },
+    "elapsed_ns": {
+      "median": 134798098,
+      "min": 134667407,
+      "max": 135397301
+    },
+    "cpu_ns": {
+      "median": 52545277,
+      "min": 52218674,
+      "max": 55535720
+    },
+    "parse_call_ns": {
+      "median": 26282225,
+      "min": 26241260,
+      "max": 28191073
+    },
+    "selection_copy_bytes": {
+      "median": 26872064,
+      "min": 26872064,
+      "max": 26872064
+    },
+    "reader_copy_bytes": {
+      "median": 114814580,
+      "min": 114814580,
+      "max": 114814580
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 6883.203763,
+      "min": 6810.984162,
+      "max": 7296.683374
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 47583.467,
+        "latency_p99_upper_ns": 147456
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5082343.96,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8083520.998,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 842368,
+      "min": 842368,
+      "max": 842368
+    },
+    "source_peak_bytes": {
+      "median": 393312,
+      "min": 393312,
+      "max": 393312
+    },
+    "output_peak_bytes": {
+      "median": 79920,
+      "min": 79920,
+      "max": 79920
+    },
+    "parser_peak_bytes": {
+      "median": 524336,
+      "min": 524336,
+      "max": 524336
+    },
+    "rss_peak_bytes": {
+      "median": 1933312,
+      "min": 1916928,
+      "max": 1949696
+    },
+    "elapsed_ns": {
+      "median": 135708499,
+      "min": 135580728,
+      "max": 135818181
+    },
+    "cpu_ns": {
+      "median": 59498427,
+      "min": 59055276,
+      "max": 61310764
+    },
+    "parse_call_ns": {
+      "median": 27370335,
+      "min": 27293452,
+      "max": 27699522
+    },
+    "selection_copy_bytes": {
+      "median": 26872064,
+      "min": 26872064,
+      "max": 26872064
+    },
+    "reader_copy_bytes": {
+      "median": 114814580,
+      "min": 114814580,
+      "max": 114814580
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 8320.069469,
+      "min": 8268.860241,
+      "max": 8492.13471
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 54118.737,
+        "latency_p99_upper_ns": 180224
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5093193.132,
+        "latency_p99_upper_ns": 5767168
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8094306.969,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "shared_copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 1097792,
+      "min": 1097792,
+      "max": 1097792
+    },
+    "source_peak_bytes": {
+      "median": 393312,
+      "min": 393312,
+      "max": 393312
+    },
+    "output_peak_bytes": {
+      "median": 72752,
+      "min": 72752,
+      "max": 72752
+    },
+    "parser_peak_bytes": {
+      "median": 524336,
+      "min": 524336,
+      "max": 524336
+    },
+    "rss_peak_bytes": {
+      "median": 1884160,
+      "min": 1884160,
+      "max": 1900544
+    },
+    "elapsed_ns": {
+      "median": 134698503,
+      "min": 134660107,
+      "max": 134733970
+    },
+    "cpu_ns": {
+      "median": 52085095,
+      "min": 51849496,
+      "max": 52189389
+    },
+    "parse_call_ns": {
+      "median": 26235438,
+      "min": 26215409,
+      "max": 26273407
+    },
+    "selection_copy_bytes": {
+      "median": 26814720,
+      "min": 26814720,
+      "max": 26814720
+    },
+    "reader_copy_bytes": {
+      "median": 114814580,
+      "min": 114814580,
+      "max": 114814580
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 6831.305534,
+      "min": 6785.330268,
+      "max": 6865.482399
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 47354.551,
+        "latency_p99_upper_ns": 147456
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5081713.058,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8082113.784,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "threshold2",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 1097792,
+      "min": 1097792,
+      "max": 1097792
+    },
+    "source_peak_bytes": {
+      "median": 393312,
+      "min": 393312,
+      "max": 393312
+    },
+    "output_peak_bytes": {
+      "median": 72752,
+      "min": 72752,
+      "max": 72752
+    },
+    "parser_peak_bytes": {
+      "median": 524336,
+      "min": 524336,
+      "max": 524336
+    },
+    "rss_peak_bytes": {
+      "median": 1884160,
+      "min": 1867776,
+      "max": 1900544
+    },
+    "elapsed_ns": {
+      "median": 134646087,
+      "min": 134596389,
+      "max": 134805557
+    },
+    "cpu_ns": {
+      "median": 51969989,
+      "min": 51772899,
+      "max": 52099602
+    },
+    "parse_call_ns": {
+      "median": 26207832,
+      "min": 26192074,
+      "max": 26303805
+    },
+    "selection_copy_bytes": {
+      "median": 26814720,
+      "min": 26814720,
+      "max": 26814720
+    },
+    "reader_copy_bytes": {
+      "median": 114814580,
+      "min": 114814580,
+      "max": 114814580
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 6812.54134,
+      "min": 6795.293198,
+      "max": 6823.249522
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 47208.702,
+        "latency_p99_upper_ns": 147456
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5082291.09,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8082717.212,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "threshold8",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 1097792,
+      "min": 1097792,
+      "max": 1097792
+    },
+    "source_peak_bytes": {
+      "median": 393312,
+      "min": 393312,
+      "max": 393312
+    },
+    "output_peak_bytes": {
+      "median": 11312,
+      "min": 11312,
+      "max": 11312
+    },
+    "parser_peak_bytes": {
+      "median": 524336,
+      "min": 524336,
+      "max": 524336
+    },
+    "rss_peak_bytes": {
+      "median": 2048000,
+      "min": 2031616,
+      "max": 2064384
+    },
+    "elapsed_ns": {
+      "median": 134627181,
+      "min": 134514858,
+      "max": 135143135
+    },
+    "cpu_ns": {
+      "median": 51051158,
+      "min": 50901202,
+      "max": 54181725
+    },
+    "parse_call_ns": {
+      "median": 26232175,
+      "min": 26138215,
+      "max": 28073539
+    },
+    "selection_copy_bytes": {
+      "median": 1059072,
+      "min": 1059072,
+      "max": 1059072
+    },
+    "reader_copy_bytes": {
+      "median": 114814580,
+      "min": 114814580,
+      "max": 114814580
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 7499.787736,
+      "min": 7468.893211,
+      "max": 7971.142415
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 46365.068,
+        "latency_p99_upper_ns": 147456
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5080938.783,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8081990.295,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "one_slow",
+    "variant": "borrow",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4427696,
+      "min": 4427696,
+      "max": 4427696
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 5537792,
+      "min": 5521408,
+      "max": 5554176
+    },
+    "elapsed_ns": {
+      "median": 132124751,
+      "min": 131976979,
+      "max": 132469040
+    },
+    "cpu_ns": {
+      "median": 38591495,
+      "min": 37612015,
+      "max": 41862764
+    },
+    "parse_call_ns": {
+      "median": 22573964,
+      "min": 22444229,
+      "max": 22964342
+    },
+    "selection_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 540860.949553,
+      "min": 540831.163899,
+      "max": 541099.43903
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8058679.423,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "one_slow",
+    "variant": "compact",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4427696,
+      "min": 4427696,
+      "max": 4427696
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 5537792,
+      "min": 5537792,
+      "max": 5554176
+    },
+    "elapsed_ns": {
+      "median": 132110379,
+      "min": 131996119,
+      "max": 132186905
+    },
+    "cpu_ns": {
+      "median": 38257181,
+      "min": 38004572,
+      "max": 38709650
+    },
+    "parse_call_ns": {
+      "median": 22486562,
+      "min": 22434299,
+      "max": 22557256
+    },
+    "selection_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 540815.06589,
+      "min": 540791.270719,
+      "max": 540907.798619
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8057936.641,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "one_slow",
+    "variant": "copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 303072,
+      "min": 303072,
+      "max": 303072
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 7168,
+      "min": 7168,
+      "max": 7168
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1818624,
+      "min": 1818624,
+      "max": 1818624
+    },
+    "elapsed_ns": {
+      "median": 131689453,
+      "min": 131600270,
+      "max": 131752053
+    },
+    "cpu_ns": {
+      "median": 34877739,
+      "min": 34455850,
+      "max": 35243759
+    },
+    "parse_call_ns": {
+      "median": 21993246,
+      "min": 21964978,
+      "max": 22030534
+    },
+    "selection_copy_bytes": {
+      "median": 57344,
+      "min": 57344,
+      "max": 57344
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 1845.194241,
+      "min": 1832.537919,
+      "max": 1857.757504
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8053071.22,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "one_slow",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 237296,
+      "min": 237296,
+      "max": 237296
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 7168,
+      "min": 7168,
+      "max": 7168
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1818624,
+      "min": 1802240,
+      "max": 1835008
+    },
+    "elapsed_ns": {
+      "median": 132246841,
+      "min": 132199048,
+      "max": 137450461
+    },
+    "cpu_ns": {
+      "median": 42202499,
+      "min": 41767998,
+      "max": 46306762
+    },
+    "parse_call_ns": {
+      "median": 24805054,
+      "min": 24673720,
+      "max": 25720817
+    },
+    "selection_copy_bytes": {
+      "median": 57344,
+      "min": 57344,
+      "max": 57344
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2084.967873,
+      "min": 2066.312998,
+      "max": 2217.245474
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8059680.607,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "one_slow",
+    "variant": "shared_copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 303072,
+      "min": 303072,
+      "max": 303072
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 7168,
+      "min": 7168,
+      "max": 7168
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1818624,
+      "min": 1802240,
+      "max": 1835008
+    },
+    "elapsed_ns": {
+      "median": 132103712,
+      "min": 131708165,
+      "max": 134003964
+    },
+    "cpu_ns": {
+      "median": 35248408,
+      "min": 34456703,
+      "max": 37157688
+    },
+    "parse_call_ns": {
+      "median": 22044118,
+      "min": 21940218,
+      "max": 22141327
+    },
+    "selection_copy_bytes": {
+      "median": 57344,
+      "min": 57344,
+      "max": 57344
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 1858.44117,
+      "min": 1833.007769,
+      "max": 1917.711679
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8054276.953,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "one_slow",
+    "variant": "threshold2",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 303072,
+      "min": 303072,
+      "max": 303072
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 7168,
+      "min": 7168,
+      "max": 7168
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1818624,
+      "min": 1802240,
+      "max": 1835008
+    },
+    "elapsed_ns": {
+      "median": 132093280,
+      "min": 131703634,
+      "max": 132588310
+    },
+    "cpu_ns": {
+      "median": 36810738,
+      "min": 34747849,
+      "max": 37673671
+    },
+    "parse_call_ns": {
+      "median": 22338927,
+      "min": 21989760,
+      "max": 22518430
+    },
+    "selection_copy_bytes": {
+      "median": 57344,
+      "min": 57344,
+      "max": 57344
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 1914.610493,
+      "min": 1842.615404,
+      "max": 1949.11739
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8054865.09,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "one_slow",
+    "variant": "threshold8",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 303072,
+      "min": 303072,
+      "max": 303072
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 7168,
+      "min": 7168,
+      "max": 7168
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1818624,
+      "min": 1802240,
+      "max": 1818624
+    },
+    "elapsed_ns": {
+      "median": 131798127,
+      "min": 131620844,
+      "max": 131976855
+    },
+    "cpu_ns": {
+      "median": 34803856,
+      "min": 34446035,
+      "max": 36997295
+    },
+    "parse_call_ns": {
+      "median": 22050963,
+      "min": 21905479,
+      "max": 22094634
+    },
+    "selection_copy_bytes": {
+      "median": 57344,
+      "min": 57344,
+      "max": 57344
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 1846.36305,
+      "min": 1832.609103,
+      "max": 1904.528214
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8054286.008,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "same_large_field",
+    "variant": "borrow",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4435888,
+      "min": 4435888,
+      "max": 4435888
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 4767744,
+      "min": 4767744,
+      "max": 4767744
+    },
+    "elapsed_ns": {
+      "median": 133814643,
+      "min": 133553215,
+      "max": 134337593
+    },
+    "cpu_ns": {
+      "median": 68888479,
+      "min": 68534602,
+      "max": 71105404
+    },
+    "parse_call_ns": {
+      "median": 22344284,
+      "min": 22264001,
+      "max": 22575073
+    },
+    "selection_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 541341.207084,
+      "min": 541236.958782,
+      "max": 541448.462493
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 52115.836,
+        "latency_p99_upper_ns": 81920
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5078986.712,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8067041.718,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "same_large_field",
+    "variant": "compact",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4730672,
+      "min": 4730672,
+      "max": 4730672
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 2001776,
+      "min": 1936144,
+      "max": 2034592
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 6340608,
+      "min": 6340608,
+      "max": 6340608
+    },
+    "elapsed_ns": {
+      "median": 134204038,
+      "min": 134074359,
+      "max": 135831514
+    },
+    "cpu_ns": {
+      "median": 74886880,
+      "min": 74679639,
+      "max": 84355786
+    },
+    "parse_call_ns": {
+      "median": 22736073,
+      "min": 22714288,
+      "max": 23107923
+    },
+    "selection_copy_bytes": {
+      "median": 33554432,
+      "min": 33554432,
+      "max": 33554432
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 341191.973388,
+      "min": 341111.908821,
+      "max": 341580.411374
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 54208.683,
+        "latency_p99_upper_ns": 90112
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5084673.227,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8069796.873,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "same_large_field",
+    "variant": "copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4504544,
+      "min": 4504544,
+      "max": 4504544
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 4233264,
+      "min": 4233264,
+      "max": 4233264
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 5292032,
+      "min": 5275648,
+      "max": 5292032
+    },
+    "elapsed_ns": {
+      "median": 134436483,
+      "min": 134254523,
+      "max": 139508137
+    },
+    "cpu_ns": {
+      "median": 76196602,
+      "min": 74842901,
+      "max": 88332555
+    },
+    "parse_call_ns": {
+      "median": 22285338,
+      "min": 22151327,
+      "max": 22864596
+    },
+    "selection_copy_bytes": {
+      "median": 100663296,
+      "min": 100663296,
+      "max": 100663296
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2295.795833,
+      "min": 2277.11069,
+      "max": 2528.253394
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 58635.959,
+        "latency_p99_upper_ns": 90112
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5084371.237,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8075247.27,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "same_large_field",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4373248,
+      "min": 4373248,
+      "max": 4373248
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 4233264,
+      "min": 4233264,
+      "max": 4233264
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 5816320,
+      "min": 5799936,
+      "max": 6078464
+    },
+    "elapsed_ns": {
+      "median": 134471775,
+      "min": 134289332,
+      "max": 216945564
+    },
+    "cpu_ns": {
+      "median": 76002725,
+      "min": 75355273,
+      "max": 116157398
+    },
+    "parse_call_ns": {
+      "median": 22740343,
+      "min": 22600489,
+      "max": 25703347
+    },
+    "selection_copy_bytes": {
+      "median": 100663296,
+      "min": 100663296,
+      "max": 100663296
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2334.193158,
+      "min": 2317.391148,
+      "max": 3917.681175
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 59008.762,
+        "latency_p99_upper_ns": 90112
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5084982.783,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8075279.097,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "same_large_field",
+    "variant": "shared_copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 2371504,
+      "min": 2371504,
+      "max": 2371504
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 2100224,
+      "min": 2100224,
+      "max": 2100224
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 3293184,
+      "min": 3178496,
+      "max": 3571712
+    },
+    "elapsed_ns": {
+      "median": 133593447,
+      "min": 133495777,
+      "max": 135030934
+    },
+    "cpu_ns": {
+      "median": 66640259,
+      "min": 66172548,
+      "max": 71236281
+    },
+    "parse_call_ns": {
+      "median": 22303696,
+      "min": 22176603,
+      "max": 22446961
+    },
+    "selection_copy_bytes": {
+      "median": 33554432,
+      "min": 33554432,
+      "max": 33554432
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2044.238204,
+      "min": 2031.917671,
+      "max": 2100.123381
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 2048,
+      "min": 2048,
+      "max": 2048
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 51484.234,
+        "latency_p99_upper_ns": 81920
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5078396.125,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8066089.677,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "same_large_field",
+    "variant": "threshold2",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 2371504,
+      "min": 2371504,
+      "max": 2371504
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 2100224,
+      "min": 2100224,
+      "max": 2100224
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 3194880,
+      "min": 3194880,
+      "max": 3244032
+    },
+    "elapsed_ns": {
+      "median": 133655494,
+      "min": 133441147,
+      "max": 134034428
+    },
+    "cpu_ns": {
+      "median": 66434679,
+      "min": 66234578,
+      "max": 69077852
+    },
+    "parse_call_ns": {
+      "median": 22159339,
+      "min": 22119254,
+      "max": 22386881
+    },
+    "selection_copy_bytes": {
+      "median": 33554432,
+      "min": 33554432,
+      "max": 33554432
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2045.927873,
+      "min": 2030.079604,
+      "max": 2071.219143
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 2048,
+      "min": 2048,
+      "max": 2048
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 51484.504,
+        "latency_p99_upper_ns": 73728
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5078118.015,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8066441.419,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "same_large_field",
+    "variant": "threshold8",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4435888,
+      "min": 4435888,
+      "max": 4435888
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 4767744,
+      "min": 4767744,
+      "max": 4833280
+    },
+    "elapsed_ns": {
+      "median": 133681327,
+      "min": 133447386,
+      "max": 134457305
+    },
+    "cpu_ns": {
+      "median": 69361342,
+      "min": 68765370,
+      "max": 70251788
+    },
+    "parse_call_ns": {
+      "median": 22353361,
+      "min": 22338685,
+      "max": 22437830
+    },
+    "selection_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 541359.828153,
+      "min": 541289.267391,
+      "max": 541408.186663
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 52372.427,
+        "latency_p99_upper_ns": 81920
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5079700.568,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8067374.837,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "slow_large_field",
+    "variant": "borrow",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4435888,
+      "min": 4435888,
+      "max": 4435888
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 4767744,
+      "min": 4767744,
+      "max": 5390336
+    },
+    "elapsed_ns": {
+      "median": 133311566,
+      "min": 133254368,
+      "max": 133477288
+    },
+    "cpu_ns": {
+      "median": 53725285,
+      "min": 52234245,
+      "max": 54530428
+    },
+    "parse_call_ns": {
+      "median": 22266351,
+      "min": 22239925,
+      "max": 22789187
+    },
+    "selection_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 541551.170985,
+      "min": 541367.893955,
+      "max": 541575.408384
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 46306.509,
+        "latency_p99_upper_ns": 61440
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5067325.337,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8070214.071,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "slow_large_field",
+    "variant": "compact",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4730672,
+      "min": 4730672,
+      "max": 4730672
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 2100224,
+      "min": 2067408,
+      "max": 2100224
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 6340608,
+      "min": 6340608,
+      "max": 6406144
+    },
+    "elapsed_ns": {
+      "median": 133282278,
+      "min": 133118662,
+      "max": 133472857
+    },
+    "cpu_ns": {
+      "median": 59607669,
+      "min": 59503628,
+      "max": 62602975
+    },
+    "parse_call_ns": {
+      "median": 22648269,
+      "min": 22558632,
+      "max": 23134595
+    },
+    "selection_copy_bytes": {
+      "median": 33554432,
+      "min": 33554432,
+      "max": 33554432
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 340524.867797,
+      "min": 340502.324772,
+      "max": 340709.17918
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 47236.674,
+        "latency_p99_upper_ns": 73728
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5071269.907,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8068767.35,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "slow_large_field",
+    "variant": "copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 2378784,
+      "min": 2378784,
+      "max": 2378784
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 2107504,
+      "min": 2107504,
+      "max": 2107504
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 3948544,
+      "min": 3751936,
+      "max": 3964928
+    },
+    "elapsed_ns": {
+      "median": 133179940,
+      "min": 133174357,
+      "max": 133407209
+    },
+    "cpu_ns": {
+      "median": 52486508,
+      "min": 52033688,
+      "max": 55263103
+    },
+    "parse_call_ns": {
+      "median": 22154380,
+      "min": 22117835,
+      "max": 22433685
+    },
+    "selection_copy_bytes": {
+      "median": 33669120,
+      "min": 33669120,
+      "max": 33669120
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2028.917653,
+      "min": 2021.284206,
+      "max": 2079.608844
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 46179.91,
+        "latency_p99_upper_ns": 61440
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5068142.38,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8068218.996,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "slow_large_field",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 2312896,
+      "min": 2312896,
+      "max": 2312896
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 2107504,
+      "min": 2107504,
+      "max": 2107504
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 3194880,
+      "min": 3178496,
+      "max": 3194880
+    },
+    "elapsed_ns": {
+      "median": 133540522,
+      "min": 133362779,
+      "max": 134281084
+    },
+    "cpu_ns": {
+      "median": 58472614,
+      "min": 57999768,
+      "max": 62190824
+    },
+    "parse_call_ns": {
+      "median": 24345793,
+      "min": 24134627,
+      "max": 25370210
+    },
+    "selection_copy_bytes": {
+      "median": 33669120,
+      "min": 33669120,
+      "max": 33669120
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2208.417867,
+      "min": 2191.645151,
+      "max": 2300.277794
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 51364.197,
+        "latency_p99_upper_ns": 81920
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5074603.185,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8073207.582,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "slow_large_field",
+    "variant": "shared_copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 2378672,
+      "min": 2378672,
+      "max": 2378672
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 2107392,
+      "min": 2107392,
+      "max": 2107392
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 3899392,
+      "min": 3293184,
+      "max": 3948544
+    },
+    "elapsed_ns": {
+      "median": 133216315,
+      "min": 133064931,
+      "max": 154001095
+    },
+    "cpu_ns": {
+      "median": 52117164,
+      "min": 51631438,
+      "max": 65368726
+    },
+    "parse_call_ns": {
+      "median": 22128273,
+      "min": 22057182,
+      "max": 23437273
+    },
+    "selection_copy_bytes": {
+      "median": 33611776,
+      "min": 33611776,
+      "max": 33611776
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2026.862393,
+      "min": 2014.496107,
+      "max": 2683.230182
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 46182.627,
+        "latency_p99_upper_ns": 61440
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5068255.587,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8067189.304,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "slow_large_field",
+    "variant": "threshold2",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 2378672,
+      "min": 2378672,
+      "max": 2378672
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 2107392,
+      "min": 2107392,
+      "max": 2107392
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 3751936,
+      "min": 3342336,
+      "max": 3932160
+    },
+    "elapsed_ns": {
+      "median": 133312135,
+      "min": 133094723,
+      "max": 134333542
+    },
+    "cpu_ns": {
+      "median": 52726291,
+      "min": 52362717,
+      "max": 53734268
+    },
+    "parse_call_ns": {
+      "median": 22219255,
+      "min": 22103023,
+      "max": 22533891
+    },
+    "selection_copy_bytes": {
+      "median": 33611776,
+      "min": 33611776,
+      "max": 33611776
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2039.714059,
+      "min": 2022.420003,
+      "max": 2071.170012
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 46192.459,
+        "latency_p99_upper_ns": 65536
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5068879.809,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8069081.323,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "slow_large_field",
+    "variant": "threshold8",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4443056,
+      "min": 4443056,
+      "max": 4443056
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 7168,
+      "min": 7168,
+      "max": 7168
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 5292032,
+      "min": 4751360,
+      "max": 5439488
+    },
+    "elapsed_ns": {
+      "median": 133341496,
+      "min": 133297584,
+      "max": 134650847
+    },
+    "cpu_ns": {
+      "median": 54857945,
+      "min": 53670610,
+      "max": 58145169
+    },
+    "parse_call_ns": {
+      "median": 22618201,
+      "min": 22263776,
+      "max": 22801055
+    },
+    "selection_copy_bytes": {
+      "median": 57344,
+      "min": 57344,
+      "max": 57344
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 541518.37496,
+      "min": 541459.255198,
+      "max": 542663.104532
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 47550.497,
+        "latency_p99_upper_ns": 73728
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5070242.543,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8069675.14,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "three_distinct_speeds",
+    "variant": "borrow",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4435888,
+      "min": 4435888,
+      "max": 4435888
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 5373952,
+      "min": 5373952,
+      "max": 5373952
+    },
+    "elapsed_ns": {
+      "median": 132595906,
+      "min": 132489898,
+      "max": 133433884
+    },
+    "cpu_ns": {
+      "median": 49691116,
+      "min": 48808681,
+      "max": 51462618
+    },
+    "parse_call_ns": {
+      "median": 22667622,
+      "min": 22622066,
+      "max": 23747967
+    },
+    "selection_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 540593.356702,
+      "min": 540484.370521,
+      "max": 540814.68462
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 45356.652,
+        "latency_p99_upper_ns": 65536
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5069713.765,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8055489.045,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "three_distinct_speeds",
+    "variant": "compact",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 4436784,
+      "min": 4436784,
+      "max": 4436784
+    },
+    "source_peak_bytes": {
+      "median": 4230192,
+      "min": 4230192,
+      "max": 4230192
+    },
+    "output_peak_bytes": {
+      "median": 6944,
+      "min": 6944,
+      "max": 7056
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 5537792,
+      "min": 5488640,
+      "max": 5603328
+    },
+    "elapsed_ns": {
+      "median": 132699783,
+      "min": 132597323,
+      "max": 132746292
+    },
+    "cpu_ns": {
+      "median": 50225388,
+      "min": 49739534,
+      "max": 50870250
+    },
+    "parse_call_ns": {
+      "median": 22671992,
+      "min": 22546544,
+      "max": 22749218
+    },
+    "selection_copy_bytes": {
+      "median": 57344,
+      "min": 57344,
+      "max": 57344
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 340108.105991,
+      "min": 340105.112239,
+      "max": 340246.674827
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 45463.711,
+        "latency_p99_upper_ns": 65536
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5069991.558,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8055038.37,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "three_distinct_speeds",
+    "variant": "copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 318432,
+      "min": 318432,
+      "max": 318432
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 47152,
+      "min": 47152,
+      "max": 47152
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1851392,
+      "min": 1851392,
+      "max": 1867776
+    },
+    "elapsed_ns": {
+      "median": 132282510,
+      "min": 132122049,
+      "max": 132351078
+    },
+    "cpu_ns": {
+      "median": 46122525,
+      "min": 45960158,
+      "max": 46415608
+    },
+    "parse_call_ns": {
+      "median": 22062914,
+      "min": 22012014,
+      "max": 22082400
+    },
+    "selection_copy_bytes": {
+      "median": 33669120,
+      "min": 33669120,
+      "max": 33669120
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 1991.776071,
+      "min": 1985.913742,
+      "max": 1996.444688
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 42165.024,
+        "latency_p99_upper_ns": 53248
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5068352.743,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8050279.443,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "three_distinct_speeds",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 252544,
+      "min": 252544,
+      "max": 252544
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 47152,
+      "min": 47152,
+      "max": 47152
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1900544,
+      "min": 1884160,
+      "max": 1933312
+    },
+    "elapsed_ns": {
+      "median": 132297747,
+      "min": 132221655,
+      "max": 132985160
+    },
+    "cpu_ns": {
+      "median": 46669804,
+      "min": 46345346,
+      "max": 49981054
+    },
+    "parse_call_ns": {
+      "median": 22170762,
+      "min": 22094470,
+      "max": 23442854
+    },
+    "selection_copy_bytes": {
+      "median": 33669120,
+      "min": 33669120,
+      "max": 33669120
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2009.648765,
+      "min": 1998.568774,
+      "max": 2129.142526
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 42678.905,
+        "latency_p99_upper_ns": 61440
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5068637.263,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8054142.04,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "three_distinct_speeds",
+    "variant": "shared_copy",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 311264,
+      "min": 311264,
+      "max": 311264
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 39984,
+      "min": 39984,
+      "max": 39984
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1851392,
+      "min": 1835008,
+      "max": 1851392
+    },
+    "elapsed_ns": {
+      "median": 132284819,
+      "min": 132140503,
+      "max": 133179387
+    },
+    "cpu_ns": {
+      "median": 45991210,
+      "min": 45823432,
+      "max": 47009567
+    },
+    "parse_call_ns": {
+      "median": 22104890,
+      "min": 22053622,
+      "max": 22145612
+    },
+    "selection_copy_bytes": {
+      "median": 33611776,
+      "min": 33611776,
+      "max": 33611776
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 1991.371251,
+      "min": 1983.569581,
+      "max": 2001.098596
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 42139.616,
+        "latency_p99_upper_ns": 57344
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5068344.258,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8052022.729,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "three_distinct_speeds",
+    "variant": "threshold2",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 311264,
+      "min": 311264,
+      "max": 311264
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 39984,
+      "min": 39984,
+      "max": 39984
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1851392,
+      "min": 1835008,
+      "max": 1867776
+    },
+    "elapsed_ns": {
+      "median": 132243573,
+      "min": 132119197,
+      "max": 132423215
+    },
+    "cpu_ns": {
+      "median": 45811373,
+      "min": 45674856,
+      "max": 46202689
+    },
+    "parse_call_ns": {
+      "median": 22085581,
+      "min": 22029775,
+      "max": 22137673
+    },
+    "selection_copy_bytes": {
+      "median": 33611776,
+      "min": 33611776,
+      "max": 33611776
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 1984.871517,
+      "min": 1978.146096,
+      "max": 1992.776523
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 42043.254,
+        "latency_p99_upper_ns": 57344
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5068193.573,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8050581.195,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  },
+  {
+    "case": "three_distinct_speeds",
+    "variant": "threshold8",
+    "samples": 5,
+    "peak_reserved_bytes": {
+      "median": 311264,
+      "min": 311264,
+      "max": 311264
+    },
+    "source_peak_bytes": {
+      "median": 98400,
+      "min": 98400,
+      "max": 98400
+    },
+    "output_peak_bytes": {
+      "median": 7168,
+      "min": 7168,
+      "max": 7168
+    },
+    "parser_peak_bytes": {
+      "median": 131120,
+      "min": 131120,
+      "max": 131120
+    },
+    "rss_peak_bytes": {
+      "median": 1851392,
+      "min": 1851392,
+      "max": 1851392
+    },
+    "elapsed_ns": {
+      "median": 132177385,
+      "min": 132072752,
+      "max": 132687220
+    },
+    "cpu_ns": {
+      "median": 44977578,
+      "min": 44815017,
+      "max": 45610919
+    },
+    "parse_call_ns": {
+      "median": 22128368,
+      "min": 22007505,
+      "max": 22143479
+    },
+    "selection_copy_bytes": {
+      "median": 57344,
+      "min": 57344,
+      "max": 57344
+    },
+    "reader_copy_bytes": {
+      "median": 75711296,
+      "min": 75711296,
+      "max": 75711296
+    },
+    "parser_realloc_copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "source_byte_seconds": {
+      "median": 2381.095196,
+      "min": 2372.402719,
+      "max": 2398.303122
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "compacted": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "dedup_hits": {
+      "median": 1024,
+      "min": 1024,
+      "max": 1024
+    },
+    "queues": [
+      {
+        "peak_count": 1,
+        "latency_mean_ns": 41268.295,
+        "latency_p99_upper_ns": 57344
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 5067698.961,
+        "latency_p99_upper_ns": 5242880
+      },
+      {
+        "peak_count": 64,
+        "latency_mean_ns": 8050851.553,
+        "latency_p99_upper_ns": 8388608
+      }
+    ]
+  }
+]

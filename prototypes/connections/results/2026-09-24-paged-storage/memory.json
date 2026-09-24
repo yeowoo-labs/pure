@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-native-document-cli-memory",
+  "scope": "Peak process RSS via a small fork/wait4 helper on Linux AArch64. Covers this CLI, libc, program parsing, store, and one 1 MiB document workload; excludes filesystem cache, kernel buffers, other processes, selected TLS/GTK hosts, and other applications. These are regression ceilings for this toolchain, not a universal memory guarantee.",
+  "samples": {
+    "small_edit_rss_kib": 1104,
+    "one_mib_edit_rss_kib": 2128,
+    "one_mib_show_rss_kib": 1056
+  },
+  "budget_sha256": "53144cabe646e0478f25f4e770ce01bad06f4984ef47f5160d212c02c0b7569f",
+  "binary_sha256": "497577bf9811b3ce787e27c6170a322ea553cdab2371b4f71eb51115a9045a16",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41"
+}

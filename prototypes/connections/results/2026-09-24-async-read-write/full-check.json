@@ -1,0 +1,614 @@
+{
+  "kind": "prepared-connection-correctness-not-performance",
+  "checks": [
+    "fragmented request and binary bytes round trip",
+    "conditional create and stale revision preserve committed bytes",
+    "writer contention and invalid extent fail without overwriting data",
+    "two native writers cannot both create the same expected revision",
+    "incomplete request never commits and releases its allocation",
+    "borrowed read remains the same snapshot during another commit",
+    "receiver reset aborts an outstanding borrowed transfer",
+    "unsupported framing and oversized payload are rejected before effects",
+    "existing workbench manipulation restores in a fresh runtime and reports conflict",
+    "invalid or non-idle restore preserves local state and does not adopt remote revision",
+    "revision above JavaScript safe integer round trips without numeric coercion",
+    "unread acknowledgment does not undo commit or permit a stale retry",
+    "empty body has a valid lifetime and stored revision",
+    "committed authoring state survives process restart",
+    "slow consumer retains its lease; budget rejects another; deadline releases it",
+    "connection slots stay bounded and recover after header deadlines",
+    "authored nested read maps only final demand while preserving parent bounds and revision",
+    "unused checked view still fails even when response range would be valid",
+    "authored write and reply share selected input; invalid parent prevents the storage effect",
+    "body-free response preserves read existence and malformed-object errors",
+    "input-backed response survives partial send and releases on finish or abort without undoing commit",
+    "invalid authored program fails preparation before creating storage or accepting requests",
+    "text client uses character selection; named numeric fields select and persist the matching UTF-8 bytes",
+    "truncated layouts and invalid data-dependent ranges never change storage; empty and end selections remain valid",
+    "changed declaration order and unaligned numeric fields determine access; aliases add no dynamic steps",
+    "unused dynamic field selection retains its validation before the write effect",
+    "named variable tail reads use the same file version and charge only the selected suffix",
+    "data-dependent response keeps and charges the original input through partial transmission",
+    "native authored byte edit and fresh native process restore UTF-8 content",
+    "native stale revision and invalid byte position preserve the committed document",
+    "native convenience editor derives unaligned reordered field positions from the authored program",
+    "raw native apply runs another authored input contract without changing the executor",
+    "native CLI and external HTTP share revisions and the same authored storage effect in both directions",
+    "partial or invalid edit input never modifies the stored document",
+    "two processes cannot both splice the same expected document revision",
+    "1 MiB document changes with 11 input credits; larger input is rejected before an effect"
+  ],
+  "prepared_connections": {
+    "excerpt": {
+      "read": {
+        "to_end": false,
+        "offset": 32,
+        "length": 16,
+        "minimum_source_bytes": 80
+      },
+      "write": {
+        "to_end": true,
+        "offset": 0,
+        "length": 0,
+        "minimum_source_bytes": 0
+      },
+      "reply_input": false,
+      "view_definitions": 2,
+      "range_definitions": 2,
+      "runtime_view_steps": 0,
+      "write_step": 0,
+      "reply_step": 0,
+      "prepared_program_bytes": 680,
+      "steps": [],
+      "write_effect": "write",
+      "splice_offset": {
+        "value": 0,
+        "from_u32le": false
+      },
+      "splice_remove": {
+        "value": 0,
+        "from_u32le": false
+      }
+    },
+    "write": {
+      "read": {
+        "to_end": true,
+        "offset": 0,
+        "length": 0,
+        "minimum_source_bytes": 0
+      },
+      "write": {
+        "to_end": false,
+        "offset": 5,
+        "length": 4,
+        "minimum_source_bytes": 12
+      },
+      "reply_input": true,
+      "view_definitions": 3,
+      "range_definitions": 2,
+      "runtime_view_steps": 0,
+      "write_step": 0,
+      "reply_step": 0,
+      "prepared_program_bytes": 680,
+      "steps": [],
+      "write_effect": "write",
+      "splice_offset": {
+        "value": 0,
+        "from_u32le": false
+      },
+      "splice_remove": {
+        "value": 0,
+        "from_u32le": false
+      }
+    }
+  },
+  "field_connections": {
+    "selection": {
+      "read": {
+        "to_end": true,
+        "offset": 0,
+        "length": 0,
+        "minimum_source_bytes": 0
+      },
+      "write": {
+        "to_end": false,
+        "offset": 0,
+        "length": 0,
+        "minimum_source_bytes": 8
+      },
+      "reply_input": true,
+      "view_definitions": 2,
+      "range_definitions": 1,
+      "runtime_view_steps": 1,
+      "write_step": 1,
+      "reply_step": 1,
+      "prepared_program_bytes": 680,
+      "steps": [
+        {
+          "source_step": 0,
+          "source": {
+            "offset": 8,
+            "length": 0,
+            "to_end": true
+          },
+          "offset": {
+            "value": 0,
+            "from_u32le": true
+          },
+          "length": {
+            "value": 4,
+            "from_u32le": true
+          }
+        }
+      ],
+      "write_effect": "write",
+      "splice_offset": {
+        "value": 0,
+        "from_u32le": false
+      },
+      "splice_remove": {
+        "value": 0,
+        "from_u32le": false
+      }
+    },
+    "reordered": {
+      "read": {
+        "to_end": true,
+        "offset": 0,
+        "length": 0,
+        "minimum_source_bytes": 0
+      },
+      "write": {
+        "to_end": false,
+        "offset": 0,
+        "length": 0,
+        "minimum_source_bytes": 11
+      },
+      "reply_input": true,
+      "view_definitions": 4,
+      "range_definitions": 1,
+      "runtime_view_steps": 1,
+      "write_step": 1,
+      "reply_step": 1,
+      "prepared_program_bytes": 680,
+      "steps": [
+        {
+          "source_step": 0,
+          "source": {
+            "offset": 11,
+            "length": 0,
+            "to_end": true
+          },
+          "offset": {
+            "value": 7,
+            "from_u32le": true
+          },
+          "length": {
+            "value": 3,
+            "from_u32le": true
+          }
+        }
+      ],
+      "write_effect": "write",
+      "splice_offset": {
+        "value": 0,
+        "from_u32le": false
+      },
+      "splice_remove": {
+        "value": 0,
+        "from_u32le": false
+      }
+    },
+    "field_get": {
+      "read": {
+        "to_end": true,
+        "offset": 11,
+        "length": 0,
+        "minimum_source_bytes": 11
+      },
+      "write": {
+        "to_end": true,
+        "offset": 0,
+        "length": 0,
+        "minimum_source_bytes": 0
+      },
+      "reply_input": false,
+      "view_definitions": 1,
+      "range_definitions": 0,
+      "runtime_view_steps": 0,
+      "write_step": 0,
+      "reply_step": 0,
+      "prepared_program_bytes": 680,
+      "steps": [],
+      "write_effect": "write",
+      "splice_offset": {
+        "value": 0,
+        "from_u32le": false
+      },
+      "splice_remove": {
+        "value": 0,
+        "from_u32le": false
+      }
+    }
+  },
+  "document_edits": {
+    "large_document_bytes": 1048576,
+    "small_edit_input_bytes": 11,
+    "storage_rewrites_full_extent": true,
+    "storage_scratch_bytes": 4096,
+    "kind": "correctness-and-admission-not-total-memory-or-performance"
+  },
+  "server_runs": [
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 6,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 1,
+      "commits": 1,
+      "gets": 0,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 1,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 0,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 1048583,
+      "payload_budget": 4194304,
+      "peak_connections": 2,
+      "accepted": 42,
+      "commits": 11,
+      "gets": 15,
+      "conflicts": 4,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 32,
+      "ingress_prefix_copy_bytes": 11674,
+      "borrowed_output_bytes": 2115421,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 2553,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 2,
+      "commits": 0,
+      "gets": 2,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 2,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 2556,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 1048576,
+      "payload_budget": 1048576,
+      "peak_connections": 8,
+      "accepted": 12,
+      "commits": 0,
+      "gets": 3,
+      "conflicts": 0,
+      "budget_rejections": 1,
+      "expired": 9,
+      "releases": 3,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 1048582,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 80,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 2,
+      "commits": 2,
+      "gets": 0,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 2,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 0,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 16,
+      "payload_budget": 16,
+      "peak_connections": 1,
+      "accepted": 3,
+      "commits": 0,
+      "gets": 1,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 1,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 16,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 16,
+      "payload_budget": 16,
+      "peak_connections": 1,
+      "accepted": 2,
+      "commits": 0,
+      "gets": 1,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 1,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 16,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 12,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 5,
+      "commits": 1,
+      "gets": 2,
+      "conflicts": 1,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 5,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 12,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 0,
+      "payload_budget": 1,
+      "peak_connections": 1,
+      "accepted": 3,
+      "commits": 0,
+      "gets": 1,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 0,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 0,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 1048576,
+      "payload_budget": 1048576,
+      "peak_connections": 2,
+      "accepted": 7,
+      "commits": 2,
+      "gets": 3,
+      "conflicts": 0,
+      "budget_rejections": 2,
+      "expired": 0,
+      "releases": 5,
+      "ingress_prefix_copy_bytes": 8006,
+      "borrowed_output_bytes": 3145734,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 54,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 20,
+      "commits": 3,
+      "gets": 4,
+      "conflicts": 1,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 17,
+      "ingress_prefix_copy_bytes": 54,
+      "borrowed_output_bytes": 57,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 19,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 2,
+      "commits": 1,
+      "gets": 1,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 2,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 8,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 14,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 4,
+      "commits": 1,
+      "gets": 1,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 3,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 3,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 34,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 3,
+      "commits": 3,
+      "gets": 0,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 3,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 0,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 23,
+      "payload_budget": 23,
+      "peak_connections": 1,
+      "accepted": 3,
+      "commits": 0,
+      "gets": 2,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 1,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 23,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 1048584,
+      "payload_budget": 1048584,
+      "peak_connections": 2,
+      "accepted": 4,
+      "commits": 1,
+      "gets": 2,
+      "conflicts": 0,
+      "budget_rejections": 1,
+      "expired": 0,
+      "releases": 3,
+      "ingress_prefix_copy_bytes": 3998,
+      "borrowed_output_bytes": 2097091,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 9,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 1,
+      "commits": 1,
+      "gets": 0,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 1,
+      "ingress_prefix_copy_bytes": 9,
+      "borrowed_output_bytes": 1,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 29,
+      "payload_budget": 4194304,
+      "peak_connections": 1,
+      "accepted": 10,
+      "commits": 1,
+      "gets": 4,
+      "conflicts": 1,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 10,
+      "ingress_prefix_copy_bytes": 16,
+      "borrowed_output_bytes": 113,
+      "server_structure_bytes": 43320
+    },
+    {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 11,
+      "payload_budget": 11,
+      "peak_connections": 1,
+      "accepted": 2,
+      "commits": 1,
+      "gets": 0,
+      "conflicts": 0,
+      "budget_rejections": 1,
+      "expired": 0,
+      "releases": 1,
+      "ingress_prefix_copy_bytes": 0,
+      "borrowed_output_bytes": 3,
+      "server_structure_bytes": 43320
+    }
+  ],
+  "storage": "immutable-byte-extents-v1",
+  "editor_sha256": "4b9f3e1882d010784d04673a231fdf3ec47b8823527e74f049d5ee3401e6fc60",
+  "binary_sha256": "63211eebd1952dbc9f31bc2eee76c1c661df9bce14e3932b4e15e52fdae5d763",
+  "environment": {
+    "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+    "machine": "aarch64",
+    "python": "3.14.7",
+    "node": "v24.20.0"
+  },
+  "source_sha256": {
+    "prototypes/connections/store.c": "44702e9414c26d1ee336b2e36e6713560013c2c8d0091a8900042e2468f88015",
+    "prototypes/connections/flow.c": "3957de06e33985a8310954af07b33c2a1d02a4afdf9bd112d06c99c0b5df7749",
+    "prototypes/connections/flow.h": "289ff43d191270066e238235023f096946f3f561ec5825d2f6c26006db5fc421",
+    "prototypes/connections/store.h": "e3cf5f169be02e40f1274105046f29a63a46cd153beaf204d33d6100b9c869b8",
+    "prototypes/connections/program.c": "d7186634d2bfd83bbaf87ea3bafdec8d14be8f556cbf3d9877d07e0074b4b389",
+    "prototypes/connections/program.h": "b9ea0af3759150637ccba9362ccb73be374ed85b449b0461fc61fb14ee50e8bc",
+    "prototypes/connections/runtime.c": "e8c84d688ba078e909c57d56c882c963ad5431afe10051bdec84486d3e155b54",
+    "prototypes/connections/runtime.h": "2a9d00a7f6f916041380cef3e3dc30602364b05288f62607b62b3de2be2595d1",
+    "prototypes/connections/result.h": "00b6cf02262039fd90b197eb781f38c9771beaa8d65f394cba6d3f8d0b2ae79d",
+    "prototypes/connections/evaluate.c": "ee8b91efc733b9d305711b7cbb7b502ae5d3917e06f750b7f62b632ed0ea6d04",
+    "prototypes/connections/store-port.c": "d6bf17878b325e039360816edcbf8d68e41b373cf3e6128d7795e11ae21fdd6f",
+    "prototypes/connections/store-port.h": "a262bac93463bfe9939ca0bdc5989d1665aafc007d61e93c28ffc36478b1fde6",
+    "prototypes/connections/test-runtime.c": "58526592ee906833718101f1d33878d66c5e357097d5347d02755d922c36dda9",
+    "prototypes/connections/server.c": "e8632667de6feaf4d495f87abb159775650e3e4eaf6713b9dfdc5f82807c2bf9",
+    "prototypes/connections/check.py": "546ab85ba3495daa09a6299b23e05308718287b77bde326849ce9c26c8068eb2",
+    "prototypes/connections/check_edits.py": "7699eb4bda57ad860acf7be6da3e6de56d6b9a3dcf3b9ff9c7df104f5bcb9224",
+    "prototypes/connections/edit.c": "f39a7c411afa80812aec6e7a7250cdc833e97cffef8d0cce25d960fe435784f6",
+    "prototypes/connections/test-splice.c": "2415188c89ff413f10d55a8cf1902e76c585cc4102f01d504bbf84dbe8d90a8f",
+    "prototypes/connections/test-flow.c": "2cd2618015ba6806b1a733af0fc7d0ed6aec48fdec117d18c3a8160f534e130b",
+    "prototypes/connections/test-program.c": "a1b65be05ab2e4e5ccbc56cd1e03e17b0d885f15dc027bf295371ec821e19cc8",
+    "prototypes/connections/test-fields.c": "e5856ae1985dc8407565ebf7b65702478a34a05081c955f127a10d3cdc900507",
+    "prototypes/connections/Makefile": "f9a0c9fa7d0f40d6d72bc72a429dd36e136e27207aa6b0c01df9505d82189b6d",
+    "prototypes/connections/core-layout.c": "e3123bdf74edb99556b05d7cd3a36b6119ec30829541b0ddba2e23e5900b089d",
+    "prototypes/connections/check_core.py": "f80ead11764e870f0bde434c93233d518e5874fdb32f77444e7bd8bbe7398a10",
+    "prototypes/connections/core-budget.json": "b4eceaffce900144470dd29076164039b8729bad4ba849789d212e7c952f5082",
+    "prototypes/connections/examples/editor.pure": "8ca6c191b98bf53a592ce24f2b5cd040e41f05c4ccdda7a072d5d7f79870c06a",
+    "prototypes/connections/examples/storage.pure": "6f2fd3733f46b762836405f40a9720de0b865f92a8bcbf9388dda0532c903c74",
+    "prototypes/connections/examples/excerpt.pure": "7ca1b9a4b6a06c32b95e37bcdeb2202ef912ffbf16163f7eea2b00574c703c16",
+    "prototypes/connections/examples/selection.pure": "90a19a080dd31b532163b8063057beee4701d8f74163ac4083833a1d664fe986",
+    "prototypes/connections/examples/select-text.py": "3211ce21bf6058f0131544959272587af4edb3fd5a956aee0a940ab19888f944",
+    "prototypes/workbench/remote.mjs": "6f5aa2bc5a3c88749b2b688c5631eed9e4a5ab41d72eca168bfb67941a8cff2f",
+    "prototypes/workbench/cli.mjs": "55a5ead56fc8ad4c3f2391505fc3dbfa477ccff5b68fc208f700da24d5e194da",
+    "prototypes/workbench/web/core.wasm": "e5187c44f8d2df952a85e4cf8102b71dbec6c43420893b3544a6f8514a1bff5c",
+    "prototypes/workbench/web/runtime.mjs": "9cf12270bb39b3d6ce0384c56df8bdfabfd9459d3375cc7819290a5fe3e5db54",
+    "prototypes/workbench/web/compiler.mjs": "349139612d1f7da5f75ef21c65aa697963b760cb35321150fc36f67f3b40adf1",
+    "prototypes/workbench/web/project.mjs": "8af4cd1a60bbb217c896be20c7c6b8d33989f2166d06e736bf1479d8ecdc8b35",
+    "prototypes/workbench/examples/direct.pure": "57177e5197d75a6185cd3ac5df2be920ddba9a9b0fcc2dddab3560b815249f0a"
+  }
+}

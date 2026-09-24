@@ -1,0 +1,251 @@
+{
+  "profile": "same-durable-document-app-direct-versus-pure",
+  "definition_sha256": "8ca6c191b98bf53a592ce24f2b5cd040e41f05c4ccdda7a072d5d7f79870c06a",
+  "prepared_sha256": "8e93861539a87c2a091f55afea1bf310fc3d1f1474521d8f8318bfacac3b0649",
+  "documents_per_variant": 256,
+  "operations_per_variant": 1024,
+  "body_bytes": 8192,
+  "pairs": 4,
+  "filesystem": {
+    "device": "/dev/mmcblk0p2",
+    "type": "ext4",
+    "mount": "/home/eunhhu/work/pure"
+  },
+  "sections": {
+    "direct": {
+      "text": 10364,
+      "data": 856,
+      "bss": 16
+    },
+    "pure": {
+      "text": 18640,
+      "data": 864,
+      "bss": 376
+    }
+  },
+  "binary_sha256": {
+    "direct": "d265f60f9126da701369c26a6263474164171349867e11079a63b6d9bd1dbbc8",
+    "pure": "8e71e09bb7923de0e945f4d51c5514dd9ab07a4ff9c0982db712ab895fc54fa0"
+  },
+  "samples": [
+    {
+      "order": [
+        "direct",
+        "pure"
+      ],
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 7241112354,
+        "stage_ns": [
+          3772530510,
+          14877249,
+          3434303263,
+          14649999
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1072,
+        "user_ns": 21367000,
+        "system_ns": 89743000,
+        "stored_file_bytes": 2103296,
+        "stored_files_sha256": "93b837ad585f9633f60c4e3fc6c52e403238e5a4cc4ec3f6d248b3981a8f425b"
+      },
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 7649396059,
+        "stage_ns": [
+          3825503100,
+          15159869,
+          3788264822,
+          15324464
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1088,
+        "user_ns": 40394000,
+        "system_ns": 72710000,
+        "stored_file_bytes": 2103296,
+        "stored_files_sha256": "93b837ad585f9633f60c4e3fc6c52e403238e5a4cc4ec3f6d248b3981a8f425b"
+      }
+    },
+    {
+      "order": [
+        "pure",
+        "direct"
+      ],
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 7398701348,
+        "stage_ns": [
+          3647571585,
+          15698014,
+          3714469244,
+          15678618
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1088,
+        "user_ns": 32058000,
+        "system_ns": 85489000,
+        "stored_file_bytes": 2103296,
+        "stored_files_sha256": "93b837ad585f9633f60c4e3fc6c52e403238e5a4cc4ec3f6d248b3981a8f425b"
+      },
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 7807026262,
+        "stage_ns": [
+          4021085986,
+          16197799,
+          3747754749,
+          16384614
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1072,
+        "user_ns": 23055000,
+        "system_ns": 96831000,
+        "stored_file_bytes": 2103296,
+        "stored_files_sha256": "93b837ad585f9633f60c4e3fc6c52e403238e5a4cc4ec3f6d248b3981a8f425b"
+      }
+    },
+    {
+      "order": [
+        "direct",
+        "pure"
+      ],
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 8124328908,
+        "stage_ns": [
+          3722508954,
+          16393229,
+          4364924440,
+          15319853
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1072,
+        "user_ns": 45910000,
+        "system_ns": 67099000,
+        "stored_file_bytes": 2103296,
+        "stored_files_sha256": "93b837ad585f9633f60c4e3fc6c52e403238e5a4cc4ec3f6d248b3981a8f425b"
+      },
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 8689792618,
+        "stage_ns": [
+          3995126011,
+          17471391,
+          4653440218,
+          17835468
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1088,
+        "user_ns": 47096000,
+        "system_ns": 83726000,
+        "stored_file_bytes": 2103296,
+        "stored_files_sha256": "93b837ad585f9633f60c4e3fc6c52e403238e5a4cc4ec3f6d248b3981a8f425b"
+      }
+    },
+    {
+      "order": [
+        "pure",
+        "direct"
+      ],
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 7553568836,
+        "stage_ns": [
+          3612364797,
+          15354345,
+          3905074609,
+          15629392
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1088,
+        "user_ns": 23794000,
+        "system_ns": 90418000,
+        "stored_file_bytes": 2103296,
+        "stored_files_sha256": "93b837ad585f9633f60c4e3fc6c52e403238e5a4cc4ec3f6d248b3981a8f425b"
+      },
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 7932443534,
+        "stage_ns": [
+          4056315266,
+          15670869,
+          3839621816,
+          15698993
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1072,
+        "user_ns": 23088000,
+        "system_ns": 92353000,
+        "stored_file_bytes": 2103296,
+        "stored_files_sha256": "93b837ad585f9633f60c4e3fc6c52e403238e5a4cc4ec3f6d248b3981a8f425b"
+      }
+    }
+  ],
+  "medians": {
+    "direct": {
+      "elapsed_ms": 7869.734898,
+      "peak_rss_kib": 1072.0,
+      "user_ms": 23.0715,
+      "system_ms": 91.048,
+      "stages_ms": [
+        3896.808248,
+        15.934334,
+        3793.6882825,
+        15.509423
+      ]
+    },
+    "pure": {
+      "elapsed_ms": 7601.4824475,
+      "peak_rss_kib": 1088.0,
+      "user_ms": 36.226,
+      "system_ms": 84.6075,
+      "stages_ms": [
+        3736.5373425,
+        15.5261795,
+        3846.6697155,
+        15.654005
+      ]
+    }
+  },
+  "median_elapsed_ratio_pure_over_direct": 0.9659134069982239,
+  "sources_sha256": {
+    "research/experiments/004-direct-document-path/document-path.c": "032d8688db330c355082d150865aa7ade3e5402cc1bbe090b361fd55cb6325fc",
+    "research/experiments/004-direct-document-path/peak-launcher.c": "fc730205d564b60a4f9e44aa1b880df0debeb1338b86b27eabe3bde1508f3f74",
+    "research/experiments/004-direct-document-path/run.py": "ab9eaed05ed47afc29cb94e72759dad6534531b52b34a8ba2c5b3be6ded1cac1",
+    "prototypes/connections/store.c": "733ddcacaffd9e9ffbadfc385eadd4c9e62736a2b97b7bc048ad14845d83070f",
+    "prototypes/connections/runtime.c": "1ced6734ee07f3688e5c9cc0a8af639da88a1741dc3e6f65ec109baa2d826e6f",
+    "prototypes/connections/evaluate.c": "ee8b91efc733b9d305711b7cbb7b502ae5d3917e06f750b7f62b632ed0ea6d04",
+    "prototypes/connections/store-port.c": "d6bf17878b325e039360816edcbf8d68e41b373cf3e6128d7795e11ae21fdd6f",
+    "prototypes/connections/examples/editor.pure": "8ca6c191b98bf53a592ce24f2b5cd040e41f05c4ccdda7a072d5d7f79870c06a"
+  },
+  "environment": {
+    "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+    "machine": "aarch64",
+    "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+    "size": "GNU size (GNU Binutils for Debian) 2.44"
+  }
+}

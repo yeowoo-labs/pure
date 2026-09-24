@@ -1,0 +1,10 @@
+{
+  "checks": [
+    "invalid-output fixture changes the numeric rule",
+    "out-of-range authored output preserves both the layout and its native control projection",
+    "a corrected policy and valid request recover from invalid host output",
+    "arithmetic rollback also restores the native range projection",
+    "policy replacement is refused during an active native gesture",
+    "oversize files cannot replace the editable text"
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "purpose": "Same final core, compiled storage accounting; no performance benchmark",
+  "cases": {
+    "shared-layout": {
+      "metrics": {
+        "sourceBytes": 2271,
+        "sourceLines": 76,
+        "states": 25,
+        "inputs": 7,
+        "views": 5,
+        "handlers": 24,
+        "instructions": 117,
+        "maxStack": 3
+      },
+      "memory": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 20064,
+        "programReservedBytes": 9728,
+        "instructionBytes": 16,
+        "handlerBytes": 16,
+        "activeIRBytes": 2256,
+        "activeStateBytes": 200,
+        "stagingReservedBytes": 9992,
+        "evalStackBytes": 512,
+        "pointerTargetBytes": 3,
+        "pointerTargets": 0
+      },
+      "routes": []
+    },
+    "routed-layout": {
+      "metrics": {
+        "sourceBytes": 1963,
+        "sourceLines": 71,
+        "states": 25,
+        "inputs": 5,
+        "views": 5,
+        "handlers": 16,
+        "instructions": 117,
+        "maxStack": 3
+      },
+      "memory": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 20064,
+        "programReservedBytes": 9728,
+        "instructionBytes": 16,
+        "handlerBytes": 16,
+        "activeIRBytes": 2137,
+        "activeStateBytes": 200,
+        "stagingReservedBytes": 9992,
+        "evalStackBytes": 512,
+        "pointerTargetBytes": 3,
+        "pointerTargets": 3
+      },
+      "routes": [
+        {
+          "input": 4,
+          "base": 1,
+          "count": 8
+        },
+        {
+          "input": 4,
+          "base": 9,
+          "count": 8
+        },
+        {
+          "input": 4,
+          "base": 17,
+          "count": 8
+        }
+      ]
+    }
+  }
+}

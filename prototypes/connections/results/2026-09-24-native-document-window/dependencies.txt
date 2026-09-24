@@ -1,0 +1,10 @@
+pure-edit
+0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+pure-connections
+0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+pure-edit-window
+0x0000000000000001 (NEEDED)             Shared library: [libgtk-4.so.1]
+0x0000000000000001 (NEEDED)             Shared library: [libgio-2.0.so.0]
+0x0000000000000001 (NEEDED)             Shared library: [libgobject-2.0.so.0]
+0x0000000000000001 (NEEDED)             Shared library: [libglib-2.0.so.0]
+0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]

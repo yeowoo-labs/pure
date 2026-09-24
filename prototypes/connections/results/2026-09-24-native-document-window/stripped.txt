@@ -1,0 +1,3 @@
+pure-edit	elf_bytes=177384	stripped_bytes=67904
+pure-connections	elf_bytes=199080	stripped_bytes=68000
+pure-edit-window	elf_bytes=199184	stripped_bytes=68280

@@ -1,0 +1,103 @@
+// Playwright CLI run-code. Functional and ownership checks, not a timing benchmark.
+async page => {
+  const checks=[],errors=[],check=(ok,label)=>{if(!ok)throw new Error(label);checks.push(label);};
+  const onDialog=d=>d.accept(),onError=e=>errors.push(e.message);page.on('dialog',onDialog);page.on('pageerror',onError);
+  const state=()=>page.evaluate(()=>window.pureDocument.snapshot());
+  const settled=()=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  const ratio=async expected=>{await page.waitForFunction(n=>Math.abs(window.pureDocument.snapshot().runtime.states.ratio-n)<0.2,expected);};
+  const geometry=()=>page.evaluate(()=>{const p=document.querySelector('#panes').getBoundingClientRect(),h=document.querySelector('#divider').getBoundingClientRect();return{left:p.left,width:p.width,handle:h.width,x:h.left+h.width/2,y:h.top+h.height/2};});
+  const target=(g,r)=>g.left+g.handle/2+(g.width-g.handle)*r/100;
+  const dragStart=async()=>{await page.locator('#divider').scrollIntoViewIfNeeded();const g=await geometry();await page.mouse.move(g.x,g.y);await page.mouse.down();return g;};
+  const upload=async(content,name='notes.txt')=>page.locator('#file-input').evaluate((input,{content,name})=>{const d=new DataTransfer();d.items.add(new File([content],name,{type:'text/plain'}));input.files=d.files;input.dispatchEvent(new Event('change',{bubbles:true}));},{content,name});
+  try {
+    await page.setViewportSize({width:1440,height:1000});await page.reload();
+    await page.waitForFunction(()=>window.pureDocument?.snapshot().ready);
+    check((await state()).runtime.memory.activeStateBytes===8,'only the authored ratio occupies VM state; no document or geometry mirror');
+    await page.locator('#sample').click();await settled();
+    const original=await page.locator('#document-text').inputValue();
+    check(await page.locator('#reading-text').textContent()===original,'native editor and reading pane show the same Unicode document');
+    check(await page.locator('#reading-text div').count()===0,'document markup is displayed as text');
+    const beforeResize=await state();
+    await page.locator('#document-text').evaluate(t=>{t.focus();t.setSelectionRange(20,25);t.scrollTop=80;});
+    await page.setViewportSize({width:1040,height:900});await settled();
+    const afterResize=await state();
+    check(afterResize.runtime.successfulEvents===beforeResize.runtime.successfulEvents&&afterResize.stats.previewWrites===beforeResize.stats.previewWrites&&afterResize.stats.geometryReads===beforeResize.stats.geometryReads,'resize reflows through CSS without VM events, document publication or application geometry reads');
+    check(await page.locator('#document-text').evaluate(t=>t.selectionStart===20&&t.selectionEnd===25),'reflow preserves the native editing selection');
+    const scrolling=await page.evaluate(()=>{const t=document.querySelector('#document-text'),r=document.querySelector('#reading-scroll');r.scrollTop=120;return{editor:t.scrollTop,reading:r.scrollTop,scrollable:r.scrollHeight>r.clientHeight};});
+    check(scrolling.scrollable&&scrolling.reading>0,'long wrapped content uses the native reading scroll area');
+    await page.locator('#reading-scroll').evaluate(r=>r.scrollTop+=80);await settled();
+    check(await page.locator('#document-text').evaluate((t,y)=>t.scrollTop===y,scrolling.editor),'reading scroll does not move the editing pane');
+    check((await state()).runtime.successfulEvents===afterResize.runtime.successfulEvents,'native scrolling does not dispatch layout data to the VM');
+    await page.locator('#split-range').focus();await page.keyboard.press('End');await ratio(80);
+    check((await state()).runtime.states.ratio===80,'a native range input uses the authored numeric-input policy');
+    await page.locator('#divider').focus();await page.keyboard.press('Home');await ratio(20);await page.keyboard.press('Shift+ArrowRight');await ratio(30);
+    check(await page.locator('#divider').getAttribute('aria-valuenow')==='30','keyboard separator control publishes the same value and accessibility state');
+    await page.locator('#reset-split').click();await ratio(50);
+    const textWrites=(await state()).stats.previewWrites;
+    let g=await dragStart();await page.mouse.move(target(g,65),g.y);await ratio(65);await page.mouse.up();
+    check(Math.abs((await state()).runtime.states.ratio-65)<0.2&&!(await state()).dragging,'mouse release commits the last delivered split position');
+    check((await state()).stats.previewWrites===textWrites,'resizing panes never republishes unchanged document text');
+    g=await dragStart();await page.mouse.move(target(g,35),g.y);await ratio(35);await page.keyboard.press('Escape');await page.mouse.up();await ratio(65);
+    check(!(await state()).dragging,'Escape restores the ratio captured at gesture start');
+    g=await dragStart();await page.setViewportSize({width:1240,height:1000});await settled();g=await geometry();
+    await page.mouse.move(target(g,45),g.y);await ratio(45);await page.mouse.up();
+    check(Math.abs((await state()).runtime.states.ratio-45)<0.2,'a resize during capture invalidates geometry before the next move');
+    // Capture a real touch; mouse compatibility termination must not release it.
+    const cdp=await page.context().newCDPSession(page);
+    try {
+      await cdp.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:2});g=await geometry();
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{id:1,x:g.x,y:g.y}]});
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{id:1,x:target(g,70),y:g.y}]});await ratio(70);
+      await page.evaluate(()=>window.dispatchEvent(new MouseEvent('mouseup',{button:0,bubbles:true})));
+      check((await state()).dragging,'a compatibility mouseup cannot release a touch owner');
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});await ratio(45);
+      check(!(await state()).dragging,'touch cancellation restores the original panel ratio');
+    } finally {await cdp.send('Emulation.setTouchEmulationEnabled',{enabled:false});await cdp.detach();}
+    g=await dragStart();await page.mouse.move(target(g,60),g.y);await ratio(60);
+    await page.setViewportSize({width:390,height:844});await settled();await page.mouse.up();await ratio(45);
+    check(await page.locator('#divider').isHidden()&&!(await state()).dragging,'narrow layout cancels the active split gesture and stacks the panes');
+    check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'the narrow document workspace has no page-level horizontal overflow');
+    const oldStats=await state();
+    await page.locator('#document-text').fill('한글 문서 📝\n새 줄과 <태그>도 그대로.');await settled();
+    check(await page.locator('#reading-text').textContent()==='한글 문서 📝\n새 줄과 <태그>도 그대로.','editing Unicode updates the text projection');
+    check((await state()).runtime.successfulEvents===oldStats.runtime.successfulEvents&& (await state()).stats.geometryReads===oldStats.stats.geometryReads,'text editing neither sends document copies to the VM nor reads geometry');
+    await page.locator('#document-text').focus();await page.keyboard.press('Control+End');await page.keyboard.insertText(' 추가');await settled();await page.keyboard.press('Control+z');await settled();
+    check(await page.locator('#document-text').inputValue()==='한글 문서 📝\n새 줄과 <태그>도 그대로.','native editing undo survives the Pure integration');
+    const compositionBefore=(await state()).stats.previewWrites;
+    await page.locator('#document-text').evaluate(t=>{t.dispatchEvent(new CompositionEvent('compositionstart'));t.value+=' 조합';t.dispatchEvent(new InputEvent('input',{bubbles:true,isComposing:true}));});await settled();
+    check((await state()).stats.previewWrites===compositionBefore,'in-progress composition does not replace the reading projection');
+    await page.locator('#document-text').evaluate(t=>t.dispatchEvent(new CompositionEvent('compositionend')));await settled();
+    check((await page.locator('#reading-text').textContent()).endsWith(' 조합'),'composition completion publishes the final text (synthetic event sequence)');
+    const fileText='표준 UTF-8 파일\n외부 편집기에서 만든 내용\n😀 <article>문자</article>\n';
+    await upload(fileText,'external.txt');await page.waitForFunction(()=>document.querySelector('#document-status').textContent.includes('파일을 열었습니다'));await settled();
+    check(await page.locator('#document-text').inputValue()===fileText,'a standard UTF-8 text file opens without a custom container');
+    const download=page.waitForEvent('download');await page.locator('#save').click();const saved=await download;const savedPath='output/playwright/pure-document-saved.txt';await saved.saveAs(savedPath);
+    check(saved.suggestedFilename()==='external.txt','export keeps the standard text filename');
+    const fresh=await page.context().newPage();await fresh.goto(page.url());await fresh.waitForFunction(()=>window.pureDocument?.snapshot().ready);
+    await fresh.locator('#file-input').setInputFiles(savedPath);await fresh.waitForFunction(()=>document.querySelector('#document-status').textContent.includes('파일을 열었습니다'));
+    check(await fresh.locator('#document-text').inputValue()===fileText,'the exported file reopens in a fresh page with exact text');await fresh.close();await page.bringToFront();
+    await page.locator('#file-input').evaluate(input=>{const f=new File(['late'],'late.txt');f.arrayBuffer=()=>new Promise(resolve=>window.finishDocumentRead=()=>resolve(new TextEncoder().encode('late').buffer));const d=new DataTransfer();d.items.add(f);Object.defineProperty(input,'files',{configurable:true,value:d.files});input.dispatchEvent(new Event('change',{bubbles:true}));});
+    await page.locator('#document-text').fill('읽는 동안 새로 편집한 문서');await page.evaluate(()=>window.finishDocumentRead());await settled();
+    check(await page.locator('#document-text').inputValue()==='읽는 동안 새로 편집한 문서'&&(await page.locator('#document-status').textContent()).includes('읽는 동안'),'a delayed file read cannot overwrite newer editing');
+    await page.locator('#file-input').evaluate(input=>{delete input.files;const d=new DataTransfer();d.items.add(new File([new Uint8Array([255])],'invalid.txt'));input.files=d.files;input.dispatchEvent(new Event('change',{bubbles:true}));});
+    await page.waitForFunction(()=>document.querySelector('#document-status').textContent.includes('UTF-8 텍스트로 읽을 수'));check(await page.locator('#document-text').inputValue()==='읽는 동안 새로 편집한 문서','invalid UTF-8 leaves the current document intact');
+    await page.setViewportSize({width:1440,height:1000});await settled();
+    await page.locator('.policy summary').click();const source=await page.locator('#policy-source').inputValue();
+    await page.locator('#policy-source').fill(source.replace('20, 80','30, 70'));await page.locator('#apply-policy').click();
+    await page.locator('#split-range').focus();await page.keyboard.press('End');await ratio(70);
+    check((await state()).runtime.states.ratio===70,'changing the authored rule changes native control behavior without touching the HTML adapter');
+    const revision=(await state()).runtime.revision;await page.locator('#policy-source').fill('state broken =');await page.locator('#apply-policy').click();
+    check((await state()).runtime.revision===revision&&await page.locator('#document-text').inputValue()==='읽는 동안 새로 편집한 문서','invalid policy edits preserve the executable policy and document');
+    await page.locator('#policy-source').fill(source);await page.locator('#apply-policy').click();await page.locator('.policy summary').click();
+    await page.locator('#sample').click();await settled();await page.locator('#reset-split').click();
+    await page.screenshot({path:'output/playwright/pure-document-desktop.png',fullPage:true});
+    await page.setViewportSize({width:390,height:844});await page.screenshot({path:'output/playwright/pure-document-mobile.png',fullPage:true});
+    const fallback=await page.context().newPage();await fallback.route('**/core.wasm',r=>r.abort());await fallback.goto(page.url());await fallback.waitForFunction(()=>window.pureDocument);
+    await fallback.locator('#document-text').fill('실행기 없이도 보존되는 텍스트');await fallback.waitForFunction(()=>document.querySelector('#reading-text').textContent.includes('실행기 없이도'));
+    check(!await fallback.evaluate(()=>window.pureDocument.snapshot().ready)&&await fallback.locator('#split-range').isDisabled()&&await fallback.locator('#save').isEnabled(),'missing Wasm disables split controls while standard text editing and saving remain available');await fallback.close();
+    check(errors.length===0,'no uncaught page errors');
+    const evidence={checks,errors,fileText,savedPath,final:await state(),browser:await page.evaluate(()=>navigator.userAgent)};
+    await page.evaluate(e=>window.__pureDocumentEvidence=e,evidence);return{checks:checks.length,errors};
+  } catch(error){await page.evaluate(e=>window.__pureDocumentEvidence=e,{failed:String(error),checks,errors,state:await state()});throw error;}
+  finally{page.off('dialog',onDialog);page.off('pageerror',onError);}
+}

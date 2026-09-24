@@ -1,0 +1,29 @@
+{
+  "scope": "Correctness, lifetimes, admission bounds; no throughput, latency, or RSS comparison",
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+  "native_command": "make check EVIDENCE=results/2026-09-23-native-connections/native.json",
+  "sanitized_command": "make check BUILD=build/sanitized CFLAGS='-std=c17 -O1 -g -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -fno-omit-frame-pointer' EVIDENCE=results/2026-09-23-native-connections/sanitized.json",
+  "core_checks": {
+    "native": "passed",
+    "asan_ubsan": "passed",
+    "leak_detection_disabled": false
+  },
+  "integration_scenarios_each": 15,
+  "cli_regression": {
+    "command": "node --test cli.test.mjs",
+    "cwd": "prototypes/workbench",
+    "passed": 8,
+    "failed": 0,
+    "test_sha256": "7e4688824e26dc7e56396f9d4d62726de0ccb1490e1a388bb64690ae2aae52f4"
+  },
+  "source_hashes_equal": true,
+  "source_snapshots": "sources/",
+  "final_binaries_match_records": true,
+  "limitations": [
+    "SQLite shared library was not rebuilt with sanitizers",
+    "Linux AArch64 only; no macOS execution",
+    "Bounded payload retention excludes SQLite internals, OS socket buffers and client allocations",
+    "SQLite operations remain synchronous; absolute deadlines are enforced between those operations",
+    "Native connection path is fixed in C; Pure-authored external effects are not implemented"
+  ]
+}

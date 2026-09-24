@@ -1,0 +1,862 @@
+{
+  "profile": "repeated-durable-one-mib-document-last-byte-edit",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "filesystem": "ext4 /dev/mmcblk0p2[/home/eunhhu/work/pure]",
+  "edits_per_variant": 70,
+  "final_body_sha256": "3cfc240f48e8e1b8553f3e2670adf7b81cafe34f089d4372fa4c28787dc02151",
+  "scope": "Same actual source-loaded CLI and editor.pure, two persistent stores, alternating operation order. Timings include each edit process, parser, store init and fsync; creation and final show are not timed. Device state is uncontrolled.",
+  "variants": {
+    "flat": {
+      "binary_sha256": "23ebc0ce1df9c49216511bee658fd5b9e373509e296bd2c2f8e76e6d3081cded",
+      "median_edit_ms": 83.176,
+      "samples": [
+        {
+          "edit": 1,
+          "elapsed_ms": 24.328,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 2,
+          "elapsed_ms": 79.862,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 3,
+          "elapsed_ms": 177.059,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 4,
+          "elapsed_ms": 89.804,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 5,
+          "elapsed_ms": 92.579,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 6,
+          "elapsed_ms": 83.733,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 7,
+          "elapsed_ms": 29.379,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 8,
+          "elapsed_ms": 78.191,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 9,
+          "elapsed_ms": 57.551,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 10,
+          "elapsed_ms": 83.875,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 11,
+          "elapsed_ms": 78.209,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 12,
+          "elapsed_ms": 85.296,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 13,
+          "elapsed_ms": 25.204,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 14,
+          "elapsed_ms": 28.663,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 15,
+          "elapsed_ms": 82.153,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 16,
+          "elapsed_ms": 84.924,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 17,
+          "elapsed_ms": 82.359,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 18,
+          "elapsed_ms": 39.211,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 19,
+          "elapsed_ms": 28.648,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 20,
+          "elapsed_ms": 82.115,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 21,
+          "elapsed_ms": 83.895,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 22,
+          "elapsed_ms": 83.007,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 23,
+          "elapsed_ms": 84.496,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 24,
+          "elapsed_ms": 28.525,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 25,
+          "elapsed_ms": 86.499,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 26,
+          "elapsed_ms": 25.536,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 27,
+          "elapsed_ms": 93.217,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 28,
+          "elapsed_ms": 36.673,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 29,
+          "elapsed_ms": 84.748,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 30,
+          "elapsed_ms": 79.529,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 31,
+          "elapsed_ms": 84.024,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 32,
+          "elapsed_ms": 82.681,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 33,
+          "elapsed_ms": 28.903,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 34,
+          "elapsed_ms": 29.254,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 35,
+          "elapsed_ms": 86.486,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 36,
+          "elapsed_ms": 96.679,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 37,
+          "elapsed_ms": 41.477,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 38,
+          "elapsed_ms": 82.386,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 39,
+          "elapsed_ms": 25.063,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 40,
+          "elapsed_ms": 27.84,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 41,
+          "elapsed_ms": 86.119,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 42,
+          "elapsed_ms": 89.284,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 43,
+          "elapsed_ms": 84.316,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 44,
+          "elapsed_ms": 86.972,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 45,
+          "elapsed_ms": 88.795,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 46,
+          "elapsed_ms": 47.265,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 47,
+          "elapsed_ms": 32.736,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 48,
+          "elapsed_ms": 93.95,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 49,
+          "elapsed_ms": 29.861,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 50,
+          "elapsed_ms": 25.674,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 51,
+          "elapsed_ms": 87.319,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 52,
+          "elapsed_ms": 83.632,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 53,
+          "elapsed_ms": 83.964,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 54,
+          "elapsed_ms": 83.345,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 55,
+          "elapsed_ms": 175.728,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 56,
+          "elapsed_ms": 92.189,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 57,
+          "elapsed_ms": 98.676,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 58,
+          "elapsed_ms": 84.905,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 59,
+          "elapsed_ms": 81.966,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 60,
+          "elapsed_ms": 87.203,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 61,
+          "elapsed_ms": 25.923,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 62,
+          "elapsed_ms": 29.165,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 63,
+          "elapsed_ms": 82.076,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 64,
+          "elapsed_ms": 128.506,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 65,
+          "elapsed_ms": 91.837,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 66,
+          "elapsed_ms": 25.832,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 67,
+          "elapsed_ms": 86.189,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 68,
+          "elapsed_ms": 83.351,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 69,
+          "elapsed_ms": 85.479,
+          "files": 2,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 70,
+          "elapsed_ms": 77.587,
+          "files": 2,
+          "allocated_bytes": 1052672
+        }
+      ]
+    },
+    "paged": {
+      "binary_sha256": "e1c12a2f5e736bb86737ceff7849fe95b1a9d13136e8c5eb3f3398cb3971c6f5",
+      "median_edit_ms": 18.858,
+      "samples": [
+        {
+          "edit": 1,
+          "elapsed_ms": 16.412,
+          "files": 3,
+          "allocated_bytes": 1069056
+        },
+        {
+          "edit": 2,
+          "elapsed_ms": 17.281,
+          "files": 3,
+          "allocated_bytes": 1085440
+        },
+        {
+          "edit": 3,
+          "elapsed_ms": 32.037,
+          "files": 3,
+          "allocated_bytes": 1101824
+        },
+        {
+          "edit": 4,
+          "elapsed_ms": 29.739,
+          "files": 3,
+          "allocated_bytes": 1118208
+        },
+        {
+          "edit": 5,
+          "elapsed_ms": 28.746,
+          "files": 3,
+          "allocated_bytes": 1134592
+        },
+        {
+          "edit": 6,
+          "elapsed_ms": 31.822,
+          "files": 3,
+          "allocated_bytes": 1150976
+        },
+        {
+          "edit": 7,
+          "elapsed_ms": 16.937,
+          "files": 3,
+          "allocated_bytes": 1167360
+        },
+        {
+          "edit": 8,
+          "elapsed_ms": 16.845,
+          "files": 3,
+          "allocated_bytes": 1183744
+        },
+        {
+          "edit": 9,
+          "elapsed_ms": 17.18,
+          "files": 3,
+          "allocated_bytes": 1200128
+        },
+        {
+          "edit": 10,
+          "elapsed_ms": 18.422,
+          "files": 3,
+          "allocated_bytes": 1216512
+        },
+        {
+          "edit": 11,
+          "elapsed_ms": 18.672,
+          "files": 3,
+          "allocated_bytes": 1232896
+        },
+        {
+          "edit": 12,
+          "elapsed_ms": 16.399,
+          "files": 3,
+          "allocated_bytes": 1249280
+        },
+        {
+          "edit": 13,
+          "elapsed_ms": 18.911,
+          "files": 3,
+          "allocated_bytes": 1265664
+        },
+        {
+          "edit": 14,
+          "elapsed_ms": 71.604,
+          "files": 3,
+          "allocated_bytes": 1282048
+        },
+        {
+          "edit": 15,
+          "elapsed_ms": 18.821,
+          "files": 3,
+          "allocated_bytes": 1298432
+        },
+        {
+          "edit": 16,
+          "elapsed_ms": 16.746,
+          "files": 3,
+          "allocated_bytes": 1314816
+        },
+        {
+          "edit": 17,
+          "elapsed_ms": 17.354,
+          "files": 3,
+          "allocated_bytes": 1331200
+        },
+        {
+          "edit": 18,
+          "elapsed_ms": 15.468,
+          "files": 3,
+          "allocated_bytes": 1347584
+        },
+        {
+          "edit": 19,
+          "elapsed_ms": 15.872,
+          "files": 3,
+          "allocated_bytes": 1363968
+        },
+        {
+          "edit": 20,
+          "elapsed_ms": 18.347,
+          "files": 3,
+          "allocated_bytes": 1380352
+        },
+        {
+          "edit": 21,
+          "elapsed_ms": 17.311,
+          "files": 3,
+          "allocated_bytes": 1396736
+        },
+        {
+          "edit": 22,
+          "elapsed_ms": 18.997,
+          "files": 3,
+          "allocated_bytes": 1413120
+        },
+        {
+          "edit": 23,
+          "elapsed_ms": 17.267,
+          "files": 3,
+          "allocated_bytes": 1429504
+        },
+        {
+          "edit": 24,
+          "elapsed_ms": 18.52,
+          "files": 3,
+          "allocated_bytes": 1445888
+        },
+        {
+          "edit": 25,
+          "elapsed_ms": 34.127,
+          "files": 3,
+          "allocated_bytes": 1462272
+        },
+        {
+          "edit": 26,
+          "elapsed_ms": 86.489,
+          "files": 3,
+          "allocated_bytes": 1478656
+        },
+        {
+          "edit": 27,
+          "elapsed_ms": 29.105,
+          "files": 3,
+          "allocated_bytes": 1495040
+        },
+        {
+          "edit": 28,
+          "elapsed_ms": 37.131,
+          "files": 3,
+          "allocated_bytes": 1511424
+        },
+        {
+          "edit": 29,
+          "elapsed_ms": 15.478,
+          "files": 3,
+          "allocated_bytes": 1527808
+        },
+        {
+          "edit": 30,
+          "elapsed_ms": 19.623,
+          "files": 3,
+          "allocated_bytes": 1544192
+        },
+        {
+          "edit": 31,
+          "elapsed_ms": 90.312,
+          "files": 3,
+          "allocated_bytes": 1560576
+        },
+        {
+          "edit": 32,
+          "elapsed_ms": 17.365,
+          "files": 3,
+          "allocated_bytes": 1576960
+        },
+        {
+          "edit": 33,
+          "elapsed_ms": 17.109,
+          "files": 3,
+          "allocated_bytes": 1593344
+        },
+        {
+          "edit": 34,
+          "elapsed_ms": 126.006,
+          "files": 3,
+          "allocated_bytes": 1609728
+        },
+        {
+          "edit": 35,
+          "elapsed_ms": 17.457,
+          "files": 3,
+          "allocated_bytes": 1626112
+        },
+        {
+          "edit": 36,
+          "elapsed_ms": 15.908,
+          "files": 3,
+          "allocated_bytes": 1642496
+        },
+        {
+          "edit": 37,
+          "elapsed_ms": 18.896,
+          "files": 3,
+          "allocated_bytes": 1658880
+        },
+        {
+          "edit": 38,
+          "elapsed_ms": 16.535,
+          "files": 3,
+          "allocated_bytes": 1675264
+        },
+        {
+          "edit": 39,
+          "elapsed_ms": 17.568,
+          "files": 3,
+          "allocated_bytes": 1691648
+        },
+        {
+          "edit": 40,
+          "elapsed_ms": 71.184,
+          "files": 3,
+          "allocated_bytes": 1708032
+        },
+        {
+          "edit": 41,
+          "elapsed_ms": 16.619,
+          "files": 3,
+          "allocated_bytes": 1724416
+        },
+        {
+          "edit": 42,
+          "elapsed_ms": 29.265,
+          "files": 3,
+          "allocated_bytes": 1740800
+        },
+        {
+          "edit": 43,
+          "elapsed_ms": 21.163,
+          "files": 3,
+          "allocated_bytes": 1757184
+        },
+        {
+          "edit": 44,
+          "elapsed_ms": 27.305,
+          "files": 3,
+          "allocated_bytes": 1773568
+        },
+        {
+          "edit": 45,
+          "elapsed_ms": 29.526,
+          "files": 3,
+          "allocated_bytes": 1789952
+        },
+        {
+          "edit": 46,
+          "elapsed_ms": 27.936,
+          "files": 3,
+          "allocated_bytes": 1806336
+        },
+        {
+          "edit": 47,
+          "elapsed_ms": 87.552,
+          "files": 3,
+          "allocated_bytes": 1822720
+        },
+        {
+          "edit": 48,
+          "elapsed_ms": 30.512,
+          "files": 3,
+          "allocated_bytes": 1839104
+        },
+        {
+          "edit": 49,
+          "elapsed_ms": 17.81,
+          "files": 3,
+          "allocated_bytes": 1855488
+        },
+        {
+          "edit": 50,
+          "elapsed_ms": 70.4,
+          "files": 3,
+          "allocated_bytes": 1871872
+        },
+        {
+          "edit": 51,
+          "elapsed_ms": 17.115,
+          "files": 3,
+          "allocated_bytes": 1888256
+        },
+        {
+          "edit": 52,
+          "elapsed_ms": 18.79,
+          "files": 3,
+          "allocated_bytes": 1904640
+        },
+        {
+          "edit": 53,
+          "elapsed_ms": 21.637,
+          "files": 3,
+          "allocated_bytes": 1921024
+        },
+        {
+          "edit": 54,
+          "elapsed_ms": 16.47,
+          "files": 3,
+          "allocated_bytes": 1937408
+        },
+        {
+          "edit": 55,
+          "elapsed_ms": 53.194,
+          "files": 3,
+          "allocated_bytes": 1953792
+        },
+        {
+          "edit": 56,
+          "elapsed_ms": 219.485,
+          "files": 3,
+          "allocated_bytes": 1970176
+        },
+        {
+          "edit": 57,
+          "elapsed_ms": 24.517,
+          "files": 3,
+          "allocated_bytes": 1986560
+        },
+        {
+          "edit": 58,
+          "elapsed_ms": 16.725,
+          "files": 3,
+          "allocated_bytes": 2002944
+        },
+        {
+          "edit": 59,
+          "elapsed_ms": 19.628,
+          "files": 3,
+          "allocated_bytes": 2019328
+        },
+        {
+          "edit": 60,
+          "elapsed_ms": 17.158,
+          "files": 3,
+          "allocated_bytes": 2035712
+        },
+        {
+          "edit": 61,
+          "elapsed_ms": 72.424,
+          "files": 3,
+          "allocated_bytes": 2052096
+        },
+        {
+          "edit": 62,
+          "elapsed_ms": 16.894,
+          "files": 3,
+          "allocated_bytes": 2068480
+        },
+        {
+          "edit": 63,
+          "elapsed_ms": 18.918,
+          "files": 3,
+          "allocated_bytes": 2084864
+        },
+        {
+          "edit": 64,
+          "elapsed_ms": 16.879,
+          "files": 3,
+          "allocated_bytes": 2101248
+        },
+        {
+          "edit": 65,
+          "elapsed_ms": 35.067,
+          "files": 3,
+          "allocated_bytes": 1052672
+        },
+        {
+          "edit": 66,
+          "elapsed_ms": 83.189,
+          "files": 3,
+          "allocated_bytes": 1069056
+        },
+        {
+          "edit": 67,
+          "elapsed_ms": 16.607,
+          "files": 3,
+          "allocated_bytes": 1085440
+        },
+        {
+          "edit": 68,
+          "elapsed_ms": 19.566,
+          "files": 3,
+          "allocated_bytes": 1101824
+        },
+        {
+          "edit": 69,
+          "elapsed_ms": 17.47,
+          "files": 3,
+          "allocated_bytes": 1118208
+        },
+        {
+          "edit": 70,
+          "elapsed_ms": 20.338,
+          "files": 3,
+          "allocated_bytes": 1134592
+        }
+      ]
+    }
+  }
+}

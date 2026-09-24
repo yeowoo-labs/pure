@@ -1,0 +1,108 @@
+{
+  "format": "pure-workbench",
+  "version": 2,
+  "source": "# 하나의 포인터 입력과 네 반응을 모든 도형이 공유합니다.\nstate selected = 0\nrecord Tile {\n  x = 0; y = 0\n  ox = 0; oy = 0\n  sx = 0; sy = 0\n  held = 0; id = 0\n}\nitem green = Tile(x=80, y=120, sx=80, sy=120, id=1)\nitem blue = Tile(x=280, y=160, sx=280, sy=160, id=2)\nitem amber = Tile(x=450, y=220, sx=450, sy=220, id=3)\ninput left = ArrowLeft\ninput right = ArrowRight\ninput up = ArrowUp\ninput down = ArrowDown\ninput drag = pointer {\n  green_box: green\n  blue_box: blue\n  amber_box: amber\n}\nbox board(20,90,600,240,\"#233a31\")\ntext help(25,40,selected,\"선택한 도형: \")\nbox green_box(green.x,green.y,56,44,\"#c9f08b\")\nbox blue_box(blue.x,blue.y,56,44,\"#74c4d4\")\nbox amber_box(amber.x,amber.y,56,44,\"#dfb184\")\n\nrule grab(t: Tile) {\n  selected = t.id\n  t.sx = t.x; t.sy = t.y\n  t.ox = event_x - t.x; t.oy = event_y - t.y\n  t.held = 1\n}\nrule move(t: Tile) {\n  t.x = clamp(event_x - t.ox, 20, 564)\n  t.y = clamp(event_y - t.oy, 90, 286)\n}\nrule drop(t: Tile) { t.held = 0 }\nrule cancel(t: Tile) { t.x = t.sx; t.y = t.sy; t.held = 0 }\nrule go_left(t: Tile) {\n  if selected == t.id && t.held == 0 { t.x = clamp(t.x - 10, 20, 564) }\n}\nrule go_right(t: Tile) {\n  if selected == t.id && t.held == 0 { t.x = clamp(t.x + 10, 20, 564) }\n}\nrule go_up(t: Tile) {\n  if selected == t.id && t.held == 0 { t.y = clamp(t.y - 10, 90, 286) }\n}\nrule go_down(t: Tile) {\n  if selected == t.id && t.held == 0 { t.y = clamp(t.y + 10, 90, 286) }\n}\n\non drag.down use grab(drag.target)\non drag.move use move(drag.target)\non drag.up use drop(drag.target)\non drag.cancel use cancel(drag.target)\n\non left.down use go_left(green)\non right.down use go_right(green)\non up.down use go_up(green)\non down.down use go_down(green)\n\non left.down use go_left(blue)\non right.down use go_right(blue)\non up.down use go_up(blue)\non down.down use go_down(blue)\n\non left.down use go_left(amber)\non right.down use go_right(amber)\non up.down use go_up(amber)\non down.down use go_down(amber)\n",
+  "draft": "# 하나의 포인터 입력과 네 반응을 모든 도형이 공유합니다.\nstate selected = 0\nrecord Tile {\n  x = 0; y = 0\n  ox = 0; oy = 0\n  sx = 0; sy = 0\n  held = 0; id = 0\n}\nitem green = Tile(x=80, y=120, sx=80, sy=120, id=1)\nitem blue = Tile(x=280, y=160, sx=280, sy=160, id=2)\nitem amber = Tile(x=450, y=220, sx=450, sy=220, id=3)\ninput left = ArrowLeft\ninput right = ArrowRight\ninput up = ArrowUp\ninput down = ArrowDown\ninput drag = pointer {\n  green_box: green\n  blue_box: blue\n  amber_box: amber\n}\nbox board(20,90,600,240,\"#233a31\")\ntext help(25,40,selected,\"선택한 도형: \")\nbox green_box(green.x,green.y,56,44,\"#c9f08b\")\nbox blue_box(blue.x,blue.y,56,44,\"#74c4d4\")\nbox amber_box(amber.x,amber.y,56,44,\"#dfb184\")\n\nrule grab(t: Tile) {\n  selected = t.id\n  t.sx = t.x; t.sy = t.y\n  t.ox = event_x - t.x; t.oy = event_y - t.y\n  t.held = 1\n}\nrule move(t: Tile) {\n  t.x = clamp(event_x - t.ox, 20, 564)\n  t.y = clamp(event_y - t.oy, 90, 286)\n}\nrule drop(t: Tile) { t.held = 0 }\nrule cancel(t: Tile) { t.x = t.sx; t.y = t.sy; t.held = 0 }\nrule go_left(t: Tile) {\n  if selected == t.id && t.held == 0 { t.x = clamp(t.x - 10, 20, 564) }\n}\nrule go_right(t: Tile) {\n  if selected == t.id && t.held == 0 { t.x = clamp(t.x + 10, 20, 564) }\n}\nrule go_up(t: Tile) {\n  if selected == t.id && t.held == 0 { t.y = clamp(t.y - 10, 90, 286) }\n}\nrule go_down(t: Tile) {\n  if selected == t.id && t.held == 0 { t.y = clamp(t.y + 10, 90, 286) }\n}\n\non drag.down use grab(drag.target)\non drag.move use move(drag.target)\non drag.up use drop(drag.target)\non drag.cancel use cancel(drag.target)\n\non left.down use go_left(green)\non right.down use go_right(green)\non up.down use go_up(green)\non down.down use go_down(green)\n\non left.down use go_left(blue)\non right.down use go_right(blue)\non up.down use go_up(blue)\non down.down use go_down(blue)\n\non left.down use go_left(amber)\non right.down use go_right(amber)\non up.down use go_up(amber)\non down.down use go_down(amber)\n\nstate unfinished =",
+  "states": [
+    {
+      "name": "selected",
+      "value": 3
+    },
+    {
+      "name": "green.x",
+      "value": 150.00000659728084
+    },
+    {
+      "name": "green.y",
+      "value": 169.9999983506798
+    },
+    {
+      "name": "green.ox",
+      "value": 9.999986805438311
+    },
+    {
+      "name": "green.oy",
+      "value": 10.00000164932024
+    },
+    {
+      "name": "green.sx",
+      "value": 80
+    },
+    {
+      "name": "green.sy",
+      "value": 120
+    },
+    {
+      "name": "green.held",
+      "value": 0
+    },
+    {
+      "name": "green.id",
+      "value": 1
+    },
+    {
+      "name": "blue.x",
+      "value": 350.00000659728073
+    },
+    {
+      "name": "blue.y",
+      "value": 209.9999983506798
+    },
+    {
+      "name": "blue.ox",
+      "value": 9.999980208157467
+    },
+    {
+      "name": "blue.oy",
+      "value": 10.00000329864045
+    },
+    {
+      "name": "blue.sx",
+      "value": 280
+    },
+    {
+      "name": "blue.sy",
+      "value": 160
+    },
+    {
+      "name": "blue.held",
+      "value": 0
+    },
+    {
+      "name": "blue.id",
+      "value": 2
+    },
+    {
+      "name": "amber.x",
+      "value": 509.999947221753
+    },
+    {
+      "name": "amber.y",
+      "value": 260.0000016493202
+    },
+    {
+      "name": "amber.ox",
+      "value": 10.000013194561802
+    },
+    {
+      "name": "amber.oy",
+      "value": 9.999998350679817
+    },
+    {
+      "name": "amber.sx",
+      "value": 450
+    },
+    {
+      "name": "amber.sy",
+      "value": 220
+    },
+    {
+      "name": "amber.held",
+      "value": 0
+    },
+    {
+      "name": "amber.id",
+      "value": 3
+    }
+  ]
+}

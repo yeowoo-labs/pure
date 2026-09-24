@@ -1,0 +1,160 @@
+{
+  "profile": "whole-native-app-idle-work-storage",
+  "prepared_sha256": "b7524e53a5d90d1ce16d2e2fbaac67ceb242f1cd27f280afc3a80857ad8c21ba",
+  "scalar_archive_sha256": "30a015c55d385b337639b54b2f31aea34b40bc37d1fe6c9e3c884660d26e4cbc",
+  "harness_sha256": "f0e3eedda1bb38bf4d2be3d1b43ca8c30bdfe536fe4890d943f25bd29bebf344",
+  "checker_sha256": "eab934985f3748c9c840d74975071389c9b7a4e8491a05bf4ef2a15e2a719111",
+  "baseline": {
+    "binary_sha256": "b9dea2faf85f096e93f9b93db4b431ec6e5617d5528be87db27e2bae0e614b89",
+    "app_source_sha256": "96ab7faf4848b5eaba5a1fb672eec2ea7882b3e554a4cba1adfac9c202a2b4ca",
+    "app_header_sha256": "32c738e06f007894457b6b4369ff75c9c2286737885a04159e257c1dcdfa3729",
+    "text_bytes": 35546,
+    "data_bytes": 1968,
+    "app_controller_bytes": 856,
+    "scalar_bytes": 280,
+    "samples": [
+      {
+        "apps": 1000,
+        "app_controller_bytes": 856,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1376,
+        "rss_initialized_kib": 2576,
+        "rss_saved_kib": 2640,
+        "rss_initialized_delta_kib": 1200,
+        "rss_saved_delta_kib": 1264,
+        "completed_actions": 1000,
+        "completed_transfers": 1005
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 856,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1392,
+        "rss_initialized_kib": 2592,
+        "rss_saved_kib": 2656,
+        "rss_initialized_delta_kib": 1200,
+        "rss_saved_delta_kib": 1264,
+        "completed_actions": 1000,
+        "completed_transfers": 1005
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 856,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1360,
+        "rss_initialized_kib": 2560,
+        "rss_saved_kib": 2624,
+        "rss_initialized_delta_kib": 1200,
+        "rss_saved_delta_kib": 1264,
+        "completed_actions": 1000,
+        "completed_transfers": 1005
+      }
+    ],
+    "median_initialized_delta_kib": 1200,
+    "median_saved_delta_kib": 1264
+  },
+  "elastic": {
+    "binary_sha256": "738fecb38f2306264ef5356318a3e23b4e131355d88c2457ef541734b9c70a37",
+    "app_source_sha256": "cf19cbf7d7c60020b13198e9335e519f650633f1eb3fb25b61953ff56c3e4dd8",
+    "app_header_sha256": "622ec62cfb5f755fe0fb2582f5e1ce264172e8a45663078429afb910061e21a4",
+    "text_bytes": 35730,
+    "data_bytes": 1968,
+    "app_controller_bytes": 408,
+    "scalar_bytes": 280,
+    "samples": [
+      {
+        "apps": 1000,
+        "app_controller_bytes": 408,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1376,
+        "rss_initialized_kib": 2128,
+        "rss_saved_kib": 2192,
+        "rss_initialized_delta_kib": 752,
+        "rss_saved_delta_kib": 816,
+        "completed_actions": 1000,
+        "completed_transfers": 1005
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 408,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1392,
+        "rss_initialized_kib": 2144,
+        "rss_saved_kib": 2208,
+        "rss_initialized_delta_kib": 752,
+        "rss_saved_delta_kib": 816,
+        "completed_actions": 1000,
+        "completed_transfers": 1005
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 408,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1376,
+        "rss_initialized_kib": 2128,
+        "rss_saved_kib": 2192,
+        "rss_initialized_delta_kib": 752,
+        "rss_saved_delta_kib": 816,
+        "completed_actions": 1000,
+        "completed_transfers": 1005
+      }
+    ],
+    "median_initialized_delta_kib": 752,
+    "median_saved_delta_kib": 816
+  },
+  "elastic_metrics": {
+    "binary_sha256": "bdf8be3979cdb5b76916e71771cf6304ea50c2184f9c490d63ab996d7852a5db",
+    "app_source_sha256": "cf19cbf7d7c60020b13198e9335e519f650633f1eb3fb25b61953ff56c3e4dd8",
+    "app_header_sha256": "622ec62cfb5f755fe0fb2582f5e1ce264172e8a45663078429afb910061e21a4",
+    "text_bytes": 35898,
+    "data_bytes": 1968,
+    "app_controller_bytes": 480,
+    "scalar_bytes": 280,
+    "samples": [
+      {
+        "apps": 1000,
+        "app_controller_bytes": 480,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1376,
+        "rss_initialized_kib": 2208,
+        "rss_saved_kib": 2272,
+        "rss_initialized_delta_kib": 832,
+        "rss_saved_delta_kib": 896,
+        "completed_actions": 1000,
+        "completed_transfers": 1005
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 480,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1392,
+        "rss_initialized_kib": 2224,
+        "rss_saved_kib": 2288,
+        "rss_initialized_delta_kib": 832,
+        "rss_saved_delta_kib": 896,
+        "completed_actions": 1000,
+        "completed_transfers": 1005
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 480,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1376,
+        "rss_initialized_kib": 2208,
+        "rss_saved_kib": 2272,
+        "rss_initialized_delta_kib": 832,
+        "rss_saved_delta_kib": 896,
+        "completed_actions": 1000,
+        "completed_transfers": 1005
+      }
+    ],
+    "median_initialized_delta_kib": 832,
+    "median_saved_delta_kib": 896
+  },
+  "controller_saved_per_app_bytes": 448,
+  "metrics_storage_saved_per_app_bytes": 72,
+  "metrics_initialized_rss_median_saved_kib": 80,
+  "metrics_saved_rss_median_saved_kib": 80,
+  "initialized_rss_median_saved_kib": 448,
+  "saved_rss_median_saved_kib": 448
+}

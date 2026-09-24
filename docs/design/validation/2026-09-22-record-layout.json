@@ -1,0 +1,80 @@
+{
+  "recordedUtc": "2026-09-22T11:52:02.452411+00:00",
+  "zigVersion": "0.15.2",
+  "scope": "Cross-compilation of C17 record sizes/offset assertions only. No target execution, function calls, module loading, memory enforcement, or performance measurement.",
+  "headerSha256": "bbdd54e9b55df26c654a6f5fed2f16cd6f90aeca2d17f88f42774beec214e637",
+  "checkerSha256": "07bd674d124b74e7926dab8ada525b570c727bbaf94a5c17d98e8438b8ada56a",
+  "assertionsPerTarget": 8,
+  "checks": [
+    {
+      "target": "aarch64-linux-gnu",
+      "command": [
+        "/tmp/pure-zig-0.15.2/zig",
+        "cc",
+        "-target",
+        "aarch64-linux-gnu",
+        "-std=c17",
+        "-ffreestanding",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-x",
+        "c",
+        "-c",
+        "/home/eunhhu/work/pure/docs/design/abi-v0.h",
+        "-o",
+        "/tmp/pure-abi-layout-w__551sp/aarch64-linux-gnu.o"
+      ],
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "target": "aarch64-macos-none",
+      "command": [
+        "/tmp/pure-zig-0.15.2/zig",
+        "cc",
+        "-target",
+        "aarch64-macos-none",
+        "-std=c17",
+        "-ffreestanding",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-x",
+        "c",
+        "-c",
+        "/home/eunhhu/work/pure/docs/design/abi-v0.h",
+        "-o",
+        "/tmp/pure-abi-layout-w__551sp/aarch64-macos-none.o"
+      ],
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "target": "wasm32-freestanding",
+      "command": [
+        "/tmp/pure-zig-0.15.2/zig",
+        "cc",
+        "-target",
+        "wasm32-freestanding",
+        "-std=c17",
+        "-ffreestanding",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-x",
+        "c",
+        "-c",
+        "/home/eunhhu/work/pure/docs/design/abi-v0.h",
+        "-o",
+        "/tmp/pure-abi-layout-w__551sp/wasm32-freestanding.o"
+      ],
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "passed": true
+}

@@ -1,0 +1,10 @@
+{
+  "profile": "linux-aarch64-gcc14-fixed-document-package",
+  "max_archive_bytes": {
+    "cli": 16384,
+    "cli_http": 34816,
+    "cli_tui": 35840,
+    "cli_http_tui": 54272
+  },
+  "scope": "Deterministic gzip archive containing selected stripped AArch64 binaries, manifest and usage text. The combined CLI+HTTP+TUI ceiling was reviewed upward by 1 KiB for the bounded document browser; the CLI-only ceiling is unchanged. These are regression ceilings for the current document app and toolchain; they exclude host libc, terminal emulator, kernel buffers and stored documents. Optional hosts are charged to their selected package, not the CLI-only package."
+}

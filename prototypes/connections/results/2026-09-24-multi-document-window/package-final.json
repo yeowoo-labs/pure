@@ -1,0 +1,14 @@
+{
+  "archive_sha256": "59a5110ef5dd186c7ba9e5c3fbe74217c10c98014c2823aabf141d3f354f8dd6",
+  "archive_bytes": 49746,
+  "selected_hosts": [
+    "pure-edit",
+    "pure-edit-window"
+  ],
+  "checks": [
+    "relocated archive has only declared files and every file hash matches",
+    "extracted native CLI creates and restores the real document",
+    "editing the packaged .pure source changes the executed reply",
+    "extracted GTK window switches documents without losing drafts"
+  ]
+}

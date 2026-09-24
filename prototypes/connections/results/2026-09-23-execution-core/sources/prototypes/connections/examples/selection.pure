@@ -1,0 +1,19 @@
+// This is an input boundary layout, not a required storage or RAM model.
+// The client sends two little-endian u32 values followed by document bytes.
+layout Selection {
+    start: u32le;
+    count: u32le;
+    document: bytes;
+}
+
+on get {
+    let saved = store.read(request.key);
+    reply(saved, saved.body);
+}
+
+on put {
+    let input = view(Selection, request.body);
+    let selected = range(input.document, input.start, input.count);
+    let saved = store.write(request.key, request.revision, selected);
+    reply(saved, selected);
+}

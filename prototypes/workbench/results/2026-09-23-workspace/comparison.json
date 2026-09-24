@@ -1,0 +1,142 @@
+{
+  "utc": "2026-09-23T01:58:27.939Z",
+  "kind": "workspace-reuse-correctness-and-storage",
+  "baselineManifestSha256": "f3e4eabf8a5a2a085a6cce62336b254e960d40892902653aba387dcbe4e775a8",
+  "sourceSha256": {
+    "core.zig": "dc84bcb75e4417fb1a804529c78ffa8cd1ddd079c00df4ca97a35da0b8fdbb8a",
+    "evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+    "web/runtime.mjs": "8516b0d7d89f5fd483b8c48cfc33bbb2bcbe8c27db3aa35b5f6cf892e89faa6e",
+    "web/compiler.mjs": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02",
+    "web/core.wasm": "76823b024fa5f4a79cbf1ed722ab757614a81a9f1c81d1d6268781a38bed7cc9",
+    "workspace-check.mjs": "a841167a2be597a56c1adc1cf31e4b1e8841579a42d853e260059531009015f0",
+    "examples/counter.pure": "53cb3a93ff0f26a3d208a5876bfff9ecb1c39e9a01acc101566727733ba166a8",
+    "examples/toggle.pure": "3de97fab9d316c17ba6a0c82a16cccd3baafc6816b879bf9b0a174210c8a1915",
+    "examples/charge.pure": "8d69d9fd51d44ab754d560eb7ff5102ea8a34540753cd7170b3bd800e4294f56"
+  },
+  "cases": [
+    {
+      "name": "counter",
+      "snapshots": 257,
+      "before": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 20272,
+        "programReservedBytes": 9392,
+        "instructionBytes": 16,
+        "handlerBytes": 12,
+        "activeIRBytes": 284,
+        "activeStateBytes": 8,
+        "stagingReservedBytes": 9392,
+        "evalStackBytes": 512
+      },
+      "after": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 19128,
+        "programReservedBytes": 9392,
+        "instructionBytes": 16,
+        "handlerBytes": 12,
+        "activeIRBytes": 284,
+        "activeStateBytes": 8,
+        "stagingReservedBytes": 9392,
+        "evalStackBytes": 512
+      },
+      "evaluation": {
+        "cacheEntries": 32,
+        "historyEntries": 8,
+        "workLimit": 2048,
+        "work": 14,
+        "instructions": 0,
+        "cacheHits": 7,
+        "reservedBytes": 1200,
+        "dedicatedBytes": 48,
+        "sharedBytes": 1152,
+        "reuseAvailable": true,
+        "workspaceTagBytes": 8
+      }
+    },
+    {
+      "name": "toggle",
+      "snapshots": 257,
+      "before": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 20272,
+        "programReservedBytes": 9392,
+        "instructionBytes": 16,
+        "handlerBytes": 12,
+        "activeIRBytes": 456,
+        "activeStateBytes": 16,
+        "stagingReservedBytes": 9392,
+        "evalStackBytes": 512
+      },
+      "after": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 19128,
+        "programReservedBytes": 9392,
+        "instructionBytes": 16,
+        "handlerBytes": 12,
+        "activeIRBytes": 456,
+        "activeStateBytes": 16,
+        "stagingReservedBytes": 9392,
+        "evalStackBytes": 512
+      },
+      "evaluation": {
+        "cacheEntries": 32,
+        "historyEntries": 8,
+        "workLimit": 2048,
+        "work": 20,
+        "instructions": 0,
+        "cacheHits": 10,
+        "reservedBytes": 1200,
+        "dedicatedBytes": 48,
+        "sharedBytes": 1152,
+        "reuseAvailable": true,
+        "workspaceTagBytes": 8
+      }
+    },
+    {
+      "name": "charge",
+      "snapshots": 257,
+      "before": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 20272,
+        "programReservedBytes": 9392,
+        "instructionBytes": 16,
+        "handlerBytes": 12,
+        "activeIRBytes": 1092,
+        "activeStateBytes": 32,
+        "stagingReservedBytes": 9392,
+        "evalStackBytes": 512
+      },
+      "after": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 19128,
+        "programReservedBytes": 9392,
+        "instructionBytes": 16,
+        "handlerBytes": 12,
+        "activeIRBytes": 1092,
+        "activeStateBytes": 32,
+        "stagingReservedBytes": 9392,
+        "evalStackBytes": 512
+      },
+      "evaluation": {
+        "cacheEntries": 32,
+        "historyEntries": 8,
+        "workLimit": 2048,
+        "work": 28,
+        "instructions": 0,
+        "cacheHits": 14,
+        "reservedBytes": 1200,
+        "dedicatedBytes": 48,
+        "sharedBytes": 1152,
+        "reuseAvailable": true,
+        "workspaceTagBytes": 8
+      }
+    }
+  ],
+  "node": "v24.20.0",
+  "platform": "linux",
+  "arch": "arm64",
+  "wasmFileBytes": {
+    "before": 53125,
+    "after": 53952
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "objects": 5,
+  "logical_bytes": 1081346,
+  "document_digest": "efaa71ebcdaf493723b82bc98532aba3fd5beace476f8b9f61f93706bddf850b",
+  "paged_reader_sha256": "f29440fcc167d1202b226f0faee450cb299989c8977277e062a330587cec5e39",
+  "flat_reader_sha256": "04974e2d3c4d7f5fb22aff67e7399aa2ebcbd85eb24da0c0e41f3ef047d5ddec",
+  "passed": true,
+  "extra_documents": 0,
+  "scratch_parent": "/home/eunhhu/work/pure/prototypes/connections/build",
+  "source_revisions": {
+    "empty": 1,
+    "small": 1,
+    "boundary": 1,
+    "large": 1,
+    "megabyte": 66
+  },
+  "readback_sha256": {
+    "empty": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "small": "4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015",
+    "boundary": "1bd4db450abc8914c2fac721cace2704ff4c16028e6d07293154dad289835694",
+    "large": "b10b6985790c800b653eeb8e979f9c1551293ee9c293cbca1c4741df09cc8284",
+    "megabyte": "3cacf45be36c19ea18974a474bd2c668f24622b9132ab99294b3778ba0124094"
+  },
+  "flat_edit_after_export": "revision 67",
+  "writer_busy_during_export_and_resumed_after": true,
+  "partial_export_not_published": true,
+  "existing_target_and_symlink_rejected": true
+}

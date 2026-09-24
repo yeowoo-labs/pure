@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "written_before_measurement": true,
+  "seed": 20260922,
+  "repeats": 5,
+  "slots": 512,
+  "policies": [
+    {
+      "name": "borrow",
+      "policy": "borrow",
+      "pool": 1
+    },
+    {
+      "name": "copy",
+      "policy": "copy",
+      "pool": 1
+    },
+    {
+      "name": "threshold2",
+      "policy": "threshold",
+      "ratio": 2,
+      "pool": 1
+    },
+    {
+      "name": "threshold4",
+      "policy": "threshold",
+      "ratio": 4,
+      "pool": 1
+    },
+    {
+      "name": "threshold8",
+      "policy": "threshold",
+      "ratio": 8,
+      "pool": 1
+    },
+    {
+      "name": "pressure",
+      "policy": "pressure",
+      "pool": 1
+    },
+    {
+      "name": "project",
+      "policy": "project",
+      "pool": 1
+    },
+    {
+      "name": "copy_no_pool",
+      "policy": "copy",
+      "pool": 0
+    }
+  ],
+  "cases": [
+    {
+      "name": "sparse_slow",
+      "shape": "sparse",
+      "records": 2048,
+      "budget": 8388608,
+      "hold_us": 5000,
+      "service_us": 20
+    },
+    {
+      "name": "dense_slow",
+      "shape": "dense",
+      "records": 2048,
+      "budget": 8388608,
+      "hold_us": 5000,
+      "service_us": 20
+    },
+    {
+      "name": "mixed_slow",
+      "shape": "mixed",
+      "records": 2048,
+      "budget": 8388608,
+      "hold_us": 5000,
+      "service_us": 20
+    },
+    {
+      "name": "mixed_tight",
+      "shape": "mixed",
+      "records": 2048,
+      "budget": 2097152,
+      "hold_us": 5000,
+      "service_us": 20
+    },
+    {
+      "name": "sparse_fast",
+      "shape": "sparse",
+      "records": 2048,
+      "budget": 8388608,
+      "hold_us": 0,
+      "service_us": 0
+    }
+  ],
+  "expectations": [
+    "Borrow retains full source allocations for small selections.",
+    "Copy can add CPU and transient source plus destination memory for dense selections.",
+    "A current-pressure rule need not outperform a static size rule or early projection.",
+    "Pool reuse can reduce allocation calls while increasing reserved idle memory.",
+    "No Pure-specific advantage, application SLO, or statistical significance is presumed."
+  ],
+  "comparison_rule": "Report all presets and repetitions; no post-hoc winner is called an out-of-sample tuned policy.",
+  "limits": "Single FIFO local pipeline with synthetic delayed sink. No Sonic/Node/.NET benchmark, fan-out, persistent cache, generic JSON parser, external open-loop arrivals, or production SLO."
+}

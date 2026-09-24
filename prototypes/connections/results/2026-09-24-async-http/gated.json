@@ -1,0 +1,38 @@
+{
+  "async_http": "reactor-progress-deadline-recovery-draining-shutdown",
+  "deadline_stats": {
+    "active": 0,
+    "retained_payload_bytes": 0,
+    "peak_retained_payload_bytes": 13,
+    "payload_budget": 4194304,
+    "peak_connections": 2,
+    "accepted": 3,
+    "commits": 1,
+    "gets": 1,
+    "conflicts": 0,
+    "budget_rejections": 0,
+    "expired": 1,
+    "releases": 2,
+    "ingress_prefix_copy_bytes": 13,
+    "borrowed_output_bytes": 10,
+    "server_structure_bytes": 43224
+  },
+  "shutdown_stats": {
+    "active": 0,
+    "retained_payload_bytes": 0,
+    "peak_retained_payload_bytes": 13,
+    "payload_budget": 4194304,
+    "peak_connections": 1,
+    "accepted": 1,
+    "commits": 1,
+    "gets": 0,
+    "conflicts": 0,
+    "budget_rejections": 0,
+    "expired": 0,
+    "releases": 1,
+    "ingress_prefix_copy_bytes": 13,
+    "borrowed_output_bytes": 5,
+    "server_structure_bytes": 43224
+  },
+  "gated_test_binary_sha256": "aaa9c62fbc1533444467d61ad9a5fe3443b4e37939a3a6aa23301f5e19f5f7b1"
+}

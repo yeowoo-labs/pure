@@ -1,0 +1,403 @@
+{
+  "purpose": "Compiled representation accounting, not a throughput/latency benchmark",
+  "examples": {
+    "layout": {
+      "metrics": {
+        "sourceBytes": 2530,
+        "sourceLines": 93,
+        "states": 22,
+        "inputs": 7,
+        "views": 5,
+        "handlers": 16,
+        "instructions": 319,
+        "maxStack": 3
+      },
+      "memory": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 19904,
+        "programReservedBytes": 9648,
+        "instructionBytes": 16,
+        "handlerBytes": 16,
+        "activeIRBytes": 5360,
+        "activeStateBytes": 176,
+        "stagingReservedBytes": 9912,
+        "evalStackBytes": 512
+      },
+      "bodies": [
+        {
+          "start": 19,
+          "length": 16
+        },
+        {
+          "start": 35,
+          "length": 14
+        },
+        {
+          "start": 49,
+          "length": 2
+        },
+        {
+          "start": 51,
+          "length": 6
+        },
+        {
+          "start": 57,
+          "length": 16
+        },
+        {
+          "start": 73,
+          "length": 14
+        },
+        {
+          "start": 87,
+          "length": 2
+        },
+        {
+          "start": 89,
+          "length": 6
+        },
+        {
+          "start": 95,
+          "length": 16
+        },
+        {
+          "start": 111,
+          "length": 14
+        },
+        {
+          "start": 125,
+          "length": 2
+        },
+        {
+          "start": 127,
+          "length": 6
+        },
+        {
+          "start": 133,
+          "length": 48
+        },
+        {
+          "start": 181,
+          "length": 45
+        },
+        {
+          "start": 226,
+          "length": 48
+        },
+        {
+          "start": 274,
+          "length": 45
+        }
+      ],
+      "bindings": [
+        {
+          "event": 9,
+          "start": 19,
+          "length": 16
+        },
+        {
+          "event": 21,
+          "start": 35,
+          "length": 14
+        },
+        {
+          "event": 10,
+          "start": 49,
+          "length": 2
+        },
+        {
+          "event": 29,
+          "start": 51,
+          "length": 6
+        },
+        {
+          "event": 11,
+          "start": 57,
+          "length": 16
+        },
+        {
+          "event": 22,
+          "start": 73,
+          "length": 14
+        },
+        {
+          "event": 12,
+          "start": 87,
+          "length": 2
+        },
+        {
+          "event": 30,
+          "start": 89,
+          "length": 6
+        },
+        {
+          "event": 13,
+          "start": 95,
+          "length": 16
+        },
+        {
+          "event": 23,
+          "start": 111,
+          "length": 14
+        },
+        {
+          "event": 14,
+          "start": 125,
+          "length": 2
+        },
+        {
+          "event": 31,
+          "start": 127,
+          "length": 6
+        },
+        {
+          "event": 1,
+          "start": 133,
+          "length": 48
+        },
+        {
+          "event": 3,
+          "start": 181,
+          "length": 45
+        },
+        {
+          "event": 5,
+          "start": 226,
+          "length": 48
+        },
+        {
+          "event": 7,
+          "start": 274,
+          "length": 45
+        }
+      ]
+    },
+    "shared-layout": {
+      "metrics": {
+        "sourceBytes": 2271,
+        "sourceLines": 76,
+        "states": 25,
+        "inputs": 7,
+        "views": 5,
+        "handlers": 24,
+        "instructions": 117,
+        "maxStack": 3
+      },
+      "memory": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 19904,
+        "programReservedBytes": 9648,
+        "instructionBytes": 16,
+        "handlerBytes": 16,
+        "activeIRBytes": 2256,
+        "activeStateBytes": 200,
+        "stagingReservedBytes": 9912,
+        "evalStackBytes": 512
+      },
+      "bodies": [
+        {
+          "start": 19,
+          "length": 16
+        },
+        {
+          "start": 35,
+          "length": 14
+        },
+        {
+          "start": 49,
+          "length": 2
+        },
+        {
+          "start": 51,
+          "length": 6
+        },
+        {
+          "start": 57,
+          "length": 15
+        },
+        {
+          "start": 72,
+          "length": 15
+        },
+        {
+          "start": 87,
+          "length": 15
+        },
+        {
+          "start": 102,
+          "length": 15
+        }
+      ],
+      "bindings": [
+        {
+          "event": 9,
+          "start": 19,
+          "length": 16,
+          "base": 1,
+          "count": 8
+        },
+        {
+          "event": 21,
+          "start": 35,
+          "length": 14,
+          "base": 1,
+          "count": 8
+        },
+        {
+          "event": 10,
+          "start": 49,
+          "length": 2,
+          "base": 1,
+          "count": 8
+        },
+        {
+          "event": 29,
+          "start": 51,
+          "length": 6,
+          "base": 1,
+          "count": 8
+        },
+        {
+          "event": 1,
+          "start": 57,
+          "length": 15,
+          "base": 1,
+          "count": 8
+        },
+        {
+          "event": 3,
+          "start": 72,
+          "length": 15,
+          "base": 1,
+          "count": 8
+        },
+        {
+          "event": 5,
+          "start": 87,
+          "length": 15,
+          "base": 1,
+          "count": 8
+        },
+        {
+          "event": 7,
+          "start": 102,
+          "length": 15,
+          "base": 1,
+          "count": 8
+        },
+        {
+          "event": 11,
+          "start": 19,
+          "length": 16,
+          "base": 9,
+          "count": 8
+        },
+        {
+          "event": 22,
+          "start": 35,
+          "length": 14,
+          "base": 9,
+          "count": 8
+        },
+        {
+          "event": 12,
+          "start": 49,
+          "length": 2,
+          "base": 9,
+          "count": 8
+        },
+        {
+          "event": 30,
+          "start": 51,
+          "length": 6,
+          "base": 9,
+          "count": 8
+        },
+        {
+          "event": 1,
+          "start": 57,
+          "length": 15,
+          "base": 9,
+          "count": 8
+        },
+        {
+          "event": 3,
+          "start": 72,
+          "length": 15,
+          "base": 9,
+          "count": 8
+        },
+        {
+          "event": 5,
+          "start": 87,
+          "length": 15,
+          "base": 9,
+          "count": 8
+        },
+        {
+          "event": 7,
+          "start": 102,
+          "length": 15,
+          "base": 9,
+          "count": 8
+        },
+        {
+          "event": 13,
+          "start": 19,
+          "length": 16,
+          "base": 17,
+          "count": 8
+        },
+        {
+          "event": 23,
+          "start": 35,
+          "length": 14,
+          "base": 17,
+          "count": 8
+        },
+        {
+          "event": 14,
+          "start": 49,
+          "length": 2,
+          "base": 17,
+          "count": 8
+        },
+        {
+          "event": 31,
+          "start": 51,
+          "length": 6,
+          "base": 17,
+          "count": 8
+        },
+        {
+          "event": 1,
+          "start": 57,
+          "length": 15,
+          "base": 17,
+          "count": 8
+        },
+        {
+          "event": 3,
+          "start": 72,
+          "length": 15,
+          "base": 17,
+          "count": 8
+        },
+        {
+          "event": 5,
+          "start": 87,
+          "length": 15,
+          "base": 17,
+          "count": 8
+        },
+        {
+          "event": 7,
+          "start": 102,
+          "length": 15,
+          "base": 17,
+          "count": 8
+        }
+      ]
+    }
+  }
+}

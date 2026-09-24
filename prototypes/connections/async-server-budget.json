@@ -1,0 +1,12 @@
+{
+  "profile": "linux-aarch64-gcc14-selected-read-write-document-http",
+  "binaries": {
+    "pure-connections-async": {
+      "max_text_bytes": 49152,
+      "max_data_bytes": 1200,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    }
+  },
+  "scope": "Optional one-read/one-write-worker HTTP host on the recorded Linux AArch64/GCC 14 toolchain. Section limits exclude the two 128 KiB worker stacks, libc, heap, mapped files and kernel buffers. Default CLI and HTTP do not link this option. Inspect process RSS and VM separately."
+}

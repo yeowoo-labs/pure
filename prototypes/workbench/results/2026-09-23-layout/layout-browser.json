@@ -1,0 +1,97 @@
+{
+  "checks": [
+    "placement save requires an applied definition",
+    "three independently authored targets move and selection directs keyboard adjustment",
+    "placement download is a separate document file",
+    "saving neither applies nor discards the unfinished draft",
+    "reset returns to authored initial positions",
+    "downloaded file restores all states and visible positions",
+    "the draft remains separate from the restored executable definition",
+    "restored work starts stopped with no replayed inputs or clock",
+    "restored selection and bindings remain editable",
+    "a fresh browser page reconstructs the saved work without old runtime state",
+    "invalid saved state cannot partially replace code, draft or scene",
+    "a delayed file read cannot overwrite a newer draft",
+    "a delayed restore cannot overwrite placement changes made while reading",
+    "saving while time advances requests a stopped document",
+    "saving with a held input is refused",
+    "extra persistence control fits a mobile viewport",
+    "no uncaught page errors"
+  ],
+  "errors": [],
+  "saved": "output/playwright/pure-layout-saved.json",
+  "expected": {
+    "states": {
+      "selected": 3,
+      "x1": 150.00000659728084,
+      "y1": 169.9999983506798,
+      "ox1": 9.999986805438311,
+      "oy1": 10.00000164932024,
+      "sx1": 80,
+      "sy1": 120,
+      "held1": 0,
+      "x2": 350.00000659728073,
+      "y2": 209.9999983506798,
+      "ox2": 9.999980208157467,
+      "oy2": 10.00000329864045,
+      "sx2": 280,
+      "sy2": 160,
+      "held2": 0,
+      "x3": 509.999947221753,
+      "y3": 260.0000016493202,
+      "ox3": 10.000013194561802,
+      "oy3": 9.999998350679817,
+      "sx3": 450,
+      "sy3": 220,
+      "held3": 0
+    },
+    "views": [
+      {
+        "id": "board",
+        "type": "box",
+        "color": "#233a31",
+        "x": 20,
+        "y": 90,
+        "width": 600,
+        "height": 240
+      },
+      {
+        "id": "help",
+        "type": "text",
+        "prefix": "선택한 도형: ",
+        "x": 25,
+        "y": 40,
+        "value": 3
+      },
+      {
+        "id": "tile1",
+        "type": "box",
+        "color": "#c9f08b",
+        "x": 150.00000659728084,
+        "y": 169.9999983506798,
+        "width": 56,
+        "height": 44
+      },
+      {
+        "id": "tile2",
+        "type": "box",
+        "color": "#74c4d4",
+        "x": 350.00000659728073,
+        "y": 209.9999983506798,
+        "width": 56,
+        "height": 44
+      },
+      {
+        "id": "tile3",
+        "type": "box",
+        "color": "#dfb184",
+        "x": 509.999947221753,
+        "y": 260.0000016493202,
+        "width": 56,
+        "height": 44
+      }
+    ]
+  },
+  "source": "# 세 도형을 배치하고 배치 저장으로 결과를 보관하세요.\n# 마지막으로 잡은 도형은 방향키로 10씩 이동합니다.\nstate selected = 0\ninput left = ArrowLeft\ninput right = ArrowRight\ninput up = ArrowUp\ninput down = ArrowDown\nstate x1 = 80\nstate y1 = 120\nstate ox1 = 0\nstate oy1 = 0\nstate sx1 = 80\nstate sy1 = 120\nstate held1 = 0\ninput drag1 = pointer(tile1)\nstate x2 = 280\nstate y2 = 160\nstate ox2 = 0\nstate oy2 = 0\nstate sx2 = 280\nstate sy2 = 160\nstate held2 = 0\ninput drag2 = pointer(tile2)\nstate x3 = 450\nstate y3 = 220\nstate ox3 = 0\nstate oy3 = 0\nstate sx3 = 450\nstate sy3 = 220\nstate held3 = 0\ninput drag3 = pointer(tile3)\nbox board(20,90,600,240,\"#233a31\")\ntext help(25,40,selected,\"선택한 도형: \")\nbox tile1(x1,y1,56,44,\"#c9f08b\")\nbox tile2(x2,y2,56,44,\"#74c4d4\")\nbox tile3(x3,y3,56,44,\"#dfb184\")\non drag1.down {\n  selected = 1\n  sx1 = x1; sy1 = y1\n  ox1 = event_x - x1; oy1 = event_y - y1\n  held1 = 1\n}\non drag1.move {\n  x1 = clamp(event_x - ox1, 20, 564)\n  y1 = clamp(event_y - oy1, 90, 286)\n}\non drag1.up { held1 = 0 }\non drag1.cancel { x1 = sx1; y1 = sy1; held1 = 0 }\non drag2.down {\n  selected = 2\n  sx2 = x2; sy2 = y2\n  ox2 = event_x - x2; oy2 = event_y - y2\n  held2 = 1\n}\non drag2.move {\n  x2 = clamp(event_x - ox2, 20, 564)\n  y2 = clamp(event_y - oy2, 90, 286)\n}\non drag2.up { held2 = 0 }\non drag2.cancel { x2 = sx2; y2 = sy2; held2 = 0 }\non drag3.down {\n  selected = 3\n  sx3 = x3; sy3 = y3\n  ox3 = event_x - x3; oy3 = event_y - y3\n  held3 = 1\n}\non drag3.move {\n  x3 = clamp(event_x - ox3, 20, 564)\n  y3 = clamp(event_y - oy3, 90, 286)\n}\non drag3.up { held3 = 0 }\non drag3.cancel { x3 = sx3; y3 = sy3; held3 = 0 }\non left.down {\n  if selected == 1 && held1 == 0 { x1 = clamp(x1 + -10, 20, 564) }\n  if selected == 2 && held2 == 0 { x2 = clamp(x2 + -10, 20, 564) }\n  if selected == 3 && held3 == 0 { x3 = clamp(x3 + -10, 20, 564) }\n}\non right.down {\n  if selected == 1 && held1 == 0 { x1 = clamp(x1 + 10, 20, 564) }\n  if selected == 2 && held2 == 0 { x2 = clamp(x2 + 10, 20, 564) }\n  if selected == 3 && held3 == 0 { x3 = clamp(x3 + 10, 20, 564) }\n}\non up.down {\n  if selected == 1 && held1 == 0 { y1 = clamp(y1 + -10, 90, 286) }\n  if selected == 2 && held2 == 0 { y2 = clamp(y2 + -10, 90, 286) }\n  if selected == 3 && held3 == 0 { y3 = clamp(y3 + -10, 90, 286) }\n}\non down.down {\n  if selected == 1 && held1 == 0 { y1 = clamp(y1 + 10, 90, 286) }\n  if selected == 2 && held2 == 0 { y2 = clamp(y2 + 10, 90, 286) }\n  if selected == 3 && held3 == 0 { y3 = clamp(y3 + 10, 90, 286) }\n}\n",
+  "draft": "# 세 도형을 배치하고 배치 저장으로 결과를 보관하세요.\n# 마지막으로 잡은 도형은 방향키로 10씩 이동합니다.\nstate selected = 0\ninput left = ArrowLeft\ninput right = ArrowRight\ninput up = ArrowUp\ninput down = ArrowDown\nstate x1 = 80\nstate y1 = 120\nstate ox1 = 0\nstate oy1 = 0\nstate sx1 = 80\nstate sy1 = 120\nstate held1 = 0\ninput drag1 = pointer(tile1)\nstate x2 = 280\nstate y2 = 160\nstate ox2 = 0\nstate oy2 = 0\nstate sx2 = 280\nstate sy2 = 160\nstate held2 = 0\ninput drag2 = pointer(tile2)\nstate x3 = 450\nstate y3 = 220\nstate ox3 = 0\nstate oy3 = 0\nstate sx3 = 450\nstate sy3 = 220\nstate held3 = 0\ninput drag3 = pointer(tile3)\nbox board(20,90,600,240,\"#233a31\")\ntext help(25,40,selected,\"선택한 도형: \")\nbox tile1(x1,y1,56,44,\"#c9f08b\")\nbox tile2(x2,y2,56,44,\"#74c4d4\")\nbox tile3(x3,y3,56,44,\"#dfb184\")\non drag1.down {\n  selected = 1\n  sx1 = x1; sy1 = y1\n  ox1 = event_x - x1; oy1 = event_y - y1\n  held1 = 1\n}\non drag1.move {\n  x1 = clamp(event_x - ox1, 20, 564)\n  y1 = clamp(event_y - oy1, 90, 286)\n}\non drag1.up { held1 = 0 }\non drag1.cancel { x1 = sx1; y1 = sy1; held1 = 0 }\non drag2.down {\n  selected = 2\n  sx2 = x2; sy2 = y2\n  ox2 = event_x - x2; oy2 = event_y - y2\n  held2 = 1\n}\non drag2.move {\n  x2 = clamp(event_x - ox2, 20, 564)\n  y2 = clamp(event_y - oy2, 90, 286)\n}\non drag2.up { held2 = 0 }\non drag2.cancel { x2 = sx2; y2 = sy2; held2 = 0 }\non drag3.down {\n  selected = 3\n  sx3 = x3; sy3 = y3\n  ox3 = event_x - x3; oy3 = event_y - y3\n  held3 = 1\n}\non drag3.move {\n  x3 = clamp(event_x - ox3, 20, 564)\n  y3 = clamp(event_y - oy3, 90, 286)\n}\non drag3.up { held3 = 0 }\non drag3.cancel { x3 = sx3; y3 = sy3; held3 = 0 }\non left.down {\n  if selected == 1 && held1 == 0 { x1 = clamp(x1 + -10, 20, 564) }\n  if selected == 2 && held2 == 0 { x2 = clamp(x2 + -10, 20, 564) }\n  if selected == 3 && held3 == 0 { x3 = clamp(x3 + -10, 20, 564) }\n}\non right.down {\n  if selected == 1 && held1 == 0 { x1 = clamp(x1 + 10, 20, 564) }\n  if selected == 2 && held2 == 0 { x2 = clamp(x2 + 10, 20, 564) }\n  if selected == 3 && held3 == 0 { x3 = clamp(x3 + 10, 20, 564) }\n}\non up.down {\n  if selected == 1 && held1 == 0 { y1 = clamp(y1 + -10, 90, 286) }\n  if selected == 2 && held2 == 0 { y2 = clamp(y2 + -10, 90, 286) }\n  if selected == 3 && held3 == 0 { y3 = clamp(y3 + -10, 90, 286) }\n}\non down.down {\n  if selected == 1 && held1 == 0 { y1 = clamp(y1 + 10, 90, 286) }\n  if selected == 2 && held2 == 0 { y2 = clamp(y2 + 10, 90, 286) }\n  if selected == 3 && held3 == 0 { y3 = clamp(y3 + 10, 90, 286) }\n}\n\nstate unfinished ="
+}

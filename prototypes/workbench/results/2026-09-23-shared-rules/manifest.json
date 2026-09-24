@@ -1,0 +1,21 @@
+{
+  "recordedUtc": "2026-09-23T07:12:25.660651+00:00",
+  "purpose": "Shared-body representation and behavior validation; no performance benchmark",
+  "sha256": {
+    "core.zig": "630aee1cc20b5803657f75e541cb6b706e2b99dd00218ac71afd78b82259621b",
+    "evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+    "web/compiler.mjs": "033227dcee1ecfe79aded2a3b5dd5f28b896377e27671347767ef99e2eb0cf56",
+    "web/runtime.mjs": "d4d8fa382f501e1cdb293a1079e5dcf3cf4e65ccfc860f800b51e32cc098cf51",
+    "web/project.mjs": "8af4cd1a60bbb217c896be20c7c6b8d33989f2166d06e736bf1479d8ecdc8b35",
+    "web/app.js": "d5e062f9eab74f7e2bd6ab9f44e1217b12f2c17537054f5f7e4ec55b96801a09",
+    "web/index.html": "729945ec20857df6fcb827d8b7ef247d21d427f22debf9018fbb99401e9c7e33",
+    "web/scene-input.mjs": "a7de0d0c26328fa6885b1d1633783f1550acfa4a2233db604b0ce4646e633a25",
+    "web/core.wasm": "2b1b6d2bbf9005f5c13275d6013cc4c21c155c7474d334c470fcb11094818b52",
+    "examples/shared-layout.pure": "be8296244b768f9adda99e7afc89249f34853fa27124a277aecb0841eb8176eb",
+    "rules.test.mjs": "caab0cb2618a39c7dcd547b402561d8f9edb11acc7cf389ae16761b70464db7b",
+    "runtime.test.mjs": "1b9bdbae7379fcdd106cebf1acc6454839fd0e989d7ce31bfd4924fb8501cb8a",
+    "workspace.test.mjs": "7289caf39283041271de39c6ac58424ba811402f1a12ae13f2c49a019e3ac2af",
+    "qa-shared-rules.js": "700ca81147fae8264bbdaf8aee83fc1070a75ab7bccc4ae54ad228a1dc06242e",
+    "CONTRACT.md": "8ab46e0e420822375ba01509fecc662c457cb2405e6b35b034f78167d6dc26b3"
+  }
+}

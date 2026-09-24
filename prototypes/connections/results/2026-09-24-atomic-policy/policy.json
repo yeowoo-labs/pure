@@ -1,0 +1,11 @@
+{
+  "checks": [
+    "authored final size is checked against the locked document version",
+    "a rejected growth leaves revision and bytes unchanged",
+    "stale revision reports conflict before the policy decision",
+    "source CLI and HTTP share a policy and committed document",
+    "source policy changes behavior after the HTTP host restarts",
+    "fixed CLI and HTTP retain their compiled policy after source edits",
+    "source and fixed terminal editors preserve unsaved drafts on policy denial"
+  ]
+}

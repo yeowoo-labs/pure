@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-selected-native-document-authoring",
+  "scope": "Review ceiling for the selected GTK document-and-definition host on Linux AArch64/GCC 14. Linked code sections and direct dependencies only; the measured 44 MiB whole-process RSS and shared GTK stack remain separate costs.",
+  "budget_sha256": "27ee292bf3fe9a15d27942f64cff01dfccde0ef5054acbb53faf76208d89d110",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-edit-window": {
+      "sections": {
+        "text": 49882,
+        "data": 1504,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6",
+        "libgio-2.0.so.0",
+        "libglib-2.0.so.0",
+        "libgobject-2.0.so.0",
+        "libgtk-4.so.1"
+      ],
+      "sha256": "4d9806ce6f82413d17bc93452d9fd3bcc2b18272d15a2edaf81f8888e73b4e02"
+    }
+  }
+}

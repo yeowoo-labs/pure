@@ -1,0 +1,53 @@
+{
+  "source": "/home/eunhhu/work/pure/prototypes/workbench/examples/routed-layout.pure",
+  "sourceSha256": "656e81577c250df704ba744b1ea6ec9c987ab3b8ee90c758062ac4beaf195650",
+  "zigVersion": "0.15.2",
+  "zigFlags": [
+    "-O",
+    "ReleaseSafe",
+    "-fno-compiler-rt"
+  ],
+  "scalarProfile": "fixed-definition",
+  "zigRoot": "/home/eunhhu/work/pure/prototypes/workbench/native-fixed.zig",
+  "cFlags": [
+    "-std=c17",
+    "-O2",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+    "-Werror",
+    "-DPURE_FIXED_DEFINITION=1"
+  ],
+  "binary": "/home/eunhhu/work/pure/prototypes/workbench/build/native/pure-peer",
+  "binarySha256": "058eff07a94e0fefb655263acb804e07332fed0f685951d81be31b6b39642a22",
+  "librarySha256": "aeb0052b016704cd77e0f673c1e270df7a26816a0f03e4d778077db8c902423a",
+  "fixedProfileSha256": "4854304aae01c28b5e6fd43a7d16ff3b08ddd711108b4fdde6848eb5f5beaa92",
+  "preparedSha256": "b7524e53a5d90d1ce16d2e2fbaac67ceb242f1cd27f280afc3a80857ad8c21ba",
+  "desktop": false,
+  "desktopFlags": [],
+  "peer": true,
+  "peerFlags": [
+    "-lssl",
+    "-lcrypto"
+  ],
+  "implementationSha256": {
+    "prototypes/workbench/engine.zig": "a2ea7923975eeeb11d9222b91887489b374efd91f3f50b312b8d96deec076339",
+    "prototypes/workbench/evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+    "prototypes/workbench/native.zig": "5656e5e402359b5f1b4bd14c1e73366ed5e32a253a7469a16f58dd8e88104d43",
+    "prototypes/workbench/native-fixed.zig": "15418d44f2f697b65770ea96d8e896de84905dec98af1074784323a51cef5a2b",
+    "prototypes/workbench/native/prepare.mjs": "94b732b7cd7a1f8beaf6759bf484fb794449f9d93ed4ea1c3a3186501f8a519a",
+    "prototypes/workbench/native/scalar.h": "4a95675e08c4a3bd30f0bef123aeb7327f0cae58297b9b32fc1e7d2a208f1d1a",
+    "prototypes/workbench/native/plan.h": "98825678cb4e9beba4699f4f9679bb6d6637968b513639cac4173c052de206d2",
+    "prototypes/workbench/native/app.h": "32c738e06f007894457b6b4369ff75c9c2286737885a04159e257c1dcdfa3729",
+    "prototypes/workbench/web/compiler.mjs": "349139612d1f7da5f75ef21c65aa697963b760cb35321150fc36f67f3b40adf1",
+    "prototypes/workbench/native/peer.c": "7d5865d499a4ba51f1d14e0d286480f605be2476616d28e1150b35ca1f87bf56",
+    "prototypes/workbench/native/peer-wire.c": "8fc3694db7a00a4f4899ca5a42dc2c0d96e39cb7d927c759ee8881901241733a",
+    "prototypes/workbench/native/app.c": "96ab7faf4848b5eaba5a1fb672eec2ea7882b3e554a4cba1adfac9c202a2b4ca",
+    "prototypes/workbench/native/plan.c": "aa484bfe9072addb00e6eb87edcc11b290b97bd4e362fe9c12105aca8b807f69",
+    "prototypes/connections/runtime.c": "a6c068c6a2cee214b3fe30241459394833917dfb6c0d33052460eab4c6a539a2",
+    "prototypes/connections/evaluate.c": "ee8b91efc733b9d305711b7cbb7b502ae5d3917e06f750b7f62b632ed0ea6d04",
+    "prototypes/connections/store.c": "44702e9414c26d1ee336b2e36e6713560013c2c8d0091a8900042e2468f88015",
+    "prototypes/connections/store-port.c": "d6bf17878b325e039360816edcbf8d68e41b373cf3e6128d7795e11ae21fdd6f"
+  }
+}

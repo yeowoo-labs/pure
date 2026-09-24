@@ -1,0 +1,55 @@
+{
+  "passed": true,
+  "failures": [],
+  "budget": {
+    "profile": "selected-owner-thread-async-effects",
+    "max_text_bytes": 8192,
+    "max_data_bytes": 0,
+    "max_bss_bytes": 0,
+    "layout_max_bytes": {
+      "domain_bytes": 200,
+      "work_slot_bytes": 224,
+      "ticket_bytes": 24,
+      "prepared_program_bytes": 680,
+      "effect_bytes": 128
+    },
+    "archive_members": [
+      "runtime-async.o",
+      "evaluate.o"
+    ],
+    "external_symbols_allowed": [
+      "memcpy",
+      "memmove",
+      "memset",
+      "strlen"
+    ],
+    "scope": "Selected owner-thread completion extension. Host I/O and worker stacks are excluded. The default execution core and fixed document packages do not link this profile."
+  },
+  "layout": {
+    "domain_bytes": 200,
+    "work_slot_bytes": 224,
+    "ticket_bytes": 24,
+    "prepared_program_bytes": 680,
+    "pointer_bytes": 8,
+    "effect_bytes": 128
+  },
+  "sections": {
+    "text": 7456,
+    "data": 0,
+    "bss": 0
+  },
+  "members": [
+    "runtime-async.o",
+    "evaluate.o"
+  ],
+  "external_symbols": [
+    "memcpy",
+    "strlen"
+  ],
+  "size_output": "   text\t   data\t    bss\t    dec\t    hex\tfilename\n   6536\t      0\t      0\t   6536\t   1988\truntime-async.o (ex /home/eunhhu/work/pure/prototypes/connections/build/libpure-execution-async.a)\n    920\t      0\t      0\t    920\t    398\tevaluate.o (ex /home/eunhhu/work/pure/prototypes/connections/build/libpure-execution-async.a)\n",
+  "archive_sha256": "897fb2f6eff5dd07efcf0789107bfcf87423fc90aae084df169601451f23d07f",
+  "layout_binary_sha256": "71866a57a3a2af37a8e3d4f2f97669c482b11b3a408a1d918e5de068dab9e34a",
+  "budget_sha256": "496e34596e24418efb46e460126b7d67492137207be988525abda1397d70c539",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "size_tool": "GNU size (GNU Binutils for Debian) 2.44"
+}

@@ -1,0 +1,18 @@
+{
+  "profile": "linux-aarch64-gcc14-default-document-hosts",
+  "binaries": {
+    "pure-edit": {
+      "max_text_bytes": 40960,
+      "max_data_bytes": 1200,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    },
+    "pure-connections": {
+      "max_text_bytes": 49152,
+      "max_data_bytes": 1300,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    }
+  },
+  "scope": "Review thresholds for release-built default CLI and HTTP adapter on the recorded Linux AArch64/GCC 14 toolchain. These section sizes exclude shared libc, heap, stack, mapped files, kernel buffers, and optional GTK/TLS hosts. Any failure requires a cost review, not automatic relaxation."
+}

@@ -1,0 +1,141 @@
+{
+  "kind": "correctness-and-cost-evidence-not-performance-benchmark",
+  "date": "2026-09-24",
+  "host": {
+    "machine": "aarch64",
+    "system": "Linux",
+    "cc": "cc (Debian 14.2.0-19) 14.2.0",
+    "gtk": "4.18.6",
+    "zig": "0.15.2"
+  },
+  "renderer_for_final_qa": "GDK_BACKEND=x11 GSK_RENDERER=cairo GDK_DISABLE=gl,vulkan GTK_A11Y=none, Xvfb 1400x800x24",
+  "sections": {
+    "cli": {
+      "text": 62827,
+      "data": 2040,
+      "bss": 16
+    },
+    "desktop": {
+      "text": 78964,
+      "data": 2824,
+      "bss": 16
+    }
+  },
+  "stripped_elf_bytes": {
+    "cli": 68000,
+    "desktop": 134224
+  },
+  "direct_needed": {
+    "cli": [
+      "libc.so.6"
+    ],
+    "desktop": [
+      "libgtk-4.so.1",
+      "libpangocairo-1.0.so.0",
+      "libpango-1.0.so.0",
+      "libcairo.so.2",
+      "libgio-2.0.so.0",
+      "libgobject-2.0.so.0",
+      "libglib-2.0.so.0",
+      "libc.so.6"
+    ]
+  },
+  "idle_kib_single_observation": {
+    "cli_vmrss": 1552,
+    "desktop_cairo_no_gpu_vmrss": 36512,
+    "desktop_cairo_no_gpu_pss": 23618,
+    "desktop_default_vmrss_other_run": 173808,
+    "desktop_default_pss_other_run": 139710
+  },
+  "observed_restored_state": {
+    "status": 0,
+    "stored_revision": 2,
+    "selected": 1,
+    "green_x": 167.07482993197277,
+    "green_y": 154.82993197278913,
+    "green_held": 0,
+    "new_view_live": 1
+  },
+  "files": {
+    "README.md": {
+      "bytes": 2596,
+      "sha256": "000e8d83d1809facacc32039618a7b6dce41d84bedf7c921ff11c37a4a7b2289"
+    },
+    "authored-after.pure": {
+      "bytes": 2000,
+      "sha256": "7e0861e8116da883dce578963cca40073f4efaf98265d1c5ca79aa0a7855001c"
+    },
+    "capture-x11.c": {
+      "bytes": 1768,
+      "sha256": "c3e21d4e79180ee60e9fa7845118fcc6ec57a4e1386471d78ae404831ebc83ae"
+    },
+    "core-budget.json": {
+      "bytes": 1851,
+      "sha256": "37e9ae8320daf7bbe05983e7f35b59707e64a83d09574e3b126e8d9e13f3336c"
+    },
+    "drag-and-save.png": {
+      "bytes": 134122,
+      "sha256": "5f8773c98f31736ba49419e1c0fa8b8e76c84b916f9fd2a92ff50accd9f35014"
+    },
+    "native-parity-sanitized.json": {
+      "bytes": 13740,
+      "sha256": "c34e50c4e634a1bc3324b190d3fd54a0502986c5cc42bf3b3d8b62c788447ba1"
+    },
+    "native-parity.json": {
+      "bytes": 13741,
+      "sha256": "24d7c37de7609fb1aa406f13cf92cbe6534c8f02ac1ab884cbd171e941fd48b4"
+    },
+    "numeric-input.png": {
+      "bytes": 45958,
+      "sha256": "284139508ecd8049083e4128325c27b4f65ec4e3104147736037fb879535cf95"
+    },
+    "recovered-edit.png": {
+      "bytes": 139858,
+      "sha256": "700895fbd4320617a3b428bed1a42eff3a5189a9647d6477a80b99a678114047"
+    },
+    "rejected-edit.png": {
+      "bytes": 142502,
+      "sha256": "5a9acabbb1ab60d569158ab403e5f51ffe0e12c655ed281f24c196f325548082"
+    },
+    "reopened-state.png": {
+      "bytes": 134717,
+      "sha256": "596bb7a9e6234143283db188605faaa94b65db9e17366a25bf0d80d0d578c046"
+    },
+    "resized-input.png": {
+      "bytes": 108314,
+      "sha256": "ca29815234a244916f1a3674963c400549343866fd9be00acc942525f631f7c4"
+    },
+    "resized.png": {
+      "bytes": 108735,
+      "sha256": "0685310a9b5c1e046a1133f54db81f29e035eefb9f1927e434a03e3b0f318f97"
+    },
+    "sources/manage.py": {
+      "bytes": 6992,
+      "sha256": "afde3c7129d89cea0a559df4aa18cc9c3bd997146375db0967730340b66c16fe"
+    },
+    "sources/native/app.c": {
+      "bytes": 11764,
+      "sha256": "96ab7faf4848b5eaba5a1fb672eec2ea7882b3e554a4cba1adfac9c202a2b4ca"
+    },
+    "sources/native/app.h": {
+      "bytes": 1492,
+      "sha256": "32c738e06f007894457b6b4369ff75c9c2286737885a04159e257c1dcdfa3729"
+    },
+    "sources/native/check.mjs": {
+      "bytes": 8492,
+      "sha256": "286e23f1ab164a956f53c6d89f229ccb0ec5fdbb35426737a6c28cd553b92953"
+    },
+    "sources/native/desktop.c": {
+      "bytes": 22779,
+      "sha256": "617d58ad2ec74de0f428ab76ca23e76bed4ca9c3234dd50213853843552d5c7c"
+    },
+    "sources/native/test.c": {
+      "bytes": 9837,
+      "sha256": "47488a2cfda2b378637f69b8f0d94f75e615d784e8418167b5b82c8ce141f7e8"
+    }
+  },
+  "binary_sha256": {
+    "cli": "b7add8a755a4959191417b3f0fd50805f71c72659eb4659905a689588351bda8",
+    "desktop": "eb4276076f4fb11268f976baef9cb7701399a8a82223bc11f93a0593e176174a"
+  }
+}

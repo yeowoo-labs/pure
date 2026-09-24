@@ -1,0 +1,12 @@
+{
+  "profile": "linux-aarch64-gcc14-fixed-document-terminal-editor",
+  "binaries": {
+    "pure-edit-tui-fixed": {
+      "max_text_bytes": 32768,
+      "max_data_bytes": 1152,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    }
+  },
+  "scope": "Release-linked optional POSIX terminal editor for one build-time prepared document app, including the bounded document browser. The raised text ceiling reviews its measured 2,541-byte addition; default CLI and core ceilings are unchanged. Excludes libc, terminal emulator, kernel TTY buffers, heap and stack. Whole-process RSS, including 1,024-key browsing, is checked by check_tui.py on the recorded Linux AArch64 host."
+}

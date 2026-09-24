@@ -1,0 +1,16 @@
+{
+  "archive_sha256": "270edeb0f897b3ea1eeacc4e89bcff2c45fefbbe77fd1546307298d801a2ed9b",
+  "archive_bytes": 51844,
+  "selected_hosts": [
+    "pure-edit-fixed",
+    "pure-connections-fixed",
+    "pure-edit-tui-fixed"
+  ],
+  "checks": [
+    "relocated archive has only declared files and every file hash matches",
+    "relocated parser-free runner creates and restores a document",
+    "relocated parser-free runner performs revision-checked edits",
+    "relocated parser-free HTTP host and CLI share the document",
+    "relocated terminal editor saves UTF-8 and one MiB documents"
+  ]
+}

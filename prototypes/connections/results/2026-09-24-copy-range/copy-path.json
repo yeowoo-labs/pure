@@ -1,0 +1,27 @@
+{
+  "profile": "linux-immutable-one-mib-last-byte-splice",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "baseline": {
+    "binary_sha256": "23ebc0ce1df9c49216511bee658fd5b9e373509e296bd2c2f8e76e6d3081cded",
+    "result_sha256": "06cb5e32505f66804f6e8c79e3230105ca4769444e1389ee36f6f11fd61f2d3a",
+    "object_pread_calls": 257,
+    "copy_file_range_calls": 0,
+    "copy_file_range_bytes": 0,
+    "pending_write_calls": 258,
+    "pending_write_bytes": 1048600,
+    "one_mib_splice_peak_rss_kib": 1056
+  },
+  "candidate": {
+    "binary_sha256": "52c2b828b0cba3564a37e3874f60bec793d1dd7031aff77ba850cee7683977f9",
+    "result_sha256": "06cb5e32505f66804f6e8c79e3230105ca4769444e1389ee36f6f11fd61f2d3a",
+    "object_pread_calls": 1,
+    "copy_file_range_calls": 1,
+    "copy_file_range_bytes": 1048575,
+    "pending_write_calls": 2,
+    "pending_write_bytes": 25,
+    "one_mib_splice_peak_rss_kib": 1056
+  },
+  "filesystem": "ext4",
+  "scratch_parent": "/home/eunhhu/work/pure/prototypes/connections/build",
+  "scope": "Successful object-file syscalls and child peak RSS; excludes physical device writes, page cache and proof of lower latency."
+}

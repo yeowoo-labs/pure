@@ -1,0 +1,13 @@
+{
+  "nodeTests": 83,
+  "nativeTests": 35,
+  "command": "node --test prototypes/workbench/*.test.mjs",
+  "nodeLog": "node-tests.log",
+  "sourceSha256": "56b8db87bcf7e49ab2b2e8d4166ade6ed04c77571fbb69c60633e76376b46976",
+  "wasmSha256": "b494269c1332f71de9725a4c7f0b58c074b669403d5d9dc95ddfeb7b16967c0d",
+  "browserChecks": {
+    "grouped": 30,
+    "authoring": 44,
+    "legacyPointers": 23
+  }
+}

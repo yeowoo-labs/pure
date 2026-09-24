@@ -1,0 +1,60 @@
+{
+  "profile": "document-app-many-objects-concurrent-clients",
+  "documents_per_variant": 1024,
+  "clients": 8,
+  "body_bytes": 8192,
+  "operations_per_variant": 4096,
+  "server_budget_bytes": 1048576,
+  "peak_rss_limit_kib": 4096,
+  "same_final_documents": "pass",
+  "fixed": {
+    "binary_sha256": "fd474f7331ac47d22360f2bfe8ba491ff8ffac448107b41da74a00142ae97958",
+    "document_digest": "e54baed00186fb020edbbcd407d86471c136287de346e3386ce52d16883e488b",
+    "stored_objects": 1024,
+    "stored_file_bytes": 8413184,
+    "idle_rss_kib": 1520,
+    "peak_rss_kib": 1712,
+    "stats": {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 49201,
+      "payload_budget": 1048576,
+      "peak_connections": 8,
+      "accepted": 4096,
+      "commits": 2048,
+      "gets": 2048,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 4096,
+      "ingress_prefix_copy_bytes": 899986,
+      "borrowed_output_bytes": 25166848,
+      "server_structure_bytes": 40848
+    }
+  },
+  "source": {
+    "binary_sha256": "9818530bdadd3da2c3cd63feb24f0585f8527887bcc9c8528d67736ee3a97653",
+    "document_digest": "e54baed00186fb020edbbcd407d86471c136287de346e3386ce52d16883e488b",
+    "stored_objects": 1024,
+    "stored_file_bytes": 8413184,
+    "idle_rss_kib": 1552,
+    "peak_rss_kib": 1728,
+    "stats": {
+      "active": 0,
+      "retained_payload_bytes": 0,
+      "peak_retained_payload_bytes": 41010,
+      "payload_budget": 1048576,
+      "peak_connections": 8,
+      "accepted": 4096,
+      "commits": 2048,
+      "gets": 2048,
+      "conflicts": 0,
+      "budget_rejections": 0,
+      "expired": 0,
+      "releases": 4096,
+      "ingress_prefix_copy_bytes": 939752,
+      "borrowed_output_bytes": 25166848,
+      "server_structure_bytes": 41528
+    }
+  }
+}

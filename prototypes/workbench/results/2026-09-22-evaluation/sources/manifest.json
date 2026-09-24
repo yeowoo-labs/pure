@@ -1,0 +1,21 @@
+{
+  "baseline.test.mjs": "3ea469a29d301b95701bc6f6ffafa2471ac0f334c5bd462c0cbc7c320bdc0764",
+  "cli.mjs": "2e0627ef84a45c8a9e91fb28c0010673212d459d0b0d09a5342856a049060030",
+  "cli.test.mjs": "655c6d80b51af818fa7cdeb27cb5462962a0e1aef70f609ef5e2ddc85f4a6bc7",
+  "compiler.test.mjs": "6aa442d9d1eeb69453082f1780ff4597e46b1fc09d8ba3cf955545bc94d81431",
+  "core.zig": "dfb9fd7f3862806c2bd88ce1c668b795d9df196e1f2e50cceff1b5c4809273df",
+  "evaluation-check.mjs": "11492759b5eff878fb8e43cad69422f9c34da6a85b5d8808478cc1845d737d4f",
+  "evaluation.test.mjs": "d3026ab5c6bffce56c0bde3155d7dddd6fa442a5688656ee710626c762258ff1",
+  "evaluation.zig": "2192e563385105f130d373b2e8724ea234c51e2909c7dbfc38e72acc3b70b2ed",
+  "examples/charge.pure": "8d69d9fd51d44ab754d560eb7ff5102ea8a34540753cd7170b3bd800e4294f56",
+  "examples/counter.pure": "53cb3a93ff0f26a3d208a5876bfff9ecb1c39e9a01acc101566727733ba166a8",
+  "examples/toggle.pure": "3de97fab9d316c17ba6a0c82a16cccd3baafc6816b879bf9b0a174210c8a1915",
+  "manage.py": "e04199a0b5addc73bea7748420eee21ccf0aaa1a5b8c83082e5588187d6ed669",
+  "qa-evaluation.js": "262d97f0aa409eb68bdfe8aa3e82ad037e6b10681f8b5025e59d148ee49564e1",
+  "runtime.test.mjs": "5fe66115aab0c178a283dcb592376a2e7209308368004865e6c0a1cc58fa7f62",
+  "web/app.js": "6d63f3bfdfe212146894dbb1772509eb4ecc2f3be3b106675f0fc10cdeb5bfd3",
+  "web/baseline.mjs": "dcd567e5568d3c798d6b48e555e6d54773963c70d23594c175706b061f8b043f",
+  "web/compiler.mjs": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02",
+  "web/core.wasm": "b79eecefba5e7da0f5dd945fa1df196ee627803243a430517f5c49c3a5e54ce1",
+  "web/runtime.mjs": "d9981282612cb06b50d24bf8919e829dce202f72b59dab607c8684bc0f297939"
+}

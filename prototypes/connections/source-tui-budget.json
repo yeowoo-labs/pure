@@ -1,0 +1,12 @@
+{
+  "profile": "linux-aarch64-gcc14-source-document-terminal-editor",
+  "binaries": {
+    "pure-edit-tui": {
+      "max_text_bytes": 49152,
+      "max_data_bytes": 1152,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    }
+  },
+  "scope": "Optional source-loaded POSIX terminal editor for the same document app. Includes the runtime .pure parser and bounded document browser. Default core, fixed CLI and fixed TUI do not link the parser. These are Linux AArch64/GCC 14 section regression ceilings, not whole-process RAM; check_tui.py measures the selected whole process separately."
+}

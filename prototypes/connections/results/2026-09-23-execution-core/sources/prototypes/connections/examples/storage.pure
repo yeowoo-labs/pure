@@ -1,0 +1,11 @@
+// The host supplies request bytes, an object name, and the expected revision.
+// Failed storage results propagate to the host's response without executing reply.
+on get {
+    let object = store.read(request.key);
+    reply(object, object.body);
+}
+
+on put {
+    let saved = store.write(request.key, request.revision, request.body);
+    reply(saved);
+}

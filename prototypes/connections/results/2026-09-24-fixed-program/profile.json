@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-fixed-document-runner",
+  "scope": "Release-linked document runner with one build-time prepared app. The source parser and compiler are separate build tools. This 20 KiB text ceiling applies only to the recorded Linux AArch64/GCC 14 toolchain and excludes libc, heap, stack, and storage files.",
+  "budget_sha256": "e6f4e727172d1d75bf109f426e169c98fa635c9cc4757ffd3871035593aa00d8",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-edit-fixed": {
+      "sections": {
+        "text": 19244,
+        "data": 920,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "00f0316cb318cf168d4437080642fe1a6db013e7d4ad82be80e57ad9e12a0a3b"
+    }
+  }
+}

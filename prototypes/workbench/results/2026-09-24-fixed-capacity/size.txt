@@ -1,0 +1,6 @@
+   text	   data	    bss	    dec	    hex	filename
+  33020	      0	      0	  33020	   80fc	prototypes/workbench/build/cache/tmp/13dbb99515d73cd6/pure-general-scalar_zcu.o (ex /tmp/pure-general-scalar.a)
+  18252	      0	      0	  18252	   474c	prototypes/workbench/build/cache/tmp/5e96d4ff68ad7b63/libpure-scalar-fixed_zcu.o (ex prototypes/workbench/build/native/libpure-scalar-fixed.a)
+  62827	   2040	     16	  64883	   fd73	/tmp/pure-native-general
+  48059	   2040	     16	  50115	   c3c3	prototypes/workbench/build/native/pure-native
+  61201	   2472	     16	  63689	   f8c9	prototypes/workbench/build/native/pure-peer

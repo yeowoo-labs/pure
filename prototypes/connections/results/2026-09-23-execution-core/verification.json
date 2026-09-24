@@ -1,0 +1,30 @@
+{
+  "sources_verified_and_frozen": 30,
+  "native_and_sanitized_binaries_match": true,
+  "tcp_scenarios_per_build": 28,
+  "all_http_runs_drained": true,
+  "core_archive_external_symbols": [
+    "memcpy",
+    "strlen"
+  ],
+  "core_archive_sha256": "59eccbea380378a6650c59a99eacd92132184e5b9aa64feada7a176cf03ccfcc",
+  "size_output": "   text\t   data\t    bss\t    dec\t    hex\tfilename\n   4892\t      0\t      0\t   4892\t   131c\t/home/eunhhu/work/pure/prototypes/connections/build/runtime.o\n    780\t      0\t      0\t    780\t    30c\t/home/eunhhu/work/pure/prototypes/connections/build/evaluate.o\n  41144\t   1048\t     16\t  42208\t   a4e0\t/home/eunhhu/work/pure/prototypes/connections/build/pure-connections\n",
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "structure_sizes": {
+    "runtime_tests": "passed",
+    "domain_bytes": 192,
+    "work_slot_bytes": 224,
+    "ticket_bytes": 24,
+    "prepared_program_bytes": 648,
+    "forwarding_chain": 1024,
+    "native_storage_pipeline": true
+  },
+  "limits": [
+    "synchronous storage effects",
+    "one owner thread",
+    "storage authoring profile only",
+    "no TLS or native UI yet",
+    "sizes are not process RSS or performance comparisons"
+  ]
+}

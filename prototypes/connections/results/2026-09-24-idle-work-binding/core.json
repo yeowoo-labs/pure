@@ -1,0 +1,53 @@
+{
+  "passed": true,
+  "failures": [],
+  "budget": {
+    "profile": "current-storage-execution-core",
+    "max_text_bytes": 6144,
+    "max_data_bytes": 0,
+    "max_bss_bytes": 0,
+    "layout_max_bytes": {
+      "domain_bytes": 200,
+      "work_slot_bytes": 224,
+      "ticket_bytes": 24,
+      "prepared_program_bytes": 680
+    },
+    "archive_members": [
+      "runtime.o",
+      "evaluate.o"
+    ],
+    "external_symbols_allowed": [
+      "memcpy",
+      "memmove",
+      "memset",
+      "strlen"
+    ],
+    "scope": "Release object sections and C bookkeeping, validated with GNU tools on Linux AArch64. Not total RAM, process RSS, stack, linked libraries, parser, storage, network or UI. 6 KiB is a regression ceiling for this profile, not a universal runtime size promise."
+  },
+  "layout": {
+    "domain_bytes": 200,
+    "work_slot_bytes": 224,
+    "ticket_bytes": 24,
+    "prepared_program_bytes": 680,
+    "pointer_bytes": 8
+  },
+  "sections": {
+    "text": 6076,
+    "data": 0,
+    "bss": 0
+  },
+  "members": [
+    "runtime.o",
+    "evaluate.o"
+  ],
+  "external_symbols": [
+    "memcpy",
+    "strlen"
+  ],
+  "size_output": "   text\t   data\t    bss\t    dec\t    hex\tfilename\n   5156\t      0\t      0\t   5156\t   1424\truntime.o (ex /home/eunhhu/work/pure/prototypes/connections/build/libpure-execution.a)\n    920\t      0\t      0\t    920\t    398\tevaluate.o (ex /home/eunhhu/work/pure/prototypes/connections/build/libpure-execution.a)\n",
+  "archive_sha256": "a02135602c3b18129cc9b80cb808994426d0c7869754eac1370c304294ad0be4",
+  "layout_binary_sha256": "db112a9cfd8deed80b9bfbff7628958fdb290cadab1efc7223d8d15ef4c4c389",
+  "budget_sha256": "b4eceaffce900144470dd29076164039b8729bad4ba849789d212e7c952f5082",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "size_tool": "GNU size (GNU Binutils for Debian) 2.44"
+}

@@ -1,0 +1,6 @@
+   text	   data	    bss	    dec	    hex	filename
+   5012	      0	      0	   5012	   1394	runtime.o (ex prototypes/connections/build/libpure-execution.a)
+    920	      0	      0	    920	    398	evaluate.o (ex prototypes/connections/build/libpure-execution.a)
+  35807	    944	     16	  36767	   8f9f	prototypes/connections/build/pure-edit
+  42761	   1040	     16	  43817	   ab29	prototypes/connections/build/pure-connections
+  43308	   1376	     16	  44700	   ae9c	prototypes/connections/build/pure-edit-window

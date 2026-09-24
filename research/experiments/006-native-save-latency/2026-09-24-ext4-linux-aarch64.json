@@ -1,0 +1,221 @@
+{
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "filesystem": "/dev/mmcblk0p2[/home/eunhhu/work/pure] ext4",
+  "workload": "one-byte final-character replacement, Ctrl+S to complete visible frame; includes full draft comparison, runtime, durable store and redraw; initial creation and final independent CLI read excluded",
+  "rounds": 3,
+  "edits_per_session": 8,
+  "binaries": {
+    "flat": {
+      "cli_sha256": "27d9ad1c83265cef24f5e756537a68692852145bfc7c1e31255e18c08fac6295",
+      "tui_sha256": "e8b224e3ce5f5d83d597418d4027ec36dd44bfe84d17f6e9224135dc457316c1"
+    },
+    "paged": {
+      "cli_sha256": "e829bd6bad3b56bc319cdab03aba7f45c44afab53876e462ae57c35b82823e9a",
+      "tui_sha256": "09303ec33d07c12b07834b07fb5eeb836005c23fcb3a6b6cc2683631a9d4b13c"
+    }
+  },
+  "runs": {
+    "flat": {
+      "256": [
+        {
+          "samples_ns": [
+            5958081,
+            7778966,
+            6548524,
+            19995479,
+            62301450,
+            9400518,
+            5842210,
+            8589502
+          ],
+          "median_ns": 8184234,
+          "final_revision": 9,
+          "body_sha256": "e075f2f51cad23d0537186cfcd50f911ea954f9c2e32a437f45327f1b7899bbb"
+        },
+        {
+          "samples_ns": [
+            9415093,
+            16809059,
+            8447428,
+            8676279,
+            6705838,
+            9542795,
+            10029758,
+            6036581
+          ],
+          "median_ns": 9045686,
+          "final_revision": 9,
+          "body_sha256": "e075f2f51cad23d0537186cfcd50f911ea954f9c2e32a437f45327f1b7899bbb"
+        },
+        {
+          "samples_ns": [
+            7148893,
+            10145461,
+            7778114,
+            6517728,
+            62411765,
+            50067253,
+            7390504,
+            8495113
+          ],
+          "median_ns": 8136613,
+          "final_revision": 9,
+          "body_sha256": "e075f2f51cad23d0537186cfcd50f911ea954f9c2e32a437f45327f1b7899bbb"
+        }
+      ],
+      "1048576": [
+        {
+          "samples_ns": [
+            145172249,
+            96882586,
+            40365568,
+            349602121,
+            39360237,
+            89495933,
+            183181933,
+            87081031
+          ],
+          "median_ns": 93189259,
+          "final_revision": 9,
+          "body_sha256": "4e29ad18ab9f42d7c233500771a39d7c852b200baf328fd00fbbe3fecea1eb56"
+        },
+        {
+          "samples_ns": [
+            29222924,
+            88900009,
+            92498076,
+            104674699,
+            38498924,
+            95164515,
+            104447385,
+            98216731
+          ],
+          "median_ns": 93831295,
+          "final_revision": 9,
+          "body_sha256": "4e29ad18ab9f42d7c233500771a39d7c852b200baf328fd00fbbe3fecea1eb56"
+        },
+        {
+          "samples_ns": [
+            150963793,
+            89303082,
+            89762414,
+            128623245,
+            37319148,
+            93848499,
+            101872780,
+            90491636
+          ],
+          "median_ns": 92170067,
+          "final_revision": 9,
+          "body_sha256": "4e29ad18ab9f42d7c233500771a39d7c852b200baf328fd00fbbe3fecea1eb56"
+        }
+      ]
+    },
+    "paged": {
+      "256": [
+        {
+          "samples_ns": [
+            8496650,
+            19415609,
+            6801246,
+            9666703,
+            10048962,
+            6038507,
+            8610260,
+            7698300
+          ],
+          "median_ns": 8553455,
+          "final_revision": 9,
+          "body_sha256": "e075f2f51cad23d0537186cfcd50f911ea954f9c2e32a437f45327f1b7899bbb"
+        },
+        {
+          "samples_ns": [
+            9062278,
+            62254117,
+            6872783,
+            9583444,
+            50943122,
+            6743320,
+            9396814,
+            9949258
+          ],
+          "median_ns": 9490129,
+          "final_revision": 9,
+          "body_sha256": "e075f2f51cad23d0537186cfcd50f911ea954f9c2e32a437f45327f1b7899bbb"
+        },
+        {
+          "samples_ns": [
+            9526426,
+            8758853,
+            6706653,
+            97037325,
+            5886063,
+            20592941,
+            9999906,
+            6661357
+          ],
+          "median_ns": 9142639,
+          "final_revision": 9,
+          "body_sha256": "e075f2f51cad23d0537186cfcd50f911ea954f9c2e32a437f45327f1b7899bbb"
+        }
+      ],
+      "1048576": [
+        {
+          "samples_ns": [
+            20936773,
+            33867655,
+            20611237,
+            21735235,
+            20170997,
+            34975172,
+            20189182,
+            22094974
+          ],
+          "median_ns": 21336004,
+          "final_revision": 9,
+          "body_sha256": "4e29ad18ab9f42d7c233500771a39d7c852b200baf328fd00fbbe3fecea1eb56"
+        },
+        {
+          "samples_ns": [
+            97702566,
+            25086172,
+            20087812,
+            22047179,
+            53326394,
+            22037808,
+            20212422,
+            21726179
+          ],
+          "median_ns": 22042493,
+          "final_revision": 9,
+          "body_sha256": "4e29ad18ab9f42d7c233500771a39d7c852b200baf328fd00fbbe3fecea1eb56"
+        },
+        {
+          "samples_ns": [
+            19868442,
+            22179308,
+            21243699,
+            30931198,
+            21662716,
+            68731271,
+            23544638,
+            26258818
+          ],
+          "median_ns": 22861973,
+          "final_revision": 9,
+          "body_sha256": "4e29ad18ab9f42d7c233500771a39d7c852b200baf328fd00fbbe3fecea1eb56"
+        }
+      ]
+    }
+  },
+  "median_ns": {
+    "flat": {
+      "256": 8542307,
+      "1048576": 93173287
+    },
+    "paged": {
+      "256": 9229546,
+      "1048576": 22042493
+    }
+  }
+}

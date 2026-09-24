@@ -1,0 +1,15 @@
+{
+  "archive_sha256": "b3c156eb7880ee4cb91b3fe52854cb5069ef035d082b7d539fa2a79592247ec5",
+  "archive_bytes": 57788,
+  "selected_hosts": [
+    "pure-edit",
+    "pure-edit-tui"
+  ],
+  "checks": [
+    "relocated archive has only declared files and every file hash matches",
+    "extracted native CLI creates and restores the real document",
+    "selected storage keeps small values inline and maps large values",
+    "editing the packaged .pure source changes the executed reply",
+    "relocated source-loaded TUI and CLI share UTF-8, large and many-document paths"
+  ]
+}

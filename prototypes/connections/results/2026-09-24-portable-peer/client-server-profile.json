@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-selected-document-peer",
+  "scope": "Review threshold for the explicitly selected authenticated document host on Linux AArch64/GCC 14. Includes linked application code but excludes the shared OpenSSL/libc implementations, process heap, stack, mappings and kernel buffers. Check measured whole-process RSS separately.",
+  "budget_sha256": "defe8efb4d544cdbf615de4d43d4ceba78fc7f1d958f245731202625052eb2ff",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-document-peer": {
+      "sections": {
+        "text": 46934,
+        "data": 1384,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6",
+        "libcrypto.so.3",
+        "libssl.so.3"
+      ],
+      "sha256": "06fc08105cb9833599b9c778797cf2be4ba8a6c1db514c836bb76667a8c7265e"
+    }
+  }
+}

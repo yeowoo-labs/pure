@@ -1,0 +1,5 @@
+{
+  "format": "pure-workbench",
+  "version": 1,
+  "source": "# A new authored interaction, not a bundled example.\nstate x = 500\nstate moving = 0\nstate count = 0\ninput advance = ArrowRight\ninput pulse = Space\nbox marker(x, 170, 48, 48, \"#7ed9ae\")\ntext reading(40, 70, count, \"Signals: \")\non advance.down { moving = 1 }\non advance.up { moving = 0 }\non pulse.down { count = count + 5 }\non frame { x = clamp(x + moving * 120 * dt, 0, 580) }\nstate bonus = 7\ninput reverse = KeyA\ncircle beacon(300, 190, 15 + bonus, \"#c9f08b\")\non reverse.down { bonus = bonus + 2 }\n# This un-applied draft must survive Reset.\n"
+}

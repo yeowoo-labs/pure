@@ -1,0 +1,12 @@
+async page => {
+  const checks=[],check=(ok,label)=>{if(!ok)throw new Error(label);checks.push(label);};
+  await page.waitForFunction(()=>window.pureWorkbench?.snapshot().ready);
+  await page.locator('#source').fill('state amount=0\ninput level=value\ntext label(20,40,amount)\non level.change {amount=clamp(event_value,0,100)}');
+  await page.locator('#apply').click();
+  await page.getByLabel('level',{exact:true}).fill('123');await page.getByRole('button',{name:'값 전달',exact:true}).click();
+  let s=await page.evaluate(()=>window.pureWorkbench.snapshot());check(s.states.amount===100&&s.lastEvent.phase==='change','numeric control dispatches change and publishes the authored result');
+  check(s.held.length===0,'numeric controls do not create a held pointer owner');
+  await page.getByLabel('level',{exact:true}).fill('-5');await page.getByRole('button',{name:'값 전달',exact:true}).click();
+  s=await page.evaluate(()=>window.pureWorkbench.snapshot());check(s.states.amount===0,'the same authored clamp handles negative requests');
+  await page.evaluate(e=>window.__pureValueEvidence=e,{checks});return{checks};
+}

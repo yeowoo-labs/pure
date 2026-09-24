@@ -1,0 +1,12 @@
+{
+  "profile": "linux-aarch64-gcc14-selected-document-server",
+  "binaries": {
+    "pure-document-server": {
+      "max_text_bytes": 45056,
+      "max_data_bytes": 1408,
+      "max_bss_bytes": 64,
+      "needed": ["libssl.so.3", "libcrypto.so.3", "libc.so.6"]
+    }
+  },
+  "scope": "Reviewed server-only TLS peer ceiling on Linux AArch64/GCC 14. Excludes linked native client code and shared OpenSSL/libc implementations; process RSS is measured separately."
+}

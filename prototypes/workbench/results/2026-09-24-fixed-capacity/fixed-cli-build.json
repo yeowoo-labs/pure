@@ -1,0 +1,48 @@
+{
+  "source": "/home/eunhhu/work/pure/prototypes/workbench/examples/routed-layout.pure",
+  "sourceSha256": "656e81577c250df704ba744b1ea6ec9c987ab3b8ee90c758062ac4beaf195650",
+  "zigVersion": "0.15.2",
+  "zigFlags": [
+    "-O",
+    "ReleaseSafe",
+    "-fno-compiler-rt"
+  ],
+  "scalarProfile": "fixed-definition",
+  "zigRoot": "/home/eunhhu/work/pure/prototypes/workbench/native-fixed.zig",
+  "cFlags": [
+    "-std=c17",
+    "-O2",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+    "-Werror"
+  ],
+  "binary": "/home/eunhhu/work/pure/prototypes/workbench/build/native/pure-native",
+  "binarySha256": "ca33aa955ac192db31f5684ff8535f05bded6adef2f7f982b4afd681b3ef11d0",
+  "librarySha256": "bcdfc29c7aaa42f3c50baa0f46c0b0cab341f7b8d5d7c75b1f10ddc9f94660f2",
+  "fixedProfileSha256": "adc229822531f3c62f3e4f16821ea21d74047808125e699f1ce03c5bfa7f9199",
+  "preparedSha256": "710503e7ffadf02b309c24a761caade4c5a093750d6801956cc698bfc263fc09",
+  "desktop": false,
+  "desktopFlags": [],
+  "peer": false,
+  "peerFlags": [],
+  "implementationSha256": {
+    "prototypes/workbench/engine.zig": "1a58aa081fcfa0876c5499bbfa2768334641e4bd5a357ae4136003fd1e315b98",
+    "prototypes/workbench/evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+    "prototypes/workbench/native.zig": "fe6c445cdfb5a4bc27ea9f540f3880c45b65c33098eec761d4398d9a7fc5c9a6",
+    "prototypes/workbench/native-fixed.zig": "29b4cc1c8777e83c0d167ecabd66b6bb8c84dba9273f0c1d9e24e33f872f1125",
+    "prototypes/workbench/native/prepare.mjs": "2d2679ae71088ba8691f29029c85c849a5351cf5e49c9b691c60b56b15ceca0f",
+    "prototypes/workbench/native/scalar.h": "b84a796bde2f45d59505cc0addb5f5afede0a9c4dc58d40a38dd37a8ac68d1fd",
+    "prototypes/workbench/native/plan.h": "2e9bd7e3c2ecc52f79c8938d09d2a696174c44a245e4bf52b70be2ed02cbbb57",
+    "prototypes/workbench/native/app.h": "32c738e06f007894457b6b4369ff75c9c2286737885a04159e257c1dcdfa3729",
+    "prototypes/workbench/web/compiler.mjs": "349139612d1f7da5f75ef21c65aa697963b760cb35321150fc36f67f3b40adf1",
+    "prototypes/workbench/native/main.c": "dd28168741e79ffaa73cf74e60b974a1ca84b0473a43aafe089019f61e732aab",
+    "prototypes/workbench/native/app.c": "96ab7faf4848b5eaba5a1fb672eec2ea7882b3e554a4cba1adfac9c202a2b4ca",
+    "prototypes/workbench/native/plan.c": "f0bdf8466097cfad54c197120aace8acd5f430170931d575e26807b760ce2173",
+    "prototypes/connections/runtime.c": "a6c068c6a2cee214b3fe30241459394833917dfb6c0d33052460eab4c6a539a2",
+    "prototypes/connections/evaluate.c": "ee8b91efc733b9d305711b7cbb7b502ae5d3917e06f750b7f62b632ed0ea6d04",
+    "prototypes/connections/store.c": "44702e9414c26d1ee336b2e36e6713560013c2c8d0091a8900042e2468f88015",
+    "prototypes/connections/store-port.c": "d6bf17878b325e039360816edcbf8d68e41b373cf3e6128d7795e11ae21fdd6f"
+  }
+}

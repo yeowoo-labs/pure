@@ -1,0 +1,18 @@
+{
+  "profile": "linux-aarch64-gcc14-selected-hybrid-document-storage",
+  "binaries": {
+    "pure-edit": {
+      "max_text_bytes": 43008,
+      "max_data_bytes": 1200,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    },
+    "pure-connections": {
+      "max_text_bytes": 50176,
+      "max_data_bytes": 1300,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    }
+  },
+  "scope": "Opt-in inline/PUREP001 document store on Linux AArch64/GCC 14. The CLI text ceiling is 42 KiB. The HTTP ceiling is 49 KiB after reviewing its 49133-to-49589-byte growth for the authored final-size guard, which checks the locked document version. This is a selected research budget, not the default micro-runtime budget. Direct dependencies only; excludes libc, process RAM, filesystem cache and journal, optional TLS/GTK."
+}

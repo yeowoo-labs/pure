@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-default-document-hosts",
+  "scope": "Review thresholds for release-built default CLI and HTTP adapter on the recorded Linux AArch64/GCC 14 toolchain. These section sizes exclude shared libc, heap, stack, mapped files, kernel buffers, and optional GTK/TLS hosts. Any failure requires a cost review, not automatic relaxation.",
+  "budget_sha256": "8b1eb0dd4844757705c24a0674142e76d9ee83fdce80a841e87a08e757f1183d",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-edit": {
+      "sections": {
+        "text": 35807,
+        "data": 944,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "b5c6ec82a1e9c8a1391d1c4ac680e7f33e53dafe5c29ac8a956d5097653b1a03"
+    },
+    "pure-connections": {
+      "sections": {
+        "text": 42761,
+        "data": 1040,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "e76d4c0a721c9ceb7142db0edbaa1f5c44bd78a2c55029658109c83e8076875f"
+    }
+  }
+}

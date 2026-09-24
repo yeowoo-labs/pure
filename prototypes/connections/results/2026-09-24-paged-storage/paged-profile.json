@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-selected-paged-document-storage",
+  "scope": "Selected 16 KiB-page document storage backend on Linux AArch64/GCC 14. Same linked-code and direct-dependency ceilings as the flat backend; excludes libc, process RAM, filesystem cache and journal, and optional TLS/GTK. Any failure requires review, not automatic relaxation.",
+  "budget_sha256": "728cbe5488a86c7cb588a1b9e53d5ddc8aafe617c229624d7abe3e3a68f50699",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-edit": {
+      "sections": {
+        "text": 39960,
+        "data": 1000,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "497577bf9811b3ce787e27c6170a322ea553cdab2371b4f71eb51115a9045a16"
+    },
+    "pure-connections": {
+      "sections": {
+        "text": 46824,
+        "data": 1088,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "b3df35ce2e25dc00578c79e47f6c5a21334da31df38cd482d9e71b835597f9cf"
+    }
+  }
+}

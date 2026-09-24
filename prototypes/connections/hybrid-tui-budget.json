@@ -1,0 +1,12 @@
+{
+  "profile": "linux-aarch64-gcc14-hybrid-source-document-terminal-editor",
+  "binaries": {
+    "pure-edit-tui": {
+      "max_text_bytes": 55296,
+      "max_data_bytes": 1152,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    }
+  },
+  "scope": "Selected source-loaded native document terminal editor with the existing 16 KiB hybrid page store. This ceiling reviews the measured 53,642-byte linked text build on Linux AArch64/GCC 14. It excludes libc, process RSS, mapped document pages and filesystem cache; check_tui.py separately gates actual one-MiB and 1,024-document work. The default core, CLI and TUI do not select this store."
+}

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pure 비교 실험 · 일반 JavaScript</title>
+<style>
+  :root { color-scheme: light; font: 16px/1.6 system-ui, sans-serif; color: #21352c; background: #f4f2eb; }
+  body { max-width: 900px; margin: auto; padding: 24px; }
+  h1 { font-size: 1.6rem; margin-bottom: 8px; }
+  a { color: #285d40; }
+  p { max-width: 75ch; }
+  svg { display: block; width: 100%; border: 1px solid #ccd1c6; border-radius: 12px; background: #fffdf6; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 18px 0; }
+  button { padding: 10px 16px; border: 1px solid #7d907f; border-radius: 6px; background: #fffdf6; font: inherit; cursor: pointer; }
+  button:focus-visible, a:focus-visible { outline: 3px solid #c78638; outline-offset: 3px; }
+  #jump { touch-action: none; background: #356548; color: white; }
+  #jump[aria-pressed="true"] { background: #945e1d; }
+  pre { white-space: pre-wrap; background: #e9eadf; padding: 16px; border-radius: 8px; }
+  .muted { color: #5c695f; }
+</style>
+<a href="./">← 빈 작업물 제작기로</a>
+<h1>일반 JavaScript로 작성한 충전 점프</h1>
+<p>동일한 충전·점프 동작을 직접 작성한 비교용 앱입니다. 실행을 켜고 Space 또는 아래 버튼을 누르다가 놓아보세요. 정지 중에는 한 프레임씩 진행할 수 있습니다.</p>
+<svg viewBox="0 0 640 360" role="img" aria-label="충전 정도와 점프 위치를 보여주는 장면">
+  <rect x="40" y="261" width="560" height="4" fill="#356548"></rect>
+  <circle id="actor" cx="180" cy="240" r="20" fill="#c78638"></circle>
+  <rect id="meter" x="80" y="80" width="0" height="12" fill="#c78638"></rect>
+  <text id="amount" x="80" y="60" fill="#21352c" font-size="16">Charge: 0</text>
+</svg>
+<div class="controls">
+  <button id="jump" aria-pressed="false">누르고 있다 놓기 · Space</button>
+  <button id="run" aria-pressed="false">실행</button>
+  <button id="step">한 프레임</button>
+  <button id="reset">초기화</button>
+  <span id="status" role="status">정지 · 0 프레임</span>
+</div>
+<pre id="state" aria-label="현재 상태"></pre>
+<p class="muted">이 앱은 고정된 JavaScript 프로그램입니다. 코드를 편집하고 다시 불러와 동작을 바꿀 수 있지만, 제작기의 정의 적용·상태 보존 기능은 구현하지 않았습니다. 아래 파일과 충전 예제를 비교할 수 있습니다.</p>
+<p><a href="./baseline.mjs">행동과 상태 소스 · baseline.mjs</a> · <a href="./examples/charge.pure">동일 동작의 Pure 정의 · charge.pure</a></p>
+<script type="module">
+  import { createChargeModel } from './baseline.mjs';
+  const model = createChargeModel();
+  const element = id => document.getElementById(id);
+  let running = false, last = null, accumulated = 0;
+  function render() {
+    const { states, tick, held } = model.snapshot();
+    element('actor').setAttribute('cy', states.y);
+    element('meter').setAttribute('width', states.charge * 200);
+    element('amount').textContent = `Charge: ${states.charge.toFixed(3)}`;
+    element('state').textContent = JSON.stringify(states, null, 2);
+    element('status').textContent = `${running ? '실행 중' : '정지'} · ${tick} 프레임`;
+    element('jump').setAttribute('aria-pressed', String(held.length > 0));
+    element('run').setAttribute('aria-pressed', String(running));
+    element('run').textContent = running ? '정지' : '실행';
+  }
+  element('run').addEventListener('click', () => {
+    running = !running; last = null; accumulated = 0; render();
+  });
+  element('step').addEventListener('click', () => {
+    running = false; last = null; accumulated = 0; model.frame(); render();
+  });
+  element('reset').addEventListener('click', () => {
+    running = false; last = null; accumulated = 0; model.reset(); render();
+  });
+  element('jump').addEventListener('pointerdown', event => {
+    event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);
+    model.down('jump', `pointer:${event.pointerId}`); render();
+  });
+  for (const phase of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    element('jump').addEventListener(phase, event => {
+      model.up('jump', `pointer:${event.pointerId}`); render();
+    });
+  }
+  element('jump').addEventListener('keydown', event => {
+    if (event.code !== 'Enter') return;
+    event.preventDefault(); model.down('jump', 'button:enter'); render();
+  });
+  element('jump').addEventListener('keyup', event => {
+    if (event.code !== 'Enter') return;
+    event.preventDefault(); model.up('jump', 'button:enter'); render();
+  });
+  element('jump').addEventListener('blur', () => {
+    model.up('jump', 'button:enter'); render();
+  });
+  window.addEventListener('keydown', event => {
+    if (event.code !== 'Space') return;
+    event.preventDefault(); model.down('jump', 'keyboard'); render();
+  });
+  window.addEventListener('keyup', event => {
+    if (event.code !== 'Space') return;
+    event.preventDefault(); model.up('jump', 'keyboard'); render();
+  });
+  function suspend() {
+    running = false; last = null; accumulated = 0; model.releaseAll(); render();
+  }
+  window.addEventListener('blur', suspend);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); });
+  function animate(now) {
+    if (running && last !== null) {
+      accumulated += Math.min(now - last, 100);
+      while (accumulated >= 1000 / 60) { model.frame(); accumulated -= 1000 / 60; }
+      render();
+    }
+    last = now; requestAnimationFrame(animate);
+  }
+  render(); requestAnimationFrame(animate);
+</script>
+</html>

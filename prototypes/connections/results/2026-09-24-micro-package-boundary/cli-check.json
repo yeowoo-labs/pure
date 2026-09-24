@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "3e5b064bbf81b13be24494a5d5a9bd55fa5ea057d2d5614965f3e5556babf9ab",
+  "archive_bytes": 14692,
+  "selected_hosts": [
+    "pure-edit-fixed"
+  ],
+  "checks": [
+    "relocated archive has only declared files and every file hash matches",
+    "relocated parser-free runner creates and restores a document",
+    "relocated parser-free runner performs revision-checked edits"
+  ]
+}

@@ -1,0 +1,6 @@
+# 웹 컨트롤이 요청한 분할 비율을 받습니다. 레이아웃과 문서는 브라우저가 소유합니다.
+state ratio = 50
+input split = value
+input reset = KeyR
+on split.change { ratio = clamp(event_value, 20, 80) }
+on reset.down { ratio = 50 }

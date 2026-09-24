@@ -1,0 +1,12 @@
+{
+  "profile": "linux-aarch64-gcc14-selected-native-document-authoring",
+  "binaries": {
+    "pure-edit-window": {
+      "max_text_bytes": 57344,
+      "max_data_bytes": 1800,
+      "max_bss_bytes": 64,
+      "needed": ["libgtk-4.so.1", "libgio-2.0.so.0", "libgobject-2.0.so.0", "libglib-2.0.so.0", "libc.so.6"]
+    }
+  },
+  "scope": "Review ceiling for the selected GTK document-and-definition host on Linux AArch64/GCC 14. Linked code sections and direct dependencies only; the measured 44 MiB whole-process RSS and shared GTK stack remain separate costs."
+}

@@ -1,0 +1,12 @@
+{
+  "profile": "linux-aarch64-gcc14-selected-document-peer",
+  "binaries": {
+    "pure-document-peer": {
+      "max_text_bytes": 53248,
+      "max_data_bytes": 1600,
+      "max_bss_bytes": 64,
+      "needed": ["libssl.so.3", "libcrypto.so.3", "libc.so.6"]
+    }
+  },
+  "scope": "Review threshold for the explicitly selected authenticated document host on Linux AArch64/GCC 14. Includes linked application code but excludes the shared OpenSSL/libc implementations, process heap, stack, mappings and kernel buffers. Check measured whole-process RSS separately."
+}

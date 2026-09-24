@@ -1,0 +1,34 @@
+{
+  "utc": "2026-09-23T05:49:37.571Z",
+  "taps": 100,
+  "elapsedMs": 375.8999999985099,
+  "phase": {
+    "present": {
+      "calls": 200,
+      "ms": 26.600000098347664
+    },
+    "costs": {
+      "calls": 200,
+      "ms": 56.59999991953373
+    },
+    "draft": {
+      "calls": 200,
+      "ms": 259.1000000089407
+    },
+    "refresh": {
+      "calls": 200,
+      "ms": 359.6000000536442
+    }
+  },
+  "metrics": {
+    "LayoutCount": 201,
+    "LayoutDuration": 0.177734,
+    "RecalcStyleCount": 201,
+    "RecalcStyleDuration": 0.03897,
+    "ScriptDuration": 0.15203
+  },
+  "source": "state x = 40\ninput move = KeyM\nbox moving(x, 100, 30, 30, \"#7ed9ae\")\ntext label(20, 40, x)\nbox static0(20, 200, 20, 20, \"#8da5bb\")\nbox static1(90, 200, 20, 20, \"#8da5bb\")\nbox static2(160, 200, 20, 20, \"#8da5bb\")\nbox static3(230, 200, 20, 20, \"#8da5bb\")\nbox static4(300, 200, 20, 20, \"#8da5bb\")\nbox static5(370, 200, 20, 20, \"#8da5bb\")\nbox static6(440, 200, 20, 20, \"#8da5bb\")\nbox static7(20, 230, 20, 20, \"#8da5bb\")\nbox static8(90, 230, 20, 20, \"#8da5bb\")\nbox static9(160, 230, 20, 20, \"#8da5bb\")\nbox static10(230, 230, 20, 20, \"#8da5bb\")\nbox static11(300, 230, 20, 20, \"#8da5bb\")\nbox static12(370, 230, 20, 20, \"#8da5bb\")\nbox static13(440, 230, 20, 20, \"#8da5bb\")\nbox static14(20, 260, 20, 20, \"#8da5bb\")\nbox static15(90, 260, 20, 20, \"#8da5bb\")\nbox static16(160, 260, 20, 20, \"#8da5bb\")\nbox static17(230, 260, 20, 20, \"#8da5bb\")\nbox static18(300, 260, 20, 20, \"#8da5bb\")\nbox static19(370, 260, 20, 20, \"#8da5bb\")\nbox static20(440, 260, 20, 20, \"#8da5bb\")\nbox static21(20, 290, 20, 20, \"#8da5bb\")\non move.down { x = x + 0.25 }",
+  "scope": "Phase timings overlap: draft/present/costs are inside refresh. CDP counters bracket the synchronous batch and may include surrounding browser work.",
+  "profileSourceSha256": "16773f1983261571a32c1e149e557c0fcb2436486437e950dd86fd3239c35d80",
+  "appSourceSha256": "a50e6d99306461f690530eedf5797b2c86c3367a704d24dc5cc86a1c1d2035ea"
+}

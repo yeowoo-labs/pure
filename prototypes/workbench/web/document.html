@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Pure · 문서 작업</title><link rel="stylesheet" href="./document.css">
+</head>
+<body>
+  <header><a class="brand" href="./">pure <span>/ 문서 작업</span></a><span class="badge">텍스트 워크스페이스</span></header>
+  <main>
+    <div class="intro"><div><p class="eyebrow">WRITE / READ</p><h1>쓰고, 읽고, 공간을 조절하세요.</h1><p>가운데 경계를 움직여 편한 폭을 만드세요. 좁은 화면에서는 위아래로 이어집니다.</p></div><button id="sample" type="button">예제 문서</button></div>
+    <div class="toolbar" aria-label="문서 도구">
+      <label>파일 이름 <input id="filename" value="notes.txt" maxlength="120" aria-label="파일 이름"></label>
+      <button id="open" type="button">텍스트 열기</button><button id="save" type="button">.txt 저장</button>
+      <input id="file-input" type="file" accept=".txt,text/plain" hidden>
+      <span id="document-status" role="status">UTF-8 텍스트 파일을 열거나 바로 작성하세요.</span>
+    </div>
+    <div class="layout-tools">
+      <label for="split-range">편집 영역</label><input id="split-range" type="range" min="20" max="80" value="50" step="1" disabled><output id="split-output" for="split-range">50%</output>
+      <button id="reset-split" type="button" disabled>반반으로</button><span class="hint">경계에서 ← → · Shift로 크게 · Esc로 취소</span>
+    </div>
+    <div id="panes" class="panes" style="--split:0.5">
+      <section id="editor-pane" class="pane edit-pane" aria-labelledby="editor-title"><div class="pane-heading"><h2 id="editor-title">작성</h2><span>TEXT</span></div><label for="document-text" class="sr-only">문서 내용</label><textarea id="document-text" spellcheck="true" placeholder="생각을 적어보세요.&#10;&#10;내용은 오른쪽 읽기 화면에 표시됩니다."></textarea></section>
+      <div id="divider" role="separator" tabindex="0" aria-orientation="vertical" aria-labelledby="editor-title" aria-controls="editor-pane" aria-valuemin="20" aria-valuemax="80" aria-valuenow="50" aria-disabled="true"><span></span></div>
+      <section class="pane read-pane" aria-labelledby="reading-title"><div class="pane-heading"><h2 id="reading-title">읽기</h2><span>PREVIEW</span></div><div id="reading-scroll" tabindex="0" aria-label="문서 읽기"><div id="reading-text"></div><p id="reading-empty">작성한 내용이 여기에 나타납니다.</p></div></section>
+    </div>
+    <details class="policy"><summary>분할 규칙 수정</summary><p>비율을 받는 규칙을 수정할 수 있습니다. 문서 내용은 유지됩니다. 숫자 입력 이름은 split, 결과 상태는 ratio입니다.</p><label for="policy-source" class="sr-only">Pure 분할 규칙</label><textarea id="policy-source" spellcheck="false"></textarea><button id="apply-policy" type="button" disabled>규칙 적용</button><span id="policy-status" role="status">실행기를 준비하고 있습니다.</span></details>
+    <footer>텍스트는 일반 .txt 파일로 저장됩니다. 줄바꿈과 글자 배치는 브라우저가 처리합니다. <a href="./">기존 작업 공간 ↗</a></footer>
+  </main>
+  <script type="module" src="./document.mjs"></script>
+</body>
+</html>

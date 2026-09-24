@@ -1,0 +1,4 @@
+   text	   data	    bss	    dec	    hex	filename
+   5012	      0	      0	   5012	   1394	/tmp/pure-peer-runtime.o
+  62827	   2040	     16	  64883	   fd73	prototypes/workbench/build/native/pure-native
+  75969	   2472	     16	  78457	  13279	prototypes/workbench/build/native/pure-peer

@@ -1,0 +1,55 @@
+name: Native macOS arm64 checkpoint
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm native Apple Silicon runner
+        run: |
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          cc --version
+      - name: Keep the default build small
+        run: |
+          make -C prototypes/connections BUILD=build/mac-default all
+          test -f prototypes/connections/build/mac-default/libpure-execution.a
+          test -x prototypes/connections/build/mac-default/pure-edit
+          test ! -e prototypes/connections/build/mac-default/pure-connections
+          test ! -e prototypes/connections/build/mac-default/pure-document-peer
+          test ! -e prototypes/connections/build/mac-default/pure-edit-window
+      - name: Build and exercise native document app
+        run: |
+          make -C prototypes/connections BUILD=build/mac-native check-native-checkpoint \
+            PORTABLE_SOURCE_MEMORY_EVIDENCE="$RUNNER_TEMP/source-memory.json" \
+            PORTABLE_FIXED_MEMORY_EVIDENCE="$RUNNER_TEMP/fixed-memory.json"
+      - name: Exercise in-process document routing
+        run: |
+          make -C prototypes/connections BUILD=build/mac-native check-mirror \
+            MIRROR_EVIDENCE="$RUNNER_TEMP/mirror.json"
+      - name: Exercise authored document policy
+        run: |
+          make -C prototypes/connections BUILD=build/mac-native check-policy \
+            POLICY_EVIDENCE="$RUNNER_TEMP/policy.json"
+      - name: Show whole-process results
+        if: always()
+        run: |
+          for result in "$RUNNER_TEMP"/{source-memory,fixed-memory,mirror,policy}.json; do
+            if test -f "$result"; then cat "$result"; fi
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-macos-arm64-evidence
+          path: |
+            ${{ runner.temp }}/source-memory.json
+            ${{ runner.temp }}/fixed-memory.json
+            ${{ runner.temp }}/mirror.json
+            ${{ runner.temp }}/policy.json
+          if-no-files-found: warn

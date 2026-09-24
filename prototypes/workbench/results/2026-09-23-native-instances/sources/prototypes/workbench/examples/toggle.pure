@@ -1,0 +1,17 @@
+# Space toggles the circle. Right arrow moves the tile.
+state visible = 1
+state position = 120
+input toggle = Space
+input move = ArrowRight
+circle marker(position, 140, visible * 24, "#c78638")
+box tile(position - 24, 190, 48, 48, "#356548")
+text value(80, 80, visible, "Visible: ")
+on toggle.down {
+  visible = !visible
+}
+on move.down {
+  position = position + 40
+  if position > 560 {
+    position = 80
+  }
+}

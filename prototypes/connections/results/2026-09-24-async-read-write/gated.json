@@ -1,0 +1,53 @@
+{
+  "async_http": "snapshot-read-write-overlap-deadline-recovery-draining-shutdown",
+  "before_publication": {
+    "status": 200,
+    "etag": "\"1\"",
+    "body": "old"
+  },
+  "after_publication": {
+    "status": 200,
+    "etag": "\"2\"",
+    "body": "oldafter"
+  },
+  "shutdown_restore": {
+    "revision": "2",
+    "body": "oldafter"
+  },
+  "deadline_stats": {
+    "active": 0,
+    "retained_payload_bytes": 0,
+    "peak_retained_payload_bytes": 16,
+    "payload_budget": 4194304,
+    "peak_connections": 2,
+    "accepted": 4,
+    "commits": 1,
+    "gets": 2,
+    "conflicts": 0,
+    "budget_rejections": 0,
+    "expired": 1,
+    "releases": 3,
+    "ingress_prefix_copy_bytes": 13,
+    "borrowed_output_bytes": 16,
+    "server_structure_bytes": 43320
+  },
+  "shutdown_stats": {
+    "active": 0,
+    "retained_payload_bytes": 0,
+    "peak_retained_payload_bytes": 13,
+    "payload_budget": 4194304,
+    "peak_connections": 1,
+    "accepted": 1,
+    "commits": 1,
+    "gets": 0,
+    "conflicts": 0,
+    "budget_rejections": 0,
+    "expired": 0,
+    "releases": 1,
+    "ingress_prefix_copy_bytes": 13,
+    "borrowed_output_bytes": 5,
+    "server_structure_bytes": 43320
+  },
+  "test_source_sha256": "f38c9d3d784676ce815c276fbffc10e00f767aaa803793d8db311c19ef3b9085",
+  "gated_test_binary_sha256": "e1764fd031a24851d3fab665df1538fa947e2bf653accaa528bb60cd6daf7105"
+}

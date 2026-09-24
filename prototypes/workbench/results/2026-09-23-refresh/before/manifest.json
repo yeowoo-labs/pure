@@ -1,0 +1,14 @@
+{
+  "web/app.js": "a50e6d99306461f690530eedf5797b2c86c3367a704d24dc5cc86a1c1d2035ea",
+  "web/output.mjs": "1d22c44955e812d671f1a3c3ae4b2f0642a05ebe614017bb041bdddc8c363be3",
+  "web/runtime.mjs": "d490c54fb2b422dfe89b90a594a8da9ebc95bb007910211cb4686ccb83ed75c7",
+  "web/compiler.mjs": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02",
+  "web/core.wasm": "76823b024fa5f4a79cbf1ed722ab757614a81a9f1c81d1d6268781a38bed7cc9",
+  "web/index.html": "4fff6eb67d8cff098302465449251d17f0efb39d9144e87d15fefcc152e5d97e",
+  "web/style.css": "43301298028c5bc431eecd5ff30d7362fae83cce1fd0fdd7e8bea858100c22b9",
+  "core.zig": "dc84bcb75e4417fb1a804529c78ffa8cd1ddd079c00df4ca97a35da0b8fdbb8a",
+  "evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+  "qa-presentation.js": "04b0135983ea718d3744b56b706c9bf3266972a5180c744ac791ef787a29aa05",
+  "qa-presentation.py": "bec45426ec297896ed5c87b152148956bc6c5730ff188aea0e041a0ec69ae1c3",
+  "presentation.test.mjs": "604858a3f601d2a67c601ff477415025dcb766cdfd092bafed2d9dcfda39abd5"
+}

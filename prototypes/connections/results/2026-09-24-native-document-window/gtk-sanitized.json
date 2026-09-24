@@ -1,0 +1,1 @@
+{"empty_document_restore": "pass", "gtk_cli_write": "pass", "http_conflict_preserves_draft": "pass", "large_window_rss_kib": 143168, "one_mib_document_one_byte_edit": "pass", "profile": "optional-native-document-window", "unchanged_save_keeps_revision": "pass", "unsaved_close_guard": "pass", "utf8_boundary_and_restart": "pass"}

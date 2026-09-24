@@ -1,0 +1,19 @@
+// A revision-checked byte edit. The input carries only the replacement.
+// UTF-8 cursor/grapheme positions are translated to byte ranges by the UI.
+layout Edit {
+    start: u32le;
+    remove: u32le;
+    insert: bytes;
+}
+
+on get {
+    let document = store.read(request.key);
+    reply(document, document.body);
+}
+
+on put {
+    let edit = view(Edit, request.body);
+    let saved = store.splice(request.key, request.revision,
+                             edit.start, edit.remove, edit.insert);
+    reply(saved, edit.insert);
+}

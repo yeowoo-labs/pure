@@ -1,0 +1,32 @@
+{
+  "sources_verified_and_frozen": 37,
+  "native_and_sanitized_source_hashes_match": true,
+  "recorded_binaries_verified": 8,
+  "integration_scenarios_per_build": 36,
+  "server_runs_per_build": 19,
+  "all_server_runs_drained": true,
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+  "core_sections": {
+    "text": 5932,
+    "data": 0,
+    "bss": 0
+  },
+  "structure_sizes": {
+    "domain_bytes": 200,
+    "work_slot_bytes": 224,
+    "ticket_bytes": 24,
+    "prepared_program_bytes": 680,
+    "pointer_bytes": 8
+  },
+  "core_external_symbols": [
+    "memcpy",
+    "strlen"
+  ],
+  "server_structure_bytes": [41528],
+  "limitations": [
+    "synchronous full-file rewrite with 4096-byte host scratch",
+    "11-byte credit test does not measure total memory",
+    "limited storage authoring profile, no native GUI or secure peer RPC",
+    "GNU footprint tooling validated on Linux AArch64; macOS unverified"
+  ]
+}

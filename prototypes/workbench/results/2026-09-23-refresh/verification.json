@@ -1,0 +1,41 @@
+{
+  "utc": "2026-09-23T05:58:28.389318+00:00",
+  "host": {
+    "system": "Linux",
+    "machine": "aarch64",
+    "release": "6.18.39+rpt-rpi-2712"
+  },
+  "browserChecks": 69,
+  "browserEvidenceSha256": {
+    "browser.json": "1ab4ee47a63fca29bf77507053bb672ac708b2dc0df55c1bbae5ac902917655d",
+    "browser-authoring.json": "8f2a7c13334c71b213d06fbfe90f524fb8bbf1857af9fa84c36b7566f995c1d3",
+    "browser-limit.json": "bfa2fb1bd385cdc2aa964ed54d465d69260d9b0a0966f9d0eb12d97cd1256a0b",
+    "profile-before.json": "716b7f1ad32c9f42c5ce3cda2f359eaccb3c81463b942372d20daa83b7616b3b"
+  },
+  "sourceSha256": {
+    "web/app.js": "f91c076ff5242b10b390b57b4213d09b1ae74e61ea221845603428ecec5ea3f9",
+    "web/runtime.mjs": "d490c54fb2b422dfe89b90a594a8da9ebc95bb007910211cb4686ccb83ed75c7",
+    "web/output.mjs": "1d22c44955e812d671f1a3c3ae4b2f0642a05ebe614017bb041bdddc8c363be3",
+    "web/compiler.mjs": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02",
+    "web/core.wasm": "76823b024fa5f4a79cbf1ed722ab757614a81a9f1c81d1d6268781a38bed7cc9",
+    "core.zig": "dc84bcb75e4417fb1a804529c78ffa8cd1ddd079c00df4ca97a35da0b8fdbb8a",
+    "evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+    "profile-refresh.js": "16773f1983261571a32c1e149e557c0fcb2436486437e950dd86fd3239c35d80",
+    "qa-refresh.js": "afa6ac62f45a1d8e25a8667ecb23607c457964c410331587bbd2a2fe3bf5baaa",
+    "qa-refresh.py": "01da7aaba6148d0ad96d6e9686300674e6ba8779113aaf7928aa3e7ad1348960"
+  },
+  "unchangedFromBaseline": [
+    "web/runtime.mjs",
+    "web/output.mjs",
+    "web/compiler.mjs",
+    "web/core.wasm",
+    "core.zig",
+    "evaluation.zig"
+  ],
+  "unitTestNote": "No fresh JS/CLI/native unit test run: runtime/compiler/Zig/Wasm unchanged. Browser behavior is covered by 69 checks. Previous 52 JS/CLI/Wasm tests recorded in 2026-09-23-presentation/verification.json.",
+  "syntaxChecks": [
+    "node --check web/app.js",
+    "node --check qa-refresh.js"
+  ],
+  "localLinksChecked": 46
+}

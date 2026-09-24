@@ -1,0 +1,12 @@
+{
+  "profile": "build-time-prepared-native-document-runner",
+  "editor_create_edit_conflict_large_restore": "pass",
+  "dynamic_selection_and_invalid_range": "pass",
+  "nested_read_and_required_extent": "pass",
+  "invalid_compilation_preserves_previous_plan": "pass",
+  "runtime_parser_symbols_absent": "pass",
+  "fixed_sha256": "00f0316cb318cf168d4437080642fe1a6db013e7d4ad82be80e57ad9e12a0a3b",
+  "source_sha256": "b5c6ec82a1e9c8a1391d1c4ac680e7f33e53dafe5c29ac8a956d5097653b1a03",
+  "selection_sha256": "836f883efb9dc86218c9606292b6c37241cc98277ce3ece03597795e076427a2",
+  "excerpt_sha256": "221543dd8cee08b19c862d11d7a7f9c9c55d974964fb8fc88bf63792d96e14b9"
+}

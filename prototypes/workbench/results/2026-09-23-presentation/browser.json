@@ -1,0 +1,1536 @@
+{
+  "utc": "2026-09-23T05:40:52.800Z",
+  "checks": [
+    "real keyboard event reaches the authored output",
+    "real pointer input and keyboard input use the same authored behavior",
+    "the displayed element survives an input update",
+    "failed editing preserves active values and output destinations",
+    "invalid view is hidden while valid views remain published",
+    "reset recovers a hidden destination without recreating the scene",
+    "successful editing replaces changed output structure",
+    "applying empty work removes all old destinations",
+    "all six archived/current runs have identical final authored state and views",
+    "current hot path creates no DOM elements and no full snapshots",
+    "archived hot path reproduces full snapshots and element replacement",
+    "each tap changes only the moving x attribute and label text in the scene",
+    "no uncaught browser errors"
+  ],
+  "errors": [],
+  "samples": [
+    {
+      "variant": "before",
+      "taps": 100,
+      "events": 200,
+      "elapsedMs": 941.1999999955297,
+      "createdElements": 9200,
+      "snapshotCalls": 200,
+      "mutations": {
+        "scene-content": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        },
+        "state-values": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        },
+        "cost-values": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        }
+      },
+      "identityPreserved": false,
+      "final": {
+        "states": {
+          "x": 70,
+          "radius": 12
+        },
+        "views": [
+          {
+            "id": "moving",
+            "type": "box",
+            "color": "#7ed9ae",
+            "x": 70,
+            "y": 100,
+            "width": 30,
+            "height": 30
+          },
+          {
+            "id": "label",
+            "type": "text",
+            "prefix": "x: ",
+            "x": 20,
+            "y": 40,
+            "value": 70
+          },
+          {
+            "id": "bubble",
+            "type": "circle",
+            "color": "#c9f08b",
+            "x": 500,
+            "y": 150,
+            "radius": 12
+          },
+          {
+            "id": "static0",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static1",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static2",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static3",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static4",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static5",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static6",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static7",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static8",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static9",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static10",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static11",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static12",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static13",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static14",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static15",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static16",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static17",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static18",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static19",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static20",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          }
+        ],
+        "successfulEvents": 240
+      },
+      "scene": "<g id=\"scene-content\"><rect data-view-id=\"moving\" x=\"70\" y=\"100\" width=\"30\" height=\"30\" fill=\"#7ed9ae\"></rect><text data-view-id=\"label\" x=\"20\" y=\"40\" fill=\"#e7ece6\" font-family=\"ui-monospace, monospace\" font-size=\"20\">x: 70</text><circle data-view-id=\"bubble\" cx=\"500\" cy=\"150\" r=\"12\" fill=\"#c9f08b\"></circle><rect data-view-id=\"static0\" x=\"20\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static1\" x=\"90\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static2\" x=\"160\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static3\" x=\"230\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static4\" x=\"300\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static5\" x=\"370\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static6\" x=\"440\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static7\" x=\"20\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static8\" x=\"90\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static9\" x=\"160\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static10\" x=\"230\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static11\" x=\"300\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static12\" x=\"370\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static13\" x=\"440\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static14\" x=\"20\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static15\" x=\"90\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static16\" x=\"160\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static17\" x=\"230\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static18\" x=\"300\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static19\" x=\"370\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static20\" x=\"440\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect></g>"
+    },
+    {
+      "variant": "after",
+      "taps": 100,
+      "events": 200,
+      "elapsedMs": 751.3999999985099,
+      "createdElements": 0,
+      "snapshotCalls": 0,
+      "mutations": {
+        "scene-content": {
+          "records": 200,
+          "childList": 100,
+          "attributes": 100
+        },
+        "state-values": {
+          "records": 100,
+          "childList": 100,
+          "attributes": 0
+        },
+        "cost-values": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        }
+      },
+      "identityPreserved": true,
+      "final": {
+        "states": {
+          "x": 70,
+          "radius": 12
+        },
+        "views": [
+          {
+            "id": "moving",
+            "type": "box",
+            "color": "#7ed9ae",
+            "x": 70,
+            "y": 100,
+            "width": 30,
+            "height": 30
+          },
+          {
+            "id": "label",
+            "type": "text",
+            "prefix": "x: ",
+            "x": 20,
+            "y": 40,
+            "value": 70
+          },
+          {
+            "id": "bubble",
+            "type": "circle",
+            "color": "#c9f08b",
+            "x": 500,
+            "y": 150,
+            "radius": 12
+          },
+          {
+            "id": "static0",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static1",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static2",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static3",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static4",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static5",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static6",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static7",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static8",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static9",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static10",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static11",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static12",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static13",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static14",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static15",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static16",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static17",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static18",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static19",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static20",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          }
+        ],
+        "successfulEvents": 240
+      },
+      "scene": "<g id=\"scene-content\"><rect data-view-id=\"moving\" fill=\"#7ed9ae\" x=\"70\" y=\"100\" width=\"30\" height=\"30\"></rect><text data-view-id=\"label\" fill=\"#e7ece6\" font-family=\"ui-monospace, monospace\" font-size=\"20\" x=\"20\" y=\"40\">x: 70</text><circle data-view-id=\"bubble\" fill=\"#c9f08b\" cx=\"500\" cy=\"150\" r=\"12\"></circle><rect data-view-id=\"static0\" fill=\"#8da5bb\" x=\"20\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static1\" fill=\"#8da5bb\" x=\"90\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static2\" fill=\"#8da5bb\" x=\"160\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static3\" fill=\"#8da5bb\" x=\"230\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static4\" fill=\"#8da5bb\" x=\"300\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static5\" fill=\"#8da5bb\" x=\"370\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static6\" fill=\"#8da5bb\" x=\"440\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static7\" fill=\"#8da5bb\" x=\"20\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static8\" fill=\"#8da5bb\" x=\"90\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static9\" fill=\"#8da5bb\" x=\"160\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static10\" fill=\"#8da5bb\" x=\"230\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static11\" fill=\"#8da5bb\" x=\"300\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static12\" fill=\"#8da5bb\" x=\"370\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static13\" fill=\"#8da5bb\" x=\"440\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static14\" fill=\"#8da5bb\" x=\"20\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static15\" fill=\"#8da5bb\" x=\"90\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static16\" fill=\"#8da5bb\" x=\"160\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static17\" fill=\"#8da5bb\" x=\"230\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static18\" fill=\"#8da5bb\" x=\"300\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static19\" fill=\"#8da5bb\" x=\"370\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static20\" fill=\"#8da5bb\" x=\"440\" y=\"280\" width=\"20\" height=\"20\"></rect></g>"
+    },
+    {
+      "variant": "after",
+      "taps": 100,
+      "events": 200,
+      "elapsedMs": 579.1000000014901,
+      "createdElements": 0,
+      "snapshotCalls": 0,
+      "mutations": {
+        "scene-content": {
+          "records": 200,
+          "childList": 100,
+          "attributes": 100
+        },
+        "state-values": {
+          "records": 100,
+          "childList": 100,
+          "attributes": 0
+        },
+        "cost-values": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        }
+      },
+      "identityPreserved": true,
+      "final": {
+        "states": {
+          "x": 70,
+          "radius": 12
+        },
+        "views": [
+          {
+            "id": "moving",
+            "type": "box",
+            "color": "#7ed9ae",
+            "x": 70,
+            "y": 100,
+            "width": 30,
+            "height": 30
+          },
+          {
+            "id": "label",
+            "type": "text",
+            "prefix": "x: ",
+            "x": 20,
+            "y": 40,
+            "value": 70
+          },
+          {
+            "id": "bubble",
+            "type": "circle",
+            "color": "#c9f08b",
+            "x": 500,
+            "y": 150,
+            "radius": 12
+          },
+          {
+            "id": "static0",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static1",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static2",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static3",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static4",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static5",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static6",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static7",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static8",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static9",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static10",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static11",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static12",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static13",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static14",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static15",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static16",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static17",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static18",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static19",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static20",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          }
+        ],
+        "successfulEvents": 240
+      },
+      "scene": "<g id=\"scene-content\"><rect data-view-id=\"moving\" fill=\"#7ed9ae\" x=\"70\" y=\"100\" width=\"30\" height=\"30\"></rect><text data-view-id=\"label\" fill=\"#e7ece6\" font-family=\"ui-monospace, monospace\" font-size=\"20\" x=\"20\" y=\"40\">x: 70</text><circle data-view-id=\"bubble\" fill=\"#c9f08b\" cx=\"500\" cy=\"150\" r=\"12\"></circle><rect data-view-id=\"static0\" fill=\"#8da5bb\" x=\"20\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static1\" fill=\"#8da5bb\" x=\"90\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static2\" fill=\"#8da5bb\" x=\"160\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static3\" fill=\"#8da5bb\" x=\"230\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static4\" fill=\"#8da5bb\" x=\"300\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static5\" fill=\"#8da5bb\" x=\"370\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static6\" fill=\"#8da5bb\" x=\"440\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static7\" fill=\"#8da5bb\" x=\"20\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static8\" fill=\"#8da5bb\" x=\"90\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static9\" fill=\"#8da5bb\" x=\"160\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static10\" fill=\"#8da5bb\" x=\"230\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static11\" fill=\"#8da5bb\" x=\"300\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static12\" fill=\"#8da5bb\" x=\"370\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static13\" fill=\"#8da5bb\" x=\"440\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static14\" fill=\"#8da5bb\" x=\"20\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static15\" fill=\"#8da5bb\" x=\"90\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static16\" fill=\"#8da5bb\" x=\"160\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static17\" fill=\"#8da5bb\" x=\"230\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static18\" fill=\"#8da5bb\" x=\"300\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static19\" fill=\"#8da5bb\" x=\"370\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static20\" fill=\"#8da5bb\" x=\"440\" y=\"280\" width=\"20\" height=\"20\"></rect></g>"
+    },
+    {
+      "variant": "before",
+      "taps": 100,
+      "events": 200,
+      "elapsedMs": 648.6999999955297,
+      "createdElements": 9200,
+      "snapshotCalls": 200,
+      "mutations": {
+        "scene-content": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        },
+        "state-values": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        },
+        "cost-values": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        }
+      },
+      "identityPreserved": false,
+      "final": {
+        "states": {
+          "x": 70,
+          "radius": 12
+        },
+        "views": [
+          {
+            "id": "moving",
+            "type": "box",
+            "color": "#7ed9ae",
+            "x": 70,
+            "y": 100,
+            "width": 30,
+            "height": 30
+          },
+          {
+            "id": "label",
+            "type": "text",
+            "prefix": "x: ",
+            "x": 20,
+            "y": 40,
+            "value": 70
+          },
+          {
+            "id": "bubble",
+            "type": "circle",
+            "color": "#c9f08b",
+            "x": 500,
+            "y": 150,
+            "radius": 12
+          },
+          {
+            "id": "static0",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static1",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static2",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static3",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static4",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static5",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static6",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static7",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static8",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static9",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static10",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static11",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static12",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static13",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static14",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static15",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static16",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static17",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static18",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static19",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static20",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          }
+        ],
+        "successfulEvents": 240
+      },
+      "scene": "<g id=\"scene-content\"><rect data-view-id=\"moving\" x=\"70\" y=\"100\" width=\"30\" height=\"30\" fill=\"#7ed9ae\"></rect><text data-view-id=\"label\" x=\"20\" y=\"40\" fill=\"#e7ece6\" font-family=\"ui-monospace, monospace\" font-size=\"20\">x: 70</text><circle data-view-id=\"bubble\" cx=\"500\" cy=\"150\" r=\"12\" fill=\"#c9f08b\"></circle><rect data-view-id=\"static0\" x=\"20\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static1\" x=\"90\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static2\" x=\"160\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static3\" x=\"230\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static4\" x=\"300\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static5\" x=\"370\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static6\" x=\"440\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static7\" x=\"20\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static8\" x=\"90\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static9\" x=\"160\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static10\" x=\"230\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static11\" x=\"300\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static12\" x=\"370\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static13\" x=\"440\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static14\" x=\"20\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static15\" x=\"90\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static16\" x=\"160\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static17\" x=\"230\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static18\" x=\"300\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static19\" x=\"370\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static20\" x=\"440\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect></g>"
+    },
+    {
+      "variant": "before",
+      "taps": 100,
+      "events": 200,
+      "elapsedMs": 633.6000000014901,
+      "createdElements": 9200,
+      "snapshotCalls": 200,
+      "mutations": {
+        "scene-content": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        },
+        "state-values": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        },
+        "cost-values": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        }
+      },
+      "identityPreserved": false,
+      "final": {
+        "states": {
+          "x": 70,
+          "radius": 12
+        },
+        "views": [
+          {
+            "id": "moving",
+            "type": "box",
+            "color": "#7ed9ae",
+            "x": 70,
+            "y": 100,
+            "width": 30,
+            "height": 30
+          },
+          {
+            "id": "label",
+            "type": "text",
+            "prefix": "x: ",
+            "x": 20,
+            "y": 40,
+            "value": 70
+          },
+          {
+            "id": "bubble",
+            "type": "circle",
+            "color": "#c9f08b",
+            "x": 500,
+            "y": 150,
+            "radius": 12
+          },
+          {
+            "id": "static0",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static1",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static2",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static3",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static4",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static5",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static6",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static7",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static8",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static9",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static10",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static11",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static12",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static13",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static14",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static15",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static16",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static17",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static18",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static19",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static20",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          }
+        ],
+        "successfulEvents": 240
+      },
+      "scene": "<g id=\"scene-content\"><rect data-view-id=\"moving\" x=\"70\" y=\"100\" width=\"30\" height=\"30\" fill=\"#7ed9ae\"></rect><text data-view-id=\"label\" x=\"20\" y=\"40\" fill=\"#e7ece6\" font-family=\"ui-monospace, monospace\" font-size=\"20\">x: 70</text><circle data-view-id=\"bubble\" cx=\"500\" cy=\"150\" r=\"12\" fill=\"#c9f08b\"></circle><rect data-view-id=\"static0\" x=\"20\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static1\" x=\"90\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static2\" x=\"160\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static3\" x=\"230\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static4\" x=\"300\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static5\" x=\"370\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static6\" x=\"440\" y=\"200\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static7\" x=\"20\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static8\" x=\"90\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static9\" x=\"160\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static10\" x=\"230\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static11\" x=\"300\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static12\" x=\"370\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static13\" x=\"440\" y=\"240\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static14\" x=\"20\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static15\" x=\"90\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static16\" x=\"160\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static17\" x=\"230\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static18\" x=\"300\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static19\" x=\"370\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect><rect data-view-id=\"static20\" x=\"440\" y=\"280\" width=\"20\" height=\"20\" fill=\"#8da5bb\"></rect></g>"
+    },
+    {
+      "variant": "after",
+      "taps": 100,
+      "events": 200,
+      "elapsedMs": 733.0999999940395,
+      "createdElements": 0,
+      "snapshotCalls": 0,
+      "mutations": {
+        "scene-content": {
+          "records": 200,
+          "childList": 100,
+          "attributes": 100
+        },
+        "state-values": {
+          "records": 100,
+          "childList": 100,
+          "attributes": 0
+        },
+        "cost-values": {
+          "records": 200,
+          "childList": 200,
+          "attributes": 0
+        }
+      },
+      "identityPreserved": true,
+      "final": {
+        "states": {
+          "x": 70,
+          "radius": 12
+        },
+        "views": [
+          {
+            "id": "moving",
+            "type": "box",
+            "color": "#7ed9ae",
+            "x": 70,
+            "y": 100,
+            "width": 30,
+            "height": 30
+          },
+          {
+            "id": "label",
+            "type": "text",
+            "prefix": "x: ",
+            "x": 20,
+            "y": 40,
+            "value": 70
+          },
+          {
+            "id": "bubble",
+            "type": "circle",
+            "color": "#c9f08b",
+            "x": 500,
+            "y": 150,
+            "radius": 12
+          },
+          {
+            "id": "static0",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static1",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static2",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static3",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static4",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static5",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static6",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 200,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static7",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static8",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static9",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static10",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static11",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static12",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static13",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 240,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static14",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 20,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static15",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 90,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static16",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 160,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static17",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 230,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static18",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 300,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static19",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 370,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          },
+          {
+            "id": "static20",
+            "type": "box",
+            "color": "#8da5bb",
+            "x": 440,
+            "y": 280,
+            "width": 20,
+            "height": 20
+          }
+        ],
+        "successfulEvents": 240
+      },
+      "scene": "<g id=\"scene-content\"><rect data-view-id=\"moving\" fill=\"#7ed9ae\" x=\"70\" y=\"100\" width=\"30\" height=\"30\"></rect><text data-view-id=\"label\" fill=\"#e7ece6\" font-family=\"ui-monospace, monospace\" font-size=\"20\" x=\"20\" y=\"40\">x: 70</text><circle data-view-id=\"bubble\" fill=\"#c9f08b\" cx=\"500\" cy=\"150\" r=\"12\"></circle><rect data-view-id=\"static0\" fill=\"#8da5bb\" x=\"20\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static1\" fill=\"#8da5bb\" x=\"90\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static2\" fill=\"#8da5bb\" x=\"160\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static3\" fill=\"#8da5bb\" x=\"230\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static4\" fill=\"#8da5bb\" x=\"300\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static5\" fill=\"#8da5bb\" x=\"370\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static6\" fill=\"#8da5bb\" x=\"440\" y=\"200\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static7\" fill=\"#8da5bb\" x=\"20\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static8\" fill=\"#8da5bb\" x=\"90\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static9\" fill=\"#8da5bb\" x=\"160\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static10\" fill=\"#8da5bb\" x=\"230\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static11\" fill=\"#8da5bb\" x=\"300\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static12\" fill=\"#8da5bb\" x=\"370\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static13\" fill=\"#8da5bb\" x=\"440\" y=\"240\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static14\" fill=\"#8da5bb\" x=\"20\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static15\" fill=\"#8da5bb\" x=\"90\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static16\" fill=\"#8da5bb\" x=\"160\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static17\" fill=\"#8da5bb\" x=\"230\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static18\" fill=\"#8da5bb\" x=\"300\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static19\" fill=\"#8da5bb\" x=\"370\" y=\"280\" width=\"20\" height=\"20\"></rect><rect data-view-id=\"static20\" fill=\"#8da5bb\" x=\"440\" y=\"280\" width=\"20\" height=\"20\"></rect></g>"
+    }
+  ],
+  "source": "state x = 40\nstate radius = 12\ninput move = KeyM\ninput shrink = KeyS\nbox moving(x, 100, 30, 30, \"#7ed9ae\")\ntext label(20, 40, x, \"x: \")\ncircle bubble(500, 150, radius, \"#c9f08b\")\nbox static0(20, 200, 20, 20, \"#8da5bb\")\nbox static1(90, 200, 20, 20, \"#8da5bb\")\nbox static2(160, 200, 20, 20, \"#8da5bb\")\nbox static3(230, 200, 20, 20, \"#8da5bb\")\nbox static4(300, 200, 20, 20, \"#8da5bb\")\nbox static5(370, 200, 20, 20, \"#8da5bb\")\nbox static6(440, 200, 20, 20, \"#8da5bb\")\nbox static7(20, 240, 20, 20, \"#8da5bb\")\nbox static8(90, 240, 20, 20, \"#8da5bb\")\nbox static9(160, 240, 20, 20, \"#8da5bb\")\nbox static10(230, 240, 20, 20, \"#8da5bb\")\nbox static11(300, 240, 20, 20, \"#8da5bb\")\nbox static12(370, 240, 20, 20, \"#8da5bb\")\nbox static13(440, 240, 20, 20, \"#8da5bb\")\nbox static14(20, 280, 20, 20, \"#8da5bb\")\nbox static15(90, 280, 20, 20, \"#8da5bb\")\nbox static16(160, 280, 20, 20, \"#8da5bb\")\nbox static17(230, 280, 20, 20, \"#8da5bb\")\nbox static18(300, 280, 20, 20, \"#8da5bb\")\nbox static19(370, 280, 20, 20, \"#8da5bb\")\nbox static20(440, 280, 20, 20, \"#8da5bb\")\non move.down { x = x + 0.25 }\non shrink.down { radius = radius - 24 }",
+  "timingScope": "100 synchronous synthetic keyboard taps after 20 warm-up taps; JS dispatch to DOM submission only, including instrumentation; not paint/input latency.",
+  "setup": "Archived app/runtime are supplied by test-only routing; snapshot calls and element creation are instrumented. Same Wasm/compiler and production configuration.",
+  "browser": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.0.0 Safari/537.36",
+  "screenshot": "output/playwright/pure-presentation.png",
+  "sourceSha256": {
+    "web/runtime.mjs": "d490c54fb2b422dfe89b90a594a8da9ebc95bb007910211cb4686ccb83ed75c7",
+    "web/app.js": "a50e6d99306461f690530eedf5797b2c86c3367a704d24dc5cc86a1c1d2035ea",
+    "web/output.mjs": "1d22c44955e812d671f1a3c3ae4b2f0642a05ebe614017bb041bdddc8c363be3",
+    "web/core.wasm": "76823b024fa5f4a79cbf1ed722ab757614a81a9f1c81d1d6268781a38bed7cc9",
+    "web/compiler.mjs": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02",
+    "qa-presentation.js": "04b0135983ea718d3744b56b706c9bf3266972a5180c744ac791ef787a29aa05",
+    "qa-presentation.py": "bec45426ec297896ed5c87b152148956bc6c5730ff188aea0e041a0ec69ae1c3"
+  },
+  "baselineManifestSha256": "6068e6ca3630e240484abfa2cddbb9d3fb877b3df1886ae500dc4caa485d4f6a"
+}

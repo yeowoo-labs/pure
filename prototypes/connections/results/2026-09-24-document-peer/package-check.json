@@ -1,0 +1,19 @@
+{
+  "archive_sha256": "dc3f7339bf5aa22b11eb5ac4c8b4a547168e0e06e65c8003a545f70a31500081",
+  "archive_bytes": 316927,
+  "selected_hosts": [
+    "pure-edit",
+    "pure-connections",
+    "pure-document-peer",
+    "pure-edit-window"
+  ],
+  "checks": [
+    "relocated archive has only declared files and every file hash matches",
+    "extracted native CLI creates and restores the real document",
+    "editing the packaged .pure source changes the executed reply",
+    "extracted C/Python TLS peers share a 1 MiB document and recover",
+    "extracted GTK window, CLI and HTTP adapter edit the same document"
+  ],
+  "peer_idle_rss_kib": 7840,
+  "peer_after_large_work_rss_kib": 9488
+}

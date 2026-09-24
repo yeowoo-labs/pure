@@ -1,0 +1,16 @@
+{
+  "profile": "native-fixed-document-terminal-editor",
+  "checks": [
+    "create and save through terminal",
+    "open another key",
+    "UTF-8 edit and save",
+    "resize redraw",
+    "external revision conflict preserves draft",
+    "one MiB document edit and fresh CLI restore",
+    "terminal mode restored after key and signal exit"
+  ],
+  "small_peak_rss_kib": 1744,
+  "one_mib_peak_rss_kib": 2784,
+  "one_mib_peak_rss_limit_kib": 4096,
+  "binary_sha256": "ae3f8ff479899929cb108dd3435750aa24b8f793744a9e7794315974182ad1f7"
+}

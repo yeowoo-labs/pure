@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-selected-read-write-document-http",
+  "scope": "Optional one-read/one-write-worker HTTP host on the recorded Linux AArch64/GCC 14 toolchain. Section limits exclude the two 128 KiB worker stacks, libc, heap, mapped files and kernel buffers. Default CLI and HTTP do not link this option. Inspect process RSS and VM separately.",
+  "budget_sha256": "acd82386572fc2f874ca2fee5f4eed68ee145cf990d7315a9f1aff06daf51995",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-connections-async": {
+      "sections": {
+        "text": 48561,
+        "data": 1180,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "9485151b8902d66052bb689e821b502810b66561e0a251d3ce091c4919b7c67e"
+    }
+  }
+}

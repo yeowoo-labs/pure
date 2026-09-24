@@ -1,0 +1,7 @@
+{
+  "checks": [
+    "numeric control dispatches change and publishes the authored result",
+    "numeric controls do not create a held pointer owner",
+    "the same authored clamp handles negative requests"
+  ]
+}

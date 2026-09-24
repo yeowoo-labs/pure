@@ -1,0 +1,16 @@
+{
+  "archive_sha256": "18a171c2f1a7b75f4fe030d6a087d6c2f3471fca731e2c9d7f103940315852e5",
+  "archive_bytes": 49186,
+  "selected_hosts": [
+    "pure-edit",
+    "pure-document-peer"
+  ],
+  "checks": [
+    "relocated archive has only declared files and every file hash matches",
+    "extracted native CLI creates and restores the real document",
+    "editing the packaged .pure source changes the executed reply",
+    "extracted C/Python TLS peers share a 1 MiB document and recover"
+  ],
+  "peer_idle_rss_kib": 7840,
+  "peer_after_large_work_rss_kib": 9520
+}

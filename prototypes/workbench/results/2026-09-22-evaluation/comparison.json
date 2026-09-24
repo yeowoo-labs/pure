@@ -1,0 +1,309 @@
+{
+  "purpose": "Choose whether to enable binding reuse by default",
+  "utc": "2026-09-22T13:56:13.104Z",
+  "host": {
+    "platform": "linux",
+    "release": "6.18.39+rpt-rpi-2712",
+    "arch": "arm64",
+    "cpu": "Cortex-A76",
+    "node": "v24.20.0",
+    "affinityControlled": false
+  },
+  "sourceSha256": {
+    "web/core.wasm": "b79eecefba5e7da0f5dd945fa1df196ee627803243a430517f5c49c3a5e54ce1",
+    "core.zig": "dfb9fd7f3862806c2bd88ce1c668b795d9df196e1f2e50cceff1b5c4809273df",
+    "evaluation.zig": "2192e563385105f130d373b2e8724ea234c51e2909c7dbfc38e72acc3b70b2ed",
+    "web/runtime.mjs": "d9981282612cb06b50d24bf8919e829dce202f72b59dab607c8684bc0f297939",
+    "web/compiler.mjs": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02",
+    "evaluation-check.mjs": "11492759b5eff878fb8e43cad69422f9c34da6a85b5d8808478cc1845d737d4f",
+    "evaluation.test.mjs": "d3026ab5c6bffce56c0bde3155d7dddd6fa442a5688656ee710626c762258ff1",
+    "examples/counter.pure": "53cb3a93ff0f26a3d208a5876bfff9ecb1c39e9a01acc101566727733ba166a8",
+    "examples/toggle.pure": "3de97fab9d316c17ba6a0c82a16cccd3baafc6816b879bf9b0a174210c8a1915",
+    "examples/charge.pure": "8d69d9fd51d44ab754d560eb7ff5102ea8a34540753cd7170b3bd800e4294f56"
+  },
+  "cases": [
+    {
+      "name": "counter",
+      "checkedSnapshots": 720,
+      "traceSha256": "5b6a375413a890f53aad8542121341bd4d460d8f7614bde17b359692b7723f04",
+      "totals": {
+        "plain": {
+          "work": 14400,
+          "instructions": 9360,
+          "cacheHits": 0
+        },
+        "cached": {
+          "work": 10251,
+          "instructions": 93,
+          "cacheHits": 5013
+        }
+      },
+      "memory": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 20272,
+        "programReservedBytes": 9392,
+        "instructionBytes": 16,
+        "handlerBytes": 12,
+        "activeIRBytes": 284,
+        "activeStateBytes": 8,
+        "stagingReservedBytes": 9392,
+        "evalStackBytes": 512
+      },
+      "evaluation": {
+        "cacheEntries": 32,
+        "historyEntries": 8,
+        "workLimit": 2048,
+        "work": 14,
+        "instructions": 0,
+        "cacheHits": 7,
+        "reservedBytes": 1200
+      },
+      "samples": [
+        {
+          "trial": 0,
+          "key": "plain",
+          "elapsedMs": 4.274374999999964
+        },
+        {
+          "trial": 0,
+          "key": "cached",
+          "elapsedMs": 3.667929999999842
+        },
+        {
+          "trial": 1,
+          "key": "cached",
+          "elapsedMs": 2.7680219999999736
+        },
+        {
+          "trial": 1,
+          "key": "plain",
+          "elapsedMs": 2.9006329999999707
+        },
+        {
+          "trial": 2,
+          "key": "plain",
+          "elapsedMs": 3.10952199999997
+        },
+        {
+          "trial": 2,
+          "key": "cached",
+          "elapsedMs": 2.6932429999999385
+        },
+        {
+          "trial": 3,
+          "key": "cached",
+          "elapsedMs": 2.495447000000013
+        },
+        {
+          "trial": 3,
+          "key": "plain",
+          "elapsedMs": 3.31631799999991
+        },
+        {
+          "trial": 4,
+          "key": "plain",
+          "elapsedMs": 3.110725000000002
+        },
+        {
+          "trial": 4,
+          "key": "cached",
+          "elapsedMs": 2.476169999999911
+        }
+      ],
+      "medianMs": {
+        "plain": 3.110725000000002,
+        "cached": 2.6932429999999385
+      },
+      "cachedOverPlain": 0.8657927010584145
+    },
+    {
+      "name": "toggle",
+      "checkedSnapshots": 720,
+      "traceSha256": "5b6a375413a890f53aad8542121341bd4d460d8f7614bde17b359692b7723f04",
+      "totals": {
+        "plain": {
+          "work": 17280,
+          "instructions": 10080,
+          "cacheHits": 0
+        },
+        "cached": {
+          "work": 14692,
+          "instructions": 54,
+          "cacheHits": 7170
+        }
+      },
+      "memory": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 20272,
+        "programReservedBytes": 9392,
+        "instructionBytes": 16,
+        "handlerBytes": 12,
+        "activeIRBytes": 456,
+        "activeStateBytes": 16,
+        "stagingReservedBytes": 9392,
+        "evalStackBytes": 512
+      },
+      "evaluation": {
+        "cacheEntries": 32,
+        "historyEntries": 8,
+        "workLimit": 2048,
+        "work": 20,
+        "instructions": 0,
+        "cacheHits": 10,
+        "reservedBytes": 1200
+      },
+      "samples": [
+        {
+          "trial": 0,
+          "key": "plain",
+          "elapsedMs": 3.189095999999836
+        },
+        {
+          "trial": 0,
+          "key": "cached",
+          "elapsedMs": 2.4810959999999795
+        },
+        {
+          "trial": 1,
+          "key": "cached",
+          "elapsedMs": 2.673020999999835
+        },
+        {
+          "trial": 1,
+          "key": "plain",
+          "elapsedMs": 3.064632999999958
+        },
+        {
+          "trial": 2,
+          "key": "plain",
+          "elapsedMs": 3.1030960000000505
+        },
+        {
+          "trial": 2,
+          "key": "cached",
+          "elapsedMs": 2.6690209999999297
+        },
+        {
+          "trial": 3,
+          "key": "cached",
+          "elapsedMs": 2.628114000000096
+        },
+        {
+          "trial": 3,
+          "key": "plain",
+          "elapsedMs": 2.907020999999986
+        },
+        {
+          "trial": 4,
+          "key": "plain",
+          "elapsedMs": 3.06628099999989
+        },
+        {
+          "trial": 4,
+          "key": "cached",
+          "elapsedMs": 2.6631320000001324
+        }
+      ],
+      "medianMs": {
+        "plain": 3.06628099999989,
+        "cached": 2.6631320000001324
+      },
+      "cachedOverPlain": 0.8685218347569019
+    },
+    {
+      "name": "charge",
+      "checkedSnapshots": 720,
+      "traceSha256": "5b6a375413a890f53aad8542121341bd4d460d8f7614bde17b359692b7723f04",
+      "totals": {
+        "plain": {
+          "work": 21600,
+          "instructions": 11520,
+          "cacheHits": 0
+        },
+        "cached": {
+          "work": 26909,
+          "instructions": 566,
+          "cacheHits": 9676
+        }
+      },
+      "memory": {
+        "linearBytes": 65536,
+        "reservedEngineBytes": 20272,
+        "programReservedBytes": 9392,
+        "instructionBytes": 16,
+        "handlerBytes": 12,
+        "activeIRBytes": 1092,
+        "activeStateBytes": 32,
+        "stagingReservedBytes": 9392,
+        "evalStackBytes": 512
+      },
+      "evaluation": {
+        "cacheEntries": 32,
+        "historyEntries": 8,
+        "workLimit": 2048,
+        "work": 28,
+        "instructions": 0,
+        "cacheHits": 14,
+        "reservedBytes": 1200
+      },
+      "samples": [
+        {
+          "trial": 0,
+          "key": "plain",
+          "elapsedMs": 4.6710420000001704
+        },
+        {
+          "trial": 0,
+          "key": "cached",
+          "elapsedMs": 4.135338000000047
+        },
+        {
+          "trial": 1,
+          "key": "cached",
+          "elapsedMs": 4.094503999999915
+        },
+        {
+          "trial": 1,
+          "key": "plain",
+          "elapsedMs": 4.58693100000005
+        },
+        {
+          "trial": 2,
+          "key": "plain",
+          "elapsedMs": 4.541652999999997
+        },
+        {
+          "trial": 2,
+          "key": "cached",
+          "elapsedMs": 4.269986000000017
+        },
+        {
+          "trial": 3,
+          "key": "cached",
+          "elapsedMs": 4.093262999999979
+        },
+        {
+          "trial": 3,
+          "key": "plain",
+          "elapsedMs": 4.703355999999985
+        },
+        {
+          "trial": 4,
+          "key": "plain",
+          "elapsedMs": 4.554652999999917
+        },
+        {
+          "trial": 4,
+          "key": "cached",
+          "elapsedMs": 4.1000779999999395
+        }
+      ],
+      "medianMs": {
+        "plain": 4.58693100000005,
+        "cached": 4.1000779999999395
+      },
+      "cachedOverPlain": 0.8938608407233279
+    }
+  ],
+  "timingScope": "Event dispatch plus snapshot construction. Excludes loading, compilation, DOM, equality checks and statistics reads. Five batch samples are not latency percentiles."
+}

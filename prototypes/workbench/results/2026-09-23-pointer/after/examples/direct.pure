@@ -1,0 +1,48 @@
+# 도형을 잡은 위치를 유지해 이동합니다. 취소하면 잡기 전 위치로 돌아갑니다.
+state x = 80
+state y = 160
+state grab_x = 0
+state grab_y = 0
+state start_x = 80
+state start_y = 160
+state dragging = 0
+
+input drag = pointer(tile)
+input left = ArrowLeft
+input right = ArrowRight
+
+box left_area(20, 100, 280, 220, "#233a31")
+box right_area(340, 100, 280, 220, "#343b25")
+box tile(x, y, 56, 44, "#c9f08b")
+text horizontal(30, 45, x, "x: ")
+text vertical(180, 45, y, "y: ")
+text region(350, 70, x >= 320, "오른쪽 영역: ")
+text active(30, 75, dragging, "잡고 있음: ")
+
+on drag.down {
+  start_x = x
+  start_y = y
+  grab_x = event_x - x
+  grab_y = event_y - y
+  dragging = 1
+}
+on drag.move {
+  x = clamp(event_x - grab_x, 20, 564)
+  y = clamp(event_y - grab_y, 100, 276)
+}
+on drag.up {
+  x = clamp(event_x - grab_x, 20, 564)
+  y = clamp(event_y - grab_y, 100, 276)
+  dragging = 0
+}
+on drag.cancel {
+  x = start_x
+  y = start_y
+  dragging = 0
+}
+on left.down {
+  if dragging == 0 { x = max(20, x - 10) }
+}
+on right.down {
+  if dragging == 0 { x = min(564, x + 10) }
+}

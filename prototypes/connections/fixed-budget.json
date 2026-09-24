@@ -1,0 +1,18 @@
+{
+  "profile": "linux-aarch64-gcc14-fixed-document-runner",
+  "binaries": {
+    "pure-edit-fixed": {
+      "max_text_bytes": 20480,
+      "max_data_bytes": 1000,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    },
+    "pure-connections-fixed": {
+      "max_text_bytes": 26880,
+      "max_data_bytes": 1100,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    }
+  },
+  "scope": "Release-linked CLI and HTTP document hosts with one build-time prepared app. The HTTP ceiling includes the reviewed 188-byte cost of moving document interpretation from the reusable core into the selected document adapter and the later 64-byte linked increase for an authored final-size guard. The source parser and compiler are separate build tools. These text ceilings apply only to the recorded Linux AArch64/GCC 14 toolchain and exclude libc, heap, stack, and storage files."
+}

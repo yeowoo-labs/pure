@@ -1,0 +1,159 @@
+{
+  "recordedUtc": "2026-09-22T10:57:50.563Z",
+  "browser": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.0.0 Safari/537.36",
+  "checks": [
+    "initial editor has literally empty source",
+    "initial scene has no built-in entities, states, inputs, or running clock",
+    "controls require an authored program",
+    "authoring a new program is a draft until Apply",
+    "new custom program constructs states and multiple views from source",
+    "input buttons are generated from the authored declarations",
+    "view bindings render the authored state value",
+    "Space and arrows in the editor never reach authored inputs",
+    "pointer down dispatches once while the clock is paused",
+    "pointer up releases without double dispatch from click",
+    "keyboard repeat is ignored",
+    "keyboard activation on a generated button is one complete tap",
+    "assistive click activation is one complete tap",
+    "keyboard and pointer sources share one logical input",
+    "releasing one source does not release the other source",
+    "last source releases the logical input",
+    "authored down/frame behavior uses the declared dt without built-in motion",
+    "keyup releases even after focus moves into the editor",
+    "focus loss sends release and pauses the clock",
+    "Play advances and Pause freezes the clock",
+    "invalid code preserves the previous executable program and states",
+    "compile error exposes a source-line diagnostic",
+    "diagnostic location moves the editor caret to the problem",
+    "apply preserves matching state names and initializes newly authored states",
+    "new input, entity, binding, and behavior work with source changes alone",
+    "changed behavior takes effect without resetting existing values",
+    "explicit Reset restores active initializers and keeps the draft",
+    "Apply is refused while an input is held",
+    "clear editor is explicit and does not clear the running scene before Apply",
+    "downloaded project restores the exact un-applied draft without execution",
+    "invalid JSON project schema cannot replace the draft",
+    "failed assistive down event rolls back and its error survives the following successful up",
+    "latched runtime failure is visible and labeled separately from the latest input",
+    "explicit Reset clears the failure record",
+    "applying empty source removes all authored states, inputs, and scene contents",
+    "explicit example loading only fills the editor and never auto-applies",
+    "authored scene executes in the actual fixed 64 KiB Wasm memory",
+    "cost inspector shows measured Wasm memory without claiming browser heap totals",
+    "390px mobile viewport has no horizontal overflow",
+    "generated mobile input buttons remain usable",
+    "ordinary-JavaScript comparison and equivalent Pure example are linked and served",
+    "missing Wasm shows an actionable load failure and disables execution controls",
+    "fresh load always returns to a blank authoring environment",
+    "no uncaught page errors during the browser scenarios"
+  ],
+  "authoredSource": "# A new authored interaction, not a bundled example.\nstate x = 90\nstate moving = 0\nstate count = 0\ninput advance = ArrowRight\ninput pulse = Space\nbox marker(x, 170, 48, 48, \"#7ed9ae\")\ntext reading(40, 70, count, \"Signals: \")\non advance.down { moving = 1 }\non advance.up { moving = 0 }\non pulse.down { count = count + 1 }\non frame { x = clamp(x + moving * 120 * dt, 0, 580) }\n",
+  "authoredSnapshot": {
+    "states": {
+      "x": 114,
+      "moving": 0,
+      "count": 2
+    },
+    "views": [
+      {
+        "id": "marker",
+        "type": "box",
+        "color": "#7ed9ae",
+        "x": 114,
+        "y": 170,
+        "width": 48,
+        "height": 48
+      },
+      {
+        "id": "reading",
+        "type": "text",
+        "prefix": "Signals: ",
+        "x": 40,
+        "y": 70,
+        "value": 2
+      }
+    ],
+    "tick": 12,
+    "revision": 5,
+    "lastError": 0,
+    "errorMessage": "",
+    "errorLine": null,
+    "lastOps": 2,
+    "successfulEvents": 18,
+    "held": [],
+    "lastEvent": {
+      "name": "advance",
+      "phase": "up",
+      "source": "keyboard:ArrowRight",
+      "status": 0,
+      "line": null,
+      "ops": 2
+    },
+    "lastFailure": null,
+    "memory": {
+      "linearBytes": 65536,
+      "reservedEngineBytes": 19072,
+      "programReservedBytes": 9392,
+      "instructionBytes": 16,
+      "handlerBytes": 12,
+      "activeIRBytes": 464,
+      "activeStateBytes": 24,
+      "stagingReservedBytes": 9392,
+      "evalStackBytes": 512
+    },
+    "ready": true,
+    "source": "# A new authored interaction, not a bundled example.\nstate x = 90\nstate moving = 0\nstate count = 0\ninput advance = ArrowRight\ninput pulse = Space\nbox marker(x, 170, 48, 48, \"#7ed9ae\")\ntext reading(40, 70, count, \"Signals: \")\non advance.down { moving = 1 }\non advance.up { moving = 0 }\non pulse.down { count = count + 1 }\non frame { x = clamp(x + moving * 120 * dt, 0, 580) }\n",
+    "appliedSource": "# A new authored interaction, not a bundled example.\nstate x = 90\nstate moving = 0\nstate count = 0\ninput advance = ArrowRight\ninput pulse = Space\nbox marker(x, 170, 48, 48, \"#7ed9ae\")\ntext reading(40, 70, count, \"Signals: \")\non advance.down { moving = 1 }\non advance.up { moving = 0 }\non pulse.down { count = count + 1 }\non frame { x = clamp(x + moving * 120 * dt, 0, 580) }\n",
+    "dirty": false,
+    "running": false,
+    "droppedTicks": 0,
+    "diagnostic": "코드를 적용했습니다. 같은 이름의 상태는 유지됩니다."
+  },
+  "mobile": {
+    "viewport": 390,
+    "content": 390
+  },
+  "downloaded": {
+    "filename": "my-work.pure.json",
+    "path": "exported-draft.json",
+    "expectedSource": "# A new authored interaction, not a bundled example.\nstate x = 500\nstate moving = 0\nstate count = 0\ninput advance = ArrowRight\ninput pulse = Space\nbox marker(x, 170, 48, 48, \"#7ed9ae\")\ntext reading(40, 70, count, \"Signals: \")\non advance.down { moving = 1 }\non advance.up { moving = 0 }\non pulse.down { count = count + 5 }\non frame { x = clamp(x + moving * 120 * dt, 0, 580) }\nstate bonus = 7\ninput reverse = KeyA\ncircle beacon(300, 190, 15 + bonus, \"#c9f08b\")\non reverse.down { bonus = bonus + 2 }\n# This un-applied draft must survive Reset.\n"
+  },
+  "errors": [],
+  "screenshots": [
+    "blank.png",
+    "authored.png",
+    "mobile.png"
+  ],
+  "checkCount": 44,
+  "artifactSha256": {
+    "authored.png": "bb599b72b8e061bc28101086d664f4e288a014e737db37e958ce4902d0efa23d",
+    "exported-draft.json": "60f35c25dc371bce5667a779d49860d056b7e9ce5884c9755379ed6e526e1710",
+    "blank.png": "967727bf28b71d34f32cb6913fd31f84275eee5909a01bb188b32a041e9a8ca4",
+    "mobile.png": "b6d352f6e8260006a5220aebf9b3c9bc93dcb2a68a7db7124cf3a6f08adb2a4d"
+  },
+  "sourceSha256": {
+    "qa-browser.js": "0d4c155b3575481c60f175b71acdc332f1c0d8489297794deca6f55999ead1b8",
+    "web/index.html": "4fff6eb67d8cff098302465449251d17f0efb39d9144e87d15fefcc152e5d97e",
+    "web/app.js": "d364d777d704e871d90ed03cd2cd74a7e80d895480668b15d7f64c8946ac1e2a",
+    "web/style.css": "43301298028c5bc431eecd5ff30d7362fae83cce1fd0fdd7e8bea858100c22b9",
+    "web/runtime.mjs": "7819737fa37f058e9134f2cc64c5dc2497cece9b364d5409f98e59ac979fa698",
+    "web/compiler.mjs": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02",
+    "web/core.wasm": "3e2184d515407fcbd422becb56e5dca93fd40feb07475165a0cdbd187e33a0c8",
+    "web/baseline.html": "325e21c004882d83c626db4ca9a305b7aa72518794514d7205f6120e4d736173"
+  },
+  "visualReview": {
+    "reviewed": [
+      "blank.png",
+      "authored.png",
+      "mobile.png"
+    ],
+    "findings": "All three screenshots inspected. Editor and scene are empty on start; user-defined source and generated controls are visible; mobile page has no horizontal overflow. Placeholder directional copy corrected from right to below; final blank screenshot recaptured and checked after this text-only correction."
+  },
+  "limits": [
+    "Automated authoring behavior checks, not a human developer-experience evaluation.",
+    "Generated custom scenario is not a bundled example; it was authored by the test through the editor.",
+    "Expected network failure was intentionally induced for the missing-Wasm test. No uncaught page errors occurred.",
+    "Native dialog events can make Playwright CLI yield before the scenario finishes; final report was retrieved from window.__pureWorkbenchQAEvidence.",
+    "Browser user-agent architecture is recorded as reported by Chromium; it is not a claim about CPU or macOS/M3 performance."
+  ]
+}

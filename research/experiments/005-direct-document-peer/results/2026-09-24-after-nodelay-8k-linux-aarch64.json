@@ -1,0 +1,109 @@
+{
+  "profile": "authenticated-document-read-direct-versus-pure",
+  "definition_sha256": "8ca6c191b98bf53a592ce24f2b5cd040e41f05c4ccdda7a072d5d7f79870c06a",
+  "body_bytes": 8192,
+  "reads_per_trial": 32,
+  "pairs": 2,
+  "filesystem": {
+    "device": "/dev/mmcblk0p2",
+    "type": "ext4",
+    "mount": "/"
+  },
+  "sections": {
+    "direct": {
+      "text": 37862,
+      "data": 1352,
+      "bss": 16
+    },
+    "pure": {
+      "text": 43454,
+      "data": 1352,
+      "bss": 16
+    }
+  },
+  "binary_sha256": {
+    "direct": "9177aebfae07d84af5b6f23fbfe28a3a89a494943b8d0c8d0d35b68593b1f704",
+    "pure": "be9f569ab444085c761a7f7c9aa91c2acd6581534059785964b3a94da89fff25"
+  },
+  "samples": [
+    {
+      "order": [
+        "direct",
+        "pure"
+      ],
+      "direct": {
+        "reads": 32,
+        "body_bytes": 8192,
+        "elapsed_ns": 3028977,
+        "server_rss_before_kib": 8640,
+        "server_rss_after_kib": 8640,
+        "stored_file_bytes": 8216,
+        "stored_file_sha256": "286cfc86e3ebe6d82dd923ef777eba30f748e8b1dd58d5c4352babbf85d0d64f"
+      },
+      "pure": {
+        "reads": 32,
+        "body_bytes": 8192,
+        "elapsed_ns": 2564107,
+        "server_rss_before_kib": 8640,
+        "server_rss_after_kib": 8640,
+        "stored_file_bytes": 8216,
+        "stored_file_sha256": "286cfc86e3ebe6d82dd923ef777eba30f748e8b1dd58d5c4352babbf85d0d64f"
+      }
+    },
+    {
+      "order": [
+        "pure",
+        "direct"
+      ],
+      "pure": {
+        "reads": 32,
+        "body_bytes": 8192,
+        "elapsed_ns": 3016236,
+        "server_rss_before_kib": 8640,
+        "server_rss_after_kib": 8640,
+        "stored_file_bytes": 8216,
+        "stored_file_sha256": "286cfc86e3ebe6d82dd923ef777eba30f748e8b1dd58d5c4352babbf85d0d64f"
+      },
+      "direct": {
+        "reads": 32,
+        "body_bytes": 8192,
+        "elapsed_ns": 3019977,
+        "server_rss_before_kib": 8624,
+        "server_rss_after_kib": 8624,
+        "stored_file_bytes": 8216,
+        "stored_file_sha256": "286cfc86e3ebe6d82dd923ef777eba30f748e8b1dd58d5c4352babbf85d0d64f"
+      }
+    }
+  ],
+  "medians": {
+    "direct": {
+      "elapsed_ms": 3.024477,
+      "server_rss_before_kib": 8632.0,
+      "server_rss_after_kib": 8632.0
+    },
+    "pure": {
+      "elapsed_ms": 2.7901715,
+      "server_rss_before_kib": 8640.0,
+      "server_rss_after_kib": 8640.0
+    }
+  },
+  "sources_sha256": {
+    "research/experiments/005-direct-document-peer/direct-peer.c": "b1ee6ba5ec3d09b842ac42d4ca158b339ec2d23b157d2c568180af2731737501",
+    "research/experiments/005-direct-document-peer/run.py": "b53539f0a915376397011713ebbc9438a9b289d3b4dd745ffab5d6039fccd958",
+    "prototypes/connections/document-peer.c": "0c72121a6929239f618f8a642247af13fb5b68cca2999c125e52de685e5b2e50",
+    "prototypes/connections/check_document_peer.py": "d9dc789148951baa6f5d47f8cdea4009fe4d2dcf67b9dfaf2e6501f8e66a0f5c",
+    "prototypes/common/tls-link.c": "5d47ce411d6a81ce1a29d288c93ff507539fda1f202f2f41c0ff5560564b4f5a",
+    "prototypes/connections/store.c": "733ddcacaffd9e9ffbadfc385eadd4c9e62736a2b97b7bc048ad14845d83070f",
+    "prototypes/connections/store-port.c": "d6bf17878b325e039360816edcbf8d68e41b373cf3e6128d7795e11ae21fdd6f",
+    "prototypes/connections/program.c": "d7186634d2bfd83bbaf87ea3bafdec8d14be8f556cbf3d9877d07e0074b4b389",
+    "prototypes/connections/evaluate.c": "ee8b91efc733b9d305711b7cbb7b502ae5d3917e06f750b7f62b632ed0ea6d04",
+    "prototypes/connections/runtime.c": "1ced6734ee07f3688e5c9cc0a8af639da88a1741dc3e6f65ec109baa2d826e6f",
+    "prototypes/connections/examples/editor.pure": "8ca6c191b98bf53a592ce24f2b5cd040e41f05c4ccdda7a072d5d7f79870c06a"
+  },
+  "environment": {
+    "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+    "machine": "aarch64",
+    "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+    "openssl": "OpenSSL 3.6.4 25 Aug 2026 (Library: OpenSSL 3.6.4 25 Aug 2026)"
+  }
+}

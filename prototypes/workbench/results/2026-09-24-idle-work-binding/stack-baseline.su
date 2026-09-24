@@ -1,0 +1,9 @@
+prototypes/workbench/results/2026-09-24-native-desktop/sources/native/app.c:16:13:allocate	32	static
+prototypes/workbench/results/2026-09-24-native-desktop/sources/native/app.c:33:19:read_value	176	static
+prototypes/workbench/results/2026-09-24-native-desktop/sources/native/app.c:15:13:release	0	static
+prototypes/workbench/results/2026-09-24-native-desktop/sources/native/app.c:121:19:write_value	336	static
+prototypes/workbench/results/2026-09-24-native-desktop/sources/native/app.c:203:20:transfer	288	static
+prototypes/workbench/results/2026-09-24-native-desktop/sources/native/app.c:167:12:pure_native_app_init	176	static
+prototypes/workbench/results/2026-09-24-native-desktop/sources/native/app.c:192:13:pure_native_app_action	208	static
+prototypes/workbench/results/2026-09-24-native-desktop/sources/native/app.c:222:13:pure_native_app_save	16	static
+prototypes/workbench/results/2026-09-24-native-desktop/sources/native/app.c:223:13:pure_native_app_restore	16	static

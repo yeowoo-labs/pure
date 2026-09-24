@@ -1,0 +1,16 @@
+{
+  "archive_sha256": "ce48ef8e330cff470b78aec9c9e6c6d8877e4c8c371512f190b91b6036ddc8ba",
+  "archive_bytes": 324261,
+  "source_files": 166,
+  "checks": [
+    "every extracted source file matches the manifest",
+    "clean C17 build and host-neutral behavior tests pass",
+    "clean fixed and source-loaded native terminal PTY scenarios pass",
+    "source-loaded CLI and parser-free CLI share the real stored document",
+    "editing .pure changes the native source-loaded reply",
+    "clean native TLS client and both server profiles pass authenticated document work",
+    "clean selected Linux copy path passes app, scale, size, RSS and traced one-MiB splice",
+    "clean Linux release behavior, code, dependency and RSS gates pass",
+    "clean source-loaded terminal editor PTY scenarios pass"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "profile": "linux-aarch64-gcc14-cli-with-selected-document-peer",
+  "max_archive_bytes": {
+    "server_only": 51200,
+    "combined": 53248
+  },
+  "scope": "Compressed CLI plus one TLS peer, source definition and manifest on Linux AArch64. These are reviewed archive ceilings, not process memory or bundled OpenSSL size. Additional HTTP, TUI, GUI or research storage selections have separate costs."
+}

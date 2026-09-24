@@ -1,0 +1,176 @@
+{
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "terminal": "PTY 24x80, C.UTF-8",
+  "tui_sha256": "4373eab2cdb033ce54b812232c7787a3a572de26e303daa9dd5001489638c899",
+  "cli_sha256": "8b594a7b1a4ae5b33cde5c842ec1e11c79b6368babc08ac2ffea378b38ac24f8",
+  "workloads": {
+    "256-byte-ascii": {
+      "document_bytes": 256,
+      "samples": [
+        {
+          "nanoseconds": 59019,
+          "frame_bytes": 467,
+          "frame_sha256": "79ce175afbd5e1168173ac158c7cba370251a226142ec00780e735b7d71de36d"
+        },
+        {
+          "nanoseconds": 39463,
+          "frame_bytes": 468,
+          "frame_sha256": "84aeb3b92beaccfaa8b4b537280122c8aece74222c9ece27a7c2e0a7a5575371"
+        },
+        {
+          "nanoseconds": 32555,
+          "frame_bytes": 469,
+          "frame_sha256": "b04bcefe68401c190b7dab9c3c29bb09cec9f4db6140d285bd2fe09ff0fa5203"
+        },
+        {
+          "nanoseconds": 30074,
+          "frame_bytes": 470,
+          "frame_sha256": "01c628338d94e9cc3371dcdb33d643c6d87d17808e04e388dc0305f2e2bf0a01"
+        },
+        {
+          "nanoseconds": 26759,
+          "frame_bytes": 471,
+          "frame_sha256": "02d4c8ab2f98fe5e99cf17237d3daa75b484472928e4105d241c06c68b082ccc"
+        },
+        {
+          "nanoseconds": 27667,
+          "frame_bytes": 472,
+          "frame_sha256": "825d74dda937507686530ce7acbff1aafcc3c236feb6befa218f2ccbe33d480b"
+        },
+        {
+          "nanoseconds": 27371,
+          "frame_bytes": 473,
+          "frame_sha256": "9458d218e52f093480dccf23b816dac00c5cc5517b4b145820061f98b61d2b32"
+        },
+        {
+          "nanoseconds": 29278,
+          "frame_bytes": 474,
+          "frame_sha256": "02d7602be4f267cdc2db7b853ecfb743dc594c941b9f6a4be9d3262b16d71fda"
+        },
+        {
+          "nanoseconds": 28167,
+          "frame_bytes": 475,
+          "frame_sha256": "21426683adeee1036c8fe02233ab5a8dde1e6f5d2da8f97d67f9b41419c745ca"
+        },
+        {
+          "nanoseconds": 37815,
+          "frame_bytes": 476,
+          "frame_sha256": "d5c581fddffb80146c1b617be580a65f5936c79dc04deeada0c5b90eaa10b193"
+        }
+      ],
+      "median_nanoseconds": 29676
+    },
+    "one-mib-ascii": {
+      "document_bytes": 1048576,
+      "samples": [
+        {
+          "nanoseconds": 111481,
+          "frame_bytes": 1950,
+          "frame_sha256": "1ee95680f91eda6c69e7b4009274591735b5b9d2825ed2076cf372acc70c613f"
+        },
+        {
+          "nanoseconds": 73685,
+          "frame_bytes": 1951,
+          "frame_sha256": "5121e7e36f445a218af46da6796e3124997a7e25b652225f25d93b60d5e09b40"
+        },
+        {
+          "nanoseconds": 71222,
+          "frame_bytes": 1952,
+          "frame_sha256": "c7b503e012baefa46d8663b98a59f1d1faf4d2b3831750f736984e6443245075"
+        },
+        {
+          "nanoseconds": 69871,
+          "frame_bytes": 1953,
+          "frame_sha256": "b7edf856b10b641faf4825a8444f386f3faf1ac1e1ccf9a187db6f1465b5264b"
+        },
+        {
+          "nanoseconds": 69945,
+          "frame_bytes": 1954,
+          "frame_sha256": "cbaaf4f2990d9c060f48cf4dd6e6fab3d872c2370302960a893bcd4c13fa4c47"
+        },
+        {
+          "nanoseconds": 69833,
+          "frame_bytes": 1955,
+          "frame_sha256": "95ce7a29f9dd111a0a319455231b79bcc41fdf897e8db3411a24821c6cc298c6"
+        },
+        {
+          "nanoseconds": 70259,
+          "frame_bytes": 1956,
+          "frame_sha256": "440d25b06f6d7dda71bd02225191f0f430a4f4278a10d3bb21b56788ccbd62c4"
+        },
+        {
+          "nanoseconds": 69537,
+          "frame_bytes": 1957,
+          "frame_sha256": "5a0f58e4f0e16194202e3f56608a6411488aa517378abedf8ff428644e63c9cb"
+        },
+        {
+          "nanoseconds": 69648,
+          "frame_bytes": 1958,
+          "frame_sha256": "4f3d92e9f165d680c4546040e0ac141db54176f6576893d1a24e89053b487b03"
+        },
+        {
+          "nanoseconds": 70092,
+          "frame_bytes": 1959,
+          "frame_sha256": "ee37bf811fd99378f57715a638fd589d5c518b34dfdc76d973c64203c2ef16f8"
+        }
+      ],
+      "median_nanoseconds": 70018
+    },
+    "one-mib-utf8": {
+      "document_bytes": 1048572,
+      "samples": [
+        {
+          "nanoseconds": 239129,
+          "frame_bytes": 2745,
+          "frame_sha256": "e7275636645244ab12463d96a08bacd5c87aec3307bf86f91399ca654531140a"
+        },
+        {
+          "nanoseconds": 228593,
+          "frame_bytes": 2746,
+          "frame_sha256": "7d183f69c1dce6fee9b86e6b2c10e01f3779b13753fb1c11160de78505f9a8e0"
+        },
+        {
+          "nanoseconds": 227148,
+          "frame_bytes": 2747,
+          "frame_sha256": "7d0190b9b944eaa7fcd07af573882df6d436a7847e51dca759a65e93d9100c8e"
+        },
+        {
+          "nanoseconds": 227500,
+          "frame_bytes": 2748,
+          "frame_sha256": "858d20af32237847e72800093ec28e1998e71c22d0991d75011bf661682323e8"
+        },
+        {
+          "nanoseconds": 237037,
+          "frame_bytes": 2749,
+          "frame_sha256": "2e848f851e174be238ce270f71749536e473c97ad2f075a55aaf020fc5438c77"
+        },
+        {
+          "nanoseconds": 228370,
+          "frame_bytes": 2750,
+          "frame_sha256": "77d4bb9a8028ea5420435bdbe23b0c188d6f6065a8eda79c6357defb32605be8"
+        },
+        {
+          "nanoseconds": 226463,
+          "frame_bytes": 2751,
+          "frame_sha256": "18d8fcba8c9d11f0cf44e2171fb613d49e45f94408b4307526fc90bec5b61e5a"
+        },
+        {
+          "nanoseconds": 261797,
+          "frame_bytes": 2752,
+          "frame_sha256": "977adff244a908e5b59448e1b8075139fbcc7b35410d0d335ad67580d3d54c44"
+        },
+        {
+          "nanoseconds": 272018,
+          "frame_bytes": 2753,
+          "frame_sha256": "1e6c90831630b4573e9dec18872d26056e6e96d68e2cfcbe7da8102f0ef8b490"
+        },
+        {
+          "nanoseconds": 235852,
+          "frame_bytes": 2754,
+          "frame_sha256": "b3599665cc5fb2a72f9a582604c5caaeceff475fa2986f3242adfb4799089600"
+        }
+      ],
+      "median_nanoseconds": 232222
+    }
+  }
+}

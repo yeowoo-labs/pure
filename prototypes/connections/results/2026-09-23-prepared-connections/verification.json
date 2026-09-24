@@ -1,0 +1,51 @@
+{
+  "date": "2026-09-23",
+  "scope": "Authored storage/response connections, prepared range semantics, lifetime correctness; no performance comparison",
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+  "os_page_size_bytes": 16384,
+  "cwd": "prototypes/connections",
+  "native_command": "make check EVIDENCE=results/2026-09-23-prepared-connections/native.json",
+  "sanitized_command": "make check BUILD=build/sanitized CFLAGS='-std=c17 -O1 -g -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -fno-omit-frame-pointer' EVIDENCE=results/2026-09-23-prepared-connections/sanitized.json",
+  "core_checks": {
+    "test-flow": {
+      "native": "passed",
+      "asan_ubsan": "passed"
+    },
+    "test-program": {
+      "native": "passed",
+      "asan_ubsan": "passed",
+      "boundary_semantic_comparisons": 3584
+    },
+    "leak_detection_disabled": false
+  },
+  "unit_binary_sha256": {
+    "build/test-flow": "63830f166dc326d95e91a30b24bba1f750de05c50b60cf454616b35eef1634dc",
+    "build/test-program": "cb8e9de15301090fda719144bd0fbbbeb9e6e91a14b2bae8e434df2ac510b527",
+    "build/sanitized/test-flow": "1b608d5ad31b21180e8a4bce0c0ceee79db281c93ef2e7adf0261ca0b5f96df2",
+    "build/sanitized/test-program": "4396abe70699580d8c27d74aeb50713a9452e6f4060289b97e2d48d5c478666d"
+  },
+  "integration_scenarios_each": 22,
+  "original_storage_scenarios": 16,
+  "authored_connection_scenarios": 6,
+  "source_snapshots": "sources/",
+  "source_hashes_equal": true,
+  "source_snapshots_match_records": true,
+  "final_binaries_match_records": true,
+  "prepared_connections_equal": true,
+  "native_dynamic_dependencies_ldd": [
+    "\tlinux-vdso.so.1 (0x00007ffee8528000)",
+    "\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x00007ffee82e0000)",
+    "\t/lib/ld-linux-aarch64.so.1 (0x00007ffee84f0000)"
+  ],
+  "limitations": [
+    "Fixed byte-range authoring profile, not the general application language or graph runtime",
+    "One registered storage effect per handler; constant ranges, no dynamic branches or feedback loops",
+    "The native connection authoring parser is separate from the existing UI/scalar parser",
+    "runtime_view_steps is a structural description, not a measured instruction count",
+    "Logical payload bounds exclude mmap page rounding, page cache, disk retention, sockets and client allocations",
+    "Selecting input bytes for a reply retains and charges the complete original receive allocation",
+    "Synchronous storage calls delay other connections and timeout enforcement",
+    "Linux AArch64 only; macOS and real power loss have not been tested",
+    "Unpublished files left by crashes have no automatic recovery/collection policy"
+  ]
+}

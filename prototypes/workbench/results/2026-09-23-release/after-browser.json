@@ -1,0 +1,62 @@
+{
+  "checks": [
+    {
+      "label": "ordinary in-scene release retains the displayed position",
+      "passed": true
+    },
+    {
+      "label": "ordinary release outside the scene retains the clamped position",
+      "passed": true
+    },
+    {
+      "label": "document-pointerup: release commits once without a coordinate jump or later cancel",
+      "passed": true
+    },
+    {
+      "label": "document-pointerup: duplicate release/capture loss produces no extra authored event",
+      "passed": true
+    },
+    {
+      "label": "child-nonbubbling-up: release commits once without a coordinate jump or later cancel",
+      "passed": true
+    },
+    {
+      "label": "child-nonbubbling-up: duplicate release/capture loss produces no extra authored event",
+      "passed": true
+    },
+    {
+      "label": "mouse-only-up: release commits once without a coordinate jump or later cancel",
+      "passed": true
+    },
+    {
+      "label": "mouse-only-up: duplicate release/capture loss produces no extra authored event",
+      "passed": true
+    },
+    {
+      "label": "stale-scene-up: release commits once without a coordinate jump or later cancel",
+      "passed": true
+    },
+    {
+      "label": "stale-scene-up: duplicate release/capture loss produces no extra authored event",
+      "passed": true
+    },
+    {
+      "label": "descendant capture-loss notification cannot cancel the root owner",
+      "passed": true
+    },
+    {
+      "label": "actual root capture loss while held still cancels",
+      "passed": true
+    },
+    {
+      "label": "cancellation outside the scene still rolls back and ignores the late up",
+      "passed": true
+    },
+    {
+      "label": "focus loss still cancels rather than committing",
+      "passed": true
+    }
+  ],
+  "passed": 14,
+  "failed": []
+}

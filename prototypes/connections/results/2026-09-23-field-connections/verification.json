@@ -1,0 +1,62 @@
+{
+  "date": "2026-09-23",
+  "scope": "Named boundary fields and data-dependent byte selection; correctness and source lifetimes, not a performance comparison",
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+  "os_page_size_bytes": 16384,
+  "cwd": "prototypes/connections",
+  "native_command": "make check EVIDENCE=results/2026-09-23-field-connections/native.json",
+  "sanitized_command": "make check BUILD=build/sanitized CFLAGS='-std=c17 -O1 -g -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -fno-omit-frame-pointer' EVIDENCE=results/2026-09-23-field-connections/sanitized.json",
+  "core_checks": {
+    "test-flow": {
+      "native": "passed",
+      "asan_ubsan": "passed"
+    },
+    "test-program": {
+      "native": "passed",
+      "asan_ubsan": "passed",
+      "boundary_semantic_comparisons": 3584
+    },
+    "test-fields": {
+      "native": "passed",
+      "asan_ubsan": "passed",
+      "data_boundary_cases": 48
+    },
+    "leak_detection_disabled": false
+  },
+  "unit_binary_sha256": {
+    "build/test-flow": "81bb00a859ffc6dad647159514e80d97ff2897687f6e904610fdd3b70ea30878",
+    "build/test-program": "c15f0f40c50a10b57d456e064d5b64d5a4cbef29bda55495fda0b4648105a866",
+    "build/test-fields": "8b274b9fe8b8c45198f8d536186aeefe0aecd8564f56d903cc4a634624889e00",
+    "build/sanitized/test-flow": "bff35676c65fcb9cd5cf3ee2daa1da33067c6648e436ad62d72ada4609542f93",
+    "build/sanitized/test-program": "e6487158d71ef075771965b4d80c7c116c689174a7cd2dee4f9e5a465def4325",
+    "build/sanitized/test-fields": "30852cde86252c52ff244f544b847ef05683ab0b33ed4dd4a134fe5fdd49a940"
+  },
+  "integration_scenarios_each": 28,
+  "previous_scenarios": 22,
+  "field_scenarios": 6,
+  "source_snapshots": "sources/",
+  "source_hashes_equal": true,
+  "source_snapshots_match_records": true,
+  "final_binaries_match_records": true,
+  "prepared_connections_equal": true,
+  "field_connections_equal": true,
+  "prepared_program_bytes": 648,
+  "previous_prepared_program_bytes": 112,
+  "native_dynamic_dependencies_ldd": [
+    "\tlinux-vdso.so.1 (0x00007fff973d8000)",
+    "\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x00007fff97190000)",
+    "\t/lib/ld-linux-aarch64.so.1 (0x00007fff973a0000)"
+  ],
+  "limitations": [
+    "Declared boundary layouts are not a universal storage schema or application object model",
+    "Only u32le, fixed bytes, and a final variable byte field; no general arithmetic or schema version negotiation",
+    "Dynamic ranges operate on PUT input; GET numeric-dependent ranges are rejected",
+    "One storage effect per handler, no read-modify-write, branches or feedback loops",
+    "Program always reserves room for eight dynamic range steps, including programs that use none",
+    "Source receive allocation remains fully retained/charged even when a small selection is returned",
+    "Server byte fields do not validate UTF-8; the example Python client preserves code-point boundaries",
+    "Logical payload bounds exclude mapping pages, page cache, disk, OS sockets and client allocations",
+    "Synchronous storage can delay other connections and timeout enforcement",
+    "Linux AArch64 only; macOS, real power loss, and large-service performance not tested"
+  ]
+}

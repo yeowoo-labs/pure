@@ -1,0 +1,2 @@
+   text	   data	    bss	    dec	    hex	filename
+  46878	   1384	     16	  48278	   bc96	prototypes/connections/build/pure-document-peer

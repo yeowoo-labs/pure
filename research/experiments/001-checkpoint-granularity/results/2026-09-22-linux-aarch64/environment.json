@@ -1,0 +1,330 @@
+{
+  "started_utc": "2026-09-22T09:32:06.820074+00:00",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "machine": "aarch64",
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+  "flags": [
+    "-std=c17",
+    "-O3",
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+    "-Werror"
+  ],
+  "python": "3.14.7",
+  "source_sha256": "9e1b1108f58a8725458531207bd1edf06d9af43ae3255c3b97d4388c2b58c707",
+  "runner_sha256": "4c3e8ae899eb5068813df9529a8c7953d63730ee3ca507a0a7dbe58963b1db01",
+  "trials": 7,
+  "target_ms": 20.0,
+  "seed": 20260922,
+  "timing": "batch elapsed time / update ticks; not input latency",
+  "memory": "sizeof engine + requested live array bytes; excludes allocator, harness, code, OS",
+  "power_control": "not controlled; shared host; preliminary measurements",
+  "original_affinity": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "measurement_affinity": [
+    0
+  ],
+  "cpu_description": [
+    "CPU architecture: 8",
+    "CPU implementer\t: 0x41",
+    "CPU part\t: 0xd0b",
+    "Model\t\t: Raspberry Pi 5 Model B Rev 1.1"
+  ],
+  "release_check": {
+    "checked_ticks": 108000,
+    "status": "passed"
+  },
+  "sanitizer_check": {
+    "checked_ticks": 108000,
+    "status": "passed"
+  },
+  "calibration_replays": [
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "roots",
+      "block": 1,
+      "replays": 6
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "roots",
+      "block": 4,
+      "replays": 4
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "roots",
+      "block": 16,
+      "replays": 6
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "roots",
+      "block": 64,
+      "replays": 6
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "roots",
+      "block": 256,
+      "replays": 6
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "uniform",
+      "block": 1,
+      "replays": 130
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "uniform",
+      "block": 4,
+      "replays": 110
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "uniform",
+      "block": 16,
+      "replays": 130
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "uniform",
+      "block": 64,
+      "replays": 124
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "uniform",
+      "block": 256,
+      "replays": 74
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "tail",
+      "block": 1,
+      "replays": 968
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "tail",
+      "block": 4,
+      "replays": 870
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "tail",
+      "block": 16,
+      "replays": 730
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "tail",
+      "block": 64,
+      "replays": 384
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "tail",
+      "block": 256,
+      "replays": 86
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "dense",
+      "block": 1,
+      "replays": 4
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "dense",
+      "block": 4,
+      "replays": 4
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "dense",
+      "block": 16,
+      "replays": 4
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "dense",
+      "block": 64,
+      "replays": 4
+    },
+    {
+      "chains": 16,
+      "length": 256,
+      "workload": "dense",
+      "block": 256,
+      "replays": 4
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "roots",
+      "block": 1,
+      "replays": 2
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "roots",
+      "block": 4,
+      "replays": 2
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "roots",
+      "block": 16,
+      "replays": 2
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "roots",
+      "block": 64,
+      "replays": 2
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "roots",
+      "block": 1024,
+      "replays": 2
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "uniform",
+      "block": 1,
+      "replays": 24
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "uniform",
+      "block": 4,
+      "replays": 22
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "uniform",
+      "block": 16,
+      "replays": 24
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "uniform",
+      "block": 64,
+      "replays": 24
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "uniform",
+      "block": 1024,
+      "replays": 14
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "tail",
+      "block": 1,
+      "replays": 912
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "tail",
+      "block": 4,
+      "replays": 834
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "tail",
+      "block": 16,
+      "replays": 708
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "tail",
+      "block": 64,
+      "replays": 384
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "tail",
+      "block": 1024,
+      "replays": 14
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "dense",
+      "block": 1,
+      "replays": 2
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "dense",
+      "block": 4,
+      "replays": 2
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "dense",
+      "block": 16,
+      "replays": 2
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "dense",
+      "block": 64,
+      "replays": 2
+    },
+    {
+      "chains": 16,
+      "length": 1024,
+      "workload": "dense",
+      "block": 1024,
+      "replays": 2
+    }
+  ],
+  "completed_utc": "2026-09-22T09:32:24.887753+00:00",
+  "binary_bytes": 71208
+}

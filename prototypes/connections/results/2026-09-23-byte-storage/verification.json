@@ -1,0 +1,52 @@
+{
+  "date": "2026-09-23",
+  "scope": "SQL-free storage correctness, lifetimes and admission bounds; not a performance comparison",
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+  "os_page_size_bytes": 16384,
+  "cwd": "prototypes/connections",
+  "native_command": "make check EVIDENCE=results/2026-09-23-byte-storage/native.json",
+  "sanitized_command": "make check BUILD=build/sanitized CFLAGS='-std=c17 -O1 -g -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -fno-omit-frame-pointer' EVIDENCE=results/2026-09-23-byte-storage/sanitized.json",
+  "core_checks": {
+    "native": "passed",
+    "asan_ubsan": "passed",
+    "leak_detection_disabled": false,
+    "coverage": [
+      "partial transfer and single release",
+      "range access including actual page boundaries and nonzero mapping offsets",
+      "immutable read across replacement",
+      "budget, conflicts, empty data, revision exhaustion",
+      "invalid file rejection",
+      "failure before publication preserves prior version",
+      "failure after publication reports uncertain durability",
+      "child exit before publication preserves prior version and releases writer lock"
+    ],
+    "native_binary_sha256": "a3189c0db63960bdf7b464d3813403065d7222366c00895e8eaad66450fd2f27",
+    "sanitized_binary_sha256": "acf03ba3881be9d534fc2419abed964f27d4dbd23173a34ab3efdeb831b7547f"
+  },
+  "integration_scenarios_each": 16,
+  "source_hashes_equal": true,
+  "source_snapshots": "sources/",
+  "source_snapshots_match_records": true,
+  "final_binaries_match_records": true,
+  "native_dynamic_dependencies_ldd": [
+    "\tlinux-vdso.so.1 (0x00007ffed5098000)",
+    "\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x00007ffed4e50000)",
+    "\t/lib/ld-linux-aarch64.so.1 (0x00007ffed5060000)"
+  ],
+  "initial_run": {
+    "directory": "initial/",
+    "difference": "Only test-flow.c changed: page-boundary fixture now uses actual OS page size and distinct per-page contents",
+    "original_test_sha256_verified": true
+  },
+  "limitations": [
+    "Linux AArch64 only; macOS not executed",
+    "No actual power-loss or disk-fault testing",
+    "Logical payload budget excludes page rounding, page cache, disk retention, OS sockets and client allocations",
+    "Unpublished files left by crashes are ignored but not automatically collected",
+    "Synchronous filesystem operations can delay other connections and timeout enforcement",
+    "Single-threaded control API with one cooperating process writer lock per directory",
+    "Whole-object replacement, no multi-object transaction or payload checksum",
+    "Stored files must not be mutated in place by external writers",
+    "Pure-authored external effects and automatic path optimization remain unimplemented"
+  ]
+}

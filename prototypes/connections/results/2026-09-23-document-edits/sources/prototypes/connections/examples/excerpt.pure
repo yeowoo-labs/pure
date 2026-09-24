@@ -1,0 +1,13 @@
+// Read bytes 32..47 of an object that must contain the complete 64-byte window.
+// Preparation keeps the size check for 16..79, and maps only 32..47 for reply.
+on get {
+    let object = store.read(request.key);
+    let window = range(object.body, 16, 64);
+    let excerpt = range(window, 16, 16);
+    reply(object, excerpt);
+}
+
+on put {
+    let saved = store.write(request.key, request.revision, request.body);
+    reply(saved);
+}

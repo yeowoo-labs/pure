@@ -1,0 +1,2602 @@
+[
+  {
+    "case": "dense_slow",
+    "variant": "borrow",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 132968553,
+      "min": 122887693,
+      "max": 156176896
+    },
+    "cpu_ns": {
+      "median": 110199520,
+      "min": 105059769,
+      "max": 135527318
+    },
+    "peak_reserved_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "peak_active_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 1007870.242312,
+      "min": 933965.439249,
+      "max": 1205798.201258
+    },
+    "latency_mean_ns": {
+      "median": 7516016.308,
+      "min": 6960585.889,
+      "max": 8983882.317
+    },
+    "latency_p99_upper_ns": {
+      "median": 14680064,
+      "min": 12582912,
+      "max": 23068672
+    },
+    "budget_waits": {
+      "median": 100,
+      "min": 8,
+      "max": 279
+    },
+    "allocations": {
+      "median": 126,
+      "min": 126,
+      "max": 126
+    },
+    "reuses": {
+      "median": 1922,
+      "min": 1922,
+      "max": 1922
+    }
+  },
+  {
+    "case": "dense_slow",
+    "variant": "copy",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 139629443,
+      "min": 132323981,
+      "max": 139897423
+    },
+    "cpu_ns": {
+      "median": 109997334,
+      "min": 98850013,
+      "max": 116916607
+    },
+    "peak_reserved_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "peak_active_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 100663296,
+      "min": 100663296,
+      "max": 100663296
+    },
+    "active_byte_seconds": {
+      "median": 1026043.651851,
+      "min": 1002967.933698,
+      "max": 1090782.263887
+    },
+    "latency_mean_ns": {
+      "median": 7639923.617,
+      "min": 7467830.775,
+      "max": 8122260.495
+    },
+    "latency_p99_upper_ns": {
+      "median": 11534336,
+      "min": 11534336,
+      "max": 16777216
+    },
+    "budget_waits": {
+      "median": 1868,
+      "min": 1245,
+      "max": 1923
+    },
+    "allocations": {
+      "median": 126,
+      "min": 126,
+      "max": 126
+    },
+    "reuses": {
+      "median": 3970,
+      "min": 3970,
+      "max": 3970
+    }
+  },
+  {
+    "case": "dense_slow",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 129205398,
+      "min": 125060409,
+      "max": 205943127
+    },
+    "cpu_ns": {
+      "median": 106642340,
+      "min": 95896509,
+      "max": 116032671
+    },
+    "peak_reserved_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "peak_active_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 100663296,
+      "min": 100663296,
+      "max": 100663296
+    },
+    "active_byte_seconds": {
+      "median": 989890.745684,
+      "min": 961708.896247,
+      "max": 1615356.534078
+    },
+    "latency_mean_ns": {
+      "median": 7371263.893,
+      "min": 7161052.395,
+      "max": 12031760.945
+    },
+    "latency_p99_upper_ns": {
+      "median": 12582912,
+      "min": 11534336,
+      "max": 20971520
+    },
+    "budget_waits": {
+      "median": 1720,
+      "min": 1363,
+      "max": 1854
+    },
+    "allocations": {
+      "median": 4096,
+      "min": 4096,
+      "max": 4096
+    },
+    "reuses": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    }
+  },
+  {
+    "case": "dense_slow",
+    "variant": "pressure",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 131031651,
+      "min": 121667696,
+      "max": 148054808
+    },
+    "cpu_ns": {
+      "median": 110625767,
+      "min": 101165480,
+      "max": 118930635
+    },
+    "peak_reserved_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "peak_active_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 1012712.39438,
+      "min": 944768.902586,
+      "max": 1145837.182993
+    },
+    "latency_mean_ns": {
+      "median": 7550902.647,
+      "min": 7047783.954,
+      "max": 8545660.143
+    },
+    "latency_p99_upper_ns": {
+      "median": 12582912,
+      "min": 11534336,
+      "max": 16777216
+    },
+    "budget_waits": {
+      "median": 217,
+      "min": 108,
+      "max": 330
+    },
+    "allocations": {
+      "median": 126,
+      "min": 126,
+      "max": 126
+    },
+    "reuses": {
+      "median": 1922,
+      "min": 1922,
+      "max": 1922
+    }
+  },
+  {
+    "case": "dense_slow",
+    "variant": "project",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 153699255,
+      "min": 138012595,
+      "max": 177547354
+    },
+    "cpu_ns": {
+      "median": 101124724,
+      "min": 97036844,
+      "max": 105530265
+    },
+    "peak_reserved_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "peak_active_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 1191532.621299,
+      "min": 1074555.345603,
+      "max": 1401395.334755
+    },
+    "latency_mean_ns": {
+      "median": 8908081.106,
+      "min": 8024328.08,
+      "max": 10478829.253
+    },
+    "latency_p99_upper_ns": {
+      "median": 15728640,
+      "min": 11534336,
+      "max": 27262976
+    },
+    "budget_waits": {
+      "median": 716,
+      "min": 573,
+      "max": 1077
+    },
+    "allocations": {
+      "median": 126,
+      "min": 126,
+      "max": 126
+    },
+    "reuses": {
+      "median": 1922,
+      "min": 1922,
+      "max": 1922
+    }
+  },
+  {
+    "case": "dense_slow",
+    "variant": "threshold2",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 127102070,
+      "min": 121944973,
+      "max": 150967021
+    },
+    "cpu_ns": {
+      "median": 109226645,
+      "min": 98389110,
+      "max": 112103512
+    },
+    "peak_reserved_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "peak_active_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 988062.578411,
+      "min": 941745.792822,
+      "max": 1153842.867633
+    },
+    "latency_mean_ns": {
+      "median": 7376714.273,
+      "min": 7027416.376,
+      "max": 8607200.207
+    },
+    "latency_p99_upper_ns": {
+      "median": 11534336,
+      "min": 11534336,
+      "max": 14680064
+    },
+    "budget_waits": {
+      "median": 343,
+      "min": 123,
+      "max": 548
+    },
+    "allocations": {
+      "median": 126,
+      "min": 126,
+      "max": 126
+    },
+    "reuses": {
+      "median": 1922,
+      "min": 1922,
+      "max": 1922
+    }
+  },
+  {
+    "case": "dense_slow",
+    "variant": "threshold4",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 128197678,
+      "min": 117467153,
+      "max": 152388963
+    },
+    "cpu_ns": {
+      "median": 105658521,
+      "min": 100339777,
+      "max": 133280290
+    },
+    "peak_reserved_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "peak_active_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 997040.290853,
+      "min": 908428.389283,
+      "max": 1188061.088853
+    },
+    "latency_mean_ns": {
+      "median": 7442559.441,
+      "min": 6773721.904,
+      "max": 8858624.865
+    },
+    "latency_p99_upper_ns": {
+      "median": 13631488,
+      "min": 11534336,
+      "max": 25165824
+    },
+    "budget_waits": {
+      "median": 263,
+      "min": 86,
+      "max": 483
+    },
+    "allocations": {
+      "median": 126,
+      "min": 126,
+      "max": 126
+    },
+    "reuses": {
+      "median": 1922,
+      "min": 1922,
+      "max": 1922
+    }
+  },
+  {
+    "case": "dense_slow",
+    "variant": "threshold8",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 130400357,
+      "min": 127832493,
+      "max": 158487631
+    },
+    "cpu_ns": {
+      "median": 108222327,
+      "min": 104607294,
+      "max": 119769747
+    },
+    "peak_reserved_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "peak_active_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 999089.777214,
+      "min": 981225.27374,
+      "max": 1223330.140557
+    },
+    "latency_mean_ns": {
+      "median": 7449478.358,
+      "min": 7311488.307,
+      "max": 9142910.493
+    },
+    "latency_p99_upper_ns": {
+      "median": 13631488,
+      "min": 12582912,
+      "max": 25165824
+    },
+    "budget_waits": {
+      "median": 210,
+      "min": 33,
+      "max": 881
+    },
+    "allocations": {
+      "median": 126,
+      "min": 126,
+      "max": 126
+    },
+    "reuses": {
+      "median": 1922,
+      "min": 1922,
+      "max": 1922
+    }
+  },
+  {
+    "case": "mixed_slow",
+    "variant": "borrow",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 202207266,
+      "min": 187355085,
+      "max": 277725554
+    },
+    "cpu_ns": {
+      "median": 109214745,
+      "min": 105102970,
+      "max": 130508378
+    },
+    "peak_reserved_bytes": {
+      "median": 8386736,
+      "min": 8386736,
+      "max": 8386736
+    },
+    "peak_active_bytes": {
+      "median": 8386640,
+      "min": 8386640,
+      "max": 8386688
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 1584952.748115,
+      "min": 1467132.987688,
+      "max": 2188978.814479
+    },
+    "latency_mean_ns": {
+      "median": 8968645.74,
+      "min": 8306217.014,
+      "max": 12364716.181
+    },
+    "latency_p99_upper_ns": {
+      "median": 15728640,
+      "min": 13631488,
+      "max": 25165824
+    },
+    "budget_waits": {
+      "median": 922,
+      "min": 882,
+      "max": 942
+    },
+    "allocations": {
+      "median": 1268,
+      "min": 1246,
+      "max": 1270
+    },
+    "reuses": {
+      "median": 780,
+      "min": 778,
+      "max": 802
+    }
+  },
+  {
+    "case": "mixed_slow",
+    "variant": "copy",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 179916143,
+      "min": 155808970,
+      "max": 221349934
+    },
+    "cpu_ns": {
+      "median": 88224841,
+      "min": 73686530,
+      "max": 109576369
+    },
+    "peak_reserved_bytes": {
+      "median": 8388560,
+      "min": 8388432,
+      "max": 8388576
+    },
+    "peak_active_bytes": {
+      "median": 8388432,
+      "min": 8388432,
+      "max": 8388432
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 53727440,
+      "min": 53727440,
+      "max": 53727440
+    },
+    "active_byte_seconds": {
+      "median": 1259295.778761,
+      "min": 1105823.092919,
+      "max": 1540447.287587
+    },
+    "latency_mean_ns": {
+      "median": 23134688.68,
+      "min": 20210703.898,
+      "max": 28163326.597
+    },
+    "latency_p99_upper_ns": {
+      "median": 37748736,
+      "min": 29360128,
+      "max": 46137344
+    },
+    "budget_waits": {
+      "median": 855,
+      "min": 733,
+      "max": 970
+    },
+    "allocations": {
+      "median": 2029,
+      "min": 1871,
+      "max": 2181
+    },
+    "reuses": {
+      "median": 2067,
+      "min": 1915,
+      "max": 2225
+    }
+  },
+  {
+    "case": "mixed_slow",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 185563183,
+      "min": 175012120,
+      "max": 209526727
+    },
+    "cpu_ns": {
+      "median": 90207409,
+      "min": 86574113,
+      "max": 99669005
+    },
+    "peak_reserved_bytes": {
+      "median": 8388432,
+      "min": 8388432,
+      "max": 8388432
+    },
+    "peak_active_bytes": {
+      "median": 8388432,
+      "min": 8388432,
+      "max": 8388432
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 53727440,
+      "min": 53727440,
+      "max": 53727440
+    },
+    "active_byte_seconds": {
+      "median": 1315287.672243,
+      "min": 1189109.090661,
+      "max": 1504182.816335
+    },
+    "latency_mean_ns": {
+      "median": 24158310.672,
+      "min": 21577383.531,
+      "max": 27706362.205
+    },
+    "latency_p99_upper_ns": {
+      "median": 37748736,
+      "min": 37748736,
+      "max": 50331648
+    },
+    "budget_waits": {
+      "median": 852,
+      "min": 824,
+      "max": 899
+    },
+    "allocations": {
+      "median": 4096,
+      "min": 4096,
+      "max": 4096
+    },
+    "reuses": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    }
+  },
+  {
+    "case": "mixed_slow",
+    "variant": "pressure",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 180476475,
+      "min": 170729984,
+      "max": 200423808
+    },
+    "cpu_ns": {
+      "median": 89751173,
+      "min": 82814346,
+      "max": 95868665
+    },
+    "peak_reserved_bytes": {
+      "median": 8388560,
+      "min": 8388480,
+      "max": 8388560
+    },
+    "peak_active_bytes": {
+      "median": 8388432,
+      "min": 8388432,
+      "max": 8388432
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 27916032,
+      "min": 27916032,
+      "max": 27916032
+    },
+    "active_byte_seconds": {
+      "median": 1287754.655314,
+      "min": 1237184.456112,
+      "max": 1462564.435239
+    },
+    "latency_mean_ns": {
+      "median": 23117968.235,
+      "min": 22318118.532,
+      "max": 26149827.952
+    },
+    "latency_p99_upper_ns": {
+      "median": 37748736,
+      "min": 31457280,
+      "max": 46137344
+    },
+    "budget_waits": {
+      "median": 862,
+      "min": 826,
+      "max": 906
+    },
+    "allocations": {
+      "median": 1996,
+      "min": 1950,
+      "max": 2034
+    },
+    "reuses": {
+      "median": 1751,
+      "min": 1713,
+      "max": 1797
+    }
+  },
+  {
+    "case": "mixed_slow",
+    "variant": "project",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 188062454,
+      "min": 182031656,
+      "max": 266408067
+    },
+    "cpu_ns": {
+      "median": 85794578,
+      "min": 77869217,
+      "max": 111663429
+    },
+    "peak_reserved_bytes": {
+      "median": 8388576,
+      "min": 8388576,
+      "max": 8388608
+    },
+    "peak_active_bytes": {
+      "median": 8388544,
+      "min": 8388544,
+      "max": 8388576
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 1338315.607594,
+      "min": 1288001.912824,
+      "max": 1878408.17389
+    },
+    "latency_mean_ns": {
+      "median": 25106963.876,
+      "min": 23787174.92,
+      "max": 34638344.422
+    },
+    "latency_p99_upper_ns": {
+      "median": 41943040,
+      "min": 33554432,
+      "max": 54525952
+    },
+    "budget_waits": {
+      "median": 835,
+      "min": 732,
+      "max": 900
+    },
+    "allocations": {
+      "median": 1594,
+      "min": 1498,
+      "max": 1654
+    },
+    "reuses": {
+      "median": 454,
+      "min": 394,
+      "max": 550
+    }
+  },
+  {
+    "case": "mixed_slow",
+    "variant": "threshold2",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 191170037,
+      "min": 172458424,
+      "max": 248649117
+    },
+    "cpu_ns": {
+      "median": 95876297,
+      "min": 88442274,
+      "max": 108815021
+    },
+    "peak_reserved_bytes": {
+      "median": 8388560,
+      "min": 8388432,
+      "max": 8388560
+    },
+    "peak_active_bytes": {
+      "median": 8388432,
+      "min": 8388432,
+      "max": 8388432
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 28479696,
+      "min": 28479696,
+      "max": 28479696
+    },
+    "active_byte_seconds": {
+      "median": 1364006.158543,
+      "min": 1218383.798869,
+      "max": 1817663.170181
+    },
+    "latency_mean_ns": {
+      "median": 24916604.797,
+      "min": 22201893.822,
+      "max": 32835308.438
+    },
+    "latency_p99_upper_ns": {
+      "median": 37748736,
+      "min": 29360128,
+      "max": 50331648
+    },
+    "budget_waits": {
+      "median": 838,
+      "min": 758,
+      "max": 873
+    },
+    "allocations": {
+      "median": 1933,
+      "min": 1822,
+      "max": 1998
+    },
+    "reuses": {
+      "median": 1855,
+      "min": 1790,
+      "max": 1966
+    }
+  },
+  {
+    "case": "mixed_slow",
+    "variant": "threshold4",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 182099749,
+      "min": 162195656,
+      "max": 221114880
+    },
+    "cpu_ns": {
+      "median": 94178139,
+      "min": 80564634,
+      "max": 108320175
+    },
+    "peak_reserved_bytes": {
+      "median": 8388608,
+      "min": 8388608,
+      "max": 8388608
+    },
+    "peak_active_bytes": {
+      "median": 8388608,
+      "min": 8388608,
+      "max": 8388608
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 11229392,
+      "min": 11229392,
+      "max": 11229392
+    },
+    "active_byte_seconds": {
+      "median": 1347766.35285,
+      "min": 1200241.584576,
+      "max": 1620151.723755
+    },
+    "latency_mean_ns": {
+      "median": 18702737.958,
+      "min": 16670151.746,
+      "max": 22302398.136
+    },
+    "latency_p99_upper_ns": {
+      "median": 27262976,
+      "min": 23068672,
+      "max": 41943040
+    },
+    "budget_waits": {
+      "median": 948,
+      "min": 867,
+      "max": 983
+    },
+    "allocations": {
+      "median": 1778,
+      "min": 1725,
+      "max": 1834
+    },
+    "reuses": {
+      "median": 1627,
+      "min": 1571,
+      "max": 1680
+    }
+  },
+  {
+    "case": "mixed_slow",
+    "variant": "threshold8",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 180744548,
+      "min": 177004559,
+      "max": 285706068
+    },
+    "cpu_ns": {
+      "median": 92447570,
+      "min": 88024506,
+      "max": 123773735
+    },
+    "peak_reserved_bytes": {
+      "median": 8388608,
+      "min": 8388496,
+      "max": 8388608
+    },
+    "peak_active_bytes": {
+      "median": 8388432,
+      "min": 8388352,
+      "max": 8388432
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 3824848,
+      "min": 3824848,
+      "max": 3824848
+    },
+    "active_byte_seconds": {
+      "median": 1375000.84592,
+      "min": 1308343.909911,
+      "max": 2141933.275175
+    },
+    "latency_mean_ns": {
+      "median": 14634490.266,
+      "min": 13961564.399,
+      "max": 22809999.729
+    },
+    "latency_p99_upper_ns": {
+      "median": 25165824,
+      "min": 20971520,
+      "max": 41943040
+    },
+    "budget_waits": {
+      "median": 956,
+      "min": 811,
+      "max": 987
+    },
+    "allocations": {
+      "median": 1752,
+      "min": 1639,
+      "max": 1772
+    },
+    "reuses": {
+      "median": 1304,
+      "min": 1284,
+      "max": 1417
+    }
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "borrow",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 494360387,
+      "min": 491528840,
+      "max": 544543692
+    },
+    "cpu_ns": {
+      "median": 76140523,
+      "min": 70906509,
+      "max": 90900399
+    },
+    "peak_reserved_bytes": {
+      "median": 2094128,
+      "min": 2094128,
+      "max": 2094128
+    },
+    "peak_active_bytes": {
+      "median": 2094128,
+      "min": 2094032,
+      "max": 2094128
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 932412.777581,
+      "min": 926418.118409,
+      "max": 1028555.825239
+    },
+    "latency_mean_ns": {
+      "median": 5500812.732,
+      "min": 5472000.565,
+      "max": 6077465.417
+    },
+    "latency_p99_upper_ns": {
+      "median": 8388608,
+      "min": 8388608,
+      "max": 11534336
+    },
+    "budget_waits": {
+      "median": 1395,
+      "min": 1286,
+      "max": 1421
+    },
+    "allocations": {
+      "median": 1345,
+      "min": 1332,
+      "max": 1353
+    },
+    "reuses": {
+      "median": 703,
+      "min": 695,
+      "max": 716
+    }
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "copy",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 191836517,
+      "min": 191114147,
+      "max": 205803459
+    },
+    "cpu_ns": {
+      "median": 62332245,
+      "min": 60306782,
+      "max": 87522857
+    },
+    "peak_reserved_bytes": {
+      "median": 2097152,
+      "min": 2097136,
+      "max": 2097152
+    },
+    "peak_active_bytes": {
+      "median": 2097136,
+      "min": 2097136,
+      "max": 2097136
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 53727440,
+      "min": 53727440,
+      "max": 53727440
+    },
+    "active_byte_seconds": {
+      "median": 347142.858576,
+      "min": 345755.184019,
+      "max": 363428.263552
+    },
+    "latency_mean_ns": {
+      "median": 6069082.115,
+      "min": 6032302.559,
+      "max": 6356735.332
+    },
+    "latency_p99_upper_ns": {
+      "median": 8388608,
+      "min": 8388608,
+      "max": 11534336
+    },
+    "budget_waits": {
+      "median": 1362,
+      "min": 1210,
+      "max": 1379
+    },
+    "allocations": {
+      "median": 2460,
+      "min": 2361,
+      "max": 2470
+    },
+    "reuses": {
+      "median": 1636,
+      "min": 1626,
+      "max": 1735
+    }
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 190661223,
+      "min": 190230224,
+      "max": 215534802
+    },
+    "cpu_ns": {
+      "median": 60180004,
+      "min": 58883103,
+      "max": 92135979
+    },
+    "peak_reserved_bytes": {
+      "median": 2097136,
+      "min": 2097136,
+      "max": 2097136
+    },
+    "peak_active_bytes": {
+      "median": 2097136,
+      "min": 2097136,
+      "max": 2097136
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 53727440,
+      "min": 53727440,
+      "max": 53727440
+    },
+    "active_byte_seconds": {
+      "median": 345094.680154,
+      "min": 344486.353015,
+      "max": 387556.898349
+    },
+    "latency_mean_ns": {
+      "median": 6036141.159,
+      "min": 6020977.936,
+      "max": 6714221.641
+    },
+    "latency_p99_upper_ns": {
+      "median": 8388608,
+      "min": 8388608,
+      "max": 10485760
+    },
+    "budget_waits": {
+      "median": 1379,
+      "min": 1179,
+      "max": 1383
+    },
+    "allocations": {
+      "median": 4096,
+      "min": 4096,
+      "max": 4096
+    },
+    "reuses": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    }
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "pressure",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 190593723,
+      "min": 189684559,
+      "max": 194998211
+    },
+    "cpu_ns": {
+      "median": 62104383,
+      "min": 60109883,
+      "max": 80964449
+    },
+    "peak_reserved_bytes": {
+      "median": 2097136,
+      "min": 2097136,
+      "max": 2097152
+    },
+    "peak_active_bytes": {
+      "median": 2097136,
+      "min": 2097136,
+      "max": 2097136
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 28385168,
+      "min": 28385168,
+      "max": 28385168
+    },
+    "active_byte_seconds": {
+      "median": 346774.138471,
+      "min": 345575.615482,
+      "max": 352937.551048
+    },
+    "latency_mean_ns": {
+      "median": 6133228.412,
+      "min": 6110993.322,
+      "max": 6209271.27
+    },
+    "latency_p99_upper_ns": {
+      "median": 8388608,
+      "min": 8388608,
+      "max": 9437184
+    },
+    "budget_waits": {
+      "median": 1387,
+      "min": 1251,
+      "max": 1401
+    },
+    "allocations": {
+      "median": 2377,
+      "min": 2265,
+      "max": 2383
+    },
+    "reuses": {
+      "median": 1398,
+      "min": 1392,
+      "max": 1510
+    }
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "project",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 176712466,
+      "min": 175293210,
+      "max": 191006927
+    },
+    "cpu_ns": {
+      "median": 57346839,
+      "min": 56768485,
+      "max": 80024226
+    },
+    "peak_reserved_bytes": {
+      "median": 2097120,
+      "min": 2097120,
+      "max": 2097120
+    },
+    "peak_active_bytes": {
+      "median": 2097120,
+      "min": 2097120,
+      "max": 2097120
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 329327.109037,
+      "min": 326483.546647,
+      "max": 354343.266259
+    },
+    "latency_mean_ns": {
+      "median": 6344282.023,
+      "min": 6283898.527,
+      "max": 6749781.49
+    },
+    "latency_p99_upper_ns": {
+      "median": 8388608,
+      "min": 8388608,
+      "max": 10485760
+    },
+    "budget_waits": {
+      "median": 1308,
+      "min": 1164,
+      "max": 1313
+    },
+    "allocations": {
+      "median": 1722,
+      "min": 1659,
+      "max": 1727
+    },
+    "reuses": {
+      "median": 326,
+      "min": 321,
+      "max": 389
+    }
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "threshold2",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 188885136,
+      "min": 187864582,
+      "max": 218109869
+    },
+    "cpu_ns": {
+      "median": 63904326,
+      "min": 60112693,
+      "max": 94383237
+    },
+    "peak_reserved_bytes": {
+      "median": 2097136,
+      "min": 2097136,
+      "max": 2097136
+    },
+    "peak_active_bytes": {
+      "median": 2097136,
+      "min": 2097136,
+      "max": 2097136
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 28479696,
+      "min": 28479696,
+      "max": 28479696
+    },
+    "active_byte_seconds": {
+      "median": 342822.067006,
+      "min": 341567.414808,
+      "max": 394831.364885
+    },
+    "latency_mean_ns": {
+      "median": 6121880.805,
+      "min": 6102214.292,
+      "max": 7013746.965
+    },
+    "latency_p99_upper_ns": {
+      "median": 8388608,
+      "min": 8388608,
+      "max": 14680064
+    },
+    "budget_waits": {
+      "median": 1390,
+      "min": 1166,
+      "max": 1411
+    },
+    "allocations": {
+      "median": 2356,
+      "min": 2188,
+      "max": 2384
+    },
+    "reuses": {
+      "median": 1432,
+      "min": 1404,
+      "max": 1600
+    }
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "threshold4",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 226008956,
+      "min": 224500368,
+      "max": 240539157
+    },
+    "cpu_ns": {
+      "median": 64169718,
+      "min": 61534673,
+      "max": 82888986
+    },
+    "peak_reserved_bytes": {
+      "median": 2097136,
+      "min": 2097136,
+      "max": 2097136
+    },
+    "peak_active_bytes": {
+      "median": 2097104,
+      "min": 2097104,
+      "max": 2097104
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 11229392,
+      "min": 11229392,
+      "max": 11229392
+    },
+    "active_byte_seconds": {
+      "median": 414911.228869,
+      "min": 412262.960044,
+      "max": 437508.612236
+    },
+    "latency_mean_ns": {
+      "median": 5866464.096,
+      "min": 5837746.733,
+      "max": 6115847.212
+    },
+    "latency_p99_upper_ns": {
+      "median": 8388608,
+      "min": 7864320,
+      "max": 9437184
+    },
+    "budget_waits": {
+      "median": 1452,
+      "min": 1333,
+      "max": 1465
+    },
+    "allocations": {
+      "median": 2125,
+      "min": 2037,
+      "max": 2145
+    },
+    "reuses": {
+      "median": 1280,
+      "min": 1260,
+      "max": 1368
+    }
+  },
+  {
+    "case": "mixed_tight",
+    "variant": "threshold8",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 284454034,
+      "min": 282084485,
+      "max": 315263040
+    },
+    "cpu_ns": {
+      "median": 68644342,
+      "min": 66066433,
+      "max": 90750328
+    },
+    "peak_reserved_bytes": {
+      "median": 2097136,
+      "min": 2097120,
+      "max": 2097136
+    },
+    "peak_active_bytes": {
+      "median": 2097136,
+      "min": 2097120,
+      "max": 2097136
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 3824848,
+      "min": 3824848,
+      "max": 3824848
+    },
+    "active_byte_seconds": {
+      "median": 523909.294385,
+      "min": 520410.956771,
+      "max": 579371.042178
+    },
+    "latency_mean_ns": {
+      "median": 5707951.51,
+      "min": 5671193.431,
+      "max": 6291155.426
+    },
+    "latency_p99_upper_ns": {
+      "median": 7340032,
+      "min": 7340032,
+      "max": 13631488
+    },
+    "budget_waits": {
+      "median": 1386,
+      "min": 1248,
+      "max": 1398
+    },
+    "allocations": {
+      "median": 1983,
+      "min": 1890,
+      "max": 1992
+    },
+    "reuses": {
+      "median": 1073,
+      "min": 1064,
+      "max": 1166
+    }
+  },
+  {
+    "case": "sparse_fast",
+    "variant": "borrow",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 21555643,
+      "min": 20408294,
+      "max": 25754576
+    },
+    "cpu_ns": {
+      "median": 21467723,
+      "min": 20408999,
+      "max": 25674260
+    },
+    "peak_reserved_bytes": {
+      "median": 156112,
+      "min": 156112,
+      "max": 156112
+    },
+    "peak_active_bytes": {
+      "median": 156112,
+      "min": 156112,
+      "max": 156112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 1339.691796,
+      "min": 1265.057763,
+      "max": 1611.048102
+    },
+    "latency_mean_ns": {
+      "median": 10366.948,
+      "min": 9812.079,
+      "max": 12408.192
+    },
+    "latency_p99_upper_ns": {
+      "median": 18432,
+      "min": 13312,
+      "max": 20480
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 1,
+      "min": 1,
+      "max": 1
+    },
+    "reuses": {
+      "median": 2047,
+      "min": 2047,
+      "max": 2047
+    }
+  },
+  {
+    "case": "sparse_fast",
+    "variant": "copy",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 21065681,
+      "min": 20744256,
+      "max": 40643311
+    },
+    "cpu_ns": {
+      "median": 21006279,
+      "min": 20744722,
+      "max": 40589351
+    },
+    "peak_reserved_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "peak_active_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 1124.320165,
+      "min": 1107.901257,
+      "max": 2334.403772
+    },
+    "latency_mean_ns": {
+      "median": 10139.793,
+      "min": 9979.793,
+      "max": 19667.254
+    },
+    "latency_p99_upper_ns": {
+      "median": 15360,
+      "min": 13312,
+      "max": 49152
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 2,
+      "min": 2,
+      "max": 2
+    },
+    "reuses": {
+      "median": 4094,
+      "min": 4094,
+      "max": 4094
+    }
+  },
+  {
+    "case": "sparse_fast",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 21725958,
+      "min": 21132162,
+      "max": 30675302
+    },
+    "cpu_ns": {
+      "median": 21582704,
+      "min": 21048817,
+      "max": 30605147
+    },
+    "peak_reserved_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "peak_active_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 1159.292471,
+      "min": 1121.783606,
+      "max": 1690.623657
+    },
+    "latency_mean_ns": {
+      "median": 10452.028,
+      "min": 10163.675,
+      "max": 14792.559
+    },
+    "latency_p99_upper_ns": {
+      "median": 16384,
+      "min": 15360,
+      "max": 36864
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 4096,
+      "min": 4096,
+      "max": 4096
+    },
+    "reuses": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    }
+  },
+  {
+    "case": "sparse_fast",
+    "variant": "pressure",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 23241749,
+      "min": 20554720,
+      "max": 28270087
+    },
+    "cpu_ns": {
+      "median": 23003312,
+      "min": 20527722,
+      "max": 28259741
+    },
+    "peak_reserved_bytes": {
+      "median": 156112,
+      "min": 156112,
+      "max": 156112
+    },
+    "peak_active_bytes": {
+      "median": 156112,
+      "min": 156112,
+      "max": 156112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 1441.524009,
+      "min": 1273.955005,
+      "max": 1772.014643
+    },
+    "latency_mean_ns": {
+      "median": 11135.177,
+      "min": 9881.978,
+      "max": 13635.652
+    },
+    "latency_p99_upper_ns": {
+      "median": 20480,
+      "min": 13312,
+      "max": 24576
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 1,
+      "min": 1,
+      "max": 1
+    },
+    "reuses": {
+      "median": 2047,
+      "min": 2047,
+      "max": 2047
+    }
+  },
+  {
+    "case": "sparse_fast",
+    "variant": "project",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 22216122,
+      "min": 21766957,
+      "max": 25768428
+    },
+    "cpu_ns": {
+      "median": 22202889,
+      "min": 21732111,
+      "max": 25607575
+    },
+    "peak_reserved_bytes": {
+      "median": 90640,
+      "min": 90640,
+      "max": 90640
+    },
+    "peak_active_bytes": {
+      "median": 90640,
+      "min": 90640,
+      "max": 90640
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 1.688434,
+      "min": 1.653919,
+      "max": 1.971383
+    },
+    "latency_mean_ns": {
+      "median": 10698.669,
+      "min": 10483.601,
+      "max": 12427.336
+    },
+    "latency_p99_upper_ns": {
+      "median": 16384,
+      "min": 13312,
+      "max": 22528
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 1,
+      "min": 1,
+      "max": 1
+    },
+    "reuses": {
+      "median": 2047,
+      "min": 2047,
+      "max": 2047
+    }
+  },
+  {
+    "case": "sparse_fast",
+    "variant": "threshold2",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 21328570,
+      "min": 20854404,
+      "max": 27294793
+    },
+    "cpu_ns": {
+      "median": 21275351,
+      "min": 20822149,
+      "max": 27138353
+    },
+    "peak_reserved_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "peak_active_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 1144.526904,
+      "min": 1108.309428,
+      "max": 1515.562825
+    },
+    "latency_mean_ns": {
+      "median": 10266.949,
+      "min": 10030.324,
+      "max": 13171.363
+    },
+    "latency_p99_upper_ns": {
+      "median": 15360,
+      "min": 14336,
+      "max": 28672
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 2,
+      "min": 2,
+      "max": 2
+    },
+    "reuses": {
+      "median": 4094,
+      "min": 4094,
+      "max": 4094
+    }
+  },
+  {
+    "case": "sparse_fast",
+    "variant": "threshold4",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 22839176,
+      "min": 20961885,
+      "max": 28395383
+    },
+    "cpu_ns": {
+      "median": 22457056,
+      "min": 20931648,
+      "max": 28350296
+    },
+    "peak_reserved_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "peak_active_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 1227.172318,
+      "min": 1117.500277,
+      "max": 1583.182193
+    },
+    "latency_mean_ns": {
+      "median": 10958.209,
+      "min": 10087.398,
+      "max": 13707.471
+    },
+    "latency_p99_upper_ns": {
+      "median": 20480,
+      "min": 13312,
+      "max": 26624
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 2,
+      "min": 2,
+      "max": 2
+    },
+    "reuses": {
+      "median": 4094,
+      "min": 4094,
+      "max": 4094
+    }
+  },
+  {
+    "case": "sparse_fast",
+    "variant": "threshold8",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 22601085,
+      "min": 20540535,
+      "max": 33207148
+    },
+    "cpu_ns": {
+      "median": 22218814,
+      "min": 20499501,
+      "max": 33180296
+    },
+    "peak_reserved_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "peak_active_bytes": {
+      "median": 156192,
+      "min": 156192,
+      "max": 156192
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 1220.513584,
+      "min": 1100.863361,
+      "max": 1873.802277
+    },
+    "latency_mean_ns": {
+      "median": 10886.611,
+      "min": 9884.486,
+      "max": 16048.501
+    },
+    "latency_p99_upper_ns": {
+      "median": 28672,
+      "min": 13312,
+      "max": 36864
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 2,
+      "min": 2,
+      "max": 2
+    },
+    "reuses": {
+      "median": 4094,
+      "min": 4094,
+      "max": 4094
+    }
+  },
+  {
+    "case": "sparse_slow",
+    "variant": "borrow",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 122707360,
+      "min": 101576920,
+      "max": 132106520
+    },
+    "cpu_ns": {
+      "median": 46471284,
+      "min": 45409725,
+      "max": 50248602
+    },
+    "peak_reserved_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "peak_active_bytes": {
+      "median": 8350112,
+      "min": 8350112,
+      "max": 8350112
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 963195.592926,
+      "min": 784884.708981,
+      "max": 1041796.843202
+    },
+    "latency_mean_ns": {
+      "median": 7210177.487,
+      "min": 5868549.98,
+      "max": 7801228.044
+    },
+    "latency_p99_upper_ns": {
+      "median": 9437184,
+      "min": 9437184,
+      "max": 10485760
+    },
+    "budget_waits": {
+      "median": 1334,
+      "min": 825,
+      "max": 1532
+    },
+    "allocations": {
+      "median": 126,
+      "min": 126,
+      "max": 126
+    },
+    "reuses": {
+      "median": 1922,
+      "min": 1922,
+      "max": 1922
+    }
+  },
+  {
+    "case": "sparse_slow",
+    "variant": "copy",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 155007270,
+      "min": 153170646,
+      "max": 160896124
+    },
+    "cpu_ns": {
+      "median": 25740442,
+      "min": 24156681,
+      "max": 48121065
+    },
+    "peak_reserved_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "peak_active_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 6585.869234,
+      "min": 6504.184345,
+      "max": 7879.414446
+    },
+    "latency_mean_ns": {
+      "median": 33274854.653,
+      "min": 32718961.288,
+      "max": 34942676.828
+    },
+    "latency_p99_upper_ns": {
+      "median": 37748736,
+      "min": 37748736,
+      "max": 50331648
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 513,
+      "min": 513,
+      "max": 513
+    },
+    "reuses": {
+      "median": 3583,
+      "min": 3583,
+      "max": 3583
+    }
+  },
+  {
+    "case": "sparse_slow",
+    "variant": "copy_no_pool",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 154586382,
+      "min": 154143199,
+      "max": 164046264
+    },
+    "cpu_ns": {
+      "median": 24703970,
+      "min": 24004931,
+      "max": 46944898
+    },
+    "peak_reserved_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "peak_active_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 6526.934401,
+      "min": 6483.552028,
+      "max": 8459.440246
+    },
+    "latency_mean_ns": {
+      "median": 33387730.27,
+      "min": 33287028.642,
+      "max": 35133900.267
+    },
+    "latency_p99_upper_ns": {
+      "median": 41943040,
+      "min": 37748736,
+      "max": 46137344
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 4096,
+      "min": 4096,
+      "max": 4096
+    },
+    "reuses": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    }
+  },
+  {
+    "case": "sparse_slow",
+    "variant": "pressure",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 151522021,
+      "min": 151398447,
+      "max": 170735523
+    },
+    "cpu_ns": {
+      "median": 27174295,
+      "min": 26713792,
+      "max": 36085789
+    },
+    "peak_reserved_bytes": {
+      "median": 4321888,
+      "min": 4321888,
+      "max": 4321888
+    },
+    "peak_active_bytes": {
+      "median": 4316448,
+      "min": 4316128,
+      "max": 4317248
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 113152,
+      "min": 113024,
+      "max": 113408
+    },
+    "active_byte_seconds": {
+      "median": 545315.69968,
+      "min": 535707.02646,
+      "max": 624641.105995
+    },
+    "latency_mean_ns": {
+      "median": 32398179.535,
+      "min": 32391902.953,
+      "max": 37128525.741
+    },
+    "latency_p99_upper_ns": {
+      "median": 37748736,
+      "min": 37748736,
+      "max": 50331648
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 514,
+      "min": 514,
+      "max": 514
+    },
+    "reuses": {
+      "median": 3302,
+      "min": 3300,
+      "max": 3306
+    }
+  },
+  {
+    "case": "sparse_slow",
+    "variant": "project",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 154766567,
+      "min": 154024996,
+      "max": 157789596
+    },
+    "cpu_ns": {
+      "median": 25290252,
+      "min": 24892483,
+      "max": 25739163
+    },
+    "peak_reserved_bytes": {
+      "median": 131520,
+      "min": 131520,
+      "max": 131520
+    },
+    "peak_active_bytes": {
+      "median": 131520,
+      "min": 131520,
+      "max": 131520
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "active_byte_seconds": {
+      "median": 5470.365986,
+      "min": 5441.502377,
+      "max": 5595.217111
+    },
+    "latency_mean_ns": {
+      "median": 33388895.003,
+      "min": 33212736.419,
+      "max": 34150955.425
+    },
+    "latency_p99_upper_ns": {
+      "median": 41943040,
+      "min": 37748736,
+      "max": 41943040
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 512,
+      "min": 512,
+      "max": 512
+    },
+    "reuses": {
+      "median": 1536,
+      "min": 1536,
+      "max": 1536
+    }
+  },
+  {
+    "case": "sparse_slow",
+    "variant": "threshold2",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 154790882,
+      "min": 154125217,
+      "max": 183186784
+    },
+    "cpu_ns": {
+      "median": 24321563,
+      "min": 24092354,
+      "max": 47779812
+    },
+    "peak_reserved_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "peak_active_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 6519.648368,
+      "min": 6508.096109,
+      "max": 8175.636446
+    },
+    "latency_mean_ns": {
+      "median": 33288663.865,
+      "min": 31414916.006,
+      "max": 39799236.839
+    },
+    "latency_p99_upper_ns": {
+      "median": 37748736,
+      "min": 37748736,
+      "max": 54525952
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 513,
+      "min": 513,
+      "max": 513
+    },
+    "reuses": {
+      "median": 3583,
+      "min": 3583,
+      "max": 3583
+    }
+  },
+  {
+    "case": "sparse_slow",
+    "variant": "threshold4",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 154103699,
+      "min": 152733814,
+      "max": 154495679
+    },
+    "cpu_ns": {
+      "median": 24603184,
+      "min": 23694419,
+      "max": 52980104
+    },
+    "peak_reserved_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "peak_active_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 6514.197106,
+      "min": 6485.074292,
+      "max": 7602.229051
+    },
+    "latency_mean_ns": {
+      "median": 33271036.464,
+      "min": 30324683.181,
+      "max": 33331969.71
+    },
+    "latency_p99_upper_ns": {
+      "median": 37748736,
+      "min": 37748736,
+      "max": 54525952
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 513,
+      "min": 513,
+      "max": 513
+    },
+    "reuses": {
+      "median": 3583,
+      "min": 3583,
+      "max": 3583
+    }
+  },
+  {
+    "case": "sparse_slow",
+    "variant": "threshold8",
+    "samples": 5,
+    "elapsed_ns": {
+      "median": 154268606,
+      "min": 154242976,
+      "max": 161984455
+    },
+    "cpu_ns": {
+      "median": 24028565,
+      "min": 23936885,
+      "max": 35308455
+    },
+    "peak_reserved_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "peak_active_bytes": {
+      "median": 197072,
+      "min": 197072,
+      "max": 197072
+    },
+    "rss_peak_bytes": {
+      "median": 28753920,
+      "min": 28753920,
+      "max": 28753920
+    },
+    "copy_bytes": {
+      "median": 131072,
+      "min": 131072,
+      "max": 131072
+    },
+    "active_byte_seconds": {
+      "median": 6509.096995,
+      "min": 6499.765006,
+      "max": 7196.657649
+    },
+    "latency_mean_ns": {
+      "median": 33299370.61,
+      "min": 33265597.392,
+      "max": 34734342.366
+    },
+    "latency_p99_upper_ns": {
+      "median": 37748736,
+      "min": 37748736,
+      "max": 41943040
+    },
+    "budget_waits": {
+      "median": 0,
+      "min": 0,
+      "max": 0
+    },
+    "allocations": {
+      "median": 513,
+      "min": 513,
+      "max": 513
+    },
+    "reuses": {
+      "median": 3583,
+      "min": 3583,
+      "max": 3583
+    }
+  }
+]

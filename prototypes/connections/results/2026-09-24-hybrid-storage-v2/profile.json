@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-selected-hybrid-document-storage",
+  "scope": "Opt-in inline/PUREP001 document store on Linux AArch64/GCC 14. The CLI text ceiling is 42 KiB: 2 KiB above the original selected-page gate because the measured 41064-byte dual-format build fails 40 KiB. This is an explicit research budget, not the default micro-runtime budget. Direct dependencies only; excludes libc, process RAM, filesystem cache and journal, optional TLS/GTK.",
+  "budget_sha256": "038a323d8492731611dfc56e799e7da751946fe0ea5dc428550ff02ffd781b29",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-edit": {
+      "sections": {
+        "text": 41064,
+        "data": 1000,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "e024d1829ea1a2211c58c33b8ae457794cbda0dbf927cdcb1126cd4de13a16e9"
+    },
+    "pure-connections": {
+      "sections": {
+        "text": 47928,
+        "data": 1088,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "09b8fb1695ea4ff3a326e75660e77a4e5532f908de7e6fb01a9dec6c840a0d53"
+    }
+  }
+}

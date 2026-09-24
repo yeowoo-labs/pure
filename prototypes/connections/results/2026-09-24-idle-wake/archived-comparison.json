@@ -1,0 +1,21 @@
+{
+  "profile": "idle-http-host-poll-syscalls",
+  "observation_seconds": 1.25,
+  "before": {
+    "poll_calls": 25,
+    "timeout_values_ms": [
+      50
+    ],
+    "trace_excerpt": "ppoll([{fd=3, events=POLLIN}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}], 9, {tv_sec=0, tv_nsec=50000000}, NULL, 0) = 0 (Timeout)\nppoll([{fd=3, events=POLLIN}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}], 9, {tv_sec=0, tv_nsec=50000000}, NULL, 0) = 0 (Timeout)\nppoll([{fd=3, events=POLLIN}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}], 9, {tv_sec=0, tv_nsec=50000000}, NULL, 0) = 0 (Timeout)\nppoll([{fd=3, events=PO",
+    "binary_sha256": "7dd0010fa6d6024afa2fe35d57a4c73f33ac632e732616ac8f8853d7b22d79b3"
+  },
+  "after": {
+    "poll_calls": 1,
+    "timeout_values_ms": [
+      -1
+    ],
+    "trace_excerpt": "ppoll([{fd=3, events=POLLIN}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}, {fd=-1}], 9, NULL, NULL, 0) = ? ERESTARTNOHAND (To be restarted if no handler)\n--- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=927636, si_uid=1000} ---\n",
+    "binary_sha256": "3e8162f6851ba407061d1109a87b9b2b17c87a5c5eadbc75ea7cc0fb27a84501"
+  },
+  "deadline_driven_idle_wait": "pass"
+}

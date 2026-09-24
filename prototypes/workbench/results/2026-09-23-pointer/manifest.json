@@ -1,0 +1,23 @@
+{
+  "recordedUtc": "2026-09-23T06:20:26.666681+00:00",
+  "host": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "purpose": "Functional input/output correctness, not a performance comparison",
+  "sha256": {
+    "core.zig": "e253ccf62c10386f70edb8c84e299eb0b5eb59f8d35772150c37b3035e9047d4",
+    "evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+    "cli.mjs": "a64681e25259c4b639f6f0dfd0c39e771096619bcae8639706633a01b3aa0ba9",
+    "pointer.test.mjs": "dcbea73a1d9506698c1559f141f0aea671e98c420eaa11ccf499fd40a7049cff",
+    "cli.test.mjs": "e10724ccbe76ec8930546ac58e4e7148c062eae44162ecb65fd6a8d8a1f68270",
+    "qa-pointer.js": "4e684038e149e8f71bf1b4d7189eecab79c16f7d06db6b3f3273a5ef441e5e87",
+    "CONTRACT.md": "bdc013e85a8c0b304f444e107d208309c8e9ae5bbc8d54f01349da911f0843f0",
+    "examples/direct.pure": "ba555e4591e92ec524f9d785333a3b8201e335abcdd2c08d9bbcc11aa84ef6f4",
+    "web/app.js": "96739c52c67398b250958a42509f1ad883d321f042d5b842e92f17995df5b3f9",
+    "web/compiler.mjs": "676f67135c2f659a6840a4bfc2eb46d808a08b026e0401022a1a10ff48f59733",
+    "web/runtime.mjs": "db026b48cd976a4b05304f56df9386b76a68a9174f5edf66f6f69b6ac7c28bf7",
+    "web/output.mjs": "98bfa97dcf5a2481fcf22dba749541dc63cac961cf1800f24c8679caab1d2353",
+    "web/scene-input.mjs": "4f65c523c31c1bc2a07dc08d7d5b384f4dd7a53b5e8298a729cbc2e39ea66a2e",
+    "web/index.html": "6fa0ff41f847fd1ab07c6c2efc777081672eaa53c434e51d7991beded5fe4765",
+    "web/style.css": "c9cf8e7983b0b11e17afa539de69b654b8e9d27962d8b16142e91ec303692cc6",
+    "web/core.wasm": "5e733dbbb87bfc7f5b0c7714f176d5655cca4f617d11b92b07e638ae320474a6"
+  }
+}

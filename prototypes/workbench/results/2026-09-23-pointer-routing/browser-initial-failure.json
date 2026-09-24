@@ -1,0 +1,32 @@
+{
+  "failed": "Error: the remaining contact keeps moving only its own target",
+  "checks": [
+    "placement save requires an applied definition",
+    "one authored pointer input connects all three view targets",
+    "DOM destinations retain distinct target identities",
+    "last input identifies the released target within its group",
+    "three independently authored targets move and selection directs keyboard adjustment",
+    "placement download is a separate document file",
+    "saving neither applies nor discards the unfinished draft",
+    "reset returns to authored initial positions",
+    "downloaded file restores all states and visible positions",
+    "the draft remains separate from the restored executable definition",
+    "restored work starts stopped with no replayed inputs or clock",
+    "restored selection and bindings remain editable",
+    "a fresh browser page reconstructs the saved work without old runtime state",
+    "invalid saved state cannot partially replace code, draft or scene",
+    "a delayed file read cannot overwrite a newer draft",
+    "a delayed restore cannot overwrite placement changes made while reading",
+    "saving while time advances requests a stopped document",
+    "saving with a held input is refused",
+    "editing the shared rule changes the selected amber target",
+    "the same single rule edit also changes the blue target",
+    "reordering instance declarations preserves every field by qualified name",
+    "rebuilt parameter maps still send selection input to blue after reorder",
+    "simultaneous touches share code but retain independent field bindings",
+    "shared cancel restores each contact to its own start position",
+    "a second touch on the same target cannot steal ownership",
+    "releasing green keeps blue captured within the same input"
+  ],
+  "errors": []
+}

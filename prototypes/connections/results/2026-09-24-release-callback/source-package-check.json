@@ -1,0 +1,15 @@
+{
+  "archive_sha256": "cff657597c0cc33bd9185c8460e0d84f0843da20a786578324ac612fa255c2b4",
+  "archive_bytes": 333037,
+  "source_files": 170,
+  "checks": [
+    "every extracted source file matches the manifest",
+    "clean C17, both real terminal PTY scenarios and fixed/source CLI document RSS checks pass",
+    "source-loaded CLI and parser-free CLI share the real stored document",
+    "editing .pure changes the native source-loaded reply",
+    "clean selected page store exports mixed revisions to the default flat store",
+    "clean one-MiB document fans out to two same-process Pure domains with independent conflict and release",
+    "clean Linux release behavior, code, dependency and RSS gates pass",
+    "clean source-loaded terminal editor PTY scenarios pass"
+  ]
+}

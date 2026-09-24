@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-fixed-document-terminal-editor",
+  "scope": "Release-linked optional POSIX terminal editor for one build-time prepared document app, including the bounded document browser. The raised text ceiling reviews its measured 2,541-byte addition; default CLI and core ceilings are unchanged. Excludes libc, terminal emulator, kernel TTY buffers, heap and stack. Whole-process RSS, including 1,024-key browsing, is checked by check_tui.py on the recorded Linux AArch64 host.",
+  "budget_sha256": "4d3097c9ec3c0139cbdd82161a74d610c15d31c6ee5625101410627664f925e7",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-edit-tui-fixed": {
+      "sections": {
+        "text": 31303,
+        "data": 1036,
+        "bss": 24
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "8b831e7582a0872b90c8b8b3dc4d30088393c3a88713a4eae938c8816bdcda68"
+    }
+  }
+}

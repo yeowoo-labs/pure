@@ -1,0 +1,39 @@
+{
+  "sources_verified_and_frozen": 28,
+  "native_and_sanitized_source_hashes_match": true,
+  "c_host_sanitizers_only": true,
+  "zig_tests_passed": 37,
+  "existing_browser_and_cli_tests_passed": 87,
+  "authored_cases_per_build": 9,
+  "event_state_and_view_comparisons_per_build": 156,
+  "selected_module": {
+    "native_instances": 3,
+    "checks": "independent-state-staging-inputs-errors-budget-snapshot-conflict-restore",
+    "scalar_instance_bytes": 20064,
+    "scalar_alignment": 8,
+    "app_controller_bytes": 928,
+    "action_bytes": 32,
+    "snapshot_bytes": 244,
+    "all_work_drained": true
+  },
+  "native_library_sections": "   text\t   data\t    bss\t    dec\t    hex\tfilename\n  33020\t      0\t      0\t  33020\t   80fc\tprototypes/workbench/build/cache/tmp/3cadbbd6974d5d26/libpure-scalar_zcu.o (ex /home/eunhhu/work/pure/prototypes/workbench/build/native/libpure-scalar.a)\n",
+  "native_library_externals": "\nprototypes/workbench/build/cache/tmp/3cadbbd6974d5d26/libpure-scalar_zcu.o:\n                 U memcpy\n                 U memset\n",
+  "selected_native_binary": {
+    "sha256": "6d587d072b6cfc93777fece74b99cde1ea5ff581b3276a6de545568bbcd5c69c",
+    "debug_file_bytes": 213720,
+    "stripped_file_bytes": 68000,
+    "size": "   text\t   data\t    bss\t    dec\t    hex\tfilename\n  62827\t   2040\t     16\t  64883\t   fd73\t/home/eunhhu/work/pure/prototypes/workbench/build/native/pure-native\n",
+    "direct_dynamic_libraries": [
+      "0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]"
+    ]
+  },
+  "common_execution_core_unchanged": true,
+  "limits": [
+    "No native window yet; CLI output adapter only",
+    "Node and Zig are build tools; not runtime dependencies",
+    "Existing scalar capacities remain 32 states, 8 inputs, 24 views, 512 instructions",
+    "Single-owner APIs; no strong native-code isolation",
+    "Synchronous storage; no secure peer RPC",
+    "No macOS execution verification or throughput/RSS claim"
+  ]
+}

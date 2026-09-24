@@ -1,0 +1,58 @@
+{
+  "utc": "2026-09-23T05:41:43.833092+00:00",
+  "javascript": [
+    {
+      "file": "compiler.test.mjs",
+      "tests": 13,
+      "sha256": "6aa442d9d1eeb69453082f1780ff4597e46b1fc09d8ba3cf955545bc94d81431",
+      "output": "✔ a blank document is an empty program with no implied behavior (4.119065ms)\n✔ forward references and separate state/input namespaces preserve declaration IDs (2.599791ms)\n✔ ordered assignments, repeated handlers, and condition evaluation once (0.981294ms)\n✔ nested branches use absolute forward targets and skip correct bodies (0.595425ms)\n✔ operator precedence, associativity, unary and builtin function lowering (1.513886ms)\n✔ multiline parentheses, scientific literals, comments, and string escapes (0.671276ms)\n✔ all instruction fields are numeric and carry original source line (0.349295ms)\n✔ contextual declaration words remain valid names outside reserved builtins (0.541406ms)\n✔ unknown and reserved symbols have useful one-based locations (1.579459ms)\n✔ duplicates, unsupported keys, initializers, and invalid syntax are rejected (1.378719ms)\n✔ document, declaration, instruction, and nesting limits reject overflow (6.561671ms)\n✔ every supported input maps to a bounded ordered event ID (0.715887ms)\n✔ optional examples compile and charge behavior is entirely authored (10.511884ms)\nℹ tests 13\nℹ suites 0\nℹ pass 13\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 41.185946\n"
+    },
+    {
+      "file": "runtime.test.mjs",
+      "tests": 13,
+      "sha256": "5fe66115aab0c178a283dcb592376a2e7209308368004865e6c0a1cc58fa7f62",
+      "output": "✔ blank startup and applied empty source contain no application objects or behavior (7.223873ms)\n✔ author can add unrelated states inputs views and behavior entirely through source (4.612638ms)\n✔ keyboard and pointer sources aggregate first down and last up; repeats are ignored (2.630605ms)\n✔ held input rejects apply without changing applied source, metadata, or values (1.535145ms)\n✔ invalid syntax, unknown references and capacity overflow preserve the previous program (2.099848ms)\n✔ state preservation follows names across reorder/add/remove; reset uses new initializers (1.048794ms)\n✔ callers cannot mutate active metadata and corrupt name-based state preservation (0.86472ms)\n✔ conditions execute once, and assignments and multiple handlers follow source order (0.828498ms)\n✔ a failed event rolls back all handlers and keeps its source diagnostic through release (2.229514ms)\n✔ reset clears held inputs and latched errors; invalid frame counts have no effects (1.298812ms)\n✔ render evaluation is pure and invalid binding is distinct from an event rollback (4.6701ms)\n✔ independent adapters replay the same author program without sharing live state (2.174384ms)\n✔ Wasm has no imports and reports fixed memory and exact active IR/state storage (9.03348ms)\nℹ tests 13\nℹ suites 0\nℹ pass 13\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 51.721812\n"
+    },
+    {
+      "file": "baseline.test.mjs",
+      "tests": 7,
+      "sha256": "3ea469a29d301b95701bc6f6ffafa2471ac0f334c5bd462c0cbc7c320bdc0764",
+      "output": "✔ reference begins with the authored states and matching scene (2.419773ms)\n✔ press, hold, release, and frame order produce exact expected values (0.596573ms)\n✔ charge clamps at one and explicit floor restores rest (1.552126ms)\n✔ repeat and concurrent physical sources produce only logical edges (0.600425ms)\n✔ airborne presses cannot charge or cause another jump (0.332166ms)\n✔ releaseAll emits release and reset clears latches without a jump (0.530518ms)\n✔ unknown inputs and invalid frame counts reject without mutation (0.836813ms)\nℹ tests 7\nℹ suites 0\nℹ pass 7\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 16.923982\n"
+    },
+    {
+      "file": "cli.test.mjs",
+      "tests": 5,
+      "sha256": "655c6d80b51af818fa7cdeb27cb5462962a0e1aef70f609ef5e2ddc85f4a6bc7",
+      "output": "✔ terminal starts empty and produces the same charge trace as the shared runtime (112.599177ms)\n✔ invalid terminal commands do not alter state and fail piped execution (50.710481ms)\n✔ file load preserves by name, rejected load preserves active work, and save never overwrites (58.74187ms)\n✔ terminal exposes arithmetic rollback and retains failure through matching release (54.053511ms)\n✔ terminal configures and discards evaluation records and recovers from a display limit (49.682483ms)\nℹ tests 5\nℹ suites 0\nℹ pass 5\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 333.929744\n"
+    },
+    {
+      "file": "evaluation.test.mjs",
+      "tests": 7,
+      "sha256": "d3026ab5c6bffce56c0bde3155d7dddd6fa442a5688656ee710626c762258ff1",
+      "output": "✔ cache reuse, unrelated changes and discarded records preserve authored values (17.225666ms)\n✔ committed changes only: failed events and failed edits preserve reusable output (2.575309ms)\n✔ program edits, state reordering and reset cannot reuse old definitions (2.738642ms)\n✔ finite float semantics include signed zero, high state bit and arithmetic errors (2.509513ms)\n✔ one budget covers the whole scene; failures publish no partial scene or state rollback (1.276608ms)\n✔ small caches, no history and every small work limit give exact results or explicit failure (30.326359ms)\n✔ invalid settings and forget names preserve policy and state (2.301254ms)\nℹ tests 7\nℹ suites 0\nℹ pass 7\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 69.267384\n"
+    },
+    {
+      "file": "workspace.test.mjs",
+      "tests": 2,
+      "sha256": "7ea664736e4c9d791d72cf64de0fbc230b8d849910cc2a456d4d0e959acb9857",
+      "output": "✔ Wasm executes old events and output during staged replacement without corrupting either phase (6.30019ms)\n✔ workspace accounting reports shared payload and safety tag without double-counting (2.077181ms)\nℹ tests 2\nℹ suites 0\nℹ pass 2\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 14.960097\n"
+    },
+    {
+      "file": "presentation.test.mjs",
+      "tests": 5,
+      "sha256": "604858a3f601d2a67c601ff477415025dcb766cdfd092bafed2d9dcfda39abd5",
+      "output": "✔ direct publication matches archived snapshots and work counts through authored changes (48.77004ms)\n✔ whole-scene budget failure never publishes partial bindings and recovers exactly (5.804043ms)\n✔ latched event rollback, nonfinite bindings, reset and signed zero keep their semantics (3.292808ms)\n✔ publication rejects reentrant runtime changes and reads before they affect the scene (3.694584ms)\n✔ invalid or throwing output adapters do not strand the runtime or alter authored state (7.631298ms)\nℹ tests 5\nℹ suites 0\nℹ pass 5\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 82.836799\n"
+    }
+  ],
+  "javascriptTestCount": 52,
+  "sourceSha256": {
+    "web/runtime.mjs": "d490c54fb2b422dfe89b90a594a8da9ebc95bb007910211cb4686ccb83ed75c7",
+    "web/output.mjs": "1d22c44955e812d671f1a3c3ae4b2f0642a05ebe614017bb041bdddc8c363be3",
+    "web/app.js": "a50e6d99306461f690530eedf5797b2c86c3367a704d24dc5cc86a1c1d2035ea",
+    "web/core.wasm": "76823b024fa5f4a79cbf1ed722ab757614a81a9f1c81d1d6268781a38bed7cc9",
+    "web/compiler.mjs": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02",
+    "core.zig": "dc84bcb75e4417fb1a804529c78ffa8cd1ddd079c00df4ca97a35da0b8fdbb8a",
+    "evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165"
+  },
+  "nativeNote": "Zig and Wasm are unchanged; native tests are not rerun. Prior build record remains in 2026-09-23-workspace/verification.json."
+}

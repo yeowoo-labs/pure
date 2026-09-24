@@ -1,0 +1,96 @@
+{
+  "format": "pure-workbench",
+  "version": 2,
+  "source": "# 세 도형을 배치하고 배치 저장으로 결과를 보관하세요.\n# 마지막으로 잡은 도형은 방향키로 10씩 이동합니다.\nstate selected = 0\ninput left = ArrowLeft\ninput right = ArrowRight\ninput up = ArrowUp\ninput down = ArrowDown\nstate x1 = 80\nstate y1 = 120\nstate ox1 = 0\nstate oy1 = 0\nstate sx1 = 80\nstate sy1 = 120\nstate held1 = 0\ninput drag1 = pointer(tile1)\nstate x2 = 280\nstate y2 = 160\nstate ox2 = 0\nstate oy2 = 0\nstate sx2 = 280\nstate sy2 = 160\nstate held2 = 0\ninput drag2 = pointer(tile2)\nstate x3 = 450\nstate y3 = 220\nstate ox3 = 0\nstate oy3 = 0\nstate sx3 = 450\nstate sy3 = 220\nstate held3 = 0\ninput drag3 = pointer(tile3)\nbox board(20,90,600,240,\"#233a31\")\ntext help(25,40,selected,\"선택한 도형: \")\nbox tile1(x1,y1,56,44,\"#c9f08b\")\nbox tile2(x2,y2,56,44,\"#74c4d4\")\nbox tile3(x3,y3,56,44,\"#dfb184\")\non drag1.down {\n  selected = 1\n  sx1 = x1; sy1 = y1\n  ox1 = event_x - x1; oy1 = event_y - y1\n  held1 = 1\n}\non drag1.move {\n  x1 = clamp(event_x - ox1, 20, 564)\n  y1 = clamp(event_y - oy1, 90, 286)\n}\non drag1.up { held1 = 0 }\non drag1.cancel { x1 = sx1; y1 = sy1; held1 = 0 }\non drag2.down {\n  selected = 2\n  sx2 = x2; sy2 = y2\n  ox2 = event_x - x2; oy2 = event_y - y2\n  held2 = 1\n}\non drag2.move {\n  x2 = clamp(event_x - ox2, 20, 564)\n  y2 = clamp(event_y - oy2, 90, 286)\n}\non drag2.up { held2 = 0 }\non drag2.cancel { x2 = sx2; y2 = sy2; held2 = 0 }\non drag3.down {\n  selected = 3\n  sx3 = x3; sy3 = y3\n  ox3 = event_x - x3; oy3 = event_y - y3\n  held3 = 1\n}\non drag3.move {\n  x3 = clamp(event_x - ox3, 20, 564)\n  y3 = clamp(event_y - oy3, 90, 286)\n}\non drag3.up { held3 = 0 }\non drag3.cancel { x3 = sx3; y3 = sy3; held3 = 0 }\non left.down {\n  if selected == 1 && held1 == 0 { x1 = clamp(x1 + -10, 20, 564) }\n  if selected == 2 && held2 == 0 { x2 = clamp(x2 + -10, 20, 564) }\n  if selected == 3 && held3 == 0 { x3 = clamp(x3 + -10, 20, 564) }\n}\non right.down {\n  if selected == 1 && held1 == 0 { x1 = clamp(x1 + 10, 20, 564) }\n  if selected == 2 && held2 == 0 { x2 = clamp(x2 + 10, 20, 564) }\n  if selected == 3 && held3 == 0 { x3 = clamp(x3 + 10, 20, 564) }\n}\non up.down {\n  if selected == 1 && held1 == 0 { y1 = clamp(y1 + -10, 90, 286) }\n  if selected == 2 && held2 == 0 { y2 = clamp(y2 + -10, 90, 286) }\n  if selected == 3 && held3 == 0 { y3 = clamp(y3 + -10, 90, 286) }\n}\non down.down {\n  if selected == 1 && held1 == 0 { y1 = clamp(y1 + 10, 90, 286) }\n  if selected == 2 && held2 == 0 { y2 = clamp(y2 + 10, 90, 286) }\n  if selected == 3 && held3 == 0 { y3 = clamp(y3 + 10, 90, 286) }\n}\n",
+  "draft": "# 세 도형을 배치하고 배치 저장으로 결과를 보관하세요.\n# 마지막으로 잡은 도형은 방향키로 10씩 이동합니다.\nstate selected = 0\ninput left = ArrowLeft\ninput right = ArrowRight\ninput up = ArrowUp\ninput down = ArrowDown\nstate x1 = 80\nstate y1 = 120\nstate ox1 = 0\nstate oy1 = 0\nstate sx1 = 80\nstate sy1 = 120\nstate held1 = 0\ninput drag1 = pointer(tile1)\nstate x2 = 280\nstate y2 = 160\nstate ox2 = 0\nstate oy2 = 0\nstate sx2 = 280\nstate sy2 = 160\nstate held2 = 0\ninput drag2 = pointer(tile2)\nstate x3 = 450\nstate y3 = 220\nstate ox3 = 0\nstate oy3 = 0\nstate sx3 = 450\nstate sy3 = 220\nstate held3 = 0\ninput drag3 = pointer(tile3)\nbox board(20,90,600,240,\"#233a31\")\ntext help(25,40,selected,\"선택한 도형: \")\nbox tile1(x1,y1,56,44,\"#c9f08b\")\nbox tile2(x2,y2,56,44,\"#74c4d4\")\nbox tile3(x3,y3,56,44,\"#dfb184\")\non drag1.down {\n  selected = 1\n  sx1 = x1; sy1 = y1\n  ox1 = event_x - x1; oy1 = event_y - y1\n  held1 = 1\n}\non drag1.move {\n  x1 = clamp(event_x - ox1, 20, 564)\n  y1 = clamp(event_y - oy1, 90, 286)\n}\non drag1.up { held1 = 0 }\non drag1.cancel { x1 = sx1; y1 = sy1; held1 = 0 }\non drag2.down {\n  selected = 2\n  sx2 = x2; sy2 = y2\n  ox2 = event_x - x2; oy2 = event_y - y2\n  held2 = 1\n}\non drag2.move {\n  x2 = clamp(event_x - ox2, 20, 564)\n  y2 = clamp(event_y - oy2, 90, 286)\n}\non drag2.up { held2 = 0 }\non drag2.cancel { x2 = sx2; y2 = sy2; held2 = 0 }\non drag3.down {\n  selected = 3\n  sx3 = x3; sy3 = y3\n  ox3 = event_x - x3; oy3 = event_y - y3\n  held3 = 1\n}\non drag3.move {\n  x3 = clamp(event_x - ox3, 20, 564)\n  y3 = clamp(event_y - oy3, 90, 286)\n}\non drag3.up { held3 = 0 }\non drag3.cancel { x3 = sx3; y3 = sy3; held3 = 0 }\non left.down {\n  if selected == 1 && held1 == 0 { x1 = clamp(x1 + -10, 20, 564) }\n  if selected == 2 && held2 == 0 { x2 = clamp(x2 + -10, 20, 564) }\n  if selected == 3 && held3 == 0 { x3 = clamp(x3 + -10, 20, 564) }\n}\non right.down {\n  if selected == 1 && held1 == 0 { x1 = clamp(x1 + 10, 20, 564) }\n  if selected == 2 && held2 == 0 { x2 = clamp(x2 + 10, 20, 564) }\n  if selected == 3 && held3 == 0 { x3 = clamp(x3 + 10, 20, 564) }\n}\non up.down {\n  if selected == 1 && held1 == 0 { y1 = clamp(y1 + -10, 90, 286) }\n  if selected == 2 && held2 == 0 { y2 = clamp(y2 + -10, 90, 286) }\n  if selected == 3 && held3 == 0 { y3 = clamp(y3 + -10, 90, 286) }\n}\non down.down {\n  if selected == 1 && held1 == 0 { y1 = clamp(y1 + 10, 90, 286) }\n  if selected == 2 && held2 == 0 { y2 = clamp(y2 + 10, 90, 286) }\n  if selected == 3 && held3 == 0 { y3 = clamp(y3 + 10, 90, 286) }\n}\n\nstate unfinished =",
+  "states": [
+    {
+      "name": "selected",
+      "value": 3
+    },
+    {
+      "name": "x1",
+      "value": 150.00000659728084
+    },
+    {
+      "name": "y1",
+      "value": 169.9999983506798
+    },
+    {
+      "name": "ox1",
+      "value": 9.999986805438311
+    },
+    {
+      "name": "oy1",
+      "value": 10.00000164932024
+    },
+    {
+      "name": "sx1",
+      "value": 80
+    },
+    {
+      "name": "sy1",
+      "value": 120
+    },
+    {
+      "name": "held1",
+      "value": 0
+    },
+    {
+      "name": "x2",
+      "value": 350.00000659728073
+    },
+    {
+      "name": "y2",
+      "value": 209.9999983506798
+    },
+    {
+      "name": "ox2",
+      "value": 9.999980208157467
+    },
+    {
+      "name": "oy2",
+      "value": 10.00000329864045
+    },
+    {
+      "name": "sx2",
+      "value": 280
+    },
+    {
+      "name": "sy2",
+      "value": 160
+    },
+    {
+      "name": "held2",
+      "value": 0
+    },
+    {
+      "name": "x3",
+      "value": 509.999947221753
+    },
+    {
+      "name": "y3",
+      "value": 260.0000016493202
+    },
+    {
+      "name": "ox3",
+      "value": 10.000013194561802
+    },
+    {
+      "name": "oy3",
+      "value": 9.999998350679817
+    },
+    {
+      "name": "sx3",
+      "value": 450
+    },
+    {
+      "name": "sy3",
+      "value": 220
+    },
+    {
+      "name": "held3",
+      "value": 0
+    }
+  ]
+}

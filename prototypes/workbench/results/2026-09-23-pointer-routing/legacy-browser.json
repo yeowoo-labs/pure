@@ -1,0 +1,106 @@
+{
+  "checks": [
+    "placement save requires an applied definition",
+    "three independently authored targets move and selection directs keyboard adjustment",
+    "placement download is a separate document file",
+    "saving neither applies nor discards the unfinished draft",
+    "reset returns to authored initial positions",
+    "downloaded file restores all states and visible positions",
+    "the draft remains separate from the restored executable definition",
+    "restored work starts stopped with no replayed inputs or clock",
+    "restored selection and bindings remain editable",
+    "a fresh browser page reconstructs the saved work without old runtime state",
+    "invalid saved state cannot partially replace code, draft or scene",
+    "a delayed file read cannot overwrite a newer draft",
+    "a delayed restore cannot overwrite placement changes made while reading",
+    "saving while time advances requests a stopped document",
+    "saving with a held input is refused",
+    "editing the shared rule changes the selected amber target",
+    "the same single rule edit also changes the blue target",
+    "reordering instance declarations preserves every field by qualified name",
+    "rebuilt parameter maps still send selection input to blue after reorder",
+    "simultaneous touches share code but retain independent field bindings",
+    "shared cancel restores each contact to its own start position",
+    "extra persistence control fits a mobile viewport",
+    "no uncaught page errors"
+  ],
+  "errors": [],
+  "saved": "output/playwright/pure-routing-legacy-saved.json",
+  "expected": {
+    "states": {
+      "selected": 3,
+      "green.x": 150.00000659728084,
+      "green.y": 169.9999983506798,
+      "green.ox": 9.999986805438311,
+      "green.oy": 10.00000164932024,
+      "green.sx": 80,
+      "green.sy": 120,
+      "green.held": 0,
+      "green.id": 1,
+      "blue.x": 350.00000659728073,
+      "blue.y": 209.9999983506798,
+      "blue.ox": 9.999980208157467,
+      "blue.oy": 10.00000329864045,
+      "blue.sx": 280,
+      "blue.sy": 160,
+      "blue.held": 0,
+      "blue.id": 2,
+      "amber.x": 509.999947221753,
+      "amber.y": 260.0000016493202,
+      "amber.ox": 10.000013194561802,
+      "amber.oy": 9.999998350679817,
+      "amber.sx": 450,
+      "amber.sy": 220,
+      "amber.held": 0,
+      "amber.id": 3
+    },
+    "views": [
+      {
+        "id": "board",
+        "type": "box",
+        "color": "#233a31",
+        "x": 20,
+        "y": 90,
+        "width": 600,
+        "height": 240
+      },
+      {
+        "id": "help",
+        "type": "text",
+        "prefix": "선택한 도형: ",
+        "x": 25,
+        "y": 40,
+        "value": 3
+      },
+      {
+        "id": "green_box",
+        "type": "box",
+        "color": "#c9f08b",
+        "x": 150.00000659728084,
+        "y": 169.9999983506798,
+        "width": 56,
+        "height": 44
+      },
+      {
+        "id": "blue_box",
+        "type": "box",
+        "color": "#74c4d4",
+        "x": 350.00000659728073,
+        "y": 209.9999983506798,
+        "width": 56,
+        "height": 44
+      },
+      {
+        "id": "amber_box",
+        "type": "box",
+        "color": "#dfb184",
+        "x": 509.999947221753,
+        "y": 260.0000016493202,
+        "width": 56,
+        "height": 44
+      }
+    ]
+  },
+  "source": "# 대상별 값은 item에, 공통 반응은 rule에 한 번만 작성합니다.\nstate selected = 0\nrecord Tile {\n  x = 0; y = 0\n  ox = 0; oy = 0\n  sx = 0; sy = 0\n  held = 0; id = 0\n}\nitem green = Tile(x=80, y=120, sx=80, sy=120, id=1)\nitem blue = Tile(x=280, y=160, sx=280, sy=160, id=2)\nitem amber = Tile(x=450, y=220, sx=450, sy=220, id=3)\ninput left = ArrowLeft\ninput right = ArrowRight\ninput up = ArrowUp\ninput down = ArrowDown\ninput drag_green = pointer(green_box)\ninput drag_blue = pointer(blue_box)\ninput drag_amber = pointer(amber_box)\nbox board(20,90,600,240,\"#233a31\")\ntext help(25,40,selected,\"선택한 도형: \")\nbox green_box(green.x,green.y,56,44,\"#c9f08b\")\nbox blue_box(blue.x,blue.y,56,44,\"#74c4d4\")\nbox amber_box(amber.x,amber.y,56,44,\"#dfb184\")\n\nrule grab(t: Tile) {\n  selected = t.id\n  t.sx = t.x; t.sy = t.y\n  t.ox = event_x - t.x; t.oy = event_y - t.y\n  t.held = 1\n}\nrule move(t: Tile) {\n  t.x = clamp(event_x - t.ox, 20, 564)\n  t.y = clamp(event_y - t.oy, 90, 286)\n}\nrule drop(t: Tile) { t.held = 0 }\nrule cancel(t: Tile) { t.x = t.sx; t.y = t.sy; t.held = 0 }\nrule go_left(t: Tile) {\n  if selected == t.id && t.held == 0 { t.x = clamp(t.x - 10, 20, 564) }\n}\nrule go_right(t: Tile) {\n  if selected == t.id && t.held == 0 { t.x = clamp(t.x + 10, 20, 564) }\n}\nrule go_up(t: Tile) {\n  if selected == t.id && t.held == 0 { t.y = clamp(t.y - 10, 90, 286) }\n}\nrule go_down(t: Tile) {\n  if selected == t.id && t.held == 0 { t.y = clamp(t.y + 10, 90, 286) }\n}\n\non drag_green.down use grab(green)\non drag_green.move use move(green)\non drag_green.up use drop(green)\non drag_green.cancel use cancel(green)\non left.down use go_left(green)\non right.down use go_right(green)\non up.down use go_up(green)\non down.down use go_down(green)\n\non drag_blue.down use grab(blue)\non drag_blue.move use move(blue)\non drag_blue.up use drop(blue)\non drag_blue.cancel use cancel(blue)\non left.down use go_left(blue)\non right.down use go_right(blue)\non up.down use go_up(blue)\non down.down use go_down(blue)\n\non drag_amber.down use grab(amber)\non drag_amber.move use move(amber)\non drag_amber.up use drop(amber)\non drag_amber.cancel use cancel(amber)\non left.down use go_left(amber)\non right.down use go_right(amber)\non up.down use go_up(amber)\non down.down use go_down(amber)\n",
+  "draft": "# 대상별 값은 item에, 공통 반응은 rule에 한 번만 작성합니다.\nstate selected = 0\nrecord Tile {\n  x = 0; y = 0\n  ox = 0; oy = 0\n  sx = 0; sy = 0\n  held = 0; id = 0\n}\nitem green = Tile(x=80, y=120, sx=80, sy=120, id=1)\nitem blue = Tile(x=280, y=160, sx=280, sy=160, id=2)\nitem amber = Tile(x=450, y=220, sx=450, sy=220, id=3)\ninput left = ArrowLeft\ninput right = ArrowRight\ninput up = ArrowUp\ninput down = ArrowDown\ninput drag_green = pointer(green_box)\ninput drag_blue = pointer(blue_box)\ninput drag_amber = pointer(amber_box)\nbox board(20,90,600,240,\"#233a31\")\ntext help(25,40,selected,\"선택한 도형: \")\nbox green_box(green.x,green.y,56,44,\"#c9f08b\")\nbox blue_box(blue.x,blue.y,56,44,\"#74c4d4\")\nbox amber_box(amber.x,amber.y,56,44,\"#dfb184\")\n\nrule grab(t: Tile) {\n  selected = t.id\n  t.sx = t.x; t.sy = t.y\n  t.ox = event_x - t.x; t.oy = event_y - t.y\n  t.held = 1\n}\nrule move(t: Tile) {\n  t.x = clamp(event_x - t.ox, 20, 564)\n  t.y = clamp(event_y - t.oy, 90, 286)\n}\nrule drop(t: Tile) { t.held = 0 }\nrule cancel(t: Tile) { t.x = t.sx; t.y = t.sy; t.held = 0 }\nrule go_left(t: Tile) {\n  if selected == t.id && t.held == 0 { t.x = clamp(t.x - 10, 20, 564) }\n}\nrule go_right(t: Tile) {\n  if selected == t.id && t.held == 0 { t.x = clamp(t.x + 10, 20, 564) }\n}\nrule go_up(t: Tile) {\n  if selected == t.id && t.held == 0 { t.y = clamp(t.y - 10, 90, 286) }\n}\nrule go_down(t: Tile) {\n  if selected == t.id && t.held == 0 { t.y = clamp(t.y + 10, 90, 286) }\n}\n\non drag_green.down use grab(green)\non drag_green.move use move(green)\non drag_green.up use drop(green)\non drag_green.cancel use cancel(green)\non left.down use go_left(green)\non right.down use go_right(green)\non up.down use go_up(green)\non down.down use go_down(green)\n\non drag_blue.down use grab(blue)\non drag_blue.move use move(blue)\non drag_blue.up use drop(blue)\non drag_blue.cancel use cancel(blue)\non left.down use go_left(blue)\non right.down use go_right(blue)\non up.down use go_up(blue)\non down.down use go_down(blue)\n\non drag_amber.down use grab(amber)\non drag_amber.move use move(amber)\non drag_amber.up use drop(amber)\non drag_amber.cancel use cancel(amber)\non left.down use go_left(amber)\non right.down use go_right(amber)\non up.down use go_up(amber)\non down.down use go_down(amber)\n\nstate unfinished ="
+}

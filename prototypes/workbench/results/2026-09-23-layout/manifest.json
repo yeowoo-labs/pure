@@ -1,0 +1,21 @@
+{
+  "recordedUtc": "2026-09-23T06:49:39.960675+00:00",
+  "purpose": "Functional persistence validation; no performance benchmark",
+  "sha256": {
+    "core.zig": "0e6d98258d2e92547dc6cf726a0cfb309ce61881647d98b20c784e2ac2025465",
+    "evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+    "web/runtime.mjs": "265cc84b4d2f1f8be05c95d5775a58b64de27cf8c285b7533321c1b93fed0013",
+    "web/project.mjs": "fcd40c0010ba4ad4d47ef96e0aada7b959e0c1d67fab8ee142f24191a9d64466",
+    "web/app.js": "d5e062f9eab74f7e2bd6ab9f44e1217b12f2c17537054f5f7e4ec55b96801a09",
+    "web/index.html": "c433f12a58e669e5ea80681abcf987ff9b5dc5ab58910c39a1ccfdb743d98254",
+    "web/scene-input.mjs": "a7de0d0c26328fa6885b1d1633783f1550acfa4a2233db604b0ce4646e633a25",
+    "web/core.wasm": "eb81bdd6c97a3cc34634d23fba58819345a71208adf05a70b563b98f11f57745",
+    "examples/layout.pure": "cebd9c3485a2be4ec16ae665c1ed4ee200d51fc56ad0151306c8e9c31138f346",
+    "cli.mjs": "3114b6aafcd9af661b9fbfefaac549c191503964f0306a3072389baad40486b0",
+    "project.test.mjs": "7efd09c75b89af384e4020e8fc59df42932897c26c0a0cb6cb7f960684393568",
+    "cli.test.mjs": "7e4688824e26dc7e56396f9d4d62726de0ccb1490e1a388bb64690ae2aae52f4",
+    "workspace.test.mjs": "9ebe7675967ad9d070902fd7f182abf1a76fd66bc9aa07f513e45d0299115543",
+    "qa-layout.js": "d54272e1ef45fd077b1e81dbcfe54f87151f75eb499c94358811fcec79d1672e",
+    "CONTRACT.md": "f996e56575bdd137a34173976c64cf0e9f548d72ea8643a8f1c8e7db73392c61"
+  }
+}

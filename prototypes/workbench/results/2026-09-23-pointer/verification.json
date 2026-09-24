@@ -1,0 +1,50 @@
+[
+  {
+    "file": "prototypes/workbench/baseline.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 reference begins with the authored states and matching scene (2.305482ms)\n\u2714 press, hold, release, and frame order produce exact expected values (0.527815ms)\n\u2714 charge clamps at one and explicit floor restores rest (1.250815ms)\n\u2714 repeat and concurrent physical sources produce only logical edges (0.412074ms)\n\u2714 airborne presses cannot charge or cause another jump (0.291222ms)\n\u2714 releaseAll emits release and reset clears latches without a jump (0.422408ms)\n\u2714 unknown inputs and invalid frame counts reject without mutation (0.72439ms)\n\u2139 tests 7\n\u2139 suites 0\n\u2139 pass 7\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 81.548794\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/cli.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 terminal starts empty and produces the same charge trace as the shared runtime (112.05504ms)\n\u2714 invalid terminal commands do not alter state and fail piped execution (49.240343ms)\n\u2714 terminal replays authored pointer movement and cancellation through the shared runtime (54.859307ms)\n\u2714 file load preserves by name, rejected load preserves active work, and save never overwrites (55.085715ms)\n\u2714 terminal exposes arithmetic rollback and retains failure through matching release (56.135751ms)\n\u2714 terminal configures and discards evaluation records and recovers from a display limit (51.887603ms)\n\u2139 tests 6\n\u2139 suites 0\n\u2139 pass 6\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 450.784885\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/compiler.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 a blank document is an empty program with no implied behavior (4.256704ms)\n\u2714 forward references and separate state/input namespaces preserve declaration IDs (1.963593ms)\n\u2714 ordered assignments, repeated handlers, and condition evaluation once (0.883148ms)\n\u2714 nested branches use absolute forward targets and skip correct bodies (0.576167ms)\n\u2714 operator precedence, associativity, unary and builtin function lowering (2.148353ms)\n\u2714 multiline parentheses, scientific literals, comments, and string escapes (0.726093ms)\n\u2714 all instruction fields are numeric and carry original source line (1.483741ms)\n\u2714 contextual declaration words remain valid names outside reserved builtins (0.465ms)\n\u2714 unknown and reserved symbols have useful one-based locations (1.551241ms)\n\u2714 duplicates, unsupported keys, initializers, and invalid syntax are rejected (1.354833ms)\n\u2714 document, declaration, instruction, and nesting limits reject overflow (5.992483ms)\n\u2714 every supported input maps to a bounded ordered event ID (0.696482ms)\n\u2714 optional examples compile and charge behavior is entirely authored (17.239448ms)\n\u2139 tests 13\n\u2139 suites 0\n\u2139 pass 13\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 109.878985\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/evaluation.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 cache reuse, unrelated changes and discarded records preserve authored values (26.550024ms)\n\u2714 committed changes only: failed events and failed edits preserve reusable output (3.965408ms)\n\u2714 program edits, state reordering and reset cannot reuse old definitions (6.722354ms)\n\u2714 finite float semantics include signed zero, high state bit and arithmetic errors (4.888334ms)\n\u2714 one budget covers the whole scene; failures publish no partial scene or state rollback (2.441686ms)\n\u2714 small caches, no history and every small work limit give exact results or explicit failure (34.833599ms)\n\u2714 invalid settings and forget names preserve policy and state (2.774686ms)\n\u2139 tests 7\n\u2139 suites 0\n\u2139 pass 7\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 176.339238\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/pointer.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 pointer declarations resolve forward targets and reject ambiguous or contextless inputs (13.505164ms)\n\u2714 authored drag keeps grab offset, uses final up coordinates, and updates linked output (28.893605ms)\n\u2714 ownership, duplicate downs, stale moves, cancellation and focus cleanup cannot leave held input (14.600108ms)\n\u2714 invalid coordinates and modes do not mutate a held gesture; arithmetic failure rolls back one event (10.681516ms)\n\u2714 independent targets share the event pipeline and publication remains non-reentrant (10.878331ms)\n\u2714 failing down, up and cancel never prevent terminal ownership cleanup (10.156146ms)\n\u2139 tests 6\n\u2139 suites 0\n\u2139 pass 6\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 230.99603\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/presentation.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 direct publication matches archived snapshots and work counts through authored changes (52.238325ms)\n\u2714 whole-scene budget failure never publishes partial bindings and recovers exactly (6.839798ms)\n\u2714 latched event rollback, nonfinite bindings, reset and signed zero keep their semantics (3.393075ms)\n\u2714 publication rejects reentrant runtime changes and reads before they affect the scene (5.349038ms)\n\u2714 invalid or throwing output adapters do not strand the runtime or alter authored state (2.23126ms)\n\u2139 tests 5\n\u2139 suites 0\n\u2139 pass 5\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 145.248954\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/runtime.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 blank startup and applied empty source contain no application objects or behavior (10.791113ms)\n\u2714 author can add unrelated states inputs views and behavior entirely through source (6.443242ms)\n\u2714 keyboard and pointer sources aggregate first down and last up; repeats are ignored (2.079686ms)\n\u2714 held input rejects apply without changing applied source, metadata, or values (2.284056ms)\n\u2714 invalid syntax, unknown references and capacity overflow preserve the previous program (3.138815ms)\n\u2714 state preservation follows names across reorder/add/remove; reset uses new initializers (1.600112ms)\n\u2714 callers cannot mutate active metadata and corrupt name-based state preservation (1.649259ms)\n\u2714 conditions execute once, and assignments and multiple handlers follow source order (2.004259ms)\n\u2714 a failed event rolls back all handlers and keeps its source diagnostic through release (1.672019ms)\n\u2714 reset clears held inputs and latched errors; invalid frame counts have no effects (1.742611ms)\n\u2714 render evaluation is pure and invalid binding is distinct from an event rollback (4.822723ms)\n\u2714 independent adapters replay the same author program without sharing live state (2.826889ms)\n\u2714 Wasm has no imports and reports fixed memory and exact active IR/state storage (7.826798ms)\n\u2139 tests 13\n\u2139 suites 0\n\u2139 pass 13\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 126.815099\n",
+    "stderr": ""
+  },
+  {
+    "file": "prototypes/workbench/workspace.test.mjs",
+    "exitCode": 0,
+    "stdout": "\u2714 Wasm executes old events and output during staged replacement without corrupting either phase (8.926576ms)\n\u2714 workspace accounting reports shared payload and safety tag without double-counting (3.193686ms)\n\u2139 tests 2\n\u2139 suites 0\n\u2139 pass 2\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 82.501368\n",
+    "stderr": ""
+  }
+]

@@ -1,0 +1,15 @@
+{
+  "profile": "current-storage-execution-core",
+  "max_text_bytes": 6144,
+  "max_data_bytes": 0,
+  "max_bss_bytes": 0,
+  "layout_max_bytes": {
+    "domain_bytes": 200,
+    "work_slot_bytes": 224,
+    "ticket_bytes": 24,
+    "prepared_program_bytes": 680
+  },
+  "archive_members": ["runtime.o", "evaluate.o"],
+  "external_symbols_allowed": ["memcpy", "memmove", "memset", "strlen"],
+  "scope": "Release object sections and C bookkeeping, validated with GNU tools on Linux AArch64. Not total RAM, process RSS, stack, linked libraries, parser, storage, network or UI. 6 KiB is a regression ceiling for this profile, not a universal runtime size promise."
+}

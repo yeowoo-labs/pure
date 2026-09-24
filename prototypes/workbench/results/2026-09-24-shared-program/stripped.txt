@@ -1,0 +1,2 @@
+pure-native	original=196688	stripped=68000
+pure-peer	original=241416	stripped=68400

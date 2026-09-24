@@ -1,0 +1,6 @@
+pure-native	TEXTREL=absent
+0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+pure-peer	TEXTREL=absent
+0x0000000000000001 (NEEDED)             Shared library: [libssl.so.3]
+0x0000000000000001 (NEEDED)             Shared library: [libcrypto.so.3]
+0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]

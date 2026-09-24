@@ -1,0 +1,23 @@
+{
+  "builtUtc": "2026-09-23T07:05:16.331700+00:00",
+  "zigVersion": "0.15.2",
+  "sourceSha256": "630aee1cc20b5803657f75e541cb6b706e2b99dd00218ac71afd78b82259621b",
+  "wasmSha256": "2b1b6d2bbf9005f5c13275d6013cc4c21c155c7474d334c470fcb11094818b52",
+  "evaluationSourceSha256": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+  "wasmFileBytes": 58440,
+  "flags": [
+    "-target",
+    "wasm32-freestanding",
+    "-O",
+    "ReleaseSafe",
+    "-fstrip",
+    "-fno-entry",
+    "-rdynamic",
+    "--export-memory",
+    "--stack",
+    "16384",
+    "--initial-memory=65536",
+    "--max-memory=65536"
+  ],
+  "nativeTests": "1/32 core.test.blank program, no hidden application behavior, and reset...OK\n2/32 core.test.arbitrary input counter and unused events...OK\n3/32 core.test.charge and release behavior exists only in the authored instruction program...OK\n4/32 core.test.forward condition executes once and assignments and handlers are ordered...OK\n5/32 core.test.branch to program end is valid...OK\n6/32 core.test.one event rolls back writes from all handlers on arithmetic failure...OK\n7/32 core.test.nonfinite arithmetic and invalid clamp fail atomically...OK\n8/32 core.test.stack underflow overflow and leftover values reject the event...OK\n9/32 core.test.failed candidates leave active values program revision and diagnostics unchanged...OK\n10/32 core.test.state preservation mapping reads active values at commit and reset uses new initials...OK\n11/32 core.test.capacity boundaries and sticky load errors...OK\n12/32 core.test.invalid declaration values state mappings event ids and handler ranges...OK\n13/32 core.test.backward self out-of-handler branches and stores without handlers are rejected...OK\n14/32 core.test.event inputs and dt enforce deterministic frame contract...OK\n15/32 core.test.binding evaluation is pure on both success and failure...OK\n16/32 core.test.arithmetic comparison logical min max and clamp expression semantics...OK\n17/32 core.test.diagnostic counters wrap without affecting scalar values...OK\n18/32 core.test.memory accounting separates reserved storage used IR and stack capacity...OK\n19/32 core.test.point coordinates are ephemeral event operands and unavailable to pure evaluation...OK\n20/32 core.test.point event ranges reject holes and invalid payloads without committing...OK\n21/32 core.test.point event failure rolls back writes from earlier matching handlers...OK\n22/32 core.test.loading shares storage with records while old events and bindings remain executable...OK\n23/32 core.test.failed and abandoned candidates restore empty reuse storage without changing active work...OK\n24/32 core.test.full pending program survives repeated evaluation configuration record loss and reset...OK\n25/32 core.test.restored definition and values commit together without changing reset initializers...OK\n26/32 core.test.missing duplicate nonfinite or invalid restored candidates leave active work untouched...OK\n27/32 core.test.empty and full restored programs validate all values and discard old display records...OK\n28/32 core.test.shared handler bodies access their own bound state slots in source order...OK\n29/32 core.test.failure in a later shared binding rolls back all earlier bindings...OK\n30/32 core.test.shared bindings reject missing arguments partial overlaps and invalid slot mappings...OK\n31/32 evaluation.test.record loss cannot authorize an old memo; unrelated changes can...OK\n32/32 evaluation.test.budget, collisions, invalid settings, and disabled history are conservative...OK\nAll 32 tests passed.\n"
+}

@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-source-document-terminal-editor",
+  "scope": "Optional source-loaded POSIX terminal editor for the same document app. Includes the runtime .pure parser and bounded document browser. Default core, fixed CLI and fixed TUI do not link the parser. These are Linux AArch64/GCC 14 section regression ceilings, not whole-process RAM; check_tui.py measures the selected whole process separately.",
+  "budget_sha256": "52df1c0a75119edbe0cfd75d6961c1713237146d44a26cd3b2ce096e4d80d624",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-edit-tui": {
+      "sections": {
+        "text": 48604,
+        "data": 1084,
+        "bss": 24
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "e4fb890935f77a7b359163758ce4c44f3710d1a99130a7d883a4f7329a20a70d"
+    }
+  }
+}

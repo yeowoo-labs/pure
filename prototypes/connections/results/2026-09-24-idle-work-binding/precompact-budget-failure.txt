@@ -1,0 +1,9 @@
+Before fixed packages switched from strip --strip-debug to strip --strip-unneeded:
+
+python3 package_native.py --fixed --with-tui --output results/2026-09-24-idle-work-binding/cli-tui.tar.gz
+
+package_native.py: error: cli_tui archive grew to 35847 bytes (reviewed maximum 35840); no package was published
+
+This is the captured result on Linux AArch64 with the updated runtime and the
+earlier packaging mode. The final package archive and relocation check are
+cli-tui.tar.gz and cli-tui-check.json in this directory.

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "written_before_measurement": true,
+  "seed": 20260923,
+  "repeats": 5,
+  "policies": [
+    {"name": "borrow", "policy": "borrow"},
+    {"name": "copy", "policy": "copy"},
+    {"name": "shared_copy", "policy": "shared_copy"},
+    {"name": "threshold2", "policy": "threshold", "ratio": 2},
+    {"name": "threshold8", "policy": "threshold", "ratio": 8},
+    {"name": "compact", "policy": "compact", "ratio": 2},
+    {"name": "copy_no_pool", "policy": "copy", "pool": 0}
+  ],
+  "cases": [
+    {"name": "one_slow", "shape": "large", "records": 1024, "keys": ["tag"], "hold_us": [8000], "service_us": [0], "budget": 8388608, "slots": 64},
+    {"name": "three_distinct_speeds", "shape": "large", "records": 1024, "keys": ["body", "tag", "tag"], "hold_us": [0, 5000, 8000], "service_us": [0, 0, 0], "budget": 8388608, "slots": 64},
+    {"name": "same_large_field", "shape": "large", "records": 1024, "keys": ["body", "body", "body"], "hold_us": [0, 5000, 8000], "service_us": [0, 0, 0], "budget": 8388608, "slots": 64},
+    {"name": "slow_large_field", "shape": "large", "records": 1024, "keys": ["tag", "tag", "body"], "hold_us": [0, 5000, 8000], "service_us": [0, 0, 0], "budget": 8388608, "slots": 64},
+    {"name": "mixed_tight", "shape": "mixed", "records": 1024, "keys": ["body", "tag", "tag"], "hold_us": [0, 5000, 8000], "service_us": [0, 0, 0], "budget": 2097152, "slots": 64},
+    {"name": "metadata_heavy", "shape": "metadata", "records": 512, "keys": ["body", "tag", "tag"], "hold_us": [0, 5000, 8000], "service_us": [0, 0, 0], "budget": 2097152, "slots": 64}
+  ],
+  "expectations": [
+    "A slow small-field consumer can retain the input after a fast large-field consumer finishes.",
+    "Sharing identical compact copies can remove duplicate per-consumer copies without a new runtime.",
+    "Late compaction may save copied bytes or fail to beat early size-based copying; all remaining owners matter.",
+    "Parser temporary memory and reader growth must be charged, even when retained selections are small.",
+    "No novel-policy advantage or production service SLO is presumed."
+  ],
+  "comparison_rule": "Report all fixed presets; exploratory measurements, no trained/held-out policy or significance claim.",
+  "limits": "Real yyjson parser and actual bytes, but synthetic NDJSON corpus and sink delays, three synchronous consumers in one event loop, no open-loop arrivals, thread races, durable output, or independent parser comparison."
+}

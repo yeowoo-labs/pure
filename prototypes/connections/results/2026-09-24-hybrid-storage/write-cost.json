@@ -1,0 +1,49 @@
+{
+  "profile": "linux-aarch64-16k-page-document-replacement",
+  "candidate_mode": "hybrid",
+  "workloads": [
+    "replace last byte of 1 MiB document",
+    "replace one-byte document"
+  ],
+  "unit": "successful user-space write syscall bytes targeting object files",
+  "excludes": "physical device writes, filesystem journal, metadata and directory sync cost",
+  "one_mib": {
+    "flat": {
+      "object_write_syscall_bytes": 1048600,
+      "object_write_calls": 258,
+      "object_files": {
+        "obj-large": 1048600
+      },
+      "binary_sha256": "b5c6ec82a1e9c8a1391d1c4ac680e7f33e53dafe5c29ac8a956d5097653b1a03"
+    },
+    "hybrid": {
+      "object_write_syscall_bytes": 16944,
+      "object_write_calls": 3,
+      "object_files": {
+        "obj-large": 560,
+        "dat-large-0000000000000001": 1064960
+      },
+      "binary_sha256": "5ea320034f2c36f378bed30bb12705f35723dd9f7f334c976aec7d6f5927ac57"
+    },
+    "flat_to_hybrid_ratio": 61.8862134088763
+  },
+  "one_byte": {
+    "flat": {
+      "object_write_syscall_bytes": 25,
+      "object_write_calls": 2,
+      "object_files": {
+        "obj-tiny": 25
+      },
+      "binary_sha256": "b5c6ec82a1e9c8a1391d1c4ac680e7f33e53dafe5c29ac8a956d5097653b1a03"
+    },
+    "hybrid": {
+      "object_write_syscall_bytes": 25,
+      "object_write_calls": 2,
+      "object_files": {
+        "obj-tiny": 25
+      },
+      "binary_sha256": "5ea320034f2c36f378bed30bb12705f35723dd9f7f334c976aec7d6f5927ac57"
+    },
+    "hybrid_to_flat_ratio": 1.0
+  }
+}

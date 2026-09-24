@@ -1,0 +1,68 @@
+[
+  {
+    "path": "input.frames",
+    "shape": "sparse",
+    "records": 2048,
+    "seed": 20260922,
+    "input_bytes": 134242304,
+    "input_sha256": "161377ac76f4b7d35b13db7edf3b93bb279ddd83f6514051020e8b49e743d1c0",
+    "expected_output_bytes": 139264,
+    "expected_output_sha256": "a01c7bff45f73512f3bc0dbd02d7c3a1f4ceb09f574d7c25b926cd3d30bb1bfa",
+    "case": "sparse_slow"
+  },
+  {
+    "path": "input.frames",
+    "shape": "sparse",
+    "records": 2048,
+    "seed": 20260922,
+    "input_bytes": 134242304,
+    "input_sha256": "161377ac76f4b7d35b13db7edf3b93bb279ddd83f6514051020e8b49e743d1c0",
+    "expected_output_bytes": 139264,
+    "expected_output_sha256": "a01c7bff45f73512f3bc0dbd02d7c3a1f4ceb09f574d7c25b926cd3d30bb1bfa",
+    "case": "sparse_slots64"
+  },
+  {
+    "path": "input.frames",
+    "shape": "dense",
+    "records": 2048,
+    "seed": 20260922,
+    "input_bytes": 134242304,
+    "input_sha256": "fb28c2da0af227079bd6888c3f549fa5a48abd0b790c3939dc330111e80c0b7f",
+    "expected_output_bytes": 100671488,
+    "expected_output_sha256": "d96dd7f80d696895e66521630fd30f13adabf63bea3b84b0a709fbc8c4095aa5",
+    "case": "dense_slow"
+  },
+  {
+    "path": "input.frames",
+    "shape": "mixed",
+    "records": 2048,
+    "seed": 20260922,
+    "input_bytes": 177631232,
+    "input_sha256": "5cfcb8e74d5f30c3a611f373ddf53fd5bc843841d83de42c763e1d931403521d",
+    "expected_output_bytes": 53735632,
+    "expected_output_sha256": "f6b4eb83e7ca9aa4b5b2e0675d34b656815c82c992700ee9cbd7e0a15594cb0b",
+    "case": "mixed_slow"
+  },
+  {
+    "path": "input.frames",
+    "shape": "mixed",
+    "records": 2048,
+    "seed": 20260922,
+    "input_bytes": 177631232,
+    "input_sha256": "5cfcb8e74d5f30c3a611f373ddf53fd5bc843841d83de42c763e1d931403521d",
+    "expected_output_bytes": 53735632,
+    "expected_output_sha256": "f6b4eb83e7ca9aa4b5b2e0675d34b656815c82c992700ee9cbd7e0a15594cb0b",
+    "case": "mixed_tight"
+  },
+  {
+    "path": "input.frames",
+    "shape": "sparse",
+    "records": 2048,
+    "seed": 20260922,
+    "input_bytes": 134242304,
+    "input_sha256": "161377ac76f4b7d35b13db7edf3b93bb279ddd83f6514051020e8b49e743d1c0",
+    "expected_output_bytes": 139264,
+    "expected_output_sha256": "a01c7bff45f73512f3bc0dbd02d7c3a1f4ceb09f574d7c25b926cd3d30bb1bfa",
+    "case": "sparse_fast"
+  }
+]

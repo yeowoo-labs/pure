@@ -1,0 +1,68 @@
+{
+  "utc": "2026-09-22T13:59:18.937195+00:00",
+  "build": {
+    "builtUtc": "2026-09-22T13:55:49.821902+00:00",
+    "zigVersion": "0.15.2",
+    "sourceSha256": "dfb9fd7f3862806c2bd88ce1c668b795d9df196e1f2e50cceff1b5c4809273df",
+    "wasmSha256": "b79eecefba5e7da0f5dd945fa1df196ee627803243a430517f5c49c3a5e54ce1",
+    "evaluationSourceSha256": "2192e563385105f130d373b2e8724ea234c51e2909c7dbfc38e72acc3b70b2ed",
+    "wasmFileBytes": 53125,
+    "flags": [
+      "-target",
+      "wasm32-freestanding",
+      "-O",
+      "ReleaseSafe",
+      "-fstrip",
+      "-fno-entry",
+      "-rdynamic",
+      "--export-memory",
+      "--stack",
+      "16384",
+      "--initial-memory=65536",
+      "--max-memory=65536"
+    ],
+    "nativeTests": "1/20 core.test.blank program, no hidden application behavior, and reset...OK\n2/20 core.test.arbitrary input counter and unused events...OK\n3/20 core.test.charge and release behavior exists only in the authored instruction program...OK\n4/20 core.test.forward condition executes once and assignments and handlers are ordered...OK\n5/20 core.test.branch to program end is valid...OK\n6/20 core.test.one event rolls back writes from all handlers on arithmetic failure...OK\n7/20 core.test.nonfinite arithmetic and invalid clamp fail atomically...OK\n8/20 core.test.stack underflow overflow and leftover values reject the event...OK\n9/20 core.test.failed candidates leave active values program revision and diagnostics unchanged...OK\n10/20 core.test.state preservation mapping reads active values at commit and reset uses new initials...OK\n11/20 core.test.capacity boundaries and sticky load errors...OK\n12/20 core.test.invalid declaration values state mappings event ids and handler ranges...OK\n13/20 core.test.backward self out-of-handler branches and stores without handlers are rejected...OK\n14/20 core.test.event inputs and dt enforce deterministic frame contract...OK\n15/20 core.test.binding evaluation is pure on both success and failure...OK\n16/20 core.test.arithmetic comparison logical min max and clamp expression semantics...OK\n17/20 core.test.diagnostic counters wrap without affecting scalar values...OK\n18/20 core.test.memory accounting separates reserved storage used IR and stack capacity...OK\n19/20 evaluation.test.record loss cannot authorize an old memo; unrelated changes can...OK\n20/20 evaluation.test.budget, collisions, invalid settings, and disabled history are conservative...OK\nAll 20 tests passed.\n"
+  },
+  "javascript": [
+    {
+      "file": "compiler.test.mjs",
+      "tests": 13,
+      "output": "✔ a blank document is an empty program with no implied behavior (4.767599ms)\n✔ forward references and separate state/input namespaces preserve declaration IDs (2.310706ms)\n✔ ordered assignments, repeated handlers, and condition evaluation once (1.271946ms)\n✔ nested branches use absolute forward targets and skip correct bodies (0.732297ms)\n✔ operator precedence, associativity, unary and builtin function lowering (2.140688ms)\n✔ multiline parentheses, scientific literals, comments, and string escapes (0.846335ms)\n✔ all instruction fields are numeric and carry original source line (1.755169ms)\n✔ contextual declaration words remain valid names outside reserved builtins (0.726316ms)\n✔ unknown and reserved symbols have useful one-based locations (1.823799ms)\n✔ duplicates, unsupported keys, initializers, and invalid syntax are rejected (1.598724ms)\n✔ document, declaration, instruction, and nesting limits reject overflow (7.090898ms)\n✔ every supported input maps to a bounded ordered event ID (0.835279ms)\n✔ optional examples compile and charge behavior is entirely authored (12.957276ms)\nℹ tests 13\nℹ suites 0\nℹ pass 13\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 48.386655\n",
+      "sha256": "6aa442d9d1eeb69453082f1780ff4597e46b1fc09d8ba3cf955545bc94d81431"
+    },
+    {
+      "file": "runtime.test.mjs",
+      "tests": 13,
+      "output": "✔ blank startup and applied empty source contain no application objects or behavior (11.310311ms)\n✔ author can add unrelated states inputs views and behavior entirely through source (6.741194ms)\n✔ keyboard and pointer sources aggregate first down and last up; repeats are ignored (3.252523ms)\n✔ held input rejects apply without changing applied source, metadata, or values (2.028058ms)\n✔ invalid syntax, unknown references and capacity overflow preserve the previous program (2.550577ms)\n✔ state preservation follows names across reorder/add/remove; reset uses new initializers (1.55202ms)\n✔ callers cannot mutate active metadata and corrupt name-based state preservation (1.051539ms)\n✔ conditions execute once, and assignments and multiple handlers follow source order (1.328224ms)\n✔ a failed event rolls back all handlers and keeps its source diagnostic through release (2.714633ms)\n✔ reset clears held inputs and latched errors; invalid frame counts have no effects (1.79928ms)\n✔ render evaluation is pure and invalid binding is distinct from an event rollback (4.471172ms)\n✔ independent adapters replay the same author program without sharing live state (1.705539ms)\n✔ Wasm has no imports and reports fixed memory and exact active IR/state storage (7.750899ms)\nℹ tests 13\nℹ suites 0\nℹ pass 13\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 64.820621\n",
+      "sha256": "5fe66115aab0c178a283dcb592376a2e7209308368004865e6c0a1cc58fa7f62"
+    },
+    {
+      "file": "baseline.test.mjs",
+      "tests": 7,
+      "output": "✔ reference begins with the authored states and matching scene (2.672337ms)\n✔ press, hold, release, and frame order produce exact expected values (0.589537ms)\n✔ charge clamps at one and explicit floor restores rest (1.429872ms)\n✔ repeat and concurrent physical sources produce only logical edges (0.524167ms)\n✔ airborne presses cannot charge or cause another jump (0.285575ms)\n✔ releaseAll emits release and reset clears latches without a jump (0.576501ms)\n✔ unknown inputs and invalid frame counts reject without mutation (0.846019ms)\nℹ tests 7\nℹ suites 0\nℹ pass 7\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 17.303448\n",
+      "sha256": "3ea469a29d301b95701bc6f6ffafa2471ac0f334c5bd462c0cbc7c320bdc0764"
+    },
+    {
+      "file": "cli.test.mjs",
+      "tests": 5,
+      "output": "✔ terminal starts empty and produces the same charge trace as the shared runtime (145.440706ms)\n✔ invalid terminal commands do not alter state and fail piped execution (55.457108ms)\n✔ file load preserves by name, rejected load preserves active work, and save never overwrites (61.176894ms)\n✔ terminal exposes arithmetic rollback and retains failure through matching release (55.231312ms)\n✔ terminal configures and discards evaluation records and recovers from a display limit (53.719162ms)\nℹ tests 5\nℹ suites 0\nℹ pass 5\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 380.392621\n",
+      "sha256": "655c6d80b51af818fa7cdeb27cb5462962a0e1aef70f609ef5e2ddc85f4a6bc7"
+    },
+    {
+      "file": "evaluation.test.mjs",
+      "tests": 7,
+      "output": "✔ cache reuse, unrelated changes and discarded records preserve authored values (18.441968ms)\n✔ committed changes only: failed events and failed edits preserve reusable output (2.9613ms)\n✔ program edits, state reordering and reset cannot reuse old definitions (3.086097ms)\n✔ finite float semantics include signed zero, high state bit and arithmetic errors (2.875652ms)\n✔ one budget covers the whole scene; failures publish no partial scene or state rollback (1.415632ms)\n✔ small caches, no history and every small work limit give exact results or explicit failure (28.082684ms)\n✔ invalid settings and forget names preserve policy and state (1.779484ms)\nℹ tests 7\nℹ suites 0\nℹ pass 7\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 69.418978\n",
+      "sha256": "d3026ab5c6bffce56c0bde3155d7dddd6fa442a5688656ee710626c762258ff1"
+    }
+  ],
+  "javascriptTestCount": 45,
+  "sourceSha256": {
+    "core.zig": "dfb9fd7f3862806c2bd88ce1c668b795d9df196e1f2e50cceff1b5c4809273df",
+    "evaluation.zig": "2192e563385105f130d373b2e8724ea234c51e2909c7dbfc38e72acc3b70b2ed",
+    "web/core.wasm": "b79eecefba5e7da0f5dd945fa1df196ee627803243a430517f5c49c3a5e54ce1",
+    "web/runtime.mjs": "d9981282612cb06b50d24bf8919e829dce202f72b59dab607c8684bc0f297939",
+    "web/app.js": "6d63f3bfdfe212146894dbb1772509eb4ecc2f3be3b106675f0fc10cdeb5bfd3",
+    "cli.mjs": "2e0627ef84a45c8a9e91fb28c0010673212d459d0b0d09a5342856a049060030",
+    "manage.py": "e04199a0b5addc73bea7748420eee21ccf0aaa1a5b8c83082e5588187d6ed669"
+  }
+}

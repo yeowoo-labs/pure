@@ -1,0 +1,15 @@
+{
+  "profile": "opaque-definition-execution-core",
+  "max_text_bytes": 4864,
+  "max_data_bytes": 0,
+  "max_bss_bytes": 0,
+  "layout_max_bytes": {
+    "domain_bytes": 120,
+    "work_slot_bytes": 216,
+    "ticket_bytes": 24,
+    "pointer_bytes": 8
+  },
+  "archive_members": ["runtime.o"],
+  "external_symbols_allowed": ["memcpy", "memmove", "memset", "strlen"],
+  "scope": "Opaque-definition execution, resource credits, completion and loans only. Document view/splice evaluation is linked into the selected adapter. Without opt-in PURE_RUNTIME_METRICS, validated with GNU tools on Linux AArch64. Not total RAM, process RSS, stack, linked libraries, parser, storage, network or UI. This ceiling is a regression guard for this profile, not a universal runtime size promise."
+}

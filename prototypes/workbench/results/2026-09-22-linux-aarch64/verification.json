@@ -1,0 +1,239 @@
+{
+  "recordedUtc": "2026-09-22T11:02:59.248Z",
+  "scope": "Build record, test outcomes observed in this task, and direct runtime operation-count samples. Browser and timing evidence are separate files.",
+  "build": {
+    "builtUtc": "2026-09-22T10:49:43.509286+00:00",
+    "zigVersion": "0.15.2",
+    "sourceSha256": "147f0fb73edfb021be48961541ca4a2e110efb0fbc2ff6e777528b43ea06fbdd",
+    "wasmSha256": "3e2184d515407fcbd422becb56e5dca93fd40feb07475165a0cdbd187e33a0c8",
+    "wasmFileBytes": 48182,
+    "flags": [
+      "-target",
+      "wasm32-freestanding",
+      "-O",
+      "ReleaseSafe",
+      "-fstrip",
+      "-fno-entry",
+      "-rdynamic",
+      "--export-memory",
+      "--stack",
+      "16384",
+      "--initial-memory=65536",
+      "--max-memory=65536"
+    ],
+    "nativeTests": "1/18 core.test.blank program, no hidden application behavior, and reset...OK\n2/18 core.test.arbitrary input counter and unused events...OK\n3/18 core.test.charge and release behavior exists only in the authored instruction program...OK\n4/18 core.test.forward condition executes once and assignments and handlers are ordered...OK\n5/18 core.test.branch to program end is valid...OK\n6/18 core.test.one event rolls back writes from all handlers on arithmetic failure...OK\n7/18 core.test.nonfinite arithmetic and invalid clamp fail atomically...OK\n8/18 core.test.stack underflow overflow and leftover values reject the event...OK\n9/18 core.test.failed candidates leave active values program revision and diagnostics unchanged...OK\n10/18 core.test.state preservation mapping reads active values at commit and reset uses new initials...OK\n11/18 core.test.capacity boundaries and sticky load errors...OK\n12/18 core.test.invalid declaration values state mappings event ids and handler ranges...OK\n13/18 core.test.backward self out-of-handler branches and stores without handlers are rejected...OK\n14/18 core.test.event inputs and dt enforce deterministic frame contract...OK\n15/18 core.test.binding evaluation is pure on both success and failure...OK\n16/18 core.test.arithmetic comparison logical min max and clamp expression semantics...OK\n17/18 core.test.diagnostic counters wrap without affecting scalar values...OK\n18/18 core.test.memory accounting separates reserved storage used IR and stack capacity...OK\nAll 18 tests passed.\n"
+  },
+  "tests": [
+    {
+      "command": "node prototypes/workbench/compiler.test.mjs",
+      "passed": 13,
+      "failed": 0
+    },
+    {
+      "command": "node prototypes/workbench/runtime.test.mjs",
+      "passed": 13,
+      "failed": 0
+    },
+    {
+      "command": "node prototypes/workbench/baseline.test.mjs",
+      "passed": 7,
+      "failed": 0
+    },
+    {
+      "command": "node prototypes/workbench/cli.test.mjs",
+      "passed": 4,
+      "failed": 0
+    }
+  ],
+  "artifacts": {
+    "core.zig": {
+      "bytes": 28150,
+      "sha256": "147f0fb73edfb021be48961541ca4a2e110efb0fbc2ff6e777528b43ea06fbdd"
+    },
+    "web/core.wasm": {
+      "bytes": 48182,
+      "sha256": "3e2184d515407fcbd422becb56e5dca93fd40feb07475165a0cdbd187e33a0c8"
+    },
+    "web/compiler.mjs": {
+      "bytes": 14327,
+      "sha256": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02"
+    },
+    "web/runtime.mjs": {
+      "bytes": 7219,
+      "sha256": "7819737fa37f058e9134f2cc64c5dc2497cece9b364d5409f98e59ac979fa698"
+    },
+    "web/baseline.mjs": {
+      "bytes": 2251,
+      "sha256": "dcd567e5568d3c798d6b48e555e6d54773963c70d23594c175706b061f8b043f"
+    },
+    "cli.mjs": {
+      "bytes": 2995,
+      "sha256": "9785d754c07991a004a1ec02e2ceeebf972d80fd142c933ecf82654a7dd01dbd"
+    },
+    "manage.py": {
+      "bytes": 3442,
+      "sha256": "bb18c531e00595555b7864f6fe0a24c1049854997b6dfe4966365d41d89ce8a8"
+    },
+    "compare.mjs": {
+      "bytes": 11869,
+      "sha256": "f304cd9191fdf737777a8286e223ee32a483a64ba6cfd80fcf9d4c4a5b1bb6d8"
+    },
+    "compiler.test.mjs": {
+      "bytes": 11198,
+      "sha256": "6aa442d9d1eeb69453082f1780ff4597e46b1fc09d8ba3cf955545bc94d81431"
+    },
+    "runtime.test.mjs": {
+      "bytes": 8833,
+      "sha256": "5fe66115aab0c178a283dcb592376a2e7209308368004865e6c0a1cc58fa7f62"
+    },
+    "baseline.test.mjs": {
+      "bytes": 3983,
+      "sha256": "3ea469a29d301b95701bc6f6ffafa2471ac0f334c5bd462c0cbc7c320bdc0764"
+    },
+    "cli.test.mjs": {
+      "bytes": 3746,
+      "sha256": "b3a1730850aa041ec97a67831e85563e07266f37ca76e029d42969915c60fae3"
+    }
+  },
+  "program": {
+    "metrics": {
+      "sourceBytes": 674,
+      "sourceLines": 35,
+      "states": 4,
+      "inputs": 1,
+      "views": 4,
+      "handlers": 3,
+      "instructions": 66,
+      "maxStack": 3
+    },
+    "memory": {
+      "linearBytes": 65536,
+      "reservedEngineBytes": 19072,
+      "programReservedBytes": 9392,
+      "instructionBytes": 16,
+      "handlerBytes": 12,
+      "activeIRBytes": 1092,
+      "activeStateBytes": 32,
+      "stagingReservedBytes": 9392,
+      "evalStackBytes": 512
+    }
+  },
+  "operationSamples": {
+    "note": "lastOps counts interpreted instructions in the last dispatched event only; excludes compiler, host bookkeeping, projection evaluation, Wasm-engine instructions and CPU instructions.",
+    "trace": [
+      {
+        "action": "apply",
+        "states": {
+          "holding": 0,
+          "charge": 0,
+          "y": 240,
+          "velocity": 0
+        },
+        "tick": 0,
+        "lastOps": 0,
+        "lastEvent": null,
+        "lastError": 0
+      },
+      {
+        "action": "one grounded frame",
+        "states": {
+          "holding": 0,
+          "charge": 0,
+          "y": 240,
+          "velocity": 0
+        },
+        "tick": 1,
+        "lastOps": 22,
+        "lastEvent": {
+          "name": "frame",
+          "phase": "frame",
+          "source": "clock",
+          "status": 0,
+          "line": null,
+          "ops": 22
+        },
+        "lastError": 0
+      },
+      {
+        "action": "down grounded",
+        "states": {
+          "holding": 1,
+          "charge": 0,
+          "y": 240,
+          "velocity": 0
+        },
+        "tick": 1,
+        "lastOps": 8,
+        "lastEvent": {
+          "name": "jump",
+          "phase": "down",
+          "source": "external",
+          "status": 0,
+          "line": null,
+          "ops": 8
+        },
+        "lastError": 0
+      },
+      {
+        "action": "one charging frame",
+        "states": {
+          "holding": 1,
+          "charge": 0.016666666666666666,
+          "y": 240,
+          "velocity": 0
+        },
+        "tick": 2,
+        "lastOps": 29,
+        "lastEvent": {
+          "name": "frame",
+          "phase": "frame",
+          "source": "clock",
+          "status": 0,
+          "line": null,
+          "ops": 29
+        },
+        "lastError": 0
+      },
+      {
+        "action": "release after one charging frame",
+        "states": {
+          "holding": 0,
+          "charge": 0,
+          "y": 240,
+          "velocity": -165
+        },
+        "tick": 2,
+        "lastOps": 13,
+        "lastEvent": {
+          "name": "jump",
+          "phase": "up",
+          "source": "external",
+          "status": 0,
+          "line": null,
+          "ops": 13
+        },
+        "lastError": 0
+      },
+      {
+        "action": "one airborne frame",
+        "states": {
+          "holding": 0,
+          "charge": 0,
+          "y": 237.41666666666666,
+          "velocity": -155
+        },
+        "tick": 3,
+        "lastOps": 18,
+        "lastEvent": {
+          "name": "frame",
+          "phase": "frame",
+          "source": "clock",
+          "status": 0,
+          "line": null,
+          "ops": 18
+        },
+        "lastError": 0
+      }
+    ]
+  }
+}

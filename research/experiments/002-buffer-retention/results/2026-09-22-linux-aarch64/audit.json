@@ -1,0 +1,6 @@
+{
+  "status": "superseded_by_corrected_measurement",
+  "reason": "All rusage RSS samples were identical at 28753920 bytes. Linux resource usage survives exec; this measure includes pre-exec history and is unsuitable for child image RSS comparison. The corrected run records proc/self/status VmHWM as a separate approximate metric and retains raw rusage. A 64-slot sparse case is added to examine the latency/queue confound. Other first-run observations remain exploratory.",
+  "next_run": "2026-09-22-linux-aarch64-v2",
+  "sources_preserved": true
+}

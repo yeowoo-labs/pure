@@ -1,0 +1,3 @@
+/tmp/pure-native-general-stripped 68000
+/tmp/pure-native-fixed-stripped 68000
+/tmp/pure-peer-fixed-stripped 68400

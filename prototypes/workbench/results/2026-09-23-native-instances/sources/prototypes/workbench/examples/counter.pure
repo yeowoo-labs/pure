@@ -1,0 +1,8 @@
+# Space or the tap control increments a state that is displayed and drawn.
+state count = 0
+input tap = Space
+text label(80, 90, count, "Count: ")
+box tile(80, 150, 40 + min(count, 20) * 8, 60, "#356548")
+on tap.down {
+  count = count + 1
+}

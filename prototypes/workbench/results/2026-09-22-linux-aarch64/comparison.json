@@ -1,0 +1,298 @@
+{
+  "experiment": "Pure Workbench charge / handwritten JavaScript reference",
+  "environment": {
+    "startedAt": "2026-09-22T10:54:56.773Z",
+    "completedAt": "2026-09-22T10:54:57.201Z",
+    "node": "v24.20.0",
+    "v8": "13.6.233.17-node.53",
+    "platform": "linux",
+    "osRelease": "6.18.39+rpt-rpi-2712",
+    "architecture": "arm64",
+    "cpuModel": "Cortex-A76",
+    "logicalCPUs": 4,
+    "availableParallelism": 4,
+    "affinityControlled": false,
+    "powerControlled": false,
+    "command": "node /home/eunhhu/work/pure/prototypes/workbench/compare.mjs --output prototypes/workbench/results/2026-09-22-linux-aarch64/comparison.json"
+  },
+  "artifacts": {
+    "charge": {
+      "bytes": 674,
+      "sha256": "8d69d9fd51d44ab754d560eb7ff5102ea8a34540753cd7170b3bd800e4294f56"
+    },
+    "baseline": {
+      "bytes": 2251,
+      "sha256": "dcd567e5568d3c798d6b48e555e6d54773963c70d23594c175706b061f8b043f"
+    },
+    "runtime": {
+      "bytes": 7219,
+      "sha256": "7819737fa37f058e9134f2cc64c5dc2497cece9b364d5409f98e59ac979fa698"
+    },
+    "compiler": {
+      "bytes": 14327,
+      "sha256": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02"
+    },
+    "wasm": {
+      "bytes": 48182,
+      "sha256": "3e2184d515407fcbd422becb56e5dca93fd40feb07475165a0cdbd187e33a0c8"
+    },
+    "harness": {
+      "bytes": 11869,
+      "sha256": "f304cd9191fdf737777a8286e223ee32a483a64ba6cfd80fcf9d4c4a5b1bb6d8"
+    }
+  },
+  "correctness": {
+    "passed": true,
+    "checkedSnapshots": 6664,
+    "checkedNumbers": 126616,
+    "maxAbsoluteDifference": 0,
+    "absoluteTolerance": 1e-11,
+    "relativeTolerance": 1e-12,
+    "checkedFields": [
+      "states",
+      "all view fields",
+      "tick",
+      "held input names"
+    ],
+    "traceSha256": "db8110b5aa105921dea390950fed8bcb5ff9a3dc8929f8d368bfd24453b5001f",
+    "counts": {
+      "hostActions": 6663,
+      "frames": 6457,
+      "logicalDown": 52,
+      "logicalUp": 51,
+      "resets": 9,
+      "releaseAllCalls": 10,
+      "downCalls": 118,
+      "upCalls": 69,
+      "dispatchedEvents": 6560
+    }
+  },
+  "sources": {
+    "chargePure": {
+      "bytes": 674,
+      "physicalLines": 34,
+      "nonblankLines": 34,
+      "sha256": "8d69d9fd51d44ab754d560eb7ff5102ea8a34540753cd7170b3bd800e4294f56"
+    },
+    "fixedJavaScriptModel": {
+      "bytes": 2251,
+      "physicalLines": 68,
+      "nonblankLines": 67,
+      "sha256": "dcd567e5568d3c798d6b48e555e6d54773963c70d23594c175706b061f8b043f"
+    },
+    "note": "Raw file size and line counts only; excludes HTML/host/compiler and does not establish authoring effort or DX quality."
+  },
+  "compilerMetrics": {
+    "sourceBytes": 674,
+    "sourceLines": 35,
+    "states": 4,
+    "inputs": 1,
+    "views": 4,
+    "handlers": 3,
+    "instructions": 66,
+    "maxStack": 3
+  },
+  "memory": {
+    "pure": {
+      "linearBytes": 65536,
+      "reservedEngineBytes": 19072,
+      "programReservedBytes": 9392,
+      "instructionBytes": 16,
+      "handlerBytes": 12,
+      "activeIRBytes": 1092,
+      "activeStateBytes": 32,
+      "stagingReservedBytes": 9392,
+      "evalStackBytes": 512
+    },
+    "note": "Wasm linear capacity and core layout counters; not process RSS or browser memory. No equivalent JS heap measurement collected. Do not add overlapping counters."
+  },
+  "timing": {
+    "seed": 20260922,
+    "warmupTracesPerImplementation": 5,
+    "trialsPerImplementation": 7,
+    "targetTrialMs": 12,
+    "calibration": {
+      "pureHostWasm": {
+        "elapsedMs": 10.597304000000008,
+        "traces": 3,
+        "selectedRepetitions": 4
+      },
+      "handwrittenJavaScript": {
+        "elapsedMs": 1.182612000000006,
+        "traces": 3,
+        "selectedRepetitions": 31
+      }
+    },
+    "traceCounts": {
+      "hostActions": 6663,
+      "frames": 6457,
+      "logicalDown": 52,
+      "logicalUp": 51,
+      "resets": 9,
+      "releaseAllCalls": 10,
+      "downCalls": 118,
+      "upCalls": 69,
+      "dispatchedEvents": 6560
+    },
+    "order": "Alternated each trial; Pure first on odd trials, JavaScript first on even trials.",
+    "included": "Host method dispatch, source-latch aggregation, state logic, and resets in the fixed trace. Pure additionally maintains generic VM/event diagnostics.",
+    "excluded": "Compilation, loading, snapshots, binding evaluation, DOM rendering, scene editing, and live apply.",
+    "normalization": "nsPerHostAction divides total time by calls including repeats, releaseAll and reset; nsPerDispatchedEvent also amortizes that host overhead.",
+    "limitations": "Single-machine batch throughput; no CPU pinning or energy/thermal control. Seven trial averages are not event latency percentiles. Fixed JS has no live program replacement, general compiler, or state migration; not feature-equivalent whole-product timing.",
+    "samples": [
+      {
+        "trial": 1,
+        "position": 1,
+        "implementation": "pureHostWasm",
+        "repetitions": 4,
+        "elapsedMs": 13.928176000000008,
+        "nsPerTrace": 3482044.000000002,
+        "nsPerHostAction": 522.5940267146933,
+        "nsPerDispatchedEvent": 530.7993902439027
+      },
+      {
+        "trial": 1,
+        "position": 2,
+        "implementation": "handwrittenJavaScript",
+        "repetitions": 31,
+        "elapsedMs": 11.025396,
+        "nsPerTrace": 355657.93548387097,
+        "nsPerHostAction": 53.37804824911766,
+        "nsPerDispatchedEvent": 54.2161487018096
+      },
+      {
+        "trial": 2,
+        "position": 1,
+        "implementation": "handwrittenJavaScript",
+        "repetitions": 31,
+        "elapsedMs": 13.416638000000034,
+        "nsPerTrace": 432794.7741935495,
+        "nsPerHostAction": 64.95494134677315,
+        "nsPerDispatchedEvent": 65.9748131392606
+      },
+      {
+        "trial": 2,
+        "position": 2,
+        "implementation": "pureHostWasm",
+        "repetitions": 4,
+        "elapsedMs": 19.406993999999997,
+        "nsPerTrace": 4851748.499999999,
+        "nsPerHostAction": 728.1627645204861,
+        "nsPerDispatchedEvent": 739.5958079268291
+      },
+      {
+        "trial": 3,
+        "position": 1,
+        "implementation": "pureHostWasm",
+        "repetitions": 4,
+        "elapsedMs": 19.585902000000033,
+        "nsPerTrace": 4896475.500000008,
+        "nsPerHostAction": 734.8755065285919,
+        "nsPerDispatchedEvent": 746.413948170733
+      },
+      {
+        "trial": 3,
+        "position": 2,
+        "implementation": "handwrittenJavaScript",
+        "repetitions": 31,
+        "elapsedMs": 15.407935000000009,
+        "nsPerTrace": 497030.1612903229,
+        "nsPerHostAction": 74.5955517470093,
+        "nsPerDispatchedEvent": 75.76679287962239
+      },
+      {
+        "trial": 4,
+        "position": 1,
+        "implementation": "handwrittenJavaScript",
+        "repetitions": 31,
+        "elapsedMs": 15.146732000000043,
+        "nsPerTrace": 488604.2580645175,
+        "nsPerHostAction": 73.3309707435866,
+        "nsPerDispatchedEvent": 74.48235641227402
+      },
+      {
+        "trial": 4,
+        "position": 2,
+        "implementation": "pureHostWasm",
+        "repetitions": 4,
+        "elapsedMs": 19.476624000000015,
+        "nsPerTrace": 4869156.000000004,
+        "nsPerHostAction": 730.7753264295368,
+        "nsPerDispatchedEvent": 742.249390243903
+      },
+      {
+        "trial": 5,
+        "position": 1,
+        "implementation": "pureHostWasm",
+        "repetitions": 4,
+        "elapsedMs": 15.168768999999998,
+        "nsPerTrace": 3792192.2499999995,
+        "nsPerHostAction": 569.1418655260393,
+        "nsPerDispatchedEvent": 578.0780868902439
+      },
+      {
+        "trial": 5,
+        "position": 2,
+        "implementation": "handwrittenJavaScript",
+        "repetitions": 31,
+        "elapsedMs": 10.88178499999998,
+        "nsPerTrace": 351025.3225806445,
+        "nsPerHostAction": 52.68277391274869,
+        "nsPerDispatchedEvent": 53.5099577104641
+      },
+      {
+        "trial": 6,
+        "position": 1,
+        "implementation": "handwrittenJavaScript",
+        "repetitions": 31,
+        "elapsedMs": 10.942656,
+        "nsPerTrace": 352988.9032258064,
+        "nsPerHostAction": 52.97747309407271,
+        "nsPerDispatchedEvent": 53.80928402832415
+      },
+      {
+        "trial": 6,
+        "position": 2,
+        "implementation": "pureHostWasm",
+        "repetitions": 4,
+        "elapsedMs": 14.048269000000005,
+        "nsPerTrace": 3512067.2500000014,
+        "nsPerHostAction": 527.0999924958729,
+        "nsPerDispatchedEvent": 535.3761051829271
+      },
+      {
+        "trial": 7,
+        "position": 1,
+        "implementation": "pureHostWasm",
+        "repetitions": 4,
+        "elapsedMs": 13.74212,
+        "nsPerTrace": 3435530,
+        "nsPerHostAction": 515.6130871979589,
+        "nsPerDispatchedEvent": 523.7088414634146
+      },
+      {
+        "trial": 7,
+        "position": 2,
+        "implementation": "handwrittenJavaScript",
+        "repetitions": 31,
+        "elapsedMs": 10.938469999999995,
+        "nsPerTrace": 352853.87096774176,
+        "nsPerHostAction": 52.957207109071256,
+        "nsPerDispatchedEvent": 53.78869984264356
+      }
+    ],
+    "summary": {
+      "pureHostWasm": {
+        "medianNsPerHostAction": 569.1418655260393,
+        "minNsPerHostAction": 515.6130871979589,
+        "maxNsPerHostAction": 734.8755065285919
+      },
+      "handwrittenJavaScript": {
+        "medianNsPerHostAction": 53.37804824911766,
+        "minNsPerHostAction": 52.68277391274869,
+        "maxNsPerHostAction": 74.5955517470093
+      },
+      "pureOverJavaScriptMedianRatio": 10.66247051353076
+    }
+  }
+}

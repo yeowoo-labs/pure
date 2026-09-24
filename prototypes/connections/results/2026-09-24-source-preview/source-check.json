@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "a11a058fa0ba71878a0fed0ee63100566f580721fa5cb602ad25cd46e6b94f6f",
+  "archive_bytes": 316748,
+  "source_files": 161,
+  "checks": [
+    "every extracted source file matches the manifest",
+    "clean C17 build and host-neutral behavior tests pass",
+    "source-loaded CLI and parser-free CLI share the real stored document",
+    "editing .pure changes the native source-loaded reply",
+    "clean Linux release behavior, code, dependency and RSS gates pass"
+  ]
+}

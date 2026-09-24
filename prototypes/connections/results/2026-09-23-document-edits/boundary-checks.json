@@ -1,0 +1,34 @@
+{
+  "core_only_build_files": [
+    "evaluate.o",
+    "libpure-execution.a",
+    "runtime.o"
+  ],
+  "reject_smaller_budget": [
+    "domain_bytes: 200 > 199"
+  ],
+  "reject_added_dependency_and_static_state": [
+    "unexpected archive members",
+    "bss: 4096 > 0",
+    "unexpected dependencies: ['malloc']"
+  ],
+  "selected_binaries": {
+    "pure-edit": {
+      "debug_file_bytes": 177384,
+      "stripped_file_bytes": 67904,
+      "sections": "   text\t   data\t    bss\t    dec\t    hex\tfilename\n  35807\t    944\t     16\t  36767\t   8f9f\t/home/eunhhu/work/pure/prototypes/connections/build/pure-edit\n",
+      "direct_dynamic_libraries": [
+        "0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]"
+      ]
+    },
+    "pure-connections": {
+      "debug_file_bytes": 199080,
+      "stripped_file_bytes": 68000,
+      "sections": "   text\t   data\t    bss\t    dec\t    hex\tfilename\n  42761\t   1040\t     16\t  43817\t   ab29\t/home/eunhhu/work/pure/prototypes/connections/build/pure-connections\n",
+      "direct_dynamic_libraries": [
+        "0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]"
+      ]
+    }
+  },
+  "scope": "Selected files and direct ELF dependencies, not complete dependency memory, RSS, stack or latency."
+}

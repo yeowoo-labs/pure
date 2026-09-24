@@ -1,0 +1,40 @@
+{
+  "source": "/home/eunhhu/work/pure/prototypes/workbench/examples/routed-layout.pure",
+  "sourceSha256": "656e81577c250df704ba744b1ea6ec9c987ab3b8ee90c758062ac4beaf195650",
+  "zigVersion": "0.15.2",
+  "zigFlags": [
+    "-O",
+    "ReleaseSafe",
+    "-fno-compiler-rt"
+  ],
+  "cFlags": [
+    "-std=c17",
+    "-O2",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+    "-Werror"
+  ],
+  "binary": "/home/eunhhu/work/pure/prototypes/workbench/build/native/pure-native",
+  "binarySha256": "6d587d072b6cfc93777fece74b99cde1ea5ff581b3276a6de545568bbcd5c69c",
+  "librarySha256": "b45932025312c12eea6cd1083c43ed57f3cf3dbbb752c47adba634af8e21c5c2",
+  "preparedSha256": "710503e7ffadf02b309c24a761caade4c5a093750d6801956cc698bfc263fc09",
+  "implementationSha256": {
+    "prototypes/workbench/engine.zig": "555b9ff3143888921d90a475bcb7957c18dbf7101ee9e3d2853c01a562cbf3f5",
+    "prototypes/workbench/evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+    "prototypes/workbench/native.zig": "fe6c445cdfb5a4bc27ea9f540f3880c45b65c33098eec761d4398d9a7fc5c9a6",
+    "prototypes/workbench/native/prepare.mjs": "3989d4e545255fccf9d846afb79246e874f4cefb03eecef9ee1e2b1ce8fd257e",
+    "prototypes/workbench/native/scalar.h": "b84a796bde2f45d59505cc0addb5f5afede0a9c4dc58d40a38dd37a8ac68d1fd",
+    "prototypes/workbench/native/plan.h": "2e9bd7e3c2ecc52f79c8938d09d2a696174c44a245e4bf52b70be2ed02cbbb57",
+    "prototypes/workbench/native/app.h": "0ea9c9dc18e3d9c34763198c6efbaa3219c6f91764b24f00591d958ca0678ce2",
+    "prototypes/workbench/web/compiler.mjs": "349139612d1f7da5f75ef21c65aa697963b760cb35321150fc36f67f3b40adf1",
+    "prototypes/workbench/native/main.c": "dd28168741e79ffaa73cf74e60b974a1ca84b0473a43aafe089019f61e732aab",
+    "prototypes/workbench/native/app.c": "a8c0547ca789f498e453f8b8b982d1e06a874f34e72d905d86923d0e573eff66",
+    "prototypes/workbench/native/plan.c": "f0bdf8466097cfad54c197120aace8acd5f430170931d575e26807b760ce2173",
+    "prototypes/connections/runtime.c": "a6c068c6a2cee214b3fe30241459394833917dfb6c0d33052460eab4c6a539a2",
+    "prototypes/connections/evaluate.c": "ee8b91efc733b9d305711b7cbb7b502ae5d3917e06f750b7f62b632ed0ea6d04",
+    "prototypes/connections/store.c": "44702e9414c26d1ee336b2e36e6713560013c2c8d0091a8900042e2468f88015",
+    "prototypes/connections/store-port.c": "d6bf17878b325e039360816edcbf8d68e41b373cf3e6128d7795e11ae21fdd6f"
+  }
+}

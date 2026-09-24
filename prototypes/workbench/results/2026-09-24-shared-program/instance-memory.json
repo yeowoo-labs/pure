@@ -1,0 +1,71 @@
+{
+  "host": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "samples": {
+    "general": [
+      {
+        "instances": 1000,
+        "instance_bytes": 20064,
+        "rss_before_kib": 1248,
+        "rss_after_kib": 21056,
+        "rss_delta_kib": 19808,
+        "checksum": 1000
+      },
+      {
+        "instances": 1000,
+        "instance_bytes": 20064,
+        "rss_before_kib": 1216,
+        "rss_after_kib": 21024,
+        "rss_delta_kib": 19808,
+        "checksum": 1000
+      },
+      {
+        "instances": 1000,
+        "instance_bytes": 20064,
+        "rss_before_kib": 1232,
+        "rss_after_kib": 21040,
+        "rss_delta_kib": 19808,
+        "checksum": 1000
+      }
+    ],
+    "shared_fixed": [
+      {
+        "instances": 1000,
+        "instance_bytes": 280,
+        "rss_before_kib": 1232,
+        "rss_after_kib": 1712,
+        "rss_delta_kib": 480,
+        "checksum": 1000
+      },
+      {
+        "instances": 1000,
+        "instance_bytes": 280,
+        "rss_before_kib": 1200,
+        "rss_after_kib": 1680,
+        "rss_delta_kib": 480,
+        "checksum": 1000
+      },
+      {
+        "instances": 1000,
+        "instance_bytes": 280,
+        "rss_before_kib": 1216,
+        "rss_after_kib": 1696,
+        "rss_delta_kib": 480,
+        "checksum": 1000
+      }
+    ]
+  },
+  "binary_sha256": {
+    "general": "b25a49909a01510d38c0c4fe125c7542b2dc343d460203f3c446ba278696acfe",
+    "shared_fixed": "3dddca197b168c404c308bef618a71020b5dece98c43c24c3fad1881e5401c46"
+  },
+  "median_rss_delta_kib": {
+    "general": 19808,
+    "shared_fixed": 480
+  },
+  "zig_version": "0.15.2",
+  "build": {
+    "zig": "ReleaseSafe -fno-compiler-rt",
+    "c": "-std=c17 -O2 -g -Wall -Wextra -Wpedantic -Werror",
+    "fixed_c_define": "PURE_FIXED_DEFINITION=1"
+  }
+}

@@ -1,0 +1,238 @@
+{
+  "profile": "same-durable-document-app-direct-versus-pure",
+  "definition_sha256": "8ca6c191b98bf53a592ce24f2b5cd040e41f05c4ccdda7a072d5d7f79870c06a",
+  "prepared_sha256": "8e93861539a87c2a091f55afea1bf310fc3d1f1474521d8f8318bfacac3b0649",
+  "documents_per_variant": 32,
+  "operations_per_variant": 128,
+  "body_bytes": 1048576,
+  "pairs": 4,
+  "sections": {
+    "direct": {
+      "text": 10364,
+      "data": 856,
+      "bss": 16
+    },
+    "pure": {
+      "text": 18640,
+      "data": 864,
+      "bss": 376
+    }
+  },
+  "binary_sha256": {
+    "direct": "1389e7d95e74e93ab5d9e8c8146d0b8fc5288e7a356df231c3c018d3db9d0e05",
+    "pure": "9a45a3d92eed499b849560a2c949f24da7d09deb5ec9bd956ab78ae4e8273e54"
+  },
+  "samples": [
+    {
+      "order": [
+        "direct",
+        "pure"
+      ],
+      "direct": {
+        "variant": "direct",
+        "documents": 32,
+        "operations": 128,
+        "body_bytes": 1048576,
+        "elapsed_ns": 340081183,
+        "stage_ns": [
+          75261818,
+          94500701,
+          17506146,
+          93772922
+        ],
+        "digest": "b74d25a65553ee41",
+        "peak_rss_kib": 3872,
+        "user_ns": 308146000,
+        "system_ns": 32015000,
+        "stored_file_bytes": 33555200
+      },
+      "pure": {
+        "variant": "pure",
+        "documents": 32,
+        "operations": 128,
+        "body_bytes": 1048576,
+        "elapsed_ns": 341099421,
+        "stage_ns": [
+          79567567,
+          92146853,
+          17844589,
+          92596187
+        ],
+        "digest": "b74d25a65553ee41",
+        "peak_rss_kib": 4336,
+        "user_ns": 305409000,
+        "system_ns": 36166000,
+        "stored_file_bytes": 33555200
+      }
+    },
+    {
+      "order": [
+        "pure",
+        "direct"
+      ],
+      "pure": {
+        "variant": "pure",
+        "documents": 32,
+        "operations": 128,
+        "body_bytes": 1048576,
+        "elapsed_ns": 338271706,
+        "stage_ns": [
+          77352220,
+          91696577,
+          18131571,
+          92186762
+        ],
+        "digest": "b74d25a65553ee41",
+        "peak_rss_kib": 3872,
+        "user_ns": 310861000,
+        "system_ns": 27897000,
+        "stored_file_bytes": 33555200
+      },
+      "direct": {
+        "variant": "direct",
+        "documents": 32,
+        "operations": 128,
+        "body_bytes": 1048576,
+        "elapsed_ns": 348018886,
+        "stage_ns": [
+          79216590,
+          98943059,
+          17171958,
+          93268609
+        ],
+        "digest": "b74d25a65553ee41",
+        "peak_rss_kib": 3856,
+        "user_ns": 302866000,
+        "system_ns": 40382000,
+        "stored_file_bytes": 33555200
+      }
+    },
+    {
+      "order": [
+        "direct",
+        "pure"
+      ],
+      "direct": {
+        "variant": "direct",
+        "documents": 32,
+        "operations": 128,
+        "body_bytes": 1048576,
+        "elapsed_ns": 337466024,
+        "stage_ns": [
+          74499100,
+          93470034,
+          17836179,
+          92757726
+        ],
+        "digest": "b74d25a65553ee41",
+        "peak_rss_kib": 3872,
+        "user_ns": 309997000,
+        "system_ns": 28181000,
+        "stored_file_bytes": 33555200
+      },
+      "pure": {
+        "variant": "pure",
+        "documents": 32,
+        "operations": 128,
+        "body_bytes": 1048576,
+        "elapsed_ns": 342399605,
+        "stage_ns": [
+          79958272,
+          92458203,
+          18037399,
+          92971374
+        ],
+        "digest": "b74d25a65553ee41",
+        "peak_rss_kib": 4336,
+        "user_ns": 311005000,
+        "system_ns": 31898000,
+        "stored_file_bytes": 33555200
+      }
+    },
+    {
+      "order": [
+        "pure",
+        "direct"
+      ],
+      "pure": {
+        "variant": "pure",
+        "documents": 32,
+        "operations": 128,
+        "body_bytes": 1048576,
+        "elapsed_ns": 340585627,
+        "stage_ns": [
+          79565343,
+          91822001,
+          17952418,
+          92354743
+        ],
+        "digest": "b74d25a65553ee41",
+        "peak_rss_kib": 3872,
+        "user_ns": 301411000,
+        "system_ns": 39659000,
+        "stored_file_bytes": 33555200
+      },
+      "direct": {
+        "variant": "direct",
+        "documents": 32,
+        "operations": 128,
+        "body_bytes": 1048576,
+        "elapsed_ns": 336890525,
+        "stage_ns": [
+          74695433,
+          93087459,
+          17564345,
+          92612242
+        ],
+        "digest": "b74d25a65553ee41",
+        "peak_rss_kib": 3856,
+        "user_ns": 309291000,
+        "system_ns": 28117000,
+        "stored_file_bytes": 33555200
+      }
+    }
+  ],
+  "medians": {
+    "direct": {
+      "elapsed_ms": 338.7736035,
+      "peak_rss_kib": 3864.0,
+      "user_ms": 308.7185,
+      "system_ms": 30.098,
+      "stages_ms": [
+        74.9786255,
+        93.9853675,
+        17.5352455,
+        93.0131675
+      ]
+    },
+    "pure": {
+      "elapsed_ms": 340.842524,
+      "peak_rss_kib": 4104.0,
+      "user_ms": 308.135,
+      "system_ms": 34.032,
+      "stages_ms": [
+        79.566455,
+        91.984427,
+        17.9949085,
+        92.475465
+      ]
+    }
+  },
+  "median_elapsed_ratio_pure_over_direct": 1.0061070888600092,
+  "sources_sha256": {
+    "research/experiments/004-direct-document-path/document-path.c": "032d8688db330c355082d150865aa7ade3e5402cc1bbe090b361fd55cb6325fc",
+    "research/experiments/004-direct-document-path/peak-launcher.c": "fc730205d564b60a4f9e44aa1b880df0debeb1338b86b27eabe3bde1508f3f74",
+    "research/experiments/004-direct-document-path/run.py": "1919287fb5dc0f884cecf038c21e0d4326f2e826ee7a48eb65f5d480e27bacb7",
+    "prototypes/connections/store.c": "733ddcacaffd9e9ffbadfc385eadd4c9e62736a2b97b7bc048ad14845d83070f",
+    "prototypes/connections/runtime.c": "1ced6734ee07f3688e5c9cc0a8af639da88a1741dc3e6f65ec109baa2d826e6f",
+    "prototypes/connections/evaluate.c": "ee8b91efc733b9d305711b7cbb7b502ae5d3917e06f750b7f62b632ed0ea6d04",
+    "prototypes/connections/store-port.c": "d6bf17878b325e039360816edcbf8d68e41b373cf3e6128d7795e11ae21fdd6f",
+    "prototypes/connections/examples/editor.pure": "8ca6c191b98bf53a592ce24f2b5cd040e41f05c4ccdda7a072d5d7f79870c06a"
+  },
+  "environment": {
+    "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+    "machine": "aarch64",
+    "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+    "size": "GNU size (GNU Binutils for Debian) 2.44"
+  }
+}

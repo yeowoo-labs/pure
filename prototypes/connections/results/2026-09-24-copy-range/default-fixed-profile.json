@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-fixed-document-runner",
+  "scope": "Release-linked CLI and HTTP document hosts with one build-time prepared app. The source parser and compiler are separate build tools. These text ceilings apply only to the recorded Linux AArch64/GCC 14 toolchain and exclude libc, heap, stack, and storage files.",
+  "budget_sha256": "2b7e550992abb1872e52846dec712fab59b78692b776fd7e648d7976299f4b2a",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-edit-fixed": {
+      "sections": {
+        "text": 19244,
+        "data": 920,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "04974e2d3c4d7f5fb22aff67e7399aa2ebcbd85eb24da0c0e41f3ef047d5ddec"
+    },
+    "pure-connections-fixed": {
+      "sections": {
+        "text": 26549,
+        "data": 1028,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "0f1c24533177357c49270c01070a7376345763393b3914276ca028e52e8589b9"
+    }
+  }
+}

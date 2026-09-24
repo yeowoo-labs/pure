@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-fixed-document-terminal-editor",
+  "scope": "Release-linked optional POSIX terminal editor for one build-time prepared document app. Excludes libc, terminal emulator, kernel TTY buffers, heap and stack. Whole-process RSS is checked by check_tui.py on the recorded Linux AArch64 host.",
+  "budget_sha256": "e378cb302b2a4bcd2ee674af048116f139b214b59f24244d6c825bc71a8e8a31",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-edit-tui-fixed": {
+      "sections": {
+        "text": 28098,
+        "data": 988,
+        "bss": 24
+      },
+      "needed": [
+        "libc.so.6"
+      ],
+      "sha256": "ae3f8ff479899929cb108dd3435750aa24b8f793744a9e7794315974182ad1f7"
+    }
+  }
+}

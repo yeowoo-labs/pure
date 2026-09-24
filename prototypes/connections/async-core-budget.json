@@ -1,0 +1,16 @@
+{
+  "profile": "selected-owner-thread-async-effects",
+  "max_text_bytes": 6144,
+  "max_data_bytes": 0,
+  "max_bss_bytes": 0,
+  "layout_max_bytes": {
+    "domain_bytes": 120,
+    "work_slot_bytes": 216,
+    "ticket_bytes": 24,
+    "pointer_bytes": 8,
+    "effect_bytes": 72
+  },
+  "archive_members": ["runtime-async.o"],
+  "external_symbols_allowed": ["memcpy", "memmove", "memset", "strlen"],
+  "scope": "Selected compact owner-thread completion extension without opt-in PURE_RUNTIME_METRICS. Host I/O and worker stacks are excluded. The default execution core and fixed document packages do not link this profile."
+}

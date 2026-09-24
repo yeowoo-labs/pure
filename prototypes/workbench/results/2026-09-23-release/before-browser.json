@@ -1,0 +1,21 @@
+{
+  "states": {
+    "x": 80,
+    "y": 160,
+    "grab_x": 9.999986805438311,
+    "grab_y": 10.00000329864045,
+    "start_x": 80,
+    "start_y": 160,
+    "dragging": 0
+  },
+  "lastEvent": {
+    "name": "drag",
+    "phase": "cancel",
+    "source": "scene:1",
+    "status": 0,
+    "line": null,
+    "ops": 6,
+    "x": 370.0000131945618,
+    "y": 229.99999835067982
+  }
+}

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Pure · 빈 작업물에서 시작하기</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23151918'/%3E%3Ctext x='9' y='23' fill='%23c9f08b' font-size='24' font-family='sans-serif'%3Ep%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="masthead">
+    <a class="wordmark" href="./" aria-label="Pure 작업 공간">pure<span> / workbench</span></a>
+    <span class="experiment">제작 경험 실험 004</span>
+    <div class="connection"><span id="ready-dot" class="dot"></span><span id="ready-status" role="status">실행기 준비 중</span></div>
+  </header>
+
+  <main>
+    <section class="intro" aria-labelledby="title">
+      <div><p class="eyebrow">빈 코드 · 직접 만든 동작</p><h1 id="title">무엇을 움직이게 할까요?</h1></div>
+      <p>상태를 만들고, 입력에 동작을 연결하세요.<br>코드를 <strong>적용</strong>하면 장면이 바뀝니다. 같은 이름의 상태는 이어집니다.</p>
+    </section>
+
+    <div class="workspace">
+      <section class="editor-panel panel" aria-labelledby="editor-title">
+        <div class="panel-heading"><h2 id="editor-title"><span class="section-index">01</span> 코드</h2><span id="draft-status" class="badge">빈 작업물</span></div>
+        <div class="file-tools" aria-label="파일 관리">
+          <button id="new" class="quiet" type="button">편집기 비우기</button>
+          <button id="upload" class="quiet" type="button">파일 열기</button>
+          <button id="download" class="quiet" type="button">.pure 저장</button>
+          <button id="download-project" class="quiet" type="button">코드 JSON 저장</button>
+          <button id="download-layout" class="quiet" type="button" disabled>배치 저장</button>
+          <input id="file-input" type="file" accept=".pure,.txt,.json,text/plain,application/json" hidden>
+        </div>
+        <label class="sr-only" for="source">Pure 코드 편집기</label>
+        <div class="code-editor">
+          <div id="line-numbers" class="line-numbers" aria-hidden="true">1</div>
+          <textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-describedby="editor-hint diagnostic" placeholder="여기서 시작하세요.&#10;&#10;아래 ‘언어 안내’에서 작은 조각을 가져올 수 있습니다."></textarea>
+        </div>
+        <div class="editor-footer"><span id="source-size">0 / 32,768 bytes</span><span id="cursor-position">1행 · 1열</span></div>
+        <div class="apply-row"><button id="apply" class="primary" type="button" disabled>코드 적용 <span aria-hidden="true">↗</span></button><p id="editor-hint">편집만으로 실행 중인 코드는 바뀌지 않습니다.</p></div>
+        <div id="diagnostic" class="diagnostic" role="status" aria-live="polite"><span id="diagnostic-text">아직 작성한 코드가 없습니다.</span><button id="error-location" type="button" class="quiet" hidden>문제 위치로</button></div>
+      </section>
+
+      <div class="right-column">
+        <section class="scene-panel panel" aria-labelledby="scene-title">
+          <div class="panel-heading"><h2 id="scene-title"><span class="section-index">02</span> 실행 장면</h2><span id="scene-status" class="badge">적용 전</span></div>
+          <div class="stage-wrap">
+            <svg id="scene" viewBox="0 0 640 360" role="img" tabindex="0" aria-labelledby="scene-description"><title id="scene-description">사용자가 코드로 만든 장면. 현재 비어 있습니다.</title><g id="scene-content"></g></svg>
+            <div id="empty-scene" class="empty-scene"><span class="empty-cross" aria-hidden="true">＋</span><strong>아직 아무것도 없습니다</strong><span>도형이나 글자를 선언하고 코드를 적용하세요.</span></div>
+            <span class="stage-dimensions" aria-hidden="true">640 × 360</span>
+          </div>
+          <div class="transport"><button id="play" class="secondary" type="button" disabled>▶ 실행</button><button id="step" type="button" disabled>한 프레임</button><button id="reset" type="button" disabled>초깃값으로</button><span id="clock-status">0 frame · 정지</span></div>
+          <p class="control-note">정지하면 시간만 멈춥니다. 아래 입력은 정지 중에도 작동합니다.</p>
+          <div class="input-heading"><h3>내가 선언한 입력</h3><span>눌렀을 때 .down / 놓았을 때 .up</span></div>
+          <div id="input-controls" class="input-controls"><p class="empty-note">입력을 선언하면 여기에 버튼이 생깁니다.</p></div>
+          <p class="keyboard-note">장면을 클릭하면 키보드로 입력할 수 있습니다. 코드나 폼을 편집하는 동안에는 전달되지 않습니다.</p>
+        </section>
+
+        <section class="inspect-panel panel" aria-labelledby="inspect-title">
+          <div class="panel-heading"><h2 id="inspect-title"><span class="section-index">03</span> 현재 상태</h2><span id="revision" class="mono subdued">revision 0</span></div>
+          <div id="state-values" class="state-values"><p class="empty-note">선언한 상태의 값이 표시됩니다.</p></div>
+          <div class="event-line"><span class="subdued">마지막 입력</span><span id="last-event" class="mono">아직 없음</span></div>
+          <div id="runtime-error" class="runtime-error" role="status" hidden></div>
+          <details class="cost-details"><summary>실행 비용과 범위</summary><dl id="cost-values" class="cost-values"></dl><p>코어가 보고한 WebAssembly 메모리입니다. 브라우저·편집기·렌더러의 메모리와 프로세스 전체 사용량은 포함하지 않습니다. 예약 공간 안에 사용 중인 코드·상태·스테이징 공간이 포함되므로 합산하지 않습니다.</p><p id="dropped-ticks">시간 지연으로 건너뛴 프레임: 0</p></details>
+        </section>
+      </div>
+    </div>
+
+    <section class="reference panel" aria-labelledby="reference-title">
+      <div class="panel-heading"><h2 id="reference-title">언어 안내</h2><span class="subdued">조각을 조합해 자신의 동작을 만드세요.</span></div>
+      <div class="reference-grid">
+        <article><h3>1. 기억할 값</h3><p>이름은 영문으로, 처음 값은 숫자로 정합니다.</p><pre><code>state count = 0
+state x = 80</code></pre><button class="insert-snippet quiet" data-snippet="state" type="button">상태 조각 삽입</button></article>
+        <article><h3>2. 입력과 반응</h3><p>버튼 이름과 키를 선언하고 .down / .up에 연결합니다.</p><pre><code>input tap = Space
+on tap.down {
+  count = count + 1
+}</code></pre><button class="insert-snippet quiet" data-snippet="input" type="button">입력 조각 삽입</button></article>
+        <article><h3>3. 보일 것</h3><p>좌표와 크기를 상태에 연결할 수 있습니다.</p><pre><code>box tile(x, 180, 40, 40, "#7ed9ae")
+text label(40, 60, count, "Count: ")</code></pre><button class="insert-snippet quiet" data-snippet="view" type="button">장면 조각 삽입</button></article>
+        <article><h3>4. 시간에 따른 변화</h3><p>실행하면 매 프레임 반응합니다. dt는 1/60초입니다.</p><pre><code>on frame {
+  x = x + 30 * dt
+  if x > 600 { x = 0 }
+}</code></pre><button class="insert-snippet quiet" data-snippet="frame" type="button">시간 조각 삽입</button></article>
+      </div>
+      <details class="syntax-details"><summary>표현식 · 입력 키 · 제한 보기</summary><div class="syntax-columns"><div><p><strong>표현식</strong><br><code>+ - * /</code>, <code>&lt; &lt;= &gt; &gt;= == !=</code>, <code>&amp;&amp; || !</code>, 괄호, <code>min(a,b)</code>, <code>max(a,b)</code>, <code>clamp(x,lo,hi)</code>를 사용합니다. 논리 연산은 양쪽을 모두 계산합니다.</p><p><strong>도형</strong><br><code>box id(x,y,width,height,"#rrggbb")</code><br><code>circle id(x,y,radius,"#rrggbb")</code><br><code>text id(x,y,value,"접두사")</code><br>글자의 value는 숫자 표현식입니다. 문자 접두사는 생략할 수 있습니다.</p></div><div><p><strong>입력</strong><br><code>Space</code>, <code>Enter</code>, <code>ArrowLeft/Right/Up/Down</code>, <code>KeyA</code>~<code>KeyZ</code>, <code>Digit0</code>~<code>Digit9</code>. 같은 키는 하나의 입력에 연결합니다.</p><p><strong>직접 조작</strong><br><code>input drag = pointer(tile)</code>로 도형에 입력을 연결합니다. <code>on drag.down / .move / .up / .cancel</code>에서 <code>event_x</code>, <code>event_y</code>는 장면 좌표입니다. 이동 방식과 취소 시 동작도 코드로 정합니다. 초점이나 포인터 캡처를 잃으면 <code>.cancel</code>이 전달됩니다.</p><p><strong>값과 규칙 재사용</strong><br><code>record Tile { x=0; y=0 }</code>로 필드를 정하고 <code>item green = Tile(x=80)</code>으로 대상을 만듭니다. <code>rule move(t: Tile) { t.x=event_x }</code>를 <code>on drag.move use move(green)</code>으로 연결합니다. 화면에서는 <code>green.x</code>를 읽습니다. 규칙은 연결한 대상의 값을 직접 바꿉니다.</p><p><strong>이 실험의 범위</strong><br>상태 32개 · 입력 8개 · 도형/글자 24개 · 반응 64개 · 컴파일된 명령 512개 · 코드 32 KiB. 반복문, 함수 선언, 자동 충돌·물리는 없습니다. 줄바꿈 또는 세미콜론으로 구분하고 <code>#</code>으로 주석을 씁니다.</p><p>0으로 나누기 등 계산 실패 시 해당 이벤트의 상태 변경 전체를 취소합니다. 입력을 누르고 있을 때는 새 코드를 적용할 수 없습니다.</p></div></div></details>
+      <div class="example-row"><div><label for="example">완성된 예제 살펴보기</label><p>선택한 코드를 편집기에 불러옵니다. 자동으로 적용되지 않습니다.</p></div><select id="example"><option value="counter">카운터</option><option value="charge">누르는 동안 충전</option><option value="toggle">입력으로 전환</option><option value="direct">직접 잡아 이동</option><option value="layout">세 도형 배치</option><option value="shared-layout">공유 규칙으로 배치</option></select><button id="load-example" type="button">예제 불러오기</button></div>
+      <div class="baseline-row"><a href="./baseline.html" target="_blank" rel="noopener">같은 동작을 일반 JavaScript로 만든 비교 앱 ↗</a><span>충전 예제와 비교할 수 있습니다. 새 탭에서 열립니다.</span></div>
+    </section>
+    <footer class="page-footer"><span>Pure · authoring experiment</span><p>원하는 동작을 만들어보고, <strong>하려던 일 / 실제로 일어난 일 / 기대했던 일</strong>을 남겨주세요.</p></footer>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

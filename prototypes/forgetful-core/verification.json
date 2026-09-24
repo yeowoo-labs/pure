@@ -1,0 +1,67 @@
+{
+  "kind": "correctness-and-bounds-only",
+  "utc": "2026-09-22T13:34:34.908273+00:00",
+  "host": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "machine": "aarch64",
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+  "source_sha256": {
+    "core.h": "cbc8cad736c72bf45f1e7d9d545b7ac40af44c4e79c9f7128ff15bc3de79e8f5",
+    "core.c": "6b98b56ab6d0802135d2b40877a3020224af687722d934911ba360bd9ba7f00e",
+    "test.c": "3d87a842ec15f9c3e35e7238165bc29652573bbe731fde348dd4500879bf7171",
+    "check.py": "2013f0530fbd06b19672da4ea4660cb44f00bf6a2154b32a3e8375b5befb2b71"
+  },
+  "runs": [
+    {
+      "name": "native",
+      "flags": [
+        "-std=c17",
+        "-g",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        "-Werror",
+        "-O2",
+        "-fstack-usage"
+      ],
+      "result": {
+        "checks": 116143,
+        "successful_queries": 116143,
+        "exhausted_queries": 16425,
+        "core_bytes": 3696,
+        "node_bytes": 24,
+        "memo_bytes": 24,
+        "history_entry_bytes": 16,
+        "frame_bytes": 24,
+        "seed": 20260922
+      },
+      "compiler_stack_usage": {
+        "native-core.su": "/home/eunhhu/work/pure/prototypes/forgetful-core/core.c:5:5:pf_init\t48\tstatic\n/home/eunhhu/work/pure/prototypes/forgetful-core/core.c:16:6:pf_forget\t0\tstatic\n/home/eunhhu/work/pure/prototypes/forgetful-core/core.c:29:5:pf_load\t32\tstatic\n/home/eunhhu/work/pure/prototypes/forgetful-core/core.c:44:5:pf_write\t0\tstatic\n/home/eunhhu/work/pure/prototypes/forgetful-core/core.c:109:5:pf_eval\t64\tstatic\n"
+      }
+    },
+    {
+      "name": "asan-ubsan",
+      "flags": [
+        "-std=c17",
+        "-g",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        "-Werror",
+        "-O1",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer"
+      ],
+      "result": {
+        "checks": 116143,
+        "successful_queries": 116143,
+        "exhausted_queries": 16425,
+        "core_bytes": 3696,
+        "node_bytes": 24,
+        "memo_bytes": 24,
+        "history_entry_bytes": 16,
+        "frame_bytes": 24,
+        "seed": 20260922
+      }
+    }
+  ]
+}

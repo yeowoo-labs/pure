@@ -1,0 +1,108 @@
+{
+  "profile": "whole-native-app-idle-work-storage",
+  "prepared_sha256": "b7524e53a5d90d1ce16d2e2fbaac67ceb242f1cd27f280afc3a80857ad8c21ba",
+  "scalar_archive_sha256": "30a015c55d385b337639b54b2f31aea34b40bc37d1fe6c9e3c884660d26e4cbc",
+  "harness_sha256": "f6d6dde36c00847552e8a8f0c98fab700e33c7634cddd363202a8891424d789e",
+  "checker_sha256": "0360c8e60f769da76f2e6352ab11b753213c61a1f7b4d85660c6bb87d673eabe",
+  "baseline": {
+    "binary_sha256": "d76598743f43ebba0c11bbb70af7a2e24cc07172c794320bdeac0d35aac44f06",
+    "app_source_sha256": "96ab7faf4848b5eaba5a1fb672eec2ea7882b3e554a4cba1adfac9c202a2b4ca",
+    "app_header_sha256": "32c738e06f007894457b6b4369ff75c9c2286737885a04159e257c1dcdfa3729",
+    "text_bytes": 35682,
+    "data_bytes": 1968,
+    "app_controller_bytes": 928,
+    "scalar_bytes": 280,
+    "samples": [
+      {
+        "apps": 1000,
+        "app_controller_bytes": 928,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1392,
+        "rss_initialized_kib": 2656,
+        "rss_saved_kib": 2720,
+        "rss_initialized_delta_kib": 1264,
+        "rss_saved_delta_kib": 1328,
+        "accepted": 3010,
+        "releases": 3010
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 928,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1376,
+        "rss_initialized_kib": 2640,
+        "rss_saved_kib": 2704,
+        "rss_initialized_delta_kib": 1264,
+        "rss_saved_delta_kib": 1328,
+        "accepted": 3010,
+        "releases": 3010
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 928,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1376,
+        "rss_initialized_kib": 2640,
+        "rss_saved_kib": 2704,
+        "rss_initialized_delta_kib": 1264,
+        "rss_saved_delta_kib": 1328,
+        "accepted": 3010,
+        "releases": 3010
+      }
+    ],
+    "median_initialized_delta_kib": 1264,
+    "median_saved_delta_kib": 1328
+  },
+  "elastic": {
+    "binary_sha256": "a5d5f4d3344dcaa9a206261f8a423f39836afa3b3302933873ae5981383c95ef",
+    "app_source_sha256": "cf19cbf7d7c60020b13198e9335e519f650633f1eb3fb25b61953ff56c3e4dd8",
+    "app_header_sha256": "622ec62cfb5f755fe0fb2582f5e1ce264172e8a45663078429afb910061e21a4",
+    "text_bytes": 35946,
+    "data_bytes": 1968,
+    "app_controller_bytes": 480,
+    "scalar_bytes": 280,
+    "samples": [
+      {
+        "apps": 1000,
+        "app_controller_bytes": 480,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1392,
+        "rss_initialized_kib": 2224,
+        "rss_saved_kib": 2288,
+        "rss_initialized_delta_kib": 832,
+        "rss_saved_delta_kib": 896,
+        "accepted": 3010,
+        "releases": 3010
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 480,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1376,
+        "rss_initialized_kib": 2208,
+        "rss_saved_kib": 2272,
+        "rss_initialized_delta_kib": 832,
+        "rss_saved_delta_kib": 896,
+        "accepted": 3010,
+        "releases": 3010
+      },
+      {
+        "apps": 1000,
+        "app_controller_bytes": 480,
+        "scalar_bytes": 280,
+        "rss_before_kib": 1392,
+        "rss_initialized_kib": 2224,
+        "rss_saved_kib": 2288,
+        "rss_initialized_delta_kib": 832,
+        "rss_saved_delta_kib": 896,
+        "accepted": 3010,
+        "releases": 3010
+      }
+    ],
+    "median_initialized_delta_kib": 832,
+    "median_saved_delta_kib": 896
+  },
+  "controller_saved_per_app_bytes": 448,
+  "initialized_rss_median_saved_kib": 432,
+  "saved_rss_median_saved_kib": 432
+}

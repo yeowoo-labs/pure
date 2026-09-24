@@ -1,0 +1,7 @@
+{
+  "profile": "linux-aarch64-gcc14-native-document-cli-memory",
+  "max_small_edit_rss_kib": 4096,
+  "max_one_mib_edit_rss_kib": 4096,
+  "max_one_mib_show_rss_kib": 4096,
+  "scope": "Peak process RSS via a small fork/wait4 helper on Linux AArch64. Covers this CLI, libc, program parsing, store, and one 1 MiB document workload; excludes filesystem cache, kernel buffers, other processes, selected TLS/GTK hosts, and other applications. These are regression ceilings for this toolchain, not a universal memory guarantee."
+}

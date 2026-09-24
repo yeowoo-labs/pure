@@ -1,0 +1,65 @@
+{
+  "host": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "samples": {
+    "general": [
+      {
+        "instances": 1000,
+        "instance_bytes": 20064,
+        "rss_before_kib": 1248,
+        "rss_after_kib": 21056,
+        "rss_delta_kib": 19808,
+        "checksum": 1000
+      },
+      {
+        "instances": 1000,
+        "instance_bytes": 20064,
+        "rss_before_kib": 1232,
+        "rss_after_kib": 21040,
+        "rss_delta_kib": 19808,
+        "checksum": 1000
+      },
+      {
+        "instances": 1000,
+        "instance_bytes": 20064,
+        "rss_before_kib": 1248,
+        "rss_after_kib": 21056,
+        "rss_delta_kib": 19808,
+        "checksum": 1000
+      }
+    ],
+    "fixed": [
+      {
+        "instances": 1000,
+        "instance_bytes": 5456,
+        "rss_before_kib": 1232,
+        "rss_after_kib": 6768,
+        "rss_delta_kib": 5536,
+        "checksum": 1000
+      },
+      {
+        "instances": 1000,
+        "instance_bytes": 5456,
+        "rss_before_kib": 1232,
+        "rss_after_kib": 6768,
+        "rss_delta_kib": 5536,
+        "checksum": 1000
+      },
+      {
+        "instances": 1000,
+        "instance_bytes": 5456,
+        "rss_before_kib": 1232,
+        "rss_after_kib": 6768,
+        "rss_delta_kib": 5536,
+        "checksum": 1000
+      }
+    ]
+  },
+  "binary_sha256": {
+    "general": "bb9b95ab306e0bb252c793055717409d3726729c408e73dd652d58cf4cb10b03",
+    "fixed": "faed0a646207e63d466f0afe78b655bfa875695aa3e45dc9e0d0d575eaa97768"
+  },
+  "median_rss_delta_kib": {
+    "general": 19808,
+    "fixed": 5536
+  }
+}

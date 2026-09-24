@@ -1,0 +1,96 @@
+{
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "machine": "aarch64",
+  "python": "3.14.7",
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+  "cpu_affinity": 0,
+  "builds": [
+    {
+      "command": [
+        "cc",
+        "-std=c17",
+        "-O2",
+        "-g",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        "-Werror",
+        "-DYYJSON_DISABLE_WRITER=1",
+        "-DYYJSON_DISABLE_UTILS=1",
+        "-DYYJSON_DISABLE_INCR_READER=1",
+        "/home/eunhhu/work/pure/research/experiments/003-json-fanout/benchmark.c",
+        "/home/eunhhu/work/pure/research/experiments/003-json-fanout/vendor/yyjson/yyjson.c",
+        "-o",
+        "/tmp/pure-fanout-i4xs4fhg/benchmark"
+      ],
+      "stderr": "",
+      "sha256": "adfd209a990abe11bfd93337c56eb2c9266d6529899fc91cd2f3844c93ef67db",
+      "size_bytes": 842056,
+      "build_wall_ns": 15110774980
+    },
+    {
+      "command": [
+        "cc",
+        "-std=c17",
+        "-O2",
+        "-g",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        "-Werror",
+        "-DYYJSON_DISABLE_WRITER=1",
+        "-DYYJSON_DISABLE_UTILS=1",
+        "-DYYJSON_DISABLE_INCR_READER=1",
+        "-O1",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer",
+        "/home/eunhhu/work/pure/research/experiments/003-json-fanout/benchmark.c",
+        "/home/eunhhu/work/pure/research/experiments/003-json-fanout/vendor/yyjson/yyjson.c",
+        "-o",
+        "/tmp/pure-fanout-i4xs4fhg/benchmark-sanitized"
+      ],
+      "stderr": "",
+      "sha256": "c7516cf3c1c18463c72b96a75d70cc326a0ff43873fa278e0b13fb94d6e180d2",
+      "size_bytes": 5441872,
+      "build_wall_ns": 160671462690
+    }
+  ],
+  "source_sha256": {
+    "benchmark.c": "c9ccc4544ef296eb59a8d071ad7fb25afc4b3fe5a94a8978c415c557b8ea8d0d",
+    "run.py": "7ab64e454f3ce0a48c20a477d8924b06ece6ad29a442d0bb49f48b5a6ecffe49",
+    "plan.json": "69f1258b3afd616404c6853526a5fbb6523d406eb43db479fd4be43905bc9f5d",
+    "vendor/yyjson/UPSTREAM.json": "eab60a505ff59ca1f3271792c16aa57d61f596cb5c57ff04dcff15d22ba29cee",
+    "vendor/yyjson/yyjson.c": "ac2e9bbb2e2d9149d90878d40506a1d624fa0b33c979a11b61075c54782c6d6a",
+    "vendor/yyjson/yyjson.h": "175867c5493a5df648cec566717fa1c29aa2f6096f5f0cf1efad0b65e1f6d7b3",
+    "vendor/yyjson/LICENSE": "45e384d3d52c73cba3a64d6e6c25d47cd738cd8a55c30629e3201046eda62947"
+  },
+  "upstream": {
+    "project": "yyjson",
+    "version": "0.12.0",
+    "commit": "8b4a38dc994a110abaec8a400615567bd996105f",
+    "license": "MIT",
+    "files": {
+      "yyjson.c": {
+        "url": "https://raw.githubusercontent.com/ibireme/yyjson/8b4a38dc994a110abaec8a400615567bd996105f/src/yyjson.c",
+        "sha256": "ac2e9bbb2e2d9149d90878d40506a1d624fa0b33c979a11b61075c54782c6d6a",
+        "bytes": 410813
+      },
+      "yyjson.h": {
+        "url": "https://raw.githubusercontent.com/ibireme/yyjson/8b4a38dc994a110abaec8a400615567bd996105f/src/yyjson.h",
+        "sha256": "175867c5493a5df648cec566717fa1c29aa2f6096f5f0cf1efad0b65e1f6d7b3",
+        "bytes": 322407
+      },
+      "LICENSE": {
+        "url": "https://raw.githubusercontent.com/ibireme/yyjson/8b4a38dc994a110abaec8a400615567bd996105f/LICENSE",
+        "sha256": "45e384d3d52c73cba3a64d6e6c25d47cd738cd8a55c30629e3201046eda62947",
+        "bytes": 1084
+      }
+    }
+  },
+  "timing": "I/O, parsing, selection, consumers, instrumentation, cleanup; excludes setup/build/verification",
+  "parse_call_ns": "wall duration inside yyjson_read_opts including allocator backpressure and serviced consumers",
+  "rss": "Linux current-image VmHWM approximate; zero means unavailable on other OSes",
+  "limits": "synthetic closed-loop arrivals/delays; one thread; uncontrolled thermals/power; cached file I/O; no fsync",
+  "started_utc": "2026-09-22T13:10:45Z",
+  "cpuinfo": "processor\t: 0\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x4\nCPU part\t: 0xd0b\nCPU revision\t: 1\n\nprocessor\t: 1\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x4\nCPU part\t: 0xd0b\nCPU revision\t: 1\n\nprocessor\t: 2\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x4\nCPU part\t: 0xd0b\nCPU revision\t: 1\n\nprocessor\t: 3\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x4\nCPU part\t: 0xd0b\nCPU revision\t: 1\n\nRevision\t: d04171\nSerial\t\t: d3ba8e625dbe42ac\nModel\t\t: Raspberry Pi 5 Model B Rev 1.1\n"
+}

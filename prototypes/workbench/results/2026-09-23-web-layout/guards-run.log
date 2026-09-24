@@ -1,0 +1,38 @@
+### Ran Playwright code
+```js
+await (async page => {
+  const checks=[],check=(ok,label)=>{if(!ok)throw new Error(label);checks.push(label);};
+  const onDialog=d=>d.accept();page.on('dialog',onDialog);
+  try {
+    await page.goto('http://127.0.0.1:8766/document.html');await page.waitForFunction(()=>window.pureDocument?.snapshot().ready);
+    await page.setViewportSize({width:1440,height:1000});await page.locator('#document-text').fill('보존할 문서');
+    await page.locator('.policy summary').click();const source=await page.locator('#policy-source').inputValue();
+    const bad=source.replace('clamp(event_value, 20, 80)','999');check(bad!==source,'invalid-output fixture changes the numeric rule');
+    await page.locator('#policy-source').fill(bad);await page.locator('#apply-policy').click();await page.locator('#split-range').focus();await page.keyboard.press('End');
+    check(await page.locator('#divider').getAttribute('aria-valuenow')==='50'&&await page.locator('#split-range').inputValue()==='50'&&(await page.locator('#policy-status').textContent()).includes('20~80'),'out-of-range authored output preserves both the layout and its native control projection');
+    await page.locator('#policy-source').fill(source);await page.locator('#apply-policy').click();await page.locator('#split-range').focus();await page.keyboard.press('Home');
+    check(await page.locator('#divider').getAttribute('aria-valuenow')==='20','a corrected policy and valid request recover from invalid host output');
+    await page.locator('#policy-source').fill(source.replace('clamp(event_value, 20, 80)','1 / 0'));await page.locator('#apply-policy').click();await page.locator('#split-range').focus();await page.keyboard.press('End');
+    const s=await page.evaluate(()=>window.pureDocument.snapshot());check(s.runtime.lastError===4&&s.runtime.states.ratio===20&&await page.locator('#split-range').inputValue()==='20','arithmetic rollback also restores the native range projection');
+    await page.locator('#policy-source').fill(source);await page.locator('#apply-policy').click();
+    await page.locator('#divider').scrollIntoViewIfNeeded();const box=await page.locator('#divider').boundingBox();await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
+    const revision=await page.evaluate(()=>window.pureDocument.snapshot().runtime.revision);
+    await page.evaluate(()=>document.querySelector('#apply-policy').click());
+    check(await page.evaluate(r=>window.pureDocument.snapshot().dragging&&window.pureDocument.snapshot().runtime.revision===r,revision)&&(await page.locator('#policy-status').textContent()).includes('경계를 놓거나'),'policy replacement is refused during an active native gesture');await page.mouse.up();
+    await page.locator('#file-input').evaluate(input=>{const d=new DataTransfer();d.items.add(new File([new Uint8Array(2*1024*1024+1)],'oversize.txt'));input.files=d.files;input.dispatchEvent(new Event('change',{bubbles:true}));});
+    await page.waitForFunction(()=>document.querySelector('#document-status').textContent.includes('2 MiB'));
+    check(await page.locator('#document-text').inputValue()==='보존할 문서','oversize files cannot replace the editable text');
+    await page.locator('.policy summary').click();await page.locator('#sample').click();await page.locator('#reset-split').click();
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    await page.screenshot({path:'output/playwright/pure-document-desktop.png',fullPage:true});
+    await page.setViewportSize({width:390,height:844});await page.screenshot({path:'output/playwright/pure-document-mobile.png',fullPage:true});
+    await page.evaluate(e=>window.__pureDocumentGuards=e,{checks});return{checks};
+  }catch(error){await page.evaluate(e=>window.__pureDocumentGuards=e,{failed:String(error),checks});throw error;}
+  finally{page.off('dialog',onDialog);}
+}
+)(page);
+```
+### Page
+- Page URL: http://127.0.0.1:8766/
+### Modal state
+- ["beforeunload" dialog with message ""]: can be handled by dialog-accept or dialog-dismiss

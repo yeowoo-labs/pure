@@ -1,0 +1,18 @@
+{
+  "profile": "linux-aarch64-gcc14-selected-paged-document-storage",
+  "binaries": {
+    "pure-edit": {
+      "max_text_bytes": 40960,
+      "max_data_bytes": 1200,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    },
+    "pure-connections": {
+      "max_text_bytes": 49152,
+      "max_data_bytes": 1300,
+      "max_bss_bytes": 64,
+      "needed": ["libc.so.6"]
+    }
+  },
+  "scope": "Selected 16 KiB-page document storage backend on Linux AArch64/GCC 14. Same linked-code and direct-dependency ceilings as the flat backend; excludes libc, process RAM, filesystem cache and journal, and optional TLS/GTK. Any failure requires review, not automatic relaxation."
+}

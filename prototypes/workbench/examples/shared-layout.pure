@@ -1,0 +1,75 @@
+# 대상별 값은 item에, 공통 반응은 rule에 한 번만 작성합니다.
+state selected = 0
+record Tile {
+  x = 0; y = 0
+  ox = 0; oy = 0
+  sx = 0; sy = 0
+  held = 0; id = 0
+}
+item green = Tile(x=80, y=120, sx=80, sy=120, id=1)
+item blue = Tile(x=280, y=160, sx=280, sy=160, id=2)
+item amber = Tile(x=450, y=220, sx=450, sy=220, id=3)
+input left = ArrowLeft
+input right = ArrowRight
+input up = ArrowUp
+input down = ArrowDown
+input drag_green = pointer(green_box)
+input drag_blue = pointer(blue_box)
+input drag_amber = pointer(amber_box)
+box board(20,90,600,240,"#233a31")
+text help(25,40,selected,"선택한 도형: ")
+box green_box(green.x,green.y,56,44,"#c9f08b")
+box blue_box(blue.x,blue.y,56,44,"#74c4d4")
+box amber_box(amber.x,amber.y,56,44,"#dfb184")
+
+rule grab(t: Tile) {
+  selected = t.id
+  t.sx = t.x; t.sy = t.y
+  t.ox = event_x - t.x; t.oy = event_y - t.y
+  t.held = 1
+}
+rule move(t: Tile) {
+  t.x = clamp(event_x - t.ox, 20, 564)
+  t.y = clamp(event_y - t.oy, 90, 286)
+}
+rule drop(t: Tile) { t.held = 0 }
+rule cancel(t: Tile) { t.x = t.sx; t.y = t.sy; t.held = 0 }
+rule go_left(t: Tile) {
+  if selected == t.id && t.held == 0 { t.x = clamp(t.x - 10, 20, 564) }
+}
+rule go_right(t: Tile) {
+  if selected == t.id && t.held == 0 { t.x = clamp(t.x + 10, 20, 564) }
+}
+rule go_up(t: Tile) {
+  if selected == t.id && t.held == 0 { t.y = clamp(t.y - 10, 90, 286) }
+}
+rule go_down(t: Tile) {
+  if selected == t.id && t.held == 0 { t.y = clamp(t.y + 10, 90, 286) }
+}
+
+on drag_green.down use grab(green)
+on drag_green.move use move(green)
+on drag_green.up use drop(green)
+on drag_green.cancel use cancel(green)
+on left.down use go_left(green)
+on right.down use go_right(green)
+on up.down use go_up(green)
+on down.down use go_down(green)
+
+on drag_blue.down use grab(blue)
+on drag_blue.move use move(blue)
+on drag_blue.up use drop(blue)
+on drag_blue.cancel use cancel(blue)
+on left.down use go_left(blue)
+on right.down use go_right(blue)
+on up.down use go_up(blue)
+on down.down use go_down(blue)
+
+on drag_amber.down use grab(amber)
+on drag_amber.move use move(amber)
+on drag_amber.up use drop(amber)
+on drag_amber.cancel use cancel(amber)
+on left.down use go_left(amber)
+on right.down use go_right(amber)
+on up.down use go_up(amber)
+on down.down use go_down(amber)

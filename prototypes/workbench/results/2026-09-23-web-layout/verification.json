@@ -1,0 +1,14 @@
+{
+  "nativeTests": 37,
+  "nodeTests": 87,
+  "browserChecks": {
+    "document": 32,
+    "authoring": 44,
+    "numericControl": 3,
+    "guards": 6
+  },
+  "sourceSha256": "60307704dbb5e11a75d14108fb7d87a5a4480359fdd771ec73beebf5f5c48b81",
+  "wasmSha256": "9f760e4a2ce6ea11f2be07693fceca74088884885cc545a70ceef5003d0b2479",
+  "wasmFileBytes": 61072,
+  "scope": "Functional and ownership checks, not a throughput/latency/RAM benchmark"
+}

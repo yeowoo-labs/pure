@@ -1,0 +1,16 @@
+{
+  "profile": "selected-authenticated-document-peer",
+  "checks": [
+    "mutual certificate identity, server hostname and ALPN separation",
+    "program source identity checked before C client sends work",
+    "persistent external TLS client: create, read, conflict and recovery",
+    "native peer edit and local CLI use the same authored document and storage",
+    "fragmented 1 MiB direct ingress, demand-selected reply and one-byte splice",
+    "native C peer uploads 1 MiB and receives only the requested metadata",
+    "incomplete, invalid and oversized frames do not publish a change",
+    "idle authenticated session closes after deadline",
+    "server restart and native C peer preserve the committed large document"
+  ],
+  "server_idle_rss_kib": 7952,
+  "server_after_large_work_rss_kib": 9696
+}

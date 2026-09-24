@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "failures": [],
+  "profile": "linux-aarch64-gcc14-selected-document-server",
+  "scope": "Reviewed server-only TLS peer ceiling on Linux AArch64/GCC 14. Excludes linked native client code and shared OpenSSL/libc implementations; process RSS is measured separately.",
+  "budget_sha256": "deae8827323061543193779ada90d1bca4db3a6dda80293e4ad28a9526be9819",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "binaries": {
+    "pure-document-server": {
+      "sections": {
+        "text": 43462,
+        "data": 1352,
+        "bss": 16
+      },
+      "needed": [
+        "libc.so.6",
+        "libcrypto.so.3",
+        "libssl.so.3"
+      ],
+      "sha256": "ea88a146270cea96faf976b548ceba7179c535042ec3a8656e92c3596372f9aa"
+    }
+  }
+}

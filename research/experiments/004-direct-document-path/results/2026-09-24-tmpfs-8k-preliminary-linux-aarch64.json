@@ -1,0 +1,322 @@
+{
+  "profile": "same-durable-document-app-direct-versus-pure",
+  "definition_sha256": "8ca6c191b98bf53a592ce24f2b5cd040e41f05c4ccdda7a072d5d7f79870c06a",
+  "prepared_sha256": "8e93861539a87c2a091f55afea1bf310fc3d1f1474521d8f8318bfacac3b0649",
+  "documents_per_variant": 256,
+  "operations_per_variant": 1024,
+  "body_bytes": 8192,
+  "pairs": 6,
+  "sections": {
+    "direct": {
+      "text": 10364,
+      "data": 856,
+      "bss": 16
+    },
+    "pure": {
+      "text": 18640,
+      "data": 864,
+      "bss": 376
+    }
+  },
+  "binary_sha256": {
+    "direct": "d265f60f9126da701369c26a6263474164171349867e11079a63b6d9bd1dbbc8",
+    "pure": "8e71e09bb7923de0e945f4d51c5514dd9ab07a4ff9c0982db712ab895fc54fa0"
+  },
+  "samples": [
+    {
+      "order": [
+        "direct",
+        "pure"
+      ],
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32443218,
+        "stage_ns": [
+          8080321,
+          7513546,
+          5301851,
+          7787666
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1056,
+        "user_ns": 24559000,
+        "system_ns": 8186000,
+        "stored_file_bytes": 2103296
+      },
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32009201,
+        "stage_ns": [
+          8131949,
+          7162898,
+          5457529,
+          7487020
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1056,
+        "user_ns": 16183000,
+        "system_ns": 16183000,
+        "stored_file_bytes": 2103296
+      }
+    },
+    {
+      "order": [
+        "pure",
+        "direct"
+      ],
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 31919941,
+        "stage_ns": [
+          8166312,
+          7144299,
+          5410416,
+          7352779
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1040,
+        "user_ns": 20228000,
+        "system_ns": 12137000,
+        "stored_file_bytes": 2103296
+      },
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32205996,
+        "stage_ns": [
+          7984983,
+          7590856,
+          5294584,
+          7570908
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1040,
+        "user_ns": 16322000,
+        "system_ns": 16322000,
+        "stored_file_bytes": 2103296
+      }
+    },
+    {
+      "order": [
+        "direct",
+        "pure"
+      ],
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32589218,
+        "stage_ns": [
+          8207096,
+          7581051,
+          5347608,
+          7656447
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1056,
+        "user_ns": 16529000,
+        "system_ns": 16529000,
+        "stored_file_bytes": 2103296
+      },
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 31973552,
+        "stage_ns": [
+          8280075,
+          7151887,
+          5368944,
+          7359984
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1056,
+        "user_ns": 24311000,
+        "system_ns": 8103000,
+        "stored_file_bytes": 2103296
+      }
+    },
+    {
+      "order": [
+        "pure",
+        "direct"
+      ],
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32080256,
+        "stage_ns": [
+          8156569,
+          7173028,
+          5460655,
+          7396332
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1056,
+        "user_ns": 28408000,
+        "system_ns": 4058000,
+        "stored_file_bytes": 2103296
+      },
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32571829,
+        "stage_ns": [
+          8142638,
+          7715426,
+          5329257,
+          7625344
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1040,
+        "user_ns": 12350000,
+        "system_ns": 20584000,
+        "stored_file_bytes": 2103296
+      }
+    },
+    {
+      "order": [
+        "direct",
+        "pure"
+      ],
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32290107,
+        "stage_ns": [
+          8045372,
+          7543971,
+          5349434,
+          7600138
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1056,
+        "user_ns": 20455000,
+        "system_ns": 12273000,
+        "stored_file_bytes": 2103296
+      },
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32067756,
+        "stage_ns": [
+          8225774,
+          7252055,
+          5472276,
+          7359265
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1056,
+        "user_ns": 4064000,
+        "system_ns": 28454000,
+        "stored_file_bytes": 2103296
+      }
+    },
+    {
+      "order": [
+        "pure",
+        "direct"
+      ],
+      "pure": {
+        "variant": "pure",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32372144,
+        "stage_ns": [
+          8141941,
+          7171001,
+          5629064,
+          7673781
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1056,
+        "user_ns": 21685000,
+        "system_ns": 10842000,
+        "stored_file_bytes": 2103296
+      },
+      "direct": {
+        "variant": "direct",
+        "documents": 256,
+        "operations": 1024,
+        "body_bytes": 8192,
+        "elapsed_ns": 32314570,
+        "stage_ns": [
+          8063229,
+          7512835,
+          5380849,
+          7585506
+        ],
+        "digest": "b8a08a9615b2eb3b",
+        "peak_rss_kib": 1056,
+        "user_ns": 16375000,
+        "system_ns": 16375000,
+        "stored_file_bytes": 2103296
+      }
+    }
+  ],
+  "medians": {
+    "direct": {
+      "elapsed_ms": 32.378894,
+      "peak_rss_kib": 1056.0,
+      "user_ms": 16.452,
+      "system_ms": 16.3485,
+      "stages_ms": [
+        8.071775,
+        7.562511,
+        5.3384325,
+        7.612741
+      ]
+    },
+    "pure": {
+      "elapsed_ms": 32.0384785,
+      "peak_rss_kib": 1056.0,
+      "user_ms": 20.9565,
+      "system_ms": 11.4895,
+      "stages_ms": [
+        8.1614405,
+        7.1669495,
+        5.459092,
+        7.378158
+      ]
+    }
+  },
+  "median_elapsed_ratio_pure_over_direct": 0.9894865000638995,
+  "sources_sha256": {
+    "research/experiments/004-direct-document-path/document-path.c": "032d8688db330c355082d150865aa7ade3e5402cc1bbe090b361fd55cb6325fc",
+    "research/experiments/004-direct-document-path/peak-launcher.c": "fc730205d564b60a4f9e44aa1b880df0debeb1338b86b27eabe3bde1508f3f74",
+    "research/experiments/004-direct-document-path/run.py": "1919287fb5dc0f884cecf038c21e0d4326f2e826ee7a48eb65f5d480e27bacb7",
+    "prototypes/connections/store.c": "733ddcacaffd9e9ffbadfc385eadd4c9e62736a2b97b7bc048ad14845d83070f",
+    "prototypes/connections/runtime.c": "1ced6734ee07f3688e5c9cc0a8af639da88a1741dc3e6f65ec109baa2d826e6f",
+    "prototypes/connections/evaluate.c": "ee8b91efc733b9d305711b7cbb7b502ae5d3917e06f750b7f62b632ed0ea6d04",
+    "prototypes/connections/store-port.c": "d6bf17878b325e039360816edcbf8d68e41b373cf3e6128d7795e11ae21fdd6f",
+    "prototypes/connections/examples/editor.pure": "8ca6c191b98bf53a592ce24f2b5cd040e41f05c4ccdda7a072d5d7f79870c06a"
+  },
+  "environment": {
+    "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+    "machine": "aarch64",
+    "compiler": "cc (Debian 14.2.0-19) 14.2.0",
+    "size": "GNU size (GNU Binutils for Debian) 2.44"
+  }
+}

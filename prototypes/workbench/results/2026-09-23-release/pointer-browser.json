@@ -1,0 +1,33 @@
+{
+  "checks": [
+    "loading the pointer example leaves the running program unchanged until Apply",
+    "authored pointer declaration binds the visible target",
+    "keyboard alternatives remain available without a fake pointer button",
+    "real mouse down reaches the authored rule",
+    "drag retains grab offset in scene coordinates",
+    "linked output updates when the authored boundary is crossed",
+    "drag keeps its bound DOM target",
+    "capture delivers movement outside the scene and authored clamp applies",
+    "release outside the scene ends the gesture once",
+    "focus loss invokes authored rollback and clears ownership",
+    "late mouse release after cancel does not dispatch a second terminal event",
+    "explicit capture loss cancels instead of committing a drop",
+    "browser cancellation routes to the authored cancel handler",
+    "editing the authored rule changes the drag limit",
+    "later handler failure rolls back all earlier movement writes",
+    "cleanup releases a failed gesture while preserving its error",
+    "touch contact starts the same authored interaction",
+    "mouse release fallback cannot terminate an active touch contact",
+    "mobile scaled SVG maps touch coordinates back to world coordinates",
+    "touch drag manipulates the target without scrolling the page",
+    "touch release clears capture ownership",
+    "two contacts on different authored targets retain separate owners",
+    "independent touch payloads reach their own rules",
+    "touch cancellation releases both targets",
+    "second contact on an already owned target does not steal it",
+    "ignored second contact cannot strand a logical input",
+    "no browser page errors"
+  ],
+  "errors": [],
+  "kind": "functional input/output checks; no performance benchmark"
+}

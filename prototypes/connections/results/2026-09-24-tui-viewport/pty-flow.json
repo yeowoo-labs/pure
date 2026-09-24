@@ -1,0 +1,19 @@
+{
+  "profile": "native-fixed-document-terminal-editor",
+  "checks": [
+    "cursor insertion and save through terminal",
+    "open another key",
+    "UTF-8 codepoint movement, visible redraw and edit",
+    "resize redraw",
+    "external revision conflict preserves draft",
+    "stored multiline and tabbed document survives edit and reopen",
+    "cached viewport preserves vertical movement across many rows",
+    "one MiB document viewport, edit and fresh CLI restore",
+    "one MiB UTF-8 viewport and edit before cached anchor",
+    "terminal mode restored after key and signal exit"
+  ],
+  "small_peak_rss_kib": 1792,
+  "one_mib_peak_rss_kib": 3168,
+  "one_mib_peak_rss_limit_kib": 4096,
+  "binary_sha256": "4373eab2cdb033ce54b812232c7787a3a572de26e303daa9dd5001489638c899"
+}

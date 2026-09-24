@@ -1,0 +1,1 @@
+{"alpn": "pass", "disconnect_release": "pass", "idle_deadline": "pass", "malformed_frames": "pass", "mutual_authentication": "pass", "persist_restart": "pass", "python_client": "pass", "revision_conflict": "pass", "server_connected_rss_kib": 8480, "server_hostname": "pass", "server_idle_rss_kib": 7904}

@@ -1,0 +1,10 @@
+{
+  "web/runtime.mjs": "8516b0d7d89f5fd483b8c48cfc33bbb2bcbe8c27db3aa35b5f6cf892e89faa6e",
+  "web/app.js": "6d63f3bfdfe212146894dbb1772509eb4ecc2f3be3b106675f0fc10cdeb5bfd3",
+  "web/core.wasm": "76823b024fa5f4a79cbf1ed722ab757614a81a9f1c81d1d6268781a38bed7cc9",
+  "web/compiler.mjs": "a34f3beb069c811a9bd5be73dde9341907ba77756066030b8b95fc6d66a5cc02",
+  "web/index.html": "4fff6eb67d8cff098302465449251d17f0efb39d9144e87d15fefcc152e5d97e",
+  "web/style.css": "43301298028c5bc431eecd5ff30d7362fae83cce1fd0fdd7e8bea858100c22b9",
+  "core.zig": "dc84bcb75e4417fb1a804529c78ffa8cd1ddd079c00df4ca97a35da0b8fdbb8a",
+  "evaluation.zig": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165"
+}

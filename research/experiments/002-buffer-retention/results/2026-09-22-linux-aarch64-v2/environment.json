@@ -1,0 +1,57 @@
+{
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "machine": "aarch64",
+  "python": "3.14.7",
+  "cpu_affinity": 0,
+  "compiler": "cc (Debian 14.2.0-19) 14.2.0\nCopyright (C) 2024 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+  "builds": [
+    {
+      "command": [
+        "cc",
+        "-std=c17",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        "-Werror",
+        "-O2",
+        "-g",
+        "/home/eunhhu/work/pure/research/experiments/002-buffer-retention/benchmark.c",
+        "-o",
+        "/tmp/pure-retention-ktukd04y/bench"
+      ],
+      "stderr": "",
+      "sha256": "61e0dcf961714992da8d8f2846a09caeda95ce1ac183e2b82dbb80828c6ae43c",
+      "size_bytes": 101072
+    },
+    {
+      "command": [
+        "cc",
+        "-std=c17",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        "-Werror",
+        "-O2",
+        "-g",
+        "-fsanitize=address,undefined",
+        "-fno-omit-frame-pointer",
+        "/home/eunhhu/work/pure/research/experiments/002-buffer-retention/benchmark.c",
+        "-o",
+        "/tmp/pure-retention-ktukd04y/bench-sanitized"
+      ],
+      "stderr": "",
+      "sha256": "a4a383b9a31ec0d3cd2ac60a1697d863f0424a303608c69ed6faff969dd5d6de",
+      "size_bytes": 257680
+    }
+  ],
+  "source_sha256": {
+    "benchmark.c": "8ac37467fd01421f23924d0e92c890cc161dbd7b3d55642ce91d47e8f12a1e52",
+    "run.py": "f40df6109d1270afa3a3241b4d22c6842d3dbf360ccf3f563ec067df5f9b1fb3",
+    "plan.json": "0e07742173d3a415af1791e2d92b3ce9319152c3bca8dfbe6e3cd8de6e13a9f4"
+  },
+  "clock": "CLOCK_MONOTONIC; CPU = CLOCK_PROCESS_CPUTIME_ID",
+  "timing": "includes file IO, scheduling, deliberate sleep, metrics, buffer cleanup; excludes startup/build/fixture/verification",
+  "limitations": "shared host; unregulated thermals; cached files; output page cache, no fsync; synthetic closed-loop arrivals",
+  "started_utc": "2026-09-22T12:23:38Z",
+  "cpuinfo": "processor\t: 0\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x4\nCPU part\t: 0xd0b\nCPU revision\t: 1\n\nprocessor\t: 1\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x4\nCPU part\t: 0xd0b\nCPU revision\t: 1\n\nprocessor\t: 2\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x4\nCPU part\t: 0xd0b\nCPU revision\t: 1\n\nprocessor\t: 3\nBogoMIPS\t: 108.00\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x4\nCPU part\t: 0xd0b\nCPU revision\t: 1\n\nRevision\t: d04171\nSerial\t\t: d3ba8e625dbe42ac\nModel\t\t: Raspberry Pi 5 Model B Rev 1.1\n"
+}

@@ -1,0 +1,19 @@
+// Same document edit as editor.pure, with an authored final-size policy.
+// The store checks the limit against the current version under its writer lock.
+layout Edit {
+    start: u32le;
+    remove: u32le;
+    insert: bytes;
+}
+
+on get {
+    let document = store.read(request.key);
+    reply(document, document.body);
+}
+
+on put {
+    let edit = view(Edit, request.body);
+    let saved = store.splice(request.key, request.revision,
+                             edit.start, edit.remove, edit.insert, 8);
+    reply(saved, edit.insert);
+}

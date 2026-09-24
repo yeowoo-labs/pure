@@ -1,0 +1,21 @@
+✔ a blank document is an empty program with no implied behavior (4.977136ms)
+✔ forward references and separate state/input namespaces preserve declaration IDs (2.107257ms)
+✔ ordered assignments, repeated handlers, and condition evaluation once (0.987638ms)
+✔ nested branches use absolute forward targets and skip correct bodies (0.87564ms)
+✔ operator precedence, associativity, unary and builtin function lowering (2.617456ms)
+✔ multiline parentheses, scientific literals, comments, and string escapes (0.840566ms)
+✔ all instruction fields are numeric and carry original source line (0.411107ms)
+✔ contextual declaration words remain valid names outside reserved builtins (0.322923ms)
+✔ unknown and reserved symbols have useful one-based locations (2.02148ms)
+✔ duplicates, unsupported keys, initializers, and invalid syntax are rejected (1.536577ms)
+✔ document, declaration, instruction, and nesting limits reject overflow (6.955487ms)
+✔ every supported input maps to a bounded ordered event ID (0.7934ms)
+✔ optional examples compile and charge behavior is entirely authored (17.558808ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 113.13035

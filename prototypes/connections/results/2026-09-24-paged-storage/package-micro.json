@@ -1,0 +1,12 @@
+{
+  "archive_sha256": "b247ba1a453c2500ec41e9161e130ec9a3b6c9316910fe655920d6fcfb62ec45",
+  "archive_bytes": 25456,
+  "selected_hosts": [
+    "pure-edit"
+  ],
+  "checks": [
+    "relocated archive has only declared files and every file hash matches",
+    "extracted native CLI creates and restores the real document",
+    "editing the packaged .pure source changes the executed reply"
+  ]
+}

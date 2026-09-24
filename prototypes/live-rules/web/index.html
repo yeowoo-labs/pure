@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f4ee">
+  <title>Pure — 규칙 실험실</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2327372b'/%3E%3Ctext x='8' y='23' font-family='Georgia' font-size='26' font-weight='bold' fill='%23f5f4ee'%3Ep%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="./" aria-label="Pure 규칙 실험실 홈"><span class="brand-mark" aria-hidden="true">p.</span><span>Pure <span class="brand-separator">/</span> <span class="brand-subtitle">규칙 실험실</span></span></a>
+    <span class="experiment-tag"><span class="status-dot" aria-hidden="true"></span>실험 002</span>
+  </header>
+
+  <main id="workspace" aria-busy="true">
+    <div class="intro">
+      <div><p class="eyebrow">작게 만들고, 직접 바꿔보기</p><h1>뛰는 도중에, 규칙을 바꿔보세요.</h1><p class="intro-copy">같은 공룡, 같은 순간. 점프 규칙만 바꾸면 무엇이 달라질까요?</p></div>
+      <p class="prototype-label">살아 있는 규칙<br><span>첫 번째 연습장</span></p>
+    </div>
+
+    <div id="load-message" class="notice" role="status">작은 실행기를 불러오고 있습니다…</div>
+    <section id="load-error" class="load-error" role="alert" hidden>
+      <h2>실행기를 불러오지 못했습니다.</h2>
+      <p>프로젝트 루트에서 아래 명령을 실행한 뒤 <a href="http://127.0.0.1:8765">http://127.0.0.1:8765</a>를 여세요. Zig 0.15.2가 필요하며, 파일을 직접 여는 <code>file://</code> 주소는 지원하지 않습니다.</p>
+      <pre><code>python3 prototypes/live-rules/manage.py build
+python3 prototypes/live-rules/manage.py serve --port 8765</code></pre>
+      <p class="error-detail" id="error-detail"></p>
+    </section>
+
+    <div class="workbench">
+      <section class="world-panel panel" aria-labelledby="world-heading">
+        <div class="panel-heading"><h2 id="world-heading"><span class="section-number">01</span>연습장</h2><span id="running-badge" class="badge">불러오는 중</span></div>
+        <div id="stage" class="stage" tabindex="0" role="group" aria-label="공룡 연습장. 스페이스 키로 점프합니다.">
+          <svg id="world" viewBox="0 0 960 350" role="img" aria-labelledby="scene-title scene-description">
+            <title id="scene-title">공룡 점프 연습장</title><desc id="scene-description">규칙을 적용하고 점프 버튼이나 스페이스 키로 움직여 보세요. 현재 상태는 연습장 아래에 표시됩니다.</desc>
+            <defs><pattern id="soil" width="48" height="24" patternUnits="userSpaceOnUse"><path d="M8 12h4M34 5h3" stroke="#c8cec0" stroke-width="2"/></pattern></defs>
+            <circle cx="765" cy="81" r="28" fill="#e7e4ce"/>
+            <path d="M556 277 673 195 744 245 813 201 935 277Z" fill="#e5e9dc"/>
+            <path d="M385 277 505 227 593 277M724 277 859 224 960 265V278" fill="#edf0e7"/>
+            <path d="M229 94h50m-35-10h17m140 53h37" stroke="#d9ded3" stroke-width="3" stroke-linecap="round"/>
+            <rect x="0" y="279" width="960" height="71" fill="#ebeee4"/><rect x="0" y="285" width="960" height="65" fill="url(#soil)"/>
+            <path d="M0 278H960" stroke="#b4bfaa" stroke-width="2"/>
+            <ellipse id="dino-shadow" cx="138" cy="281" rx="27" ry="5" fill="#3e5e36" opacity="0.15"/>
+            <g id="dino" transform="translate(120 230)">
+              <path d="M16 0H36V19H24V25H30V31H24V37H19V48H12V39H6V33H0V17H5V24H11V17H16Z" fill="#356548"/>
+              <path d="M27 5h4v4h-4z" fill="#f8fbf4"/><path d="M24 15h12" stroke="#21432c" stroke-width="2"/>
+              <path id="dino-foot" d="M18 46h6M9 46h6" stroke="#356548" stroke-width="4"/>
+            </g>
+            <g id="obstacle" transform="translate(800 230)"><rect id="obstacle-body" x="0" y="0" width="32" height="48" rx="5" fill="#87916c"/><path id="obstacle-mark" d="M11 10v28m10-21v21" stroke="#6a7957" stroke-width="2" stroke-linecap="round"/></g>
+            <text x="22" y="327" fill="#819075" font-size="12" font-family="ui-monospace, monospace" letter-spacing="2">PURE · RULE PLAYGROUND</text>
+          </svg>
+          <div class="stage-hint"><span class="tiny-dot" aria-hidden="true"></span><span id="stage-hint">일시정지 상태에서도 규칙과 입력을 확인할 수 있어요.</span></div>
+        </div>
+        <div class="transport">
+          <div class="transport-primary"><button id="run-button" class="button button-dark" disabled>실행</button><button id="step-button" class="button button-quiet" disabled>한 프레임</button></div>
+          <button id="jump-button" class="button button-jump" disabled>점프 <kbd>Space</kbd></button>
+          <button id="reset-button" class="button button-reset" disabled title="세계와 규칙을 초기 상태로 되돌립니다">처음부터</button>
+        </div>
+        <p id="runtime-note" class="runtime-note">실행하면 시간이 흐릅니다. 멈춘 뒤 한 프레임씩 살펴볼 수도 있어요.</p>
+        <div class="state-grid" aria-label="현재 상태">
+          <div><span>높이</span><strong id="state-height">—</strong></div><div><span>세로 속도</span><strong id="state-velocity">—</strong></div><div><span>발 디딤</span><strong id="state-ground">—</strong></div><div><span>사용한 점프</span><strong id="state-jumps">—</strong></div><div><span>진행 거리</span><strong id="state-distance">—</strong></div><div><span>진행 시간</span><strong id="state-time">—</strong></div>
+        </div>
+        <div class="world-summary"><span>지나간 장애물 <b id="state-passed">0</b></span><span>닿은 장애물 <b id="state-hits">0</b></span><span class="tick-label">tick <b id="state-tick">0</b></span></div>
+      </section>
+
+      <aside class="rules-panel panel" aria-labelledby="rules-heading">
+        <div class="panel-heading"><h2 id="rules-heading"><span class="section-number">02</span>점프 규칙</h2><span id="revision-badge" class="badge">v—</span></div>
+        <form id="rules-form">
+          <fieldset id="rule-controls" disabled>
+            <legend class="field-label">언제 다시 뛸 수 있나요?</legend>
+            <div class="mode-options"><label class="mode-option"><input type="radio" name="mode" value="0" checked><span><b>땅에서만</b><small>착지해야 다시 점프할 수 있어요.</small></span><span class="radio-mark" aria-hidden="true"></span></label><label class="mode-option"><input type="radio" name="mode" value="1"><span><b>두 번 점프</b><small>공중에서 한 번 더 뛸 수 있어요.</small></span><span class="radio-mark" aria-hidden="true"></span></label></div>
+            <div class="force-heading"><label class="field-label" for="impulse">점프 세기</label><output id="impulse-output" for="impulse">10</output></div>
+            <input type="range" id="impulse" name="impulse" min="6" max="16" step="1" value="10" aria-describedby="force-help"><div class="range-labels"><span>가볍게 · 6</span><span>높이 · 16</span></div><p id="force-help" class="field-help">다음에 받아들인 점프부터 적용됩니다.</p>
+            <label class="enabled-option"><span><b>점프 입력 받기</b><small>끄면 어떤 점프 요청도 받지 않아요.</small></span><input id="enabled" name="enabled" type="checkbox" checked><span class="switch" aria-hidden="true"></span></label>
+          </fieldset>
+          <div class="apply-area"><div class="draft-line"><span id="draft-status">실행기 준비 중</span><span id="applied-label">적용 v—</span></div><button id="apply-button" class="button button-apply" type="submit" disabled>규칙 적용</button><p id="apply-feedback">바꾼 뒤 적용을 눌러주세요. 위치와 진행 시간은 이어집니다.</p></div>
+        </form>
+        <div class="try-card"><span class="eyebrow">이렇게 해보세요</span><ol><li>점프한 뒤, 공중에서 다시 눌러보세요.</li><li>멈춘 상태에서 <b>두 번 점프</b>로 바꾸고 적용하세요.</li><li>위치가 그대로인지 보고 다시 점프해보세요.</li></ol><p>처음엔 멈춘 채로 점프 → 한 프레임을 눌러도 좋아요.</p></div>
+      </aside>
+    </div>
+
+    <section class="decision-panel panel" aria-labelledby="decision-heading">
+      <div class="panel-heading"><h2 id="decision-heading"><span class="section-number">03</span>왜 그렇게 움직였나요?</h2><span class="muted-small">마지막 점프 요청</span></div>
+      <div class="decision-summary"><div><p id="decision-result" class="decision-result">첫 점프를 기다리고 있어요.</p><p id="decision-explanation" class="decision-explanation">한 번 누르면 입력이 규칙을 통과하는 과정을 볼 수 있습니다.</p></div><div id="decision-meta" class="decision-meta">아직 입력 없음</div></div>
+      <p id="stale-decision" class="stale-note" hidden>이 기록은 이전 규칙의 판단입니다. 다시 점프하면 새 규칙으로 확인할 수 있어요.</p>
+      <ol id="decision-path" class="decision-path" aria-label="마지막 입력 판단 경로">
+        <li data-node="0"><span class="node-step">01</span><strong>요청 도착</strong><span class="node-value">대기</span></li><li data-node="1"><span class="node-step">02</span><strong>입력 켜짐</strong><span class="node-value">대기</span></li><li data-node="2"><span class="node-step">03</span><strong>땅에 있음</strong><span class="node-value">대기</span></li><li data-node="3"><span class="node-step">04</span><strong>점프 여유</strong><span class="node-value">대기</span></li><li data-node="4"><span class="node-step">05</span><strong>방식에 맞음</strong><span class="node-value">대기</span></li><li data-node="5"><span class="node-step">06</span><strong>점프 허용</strong><span class="node-value">대기</span></li>
+      </ol>
+      <p class="path-caption">요청과 입력 켜짐을 확인하고, 선택한 방식에 따라 ‘땅에 있음’ 또는 ‘점프 여유’를 판단합니다. 기록은 입력을 받은 순간의 상태입니다.</p>
+      <div class="history-section"><h3>최근 변화 <span>최대 8개 표시</span></h3><ol id="history-list" class="history-list"><li class="empty-history">점프하거나 규칙을 적용하면 이곳에 기록됩니다.</li></ol></div>
+    </section>
+
+    <details class="research-panel"><summary><span>실험의 범위와 메모리 보기</span><span class="summary-caption">기술적인 내용은 여기에</span></summary><div class="research-body"><div><h2>무엇을 확인하는 실험인가요?</h2><p>세계가 실행되는 동안 점프 규칙을 바꾸고, 상태를 유지하며, 입력 판단을 살펴보는 작은 시제품입니다. 물리 계산과 규칙 판단은 Zig로 작성한 동일한 WebAssembly 코어에서 처리합니다. 화면은 그 결과를 보여줍니다.</p><p>시간은 고정 60Hz 틱으로 진행합니다. 느린 화면에서는 한 번에 최대 6틱을 처리하며, 생략한 틱 수를 아래에 표시합니다. 실제 시간과 정확히 같다는 보장은 없습니다.</p><p>높이·속도·거리는 세계 좌표(px)로 표시합니다. 높은 점프에서는 시점이 공룡을 따라 위로 이동합니다. 화면 크기와 시점은 물리 계산을 바꾸지 않습니다.</p><p id="scheduling-detail" class="metric-note">아직 실행 전 · 생략한 틱 0</p></div><div><h2>코어의 자료 구조 크기</h2><table class="memory-table"><caption>코어가 보고한 논리 자료 크기 · 실제 프로세스 메모리와 다름</caption><tbody><tr><th scope="row">규칙</th><td id="bytes-rules">—</td></tr><tr><th scope="row">세계 상태</th><td id="bytes-state">—</td></tr><tr><th scope="row">마지막 판단</th><td id="bytes-decision">—</td></tr><tr><th scope="row">기록과 관리 정보</th><td id="bytes-history">—</td></tr><tr><th scope="row">엔진 전체 · 정렬 포함</th><td id="bytes-engine">—</td></tr><tr><th scope="row">고정 규칙 그래프</th><td id="bytes-graph">—</td></tr><tr class="total-row"><th scope="row">엔진 + 그래프 · 논리 합계</th><td id="bytes-total">—</td></tr><tr><th scope="row">WASM 선형 메모리 · 별도</th><td id="bytes-linear">—</td></tr></tbody></table><p class="metric-note">자료 구조 크기는 Zig 타입 배치 기준입니다. 고정 그래프는 컴파일 과정에서 코드에 통합될 수 있어, 이 수치를 실제 RAM 사용량으로 읽으면 안 됩니다. WASM 선형 메모리는 실제 할당된 별도 범위이며 위 합계와 더하지 않습니다. 브라우저·화면·코드·프로세스 전체 메모리(RSS)는 이 표에 포함되지 않습니다. M3 성능이나 최적화 우위를 입증하는 측정도 아닙니다.</p></div></div></details>
+    <p id="live-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+  </main>
+  <footer>Pure <span>·</span> 원하는 동작을 먼저, 근거는 남기면서.</footer>
+</body>
+</html>

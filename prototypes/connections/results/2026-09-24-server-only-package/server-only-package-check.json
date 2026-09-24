@@ -1,0 +1,23 @@
+{
+  "archive_sha256": "34fb507c160e4aa719cf44fb4f8bbcb422d2c0ee6dc3f206f6a5fe3bc4d089b6",
+  "archive_bytes": 47686,
+  "selected_hosts": [
+    "pure-edit",
+    "pure-document-server"
+  ],
+  "checks": [
+    "relocated archive has only declared files and every file hash matches",
+    "extracted native CLI creates and restores the real document",
+    "editing the packaged .pure source changes the executed reply",
+    "extracted server-only TLS peer and external client share a 1 MiB document and recover"
+  ],
+  "peer_checks": [
+    "relocated server rejects invalid client identity, ALPN and hostname",
+    "external client and extracted CLI share a conditional document",
+    "fragmented one MiB ingress, selected reply and CLI-visible splice",
+    "truncated and invalid frames do not publish a change",
+    "relocated server restart restores the committed one MiB document"
+  ],
+  "peer_idle_rss_kib": 7968,
+  "peer_after_large_work_rss_kib": 8672
+}

@@ -1,0 +1,23 @@
+{
+  "builtUtc": "2026-09-23T08:54:16.810753+00:00",
+  "zigVersion": "0.15.2",
+  "sourceSha256": "60307704dbb5e11a75d14108fb7d87a5a4480359fdd771ec73beebf5f5c48b81",
+  "wasmSha256": "9f760e4a2ce6ea11f2be07693fceca74088884885cc545a70ceef5003d0b2479",
+  "evaluationSourceSha256": "ce04f0785180aaf6d1dcddc4461817251ad61abf1625ccd04ce673c89774b165",
+  "wasmFileBytes": 61072,
+  "flags": [
+    "-target",
+    "wasm32-freestanding",
+    "-O",
+    "ReleaseSafe",
+    "-fstrip",
+    "-fno-entry",
+    "-rdynamic",
+    "--export-memory",
+    "--stack",
+    "16384",
+    "--initial-memory=65536",
+    "--max-memory=65536"
+  ],
+  "nativeTests": "1/37 core.test.blank program, no hidden application behavior, and reset...OK\n2/37 core.test.arbitrary input counter and unused events...OK\n3/37 core.test.charge and release behavior exists only in the authored instruction program...OK\n4/37 core.test.forward condition executes once and assignments and handlers are ordered...OK\n5/37 core.test.branch to program end is valid...OK\n6/37 core.test.one event rolls back writes from all handlers on arithmetic failure...OK\n7/37 core.test.nonfinite arithmetic and invalid clamp fail atomically...OK\n8/37 core.test.stack underflow overflow and leftover values reject the event...OK\n9/37 core.test.failed candidates leave active values program revision and diagnostics unchanged...OK\n10/37 core.test.state preservation mapping reads active values at commit and reset uses new initials...OK\n11/37 core.test.capacity boundaries and sticky load errors...OK\n12/37 core.test.invalid declaration values state mappings event ids and handler ranges...OK\n13/37 core.test.backward self out-of-handler branches and stores without handlers are rejected...OK\n14/37 core.test.event inputs and dt enforce deterministic frame contract...OK\n15/37 core.test.binding evaluation is pure on both success and failure...OK\n16/37 core.test.arithmetic comparison logical min max and clamp expression semantics...OK\n17/37 core.test.diagnostic counters wrap without affecting scalar values...OK\n18/37 core.test.memory accounting separates reserved storage used IR and stack capacity...OK\n19/37 core.test.point coordinates are ephemeral event operands and unavailable to pure evaluation...OK\n20/37 core.test.point event ranges reject holes and invalid payloads without committing...OK\n21/37 core.test.point event failure rolls back writes from earlier matching handlers...OK\n22/37 core.test.loading shares storage with records while old events and bindings remain executable...OK\n23/37 core.test.failed and abandoned candidates restore empty reuse storage without changing active work...OK\n24/37 core.test.full pending program survives repeated evaluation configuration record loss and reset...OK\n25/37 core.test.restored definition and values commit together without changing reset initializers...OK\n26/37 core.test.missing duplicate nonfinite or invalid restored candidates leave active work untouched...OK\n27/37 core.test.empty and full restored programs validate all values and discard old display records...OK\n28/37 core.test.shared handler bodies access their own bound state slots in source order...OK\n29/37 core.test.failure in a later shared binding rolls back all earlier bindings...OK\n30/37 core.test.shared bindings reject missing arguments partial overlaps and invalid slot mappings...OK\n31/37 core.test.one routed handler changes only its event target and rejects missing or foreign routes...OK\n32/37 core.test.routes reject invalid mappings and bindings without replacing active work...OK\n33/37 core.test.routed event rollback includes globals and earlier handlers and survives staged route replacement...OK\n34/37 core.test.scalar inputs carry a finite ephemeral value without adding state or pointer ownership...OK\n35/37 core.test.scalar input failure rolls back earlier writes and old scalar events survive staging...OK\n36/37 evaluation.test.record loss cannot authorize an old memo; unrelated changes can...OK\n37/37 evaluation.test.budget, collisions, invalid settings, and disabled history are conservative...OK\nAll 37 tests passed.\n"
+}

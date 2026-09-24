@@ -1,0 +1,92 @@
+# 세 도형을 배치하고 배치 저장으로 결과를 보관하세요.
+# 마지막으로 잡은 도형은 방향키로 10씩 이동합니다.
+state selected = 0
+input left = ArrowLeft
+input right = ArrowRight
+input up = ArrowUp
+input down = ArrowDown
+state x1 = 80
+state y1 = 120
+state ox1 = 0
+state oy1 = 0
+state sx1 = 80
+state sy1 = 120
+state held1 = 0
+input drag1 = pointer(tile1)
+state x2 = 280
+state y2 = 160
+state ox2 = 0
+state oy2 = 0
+state sx2 = 280
+state sy2 = 160
+state held2 = 0
+input drag2 = pointer(tile2)
+state x3 = 450
+state y3 = 220
+state ox3 = 0
+state oy3 = 0
+state sx3 = 450
+state sy3 = 220
+state held3 = 0
+input drag3 = pointer(tile3)
+box board(20,90,600,240,"#233a31")
+text help(25,40,selected,"선택한 도형: ")
+box tile1(x1,y1,56,44,"#c9f08b")
+box tile2(x2,y2,56,44,"#74c4d4")
+box tile3(x3,y3,56,44,"#dfb184")
+on drag1.down {
+  selected = 1
+  sx1 = x1; sy1 = y1
+  ox1 = event_x - x1; oy1 = event_y - y1
+  held1 = 1
+}
+on drag1.move {
+  x1 = clamp(event_x - ox1, 20, 564)
+  y1 = clamp(event_y - oy1, 90, 286)
+}
+on drag1.up { held1 = 0 }
+on drag1.cancel { x1 = sx1; y1 = sy1; held1 = 0 }
+on drag2.down {
+  selected = 2
+  sx2 = x2; sy2 = y2
+  ox2 = event_x - x2; oy2 = event_y - y2
+  held2 = 1
+}
+on drag2.move {
+  x2 = clamp(event_x - ox2, 20, 564)
+  y2 = clamp(event_y - oy2, 90, 286)
+}
+on drag2.up { held2 = 0 }
+on drag2.cancel { x2 = sx2; y2 = sy2; held2 = 0 }
+on drag3.down {
+  selected = 3
+  sx3 = x3; sy3 = y3
+  ox3 = event_x - x3; oy3 = event_y - y3
+  held3 = 1
+}
+on drag3.move {
+  x3 = clamp(event_x - ox3, 20, 564)
+  y3 = clamp(event_y - oy3, 90, 286)
+}
+on drag3.up { held3 = 0 }
+on drag3.cancel { x3 = sx3; y3 = sy3; held3 = 0 }
+on left.down {
+  if selected == 1 && held1 == 0 { x1 = clamp(x1 + -10, 20, 564) }
+  if selected == 2 && held2 == 0 { x2 = clamp(x2 + -10, 20, 564) }
+  if selected == 3 && held3 == 0 { x3 = clamp(x3 + -10, 20, 564) }
+}
+on right.down {
+  if selected == 1 && held1 == 0 { x1 = clamp(x1 + 10, 20, 564) }
+  if selected == 2 && held2 == 0 { x2 = clamp(x2 + 10, 20, 564) }
+  if selected == 3 && held3 == 0 { x3 = clamp(x3 + 10, 20, 564) }
+}
+on up.down {
+  if selected == 1 && held1 == 0 { y1 = clamp(y1 + -10, 90, 286) }
+  if selected == 2 && held2 == 0 { y2 = clamp(y2 + -10, 90, 286) }
+  if selected == 3 && held3 == 0 { y3 = clamp(y3 + -10, 90, 286) }
+}
+on down.down {
+  if selected == 1 && held1 == 0 { y1 = clamp(y1 + 10, 90, 286) }
+  if selected == 2 && held2 == 0 { y2 = clamp(y2 + 10, 90, 286) }
+  if selected == 3 && held3 == 0 { y3 = clamp(y3 + 10, 90, 286) }
+}
