@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "os_page_bytes": 4096,
+  "checks": [
+    "128 mixed and fault-injected page-store edits",
+    "real prepared CLI creates and rereads every byte of a 1 MiB document",
+    "one-byte last-position revision edit and stale-revision rejection"
+  ],
+  "guest_shutdown": "power down",
+  "qemu_exit_code": 0,
+  "host": {
+    "system": "Linux",
+    "machine": "aarch64",
+    "page_bytes": 16384
+  },
+  "kernel_sha256": "fc341c15f1df9727f8dff25dc5acbbd872cc58ccf5d035a47ea8f6cecb07c5d8",
+  "config_sha256": "eb5d806796ea79dc73f73cce9ca3146fbd54318f3a3b0cd5b70a500d488e6114",
+  "guest_binary_sha256": "b8570d4f48e8b9bc5c4244af76d1d0f8854ef9e39e4487eb0f3ca78d6fc98ae5",
+  "initramfs_sha256": "e318b16208503a8779c9ab88eaaf5f8b3e3af030d5f8c646f153c5ec1ed1140e",
+  "log_sha256": "894c401f1e888dfe6be360b8903fc384008ac4751758ca9aa52d5f9ba0efefcf",
+  "compressed_log_sha256": "128e5d54880b7f5b2322f94282dfad8aa949d7646e5066cb70d86088cdfd1ea4",
+  "qemu_version": "QEMU emulator version 10.0.13 (Debian 1:10.0.13+ds-0+deb13u1)"
+}

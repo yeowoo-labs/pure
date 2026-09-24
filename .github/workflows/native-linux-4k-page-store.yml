@@ -11,6 +11,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Require a real 4 KiB OS page
         run: test "$(getconf PAGESIZE)" = 4096
       - name: Exercise the selected 16 KiB logical-page store

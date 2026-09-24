@@ -165,7 +165,8 @@ static void mixed_edits(const char *path) {
 }
 
 int main(void) {
-    assert(sysconf(_SC_PAGESIZE) == PAGE);
+    long host_page = sysconf(_SC_PAGESIZE);
+    assert(host_page > 0 && PAGE % host_page == 0);
     char base[] = "/tmp/pure-page-store-XXXXXX";
     assert(mkdtemp(base));
     char path[256];
@@ -267,4 +268,5 @@ int main(void) {
     }
     assert(closedir(directory) == 0 && rmdir(path) == 0 && rmdir(base) == 0);
     puts("{\"hybrid_storage\":\"snapshot-patch-range-compaction-crash-conflict-uncertain-inline-transitions\",\"mixed_edits\":128}");
+    return 0;
 }

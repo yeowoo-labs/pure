@@ -1,0 +1,15 @@
+{
+  "archive_sha256": "8de4a88acc0ecb6dd28cd569eb2ad1f6a88867898d86754ae2779f9adf771227",
+  "archive_bytes": 338483,
+  "source_files": 173,
+  "checks": [
+    "every extracted source file matches the manifest",
+    "clean default build contains only the core, parser-free CLI and its build-time compiler",
+    "clean C17, both real terminal PTY scenarios and fixed/source CLI document RSS checks pass",
+    "source-loaded CLI and parser-free CLI share the real stored document",
+    "editing .pure changes the native source-loaded reply",
+    "clean selected page store runs the source-loaded TUI and relocatable CLI+TUI package",
+    "clean Linux release behavior, code, dependency and RSS gates pass",
+    "clean source-loaded terminal editor PTY scenarios pass"
+  ]
+}

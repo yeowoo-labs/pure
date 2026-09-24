@@ -83,6 +83,9 @@ python3 prototypes/connections/package_native.py \
 python3 prototypes/connections/check_package.py /tmp/pure-hybrid-tui.tar.gz
 ```
 
+The 4 KiB AArch64 guest has passed the page-store assertions and a 1 MiB
+fixed-CLI edit; this archive does not include that QEMU research harness.
+
 Use a new store directory for this profile; large documents use `PUREP001`
 and need the offline exporter above before the default store can read them.
 

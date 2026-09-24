@@ -61,10 +61,11 @@ source TUI adds 4,958 B linked `text`; its [CLI+TUI archive](prototypes/connecti
 is 57,788 B compressed and passed a relocated app check. Large documents use
 an incompatible on-disk page format, so this remains an opt-in Linux storage
 research profile. Its 16 KiB logical pages now admit OS page sizes that divide
-16 KiB, but only the 16 KiB host has passed the real storage suite so far;
-the default core and storage path are unchanged. The
-[alignment and verification boundary](docs/research/071-logical-page-portability.md)
-records the 32 B selected-code cost and the unrun 4 KiB/macOS checks.
+16 KiB. The 16 KiB host passed the full selected suite, and a
+[real 4 KiB QEMU guest](docs/research/072-qemu-4k-page-store.md) passed the
+page-store assertions plus a 1 MiB native CLI edit and stale-revision check.
+Physical-disk durability, Linux x86_64 CI and macOS remain unverified; the
+default core and storage path are unchanged.
 
 The current execution profile has separate `core`, `fixed-editor`, `editor`, and
 `server` build targets. `make all` produces the core and the parser-free CLI
