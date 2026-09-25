@@ -545,6 +545,33 @@ static void draft_relocation(const char *path) {
     free(big);
 }
 
+/* A held draft keeps earlier versions readable across later edits. */
+static void draft_versions(const char *path) {
+    static unsigned char bytes[200000], scratch[200000];
+    uint32_t state = 17;
+    fill(bytes, sizeof(bytes), &state);
+    int64_t revision;
+    CHECK(pure_store_put(path, "versioned", 0, (PureSpan){bytes, sizeof(bytes)}, &revision) == PURE_OK);
+    PureDraft *draft;
+    CHECK(pure_draft_open(path, "versioned", &draft) == PURE_OK);
+    pure_draft_hold(draft, true);
+    PureVersion first = pure_draft_version(draft);
+    for (unsigned i = 0; i < 400; ++i) {
+        unsigned char byte = (unsigned char)i;
+        CHECK(pure_draft_splice(draft, (i * 977u) % 150000, 3, (PureSpan){&byte, 1}) == PURE_OK);
+    }
+    Gather g = {scratch, 0, 0, 0};
+    CHECK(pure_draft_read_version(draft, first, 0, sizeof(bytes), gather, &g) == PURE_OK);
+    CHECK((size_t)(g.out - scratch) == sizeof(bytes) && !memcmp(scratch, bytes, sizeof(bytes)));
+    CHECK(pure_draft_size(draft) == sizeof(bytes) - 800);
+    size_t nodes, held_bytes, after;
+    pure_draft_test_arena(draft, &nodes, &held_bytes);
+    pure_draft_hold(draft, false);
+    pure_draft_test_arena(draft, &nodes, &after);
+    CHECK(after < held_bytes);
+    pure_draft_close(draft);
+}
+
 /* A failed commit changes neither the store nor the draft. */
 static void draft_faults(const char *path) {
     unsigned char scratch[64];
@@ -593,7 +620,8 @@ static void clean(const char *path) {
 int main(void) {
     void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
                                       isolation, corruption, many_keys, revision_limit, keys,
-                                      drafts, typing, draft_conflict, draft_relocation, draft_faults};
+                                      drafts, typing, draft_conflict, draft_relocation, draft_faults,
+                                      draft_versions};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -603,6 +631,6 @@ int main(void) {
     }
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
-         "draft-oracle-typing-arena-conflict-relocation-commit-faults\"}");
+         "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions\"}");
     return 0;
 }

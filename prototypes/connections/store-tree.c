@@ -943,6 +943,7 @@ struct PureDraft {
     Entry root;
     int64_t revision;
     size_t live;      /* arena bytes reachable at the last collection */
+    bool held;        /* a transaction still reads earlier versions */
 };
 
 /* Rebase the draft on the committed version of its key. */
@@ -1013,6 +1014,7 @@ static size_t mark(const Tree *tree, Entry entry, unsigned char *marks) {
  * longer reaches once they outweigh the reachable ones (and 32 KiB). */
 static void collect(PureDraft *draft) {
     Tree *tree = &draft->tree;
+    if (draft->held) return;
     size_t allowance = draft->live > 32768 ? draft->live : 32768;
     if (tree->bytes <= draft->live || tree->bytes - draft->live <= allowance) return;
     unsigned char *marks = calloc(tree->count, 1);
@@ -1044,14 +1046,29 @@ PureResult pure_draft_splice(PureDraft *draft, size_t offset, size_t remove, Pur
     return ok ? PURE_OK : PURE_STORE_ERROR;
 }
 
+PureVersion pure_draft_version(const PureDraft *draft) {
+    return (PureVersion){draft->root.ref, draft->root.bytes};
+}
+
+PureResult pure_draft_read_version(const PureDraft *draft, PureVersion version, size_t offset,
+                                   size_t length, bool (*visit)(void *, PureSpan), void *context) {
+    Entry root = {version.ref, version.bytes};
+    unsigned height;
+    if (offset > root.bytes || length > root.bytes - offset) return PURE_LIMIT;
+    if (!length) return PURE_OK;
+    if (!root_height(&draft->tree, root, &height)) return PURE_STORE_ERROR;
+    return visit_range(&draft->tree, root, height, offset, length, visit, context) ?
+           PURE_OK : PURE_STORE_ERROR;
+}
+
 PureResult pure_draft_read(const PureDraft *draft, size_t offset, size_t length,
                            bool (*visit)(void *, PureSpan), void *context) {
-    unsigned height;
-    if (offset > draft->root.bytes || length > draft->root.bytes - offset) return PURE_LIMIT;
-    if (!length) return PURE_OK;
-    if (!root_height(&draft->tree, draft->root, &height)) return PURE_STORE_ERROR;
-    return visit_range(&draft->tree, draft->root, height, offset, length, visit, context) ?
-           PURE_OK : PURE_STORE_ERROR;
+    return pure_draft_read_version(draft, pure_draft_version(draft), offset, length, visit, context);
+}
+
+void pure_draft_hold(PureDraft *draft, bool held) {
+    draft->held = held;
+    if (!held) collect(draft);
 }
 
 PureResult pure_draft_commit(PureDraft *draft, int64_t *revision) {

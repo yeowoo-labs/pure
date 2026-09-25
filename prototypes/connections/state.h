@@ -24,6 +24,14 @@ int64_t pure_draft_revision(const PureDraft *);
  * splice, commit or close of this draft. */
 PureResult pure_draft_read(const PureDraft *, size_t offset, size_t length,
                            bool (*visit)(void *, PureSpan), void *context);
+/* An immutable version of a draft's value. It stays readable while the draft
+ * is held (reclamation is suspended) and until the next commit or close. */
+typedef struct { uint64_t ref, bytes; } PureVersion;
+PureVersion pure_draft_version(const PureDraft *);
+PureResult pure_draft_read_version(const PureDraft *, PureVersion, size_t offset, size_t length,
+                                   bool (*visit)(void *, PureSpan), void *context);
+/* While held, edits keep every earlier version's nodes (one transaction). */
+void pure_draft_hold(PureDraft *, bool held);
 /* Publish if the key is still at the draft's base revision. On success the
  * draft continues from the new revision; on any failure it is unchanged. */
 PureResult pure_draft_commit(PureDraft *, int64_t *revision);
