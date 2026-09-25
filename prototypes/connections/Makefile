@@ -11,7 +11,7 @@ HOST = $(STORE) store-port.c evaluate.c
 # Document browsers list keys through the store. The tree store keeps its own
 # catalog; per-object file stores share a directory listing.
 KEYS = $(if $(filter store-tree.c,$(STORE)),,store-keys.c)
-HEADERS = runtime.h program.h store.h store-port.h flow.h result.h
+HEADERS = runtime.h program.h store.h store-port.h state.h flow.h result.h
 all: core fixed-editor
 core: $(BUILD)/libpure-execution.a
 async-core: $(BUILD)/libpure-execution-async.a

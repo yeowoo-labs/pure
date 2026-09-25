@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "store.h"
+#include "state.h"
 #include <assert.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -21,6 +22,8 @@ int pure_store_test_fault(PureStoreStage stage) {
 }
 bool pure_tree_test_shape(const char *path, const char *key, unsigned *height,
                           uint64_t *leaves, uint64_t *small, uint64_t *file_end);
+
+void pure_draft_test_arena(const PureDraft *draft, size_t *nodes, size_t *bytes);
 
 enum { KEYS = 4, CAPACITY = 1 << 20 };
 typedef struct { unsigned char *bytes; size_t size; int64_t revision; } Oracle;
@@ -366,6 +369,215 @@ static void keys(const char *path) {
     CHECK(pure_store_keys(path, count_key, &count) == PURE_OK && count == 5);
 }
 
+typedef struct { unsigned char *out; size_t spans, largest, limit; } Gather;
+
+static bool gather(void *context, PureSpan span) {
+    Gather *g = context;
+    memcpy(g->out, span.data, span.size);
+    g->out += span.size;
+    if (span.size > g->largest) g->largest = span.size;
+    return ++g->spans != g->limit;
+}
+
+static void expect_draft(const PureDraft *draft, const Oracle *o, unsigned char *scratch) {
+    Gather g = {scratch, 0, 0, 0};
+    CHECK(pure_draft_size(draft) == o->size && pure_draft_revision(draft) == o->revision);
+    CHECK(pure_draft_read(draft, 0, o->size, gather, &g) == PURE_OK);
+    CHECK((size_t)(g.out - scratch) == o->size && (!o->size || !memcmp(scratch, o->bytes, o->size)));
+    CHECK(g.largest <= 4096);
+}
+
+static void apply(Oracle *o, size_t offset, size_t remove, const unsigned char *insert, size_t count) {
+    memmove(o->bytes + offset + count, o->bytes + offset + remove, o->size - offset - remove);
+    if (count) memcpy(o->bytes + offset, insert, count);
+    o->size = o->size - remove + count;
+}
+
+/* Edits live only in the draft until commit; each commit continues from the
+ * published version with an empty arena. */
+static void drafts(const char *path) {
+    Oracle o = {malloc(CAPACITY), 0, 0};
+    unsigned char *scratch = malloc(CAPACITY), *insert = malloc(65536);
+    CHECK(o.bytes && scratch && insert);
+    PureDraft *draft;
+    PureStoredView view;
+    CHECK(pure_draft_open(path, "draft", &draft) == PURE_OK);
+    expect_draft(draft, &o, scratch);
+    uint32_t state = 0x1234567u;
+    for (unsigned step = 0; step < 20000; ++step) {
+        uint32_t kind = random_value(&state) % 100;
+        size_t count = kind < 80 ? random_value(&state) % 8 :
+                       kind < 98 ? random_value(&state) % 4000 : random_value(&state) % 65536;
+        size_t offset = o.size ? random_value(&state) % (o.size + 1) : 0;
+        size_t remove = o.size - offset ? random_value(&state) % (o.size - offset + 1) : 0;
+        if (random_value(&state) % 64) remove %= 16;
+        if (o.size - remove + count > CAPACITY) count = 0;
+        fill(insert, count, &state);
+        CHECK(pure_draft_splice(draft, offset, remove, (PureSpan){insert, count}) == PURE_OK);
+        apply(&o, offset, remove, insert, count);
+        if (step % 97 == 0) expect_draft(draft, &o, scratch);
+        if (step % 1000 == 999) {
+            if (o.revision) CHECK(pure_store_get(path, "draft", PURE_OBJECT_LIMIT, &view) == PURE_OK &&
+                                  view.revision == o.revision);
+            if (o.revision) pure_store_release(&view);
+            int64_t revision;
+            CHECK(pure_draft_commit(draft, &revision) == PURE_OK && revision == o.revision + 1);
+            o.revision = revision;
+            expect(path, "draft", &o);
+            expect_draft(draft, &o, scratch);
+            size_t nodes, bytes;
+            pure_draft_test_arena(draft, &nodes, &bytes);
+            CHECK(nodes == 0);
+        }
+    }
+    CHECK(o.size > 100000);
+    Gather g = {scratch, 0, 0, 3};
+    CHECK(pure_draft_read(draft, 0, o.size, gather, &g) == PURE_OK && g.spans == 3);
+    CHECK(pure_draft_splice(draft, o.size + 1, 0, (PureSpan){0}) == PURE_LIMIT);
+    CHECK(pure_draft_splice(draft, 0, o.size + 1, (PureSpan){0}) == PURE_LIMIT);
+    CHECK(pure_draft_read(draft, o.size, 1, gather, &g) == PURE_LIMIT);
+    expect_draft(draft, &o, scratch);
+    pure_draft_close(draft);
+    printf("{\"draft_steps\":20000,\"draft_commits\":%lld,\"draft_bytes\":%zu}\n",
+           (long long)o.revision, o.size);
+    free(o.bytes);
+    free(scratch);
+    free(insert);
+}
+
+/* Long typing and deleting at one place keeps only the live path in memory,
+ * and its commit appends the typed bytes and path, not the document. */
+static void typing(const char *path) {
+    size_t size = 1048576;
+    Oracle o = {malloc(size + 40000), size, 0};
+    unsigned char *scratch = malloc(size + 40000);
+    uint32_t state = 5;
+    CHECK(o.bytes && scratch);
+    fill(o.bytes, size, &state);
+    CHECK(pure_store_put(path, "typed", 0, (PureSpan){o.bytes, size}, &o.revision) == PURE_OK);
+    PureDraft *draft;
+    CHECK(pure_draft_open(path, "typed", &draft) == PURE_OK);
+    size_t cursor = size / 2, nodes, bytes, peak = 0;
+    for (unsigned i = 0; i < 30000; ++i) {
+        unsigned char byte = (unsigned char)('a' + i % 26);
+        if (i % 3 == 2) {
+            CHECK(pure_draft_splice(draft, cursor - 1, 1, (PureSpan){0}) == PURE_OK);
+            apply(&o, --cursor, 1, NULL, 0);
+        } else {
+            CHECK(pure_draft_splice(draft, cursor, 0, (PureSpan){&byte, 1}) == PURE_OK);
+            apply(&o, cursor++, 0, &byte, 1);
+        }
+        pure_draft_test_arena(draft, &nodes, &bytes);
+        if (bytes > peak) peak = bytes;
+    }
+    expect_draft(draft, &o, scratch);
+    /* Reachable: 10,000 net typed bytes, the leaves they landed in and one
+     * path. Unreachable copies are reclaimed past max(reachable, 32 KiB). */
+    CHECK(peak < 2 * (10000 + 4 * 4096 + 2048) + 32768 + 8192);
+    uint64_t before = file_size(path);
+    int64_t revision;
+    CHECK(pure_draft_commit(draft, &revision) == PURE_OK);
+    o.revision = revision;
+    CHECK(file_size(path) - before < 10000 + 16384);
+    expect(path, "typed", &o);
+    pure_draft_close(draft);
+    printf("{\"typing_keystrokes\":30000,\"peak_arena_bytes\":%zu,\"commit_appended_bytes\":%llu}\n",
+           peak, (unsigned long long)(file_size(path) - before));
+    free(o.bytes);
+    free(scratch);
+}
+
+/* Two drafts of one key: the second commit conflicts and keeps its edits. */
+static void draft_conflict(const char *path) {
+    unsigned char scratch[64];
+    int64_t revision;
+    CHECK(pure_store_put(path, "shared", 0, (PureSpan){(const unsigned char *)"base", 4}, &revision) == PURE_OK);
+    PureDraft *first, *second;
+    CHECK(pure_draft_open(path, "shared", &first) == PURE_OK && pure_draft_open(path, "shared", &second) == PURE_OK);
+    CHECK(pure_draft_splice(first, 4, 0, (PureSpan){(const unsigned char *)"-one", 4}) == PURE_OK);
+    CHECK(pure_draft_splice(second, 0, 0, (PureSpan){(const unsigned char *)"two-", 4}) == PURE_OK);
+    CHECK(pure_draft_commit(first, &revision) == PURE_OK && revision == 2);
+    CHECK(pure_draft_commit(second, &revision) == PURE_CONFLICT && revision == 2);
+    Oracle kept = {(unsigned char *)"two-base", 8, 1};
+    expect_draft(second, &kept, scratch);
+    Oracle stored = {(unsigned char *)"base-one", 8, 2};
+    expect(path, "shared", &stored);
+    pure_draft_close(second);
+    CHECK(pure_draft_open(path, "shared", &second) == PURE_OK);
+    expect_draft(second, &stored, scratch);
+    CHECK(pure_store_put(path, "shared", 2, (PureSpan){(const unsigned char *)"x", 1}, &revision) == PURE_OK);
+    CHECK(pure_draft_commit(first, &revision) == PURE_CONFLICT && revision == 3);
+    pure_draft_close(first);
+    pure_draft_close(second);
+}
+
+/* Another key's writes compact the file under an open draft; the draft's
+ * stored extents are copied from its old mapping on commit. */
+static void draft_relocation(const char *path) {
+    unsigned char *big = malloc(300000), scratch[20000];
+    uint32_t state = 11;
+    CHECK(big);
+    fill(big, 300000, &state);
+    Oracle o = {malloc(20000), 12000, 0};
+    CHECK(o.bytes);
+    fill(o.bytes, o.size, &state);
+    CHECK(pure_store_put(path, "kept", 0, (PureSpan){o.bytes, o.size}, &o.revision) == PURE_OK);
+    PureDraft *draft;
+    CHECK(pure_draft_open(path, "kept", &draft) == PURE_OK);
+    CHECK(pure_draft_splice(draft, 6000, 10, (PureSpan){(const unsigned char *)"relocated", 9}) == PURE_OK);
+    apply(&o, 6000, 10, (const unsigned char *)"relocated", 9);
+    char name[512];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    struct stat before, after;
+    CHECK(stat(name, &before) == 0);
+    int64_t revision = 0;
+    for (unsigned i = 0; i < 8; ++i)
+        CHECK(pure_store_put(path, "other", revision, (PureSpan){big, 300000 - i}, &revision) == PURE_OK);
+    CHECK(stat(name, &after) == 0 && after.st_ino != before.st_ino);
+    CHECK(pure_draft_commit(draft, &revision) == PURE_OK && revision == o.revision + 1);
+    o.revision = revision;
+    expect(path, "kept", &o);
+    expect_draft(draft, &o, scratch);
+    Oracle other = {big, 300000 - 7, 8};
+    expect(path, "other", &other);
+    pure_draft_close(draft);
+    free(o.bytes);
+    free(big);
+}
+
+/* A failed commit changes neither the store nor the draft. */
+static void draft_faults(const char *path) {
+    unsigned char scratch[64];
+    int64_t revision;
+    CHECK(pure_store_put(path, "faulty", 0, (PureSpan){(const unsigned char *)"stable", 6}, &revision) == PURE_OK);
+    PureDraft *draft;
+    CHECK(pure_draft_open(path, "faulty", &draft) == PURE_OK);
+    CHECK(pure_draft_splice(draft, 6, 0, (PureSpan){(const unsigned char *)"+edit", 5}) == PURE_OK);
+    Oracle stored = {(unsigned char *)"stable", 6, 1}, edited = {(unsigned char *)"stable+edit", 11, 1};
+    uint64_t size = file_size(path);
+    for (fail_stage = PURE_AFTER_HEADER; fail_stage <= PURE_BEFORE_RENAME; ++fail_stage) {
+        CHECK(pure_draft_commit(draft, &revision) == PURE_STORE_ERROR);
+        expect(path, "faulty", &stored);
+        expect_draft(draft, &edited, scratch);
+        CHECK(file_size(path) == size);
+    }
+    fail_stage = PURE_BEFORE_DIR_SYNC;
+    CHECK(pure_draft_commit(draft, &revision) == PURE_UNCERTAIN && revision == 2);
+    fail_stage = -1;
+    expect_draft(draft, &edited, scratch);
+    CHECK(pure_draft_commit(draft, &revision) == PURE_CONFLICT && revision == 2);
+    pure_draft_close(draft);
+    CHECK(pure_draft_open(path, "faulty", &draft) == PURE_OK);
+    edited.revision = 2;
+    expect_draft(draft, &edited, scratch);
+    CHECK(pure_draft_splice(draft, 0, 6, (PureSpan){0}) == PURE_OK);
+    CHECK(pure_draft_commit(draft, &revision) == PURE_OK && revision == 3);
+    Oracle final = {(unsigned char *)"+edit", 5, 3};
+    expect(path, "faulty", &final);
+    pure_draft_close(draft);
+    CHECK(pure_draft_open(path, "bad/key", &draft) == PURE_INVALID && !draft);
+}
+
 static void clean(const char *path) {
     DIR *entries = opendir(path);
     CHECK(entries);
@@ -380,7 +592,8 @@ static void clean(const char *path) {
 
 int main(void) {
     void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
-                                      isolation, corruption, many_keys, revision_limit, keys};
+                                      isolation, corruption, many_keys, revision_limit, keys,
+                                      drafts, typing, draft_conflict, draft_relocation, draft_faults};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -389,6 +602,7 @@ int main(void) {
         clean(path);
     }
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
-         "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing\"}");
+         "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
+         "draft-oracle-typing-arena-conflict-relocation-commit-faults\"}");
     return 0;
 }

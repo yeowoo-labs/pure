@@ -148,6 +148,8 @@ python3 prototypes/connections/export_flat_store.py \
 트리로 둔다. 편집은 바뀐 leaf와 경로만 기록하고, 읽기는 잠그지 않는다. 기존 런타임·부분 수정·
 비동기·실제 PTY 검사와 자체 고장·오라클 검사를 함께 실행한다. 형식이 달라 별도 `--store`
 디렉터리를 쓴다. [설계·측정·한계](../../docs/research/073-single-file-persistent-tree.md).
+같은 저장소에서 런타임이 앱의 작업 버전을 소유하는 draft API는 [`state.h`](state.h)이며,
+설계와 측정은 [074](../../docs/research/074-runtime-owned-drafts.md)에 있다.
 
 ```sh
 make -C prototypes/connections check-tree

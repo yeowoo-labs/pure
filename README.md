@@ -79,6 +79,15 @@ unchanged runtime, splice, async and real-PTY TUI checks pass on it
 larger, contiguous reads of multi-leaf documents copy, and space is reclaimed
 only by compaction, so it remains an opt-in profile.
 
+On that store the runtime can own an app's working version
+([drafts](docs/research/074-runtime-owned-drafts.md), `state.h`). A draft
+shares unchanged extents with the stored version, lends ordered extents
+without copying, and commits only its new nodes. Typing into the middle of a
+1 MiB document and saving each character peaked at 1,648–1,664 KiB RSS with
+drafts. An app copy that is compared with storage on save peaked at
+4,464–4,496 KiB. Saves were only about 1–2 ms faster; drafts are not yet
+exposed to `.pure` definitions or charged to the runtime budget.
+
 The current execution profile has separate `core`, `fixed-editor`, `editor`, and
 `server` build targets. `make all` produces the core and the parser-free CLI
 from the build-time prepared `editor.pure`; it also builds a compiler tool that

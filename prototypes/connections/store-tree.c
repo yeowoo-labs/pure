@@ -10,6 +10,7 @@
 #define _DARWIN_C_SOURCE
 #endif
 #include "store.h"
+#include "state.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -20,6 +21,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+enum { FREE = 0xffff };
 enum { SLOT = 64, DATA = 2 * SLOT, LEAF_MAX = 4096, LEAF_MIN = 1024,
        FAN_MAX = 32, FAN_MIN = 8, RECORD = 96, KEY = 64, HEIGHT_MAX = 12,
        BUFFER = 65536 };
@@ -43,14 +45,15 @@ typedef struct { Entry *items; size_t count, capacity; } List;
 typedef struct {
     unsigned char *bytes; /* leaf only */
     Entry *children;      /* branch only */
-    size_t size;          /* leaf bytes or child count */
-    unsigned height;
+    size_t size;          /* leaf bytes, child count, or next free slot + 1 */
+    unsigned height;      /* FREE for a reclaimed slot */
 } Node;
 typedef struct {
     const unsigned char *map;
     uint64_t end;
     Node *nodes;
-    size_t count, capacity;
+    size_t count, capacity, free_head, free_count; /* free_head is slot + 1 */
+    size_t bytes; /* payload held by arena nodes, including unreachable ones */
 } Tree;
 typedef struct { uint64_t seq, end, catalog, catalog_bytes, live; } Head;
 typedef struct {
@@ -309,11 +312,23 @@ static bool push(List *list, Entry entry) {
     return true;
 }
 
+static size_t node_bytes(const Node *node) {
+    return node->bytes ? node->size : node->size * sizeof(Entry);
+}
+
 static bool add_node(Tree *tree, Node node, uint64_t *index) {
+    tree->bytes += node_bytes(&node);
+    if (tree->free_head) {
+        *index = tree->free_head - 1;
+        tree->free_head = tree->nodes[*index].size;
+        --tree->free_count;
+        tree->nodes[*index] = node;
+        return true;
+    }
     if (tree->count == tree->capacity) {
         size_t capacity = tree->capacity ? 2 * tree->capacity : 64;
         Node *nodes = realloc(tree->nodes, capacity * sizeof(*nodes));
-        if (!nodes) return false;
+        if (!nodes) { tree->bytes -= node_bytes(&node); return false; }
         tree->nodes = nodes;
         tree->capacity = capacity;
     }
@@ -537,8 +552,9 @@ static uint64_t put_branch(Writer *writer, const Entry *kids, size_t count, unsi
 }
 
 /* Append a subtree's arena nodes, children first, and set entry to the
- * stored reference without changing the arena. With relocate, stored nodes
- * are copied too; compaction uses this to rewrite reachable nodes. */
+ * stored reference. The arena is not changed, so a failed commit leaves a
+ * draft intact. With relocate, stored nodes are copied too (compaction, or a
+ * draft whose base file was replaced by compaction). */
 static bool write_subtree(const Tree *tree, Writer *writer, Entry *entry, unsigned height,
                           bool relocate) {
     if (!entry->bytes || (!(entry->ref & MEMORY_BIT) && !relocate)) return true;
@@ -918,6 +934,160 @@ PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *k
     return result;
 }
 
+struct PureDraft {
+    char *path;
+    char key[KEY + 1];
+    Tree tree;        /* the base file's mapping plus this draft's node arena */
+    dev_t device;     /* identity of the base file; compaction replaces it */
+    ino_t inode;
+    Entry root;
+    int64_t revision;
+    size_t live;      /* arena bytes reachable at the last collection */
+};
+
+/* Rebase the draft on the committed version of its key. */
+static PureResult load_draft(PureDraft *draft) {
+    int directory = open(draft->path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0) return PURE_STORE_ERROR;
+    int fd = openat(directory, tree_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    close(directory);
+    if (fd < 0) return PURE_STORE_ERROR;
+    Tree tree = {0};
+    Head head;
+    struct stat info;
+    Entry document;
+    uint64_t index;
+    int64_t revision;
+    bool found;
+    bool ok = !fstat(fd, &info) && read_head(fd, &head) && map_tree(fd, &head, &tree) &&
+              find(&tree, (Entry){head.catalog, head.catalog_bytes}, draft->key, &index, &found,
+                   &document, &revision);
+    close(fd);
+    if (!ok) { release_tree(&tree); return PURE_STORE_ERROR; }
+    release_tree(&draft->tree);
+    draft->tree = tree;
+    draft->device = info.st_dev;
+    draft->inode = info.st_ino;
+    draft->root = document;
+    draft->revision = revision;
+    draft->live = 0;
+    return PURE_OK;
+}
+
+PureResult pure_draft_open(const char *path, const char *key, PureDraft **out) {
+    *out = NULL;
+    if (!path || !valid_key(key)) return PURE_INVALID;
+    PureDraft *draft = calloc(1, sizeof(*draft));
+    if (!draft || !(draft->path = strdup(path))) { free(draft); return PURE_ALLOCATION; }
+    memcpy(draft->key, key, strlen(key) + 1);
+    PureResult result = load_draft(draft);
+    if (result != PURE_OK) { pure_draft_close(draft); return result; }
+    *out = draft;
+    return PURE_OK;
+}
+
+void pure_draft_close(PureDraft *draft) {
+    if (!draft) return;
+    release_tree(&draft->tree);
+    free(draft->path);
+    free(draft);
+}
+
+size_t pure_draft_size(const PureDraft *draft) { return (size_t)draft->root.bytes; }
+
+int64_t pure_draft_revision(const PureDraft *draft) { return draft->revision; }
+
+static size_t mark(const Tree *tree, Entry entry, unsigned char *marks) {
+    if (!(entry.ref & MEMORY_BIT)) return 0;
+    size_t at = (size_t)(entry.ref & LOCATION);
+    if (marks[at]) return 0;
+    marks[at] = 1;
+    const Node *node = &tree->nodes[at];
+    size_t bytes = node_bytes(node);
+    if (!node->bytes)
+        for (size_t i = 0; i < node->size; ++i) bytes += mark(tree, node->children[i], marks);
+    return bytes;
+}
+
+/* Every edit copies a leaf and path, so reclaim arena nodes the root no
+ * longer reaches once they outweigh the reachable ones (and 32 KiB). */
+static void collect(PureDraft *draft) {
+    Tree *tree = &draft->tree;
+    size_t allowance = draft->live > 32768 ? draft->live : 32768;
+    if (tree->bytes <= draft->live || tree->bytes - draft->live <= allowance) return;
+    unsigned char *marks = calloc(tree->count, 1);
+    if (!marks) return;
+    draft->live = mark(tree, draft->root, marks);
+    for (size_t i = 0; i < tree->count; ++i) {
+        Node *node = &tree->nodes[i];
+        if (marks[i] || node->height == FREE) continue;
+        tree->bytes -= node_bytes(node);
+        free(node->bytes);
+        free(node->children);
+        *node = (Node){.size = tree->free_head, .height = FREE};
+        tree->free_head = i + 1;
+        ++tree->free_count;
+    }
+    free(marks);
+}
+
+PureResult pure_draft_splice(PureDraft *draft, size_t offset, size_t remove, PureSpan insert) {
+    uint64_t size = draft->root.bytes;
+    if (insert.size && !insert.data) return PURE_INVALID;
+    if (offset > size || remove > size - offset || insert.size > PURE_OBJECT_LIMIT - (size - remove))
+        return PURE_LIMIT;
+    if (!remove && !insert.size) return PURE_OK;
+    Entry next;
+    bool ok = rebuild(&draft->tree, draft->root, offset, remove, insert, &next);
+    if (ok) draft->root = next;
+    collect(draft);
+    return ok ? PURE_OK : PURE_STORE_ERROR;
+}
+
+PureResult pure_draft_read(const PureDraft *draft, size_t offset, size_t length,
+                           bool (*visit)(void *, PureSpan), void *context) {
+    unsigned height;
+    if (offset > draft->root.bytes || length > draft->root.bytes - offset) return PURE_LIMIT;
+    if (!length) return PURE_OK;
+    if (!root_height(&draft->tree, draft->root, &height)) return PURE_STORE_ERROR;
+    return visit_range(&draft->tree, draft->root, height, offset, length, visit, context) ?
+           PURE_OK : PURE_STORE_ERROR;
+}
+
+PureResult pure_draft_commit(PureDraft *draft, int64_t *revision) {
+    *revision = draft->revision;
+    Session session;
+    Writer *writer = NULL;
+    Entry current, root = draft->root;
+    uint64_t index;
+    int64_t stored;
+    bool found;
+    PureResult result = open_session(draft->path, &session);
+    if (result != PURE_OK) goto finish;
+    result = PURE_STORE_ERROR;
+    if (!find(&session.tree, (Entry){session.head.catalog, session.head.catalog_bytes}, draft->key,
+              &index, &found, &current, &stored)) goto finish;
+    if (stored != draft->revision) { *revision = stored; result = PURE_CONFLICT; goto finish; }
+    if (stored == INT64_MAX) { result = PURE_LIMIT; goto finish; }
+    /* After compaction the draft's stored references name the old file. */
+    bool relocate = session.file.st_dev != draft->device || session.file.st_ino != draft->inode;
+    writer = malloc(sizeof(*writer));
+    if (!writer) goto finish;
+    *writer = (Writer){.fd = session.fd, .at = session.head.end};
+    if (!write_root(&draft->tree, writer, &root, relocate)) {
+        if (ftruncate(session.fd, (off_t)session.head.end) == 0) sync_fd(session.fd);
+        goto finish;
+    }
+    result = publish(&session, writer, draft->key, index, found, root, revision);
+    /* Rebase while still holding the writer lock; the arena is no longer needed.
+     * If remapping fails the draft keeps equal content at the new revision. */
+    if (result == PURE_OK && load_draft(draft) != PURE_OK) draft->revision = *revision;
+finish:
+    free(writer);
+    close_session(&session);
+    return result;
+}
+
 PureResult pure_store_put(const char *path, const char *key, int64_t expected,
                           PureSpan body, int64_t *revision) {
     return mutate(path, key, expected, body, false, 0, 0, PURE_OBJECT_LIMIT, revision);
@@ -944,6 +1114,17 @@ static bool shape(const Tree *tree, Entry entry, unsigned height, bool root,
     for (size_t i = 0; i < count; ++i)
         if (!shape(tree, kids[i], height - 1, false, leaves, small)) return false;
     return true;
+}
+
+/* Test-only: live arena nodes and their payload bytes. */
+void pure_draft_test_arena(const PureDraft *draft, size_t *nodes, size_t *bytes) {
+    *nodes = *bytes = 0;
+    for (size_t i = 0; i < draft->tree.count; ++i) {
+        const Node *node = &draft->tree.nodes[i];
+        if (node->height == FREE) continue;
+        ++*nodes;
+        *bytes += node->bytes ? node->size : node->size * sizeof(Entry);
+    }
 }
 
 /* Test-only: the stored height, leaf count and number of underfull nodes. */
