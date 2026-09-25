@@ -916,6 +916,7 @@ static void lists(void) {
     double value;
     CHECK(number_view(&app, 0) == 0 && number_view(&app, 1) == 0 && !pure_app_view(&app, 2, &value));
     CHECK(pure_app_view_text(&app, 3, text_span, &(Text){{0}, 0}) == PURE_NOT_FOUND);  /* no item yet */
+    CHECK(app.fault == PURE_FAULT_NONE);                                                /* views leave faults alone */
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"b", 1}) == PURE_OK);
     CHECK(pure_list_count(app.lists[1]) == 2 && app.values[2] == 1 && app.values[0] == 2);

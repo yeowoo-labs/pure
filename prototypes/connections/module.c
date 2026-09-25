@@ -1132,12 +1132,18 @@ PureResult pure_app_reply(const PureApp *app, bool (*visit)(void *, PureSpan), v
     return visit_value(app, &app->arena, app->reply, visit, context);
 }
 
+/* A view that fails reports it by its result; the fault stays the last event's. */
 static PureResult evaluate(PureApp *app, uint32_t view, Slot *out) {
     double values[PURE_MODULE_STATES];
     memcpy(values, app->values, sizeof(values));
     app->view_arena.used = 0;
     Event ev = {.app = app, .arena = &app->view_arena};
-    return run(app->module, values, app->module->view_code[view], &ev, out);
+    PureFault fault = app->fault;
+    uint32_t fault_pc = app->fault_pc;
+    PureResult result = run(app->module, values, app->module->view_code[view], &ev, out);
+    app->fault = fault;
+    app->fault_pc = fault_pc;
+    return result;
 }
 
 bool pure_app_view(PureApp *app, uint32_t view, double *out) {
