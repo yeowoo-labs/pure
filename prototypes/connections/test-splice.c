@@ -126,12 +126,15 @@ static void storage(const char *path) {
     expect(path, "work", revision, (PureSpan){oracle, length});
     CHECK(pure_store_splice(path, "work", revision, 0, length, (PureSpan){0}, PURE_OBJECT_LIMIT, &revision) == PURE_OK);
     expect(path, "work", revision, (PureSpan){0});
+#ifndef PURE_STORE_TREE
+    /* Per-object file formats; test-tree-store covers the same limit. */
     char file[256];
     snprintf(file, sizeof(file), "%s/obj-work", path);
     int fd = open(file, O_WRONLY);
     const unsigned char maximum[] = {255,255,255,255,255,255,255,127};
     CHECK(fd >= 0 && pwrite(fd, maximum, 8, 8) == 8 && close(fd) == 0);
     CHECK(pure_store_splice(path, "work", INT64_MAX, 0, 0, (PureSpan){0}, PURE_OBJECT_LIMIT, &revision) == PURE_LIMIT);
+#endif
 }
 
 static void runtime(const char *path) {

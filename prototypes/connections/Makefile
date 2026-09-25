@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -Werror
 BUILD ?= build
 
-.PHONY: all core async-core editor fixed-editor fixed-server fixed-tui source-tui compiler mirror window server async-server document-peer document-server check check-policy check-policy-peer check-portable check-portable-tui check-paged-portable check-portable-peer check-native-checkpoint check-mirror check-core check-async check-async-server check-async-service-scale check-profile check-fixed-profile check-fixed-server check-service-scale check-tui-profile check-source-tui-profile check-tui check-source-tui check-release check-micro-memory check-hybrid check-flat-export check-copy-range check-peer-profile check-document-server-profile check-window-profile check-document-peer check-document-server FORCE
+.PHONY: all core async-core editor fixed-editor fixed-server fixed-tui source-tui compiler mirror window server async-server document-peer document-server check check-policy check-policy-peer check-portable check-portable-tui check-paged-portable check-tree check-portable-peer check-native-checkpoint check-mirror check-core check-async check-async-server check-async-service-scale check-profile check-fixed-profile check-fixed-server check-service-scale check-tui-profile check-source-tui-profile check-tui check-source-tui check-release check-micro-memory check-hybrid check-flat-export check-copy-range check-peer-profile check-document-server-profile check-window-profile check-document-peer check-document-server FORCE
 CORE = runtime.c
 STORE ?= store.c
 FIXED_PROGRAM ?= examples/editor.pure
@@ -114,6 +114,9 @@ $(BUILD)/test-async: test-async.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUILD
 
 $(BUILD)/test-splice: test-splice.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_STORE_TEST test-splice.c program.c $(CORE) $(HOST) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(BUILD)/test-tree-store: test-tree-store.c store-tree.c $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-tree-store.c store-tree.c $(LDFLAGS) $(LDLIBS) -o $@
 
 $(BUILD)/test-paged-store: test-paged-store.c store-paged.c $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-paged-store.c store-paged.c $(LDFLAGS) $(LDLIBS) -o $@
@@ -245,6 +248,14 @@ check-portable: $(BUILD)/test-flow $(BUILD)/test-program $(BUILD)/test-fields $(
 check-portable-tui: fixed-editor fixed-tui editor source-tui
 	python3 check_tui.py --build $(BUILD) --portable $(if $(PORTABLE_FIXED_TUI_EVIDENCE),--output "$(PORTABLE_FIXED_TUI_EVIDENCE)")
 	python3 check_tui.py --build $(BUILD) --source --portable $(if $(PORTABLE_SOURCE_TUI_EVIDENCE),--output "$(PORTABLE_SOURCE_TUI_EVIDENCE)")
+
+# Selected single-file persistent-tree store: its own crash/oracle checks, then
+# the unchanged runtime, splice, async and real-PTY editor checks on it.
+check-tree:
+	$(MAKE) BUILD=build/tree STORE=store-tree.c CPPFLAGS="$(CPPFLAGS) -DPURE_STORE_TREE" check-portable build/tree/test-tree-store fixed-editor fixed-tui editor source-tui
+	build/tree/test-tree-store
+	python3 check_tui.py --build build/tree --portable --single-file-store $(if $(TREE_TUI_EVIDENCE),--output "$(TREE_TUI_EVIDENCE)")
+	python3 check_tui.py --build build/tree --source --portable --single-file-store
 
 # Exercise the selected logical-page store without Linux-only size/RSS gates.
 # The CI runner separately asserts its real OS page size before this target.

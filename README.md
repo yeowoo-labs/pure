@@ -67,6 +67,18 @@ page-store assertions plus a 1 MiB native CLI edit and stale-revision check.
 Physical-disk durability, Linux x86_64 CI and macOS remain unverified; the
 default core and storage path are unchanged.
 
+The [selected single-file persistent tree](docs/research/073-single-file-persistent-tree.md)
+questions the one-contiguous-file-per-document model instead. All documents
+share one append-only file of immutable extents. An insert, delete or append
+writes only the changed leaf and path, and unchanged extents are shared
+between versions. On the same ext4 host, a durable 1-byte middle insert into a
+1 MiB document took 8.58 ms against 78.51 ms for the default store. The real
+TUI's Ctrl+S after typing one character took 16.60 ms against 84.59 ms. The
+unchanged runtime, splice, async and real-PTY TUI checks pass on it
+(`make -C prototypes/connections check-tree`). Its linked CLI is 12,710 B
+larger, contiguous reads of multi-leaf documents copy, and space is reclaimed
+only by compaction, so it remains an opt-in profile.
+
 The current execution profile has separate `core`, `fixed-editor`, `editor`, and
 `server` build targets. `make all` produces the core and the parser-free CLI
 from the build-time prepared `editor.pure`; it also builds a compiler tool that

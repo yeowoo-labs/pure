@@ -128,7 +128,7 @@ def wait_stored(editor, store, key, expected, revision):
     raise AssertionError((key, expected[:100], shown(editor, store, key)))
 
 
-def check(build, rss_limit_kib, source, program_path, portable=False):
+def check(build, rss_limit_kib, source, program_path, portable=False, object_files=True):
     binary = (build / ('pure-edit-tui' if source else 'pure-edit-tui-fixed')).resolve()
     program = (program_path or HERE / 'examples/editor.pure').resolve() if source else None
     editor = [str((build / ('pure-edit' if source else 'pure-edit-fixed')).resolve())]
@@ -171,9 +171,11 @@ def check(build, rss_limit_kib, source, program_path, portable=False):
             terminal.wait_for(b'Pure | note')
             terminal.type(b'\x0c')
             terminal.wait_for(b'Pure | documents')
-            (store / 'obj-second').unlink()
-            terminal.type(b'\x1b[B\r')
-            terminal.wait_for(b'Document disappeared; refresh the list')
+            if object_files:
+                # Only per-object file stores can lose one document underneath the list.
+                (store / 'obj-second').unlink()
+                terminal.type(b'\x1b[B\r')
+                terminal.wait_for(b'Document disappeared; refresh the list')
             terminal.type(b'\x1b')
             terminal.wait_for(b'Pure | note')
             terminal.type(b'!')
@@ -335,12 +337,14 @@ def main():
     parser.add_argument('--portable', action='store_true',
                         help='run all PTY behavior without Linux /proc RSS measurement')
     parser.add_argument('--program', type=Path, help='definition for --source (including relocated bundles)')
+    parser.add_argument('--single-file-store', action='store_true',
+                        help='store keeps all documents in one file (skips external deletion)')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     if args.output and args.output.exists():
         parser.error('evidence file already exists')
     result = check(args.build, 0 if args.portable else args.rss_limit_kib,
-                   args.source, args.program, args.portable)
+                   args.source, args.program, args.portable, not args.single_file_store)
     body = json.dumps(result, indent=2) + '\n'
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

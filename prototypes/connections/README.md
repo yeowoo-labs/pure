@@ -144,6 +144,16 @@ python3 prototypes/connections/export_flat_store.py \
 [실제 큰·작은 문서 쓰기량과 전체 제한](../../docs/research/034-hybrid-document-storage.md),
 [기본 형식으로 내보내는 검증](../../docs/research/062-paged-store-rollback.md).
 
+선택형 영속 트리 저장소(`store-tree.c`)는 모든 문서를 추가 전용 파일 하나에 불변 익스텐트
+트리로 둔다. 편집은 바뀐 leaf와 경로만 기록하고, 읽기는 잠그지 않는다. 기존 런타임·부분 수정·
+비동기·실제 PTY 검사와 자체 고장·오라클 검사를 함께 실행한다. 형식이 달라 별도 `--store`
+디렉터리를 쓴다. [설계·측정·한계](../../docs/research/073-single-file-persistent-tree.md).
+
+```sh
+make -C prototypes/connections check-tree
+prototypes/connections/build/tree/pure-edit-tui-fixed --store /tmp/pure-tree-documents note
+```
+
 같은 `.pure` 문서 편집기를 선택형 페이지 저장소와 함께 터미널에서 사용하려면
 새 저장 디렉터리를 지정한다. 논리 페이지는 16 KiB이며 OS 페이지가 이를
 나눌 때만 초기화한다. Linux 16 KiB 호스트에서 전체 선택형 검사가 통과했고,
