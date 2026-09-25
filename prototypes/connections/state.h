@@ -17,6 +17,10 @@ typedef struct PureDraft PureDraft;
 PureDraft *pure_draft_new(void);
 /* A missing key opens as an empty draft at revision 0; commit creates it. */
 PureResult pure_draft_open(const char *path, const char *key, PureDraft **out);
+/* A runtime-owned value of an app, such as a list or text state, stored
+ * under a name that is never a document key (hosts listing documents do not
+ * see it). name is a valid key of at most 63 bytes. */
+PureResult pure_state_open(const char *path, const char *name, PureDraft **out);
 /* Memory only. Fails without change on a bad range or when memory runs out. */
 PureResult pure_draft_splice(PureDraft *, size_t offset, size_t remove, PureSpan insert);
 size_t pure_draft_size(const PureDraft *);
@@ -40,5 +44,9 @@ void pure_draft_restore(PureDraft *, PureVersion);
 /* Publish if the key is still at the draft's base revision. On success the
  * draft continues from the new revision; on any failure it is unchanged. */
 PureResult pure_draft_commit(PureDraft *, int64_t *revision);
+/* Publish drafts of one store in one commit: each key must still be at its
+ * draft's base revision (a conflict names the stored revision in revisions),
+ * and either every draft is published or none is. Keys must differ. */
+PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t *revisions);
 void pure_draft_close(PureDraft *);
 #endif

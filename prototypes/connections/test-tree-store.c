@@ -638,6 +638,133 @@ static void draft_faults(const char *path) {
     CHECK(pure_draft_open(path, "bad/key", &draft) == PURE_INVALID && !draft);
 }
 
+static bool list_key(void *context, const char *key) {
+    char *seen = context;
+    strcat(seen, key);
+    strcat(seen, ",");
+    return true;
+}
+
+/* Several drafts publish in one commit: all or none, under process crashes,
+ * faults and a stale draft. Runtime values stay out of the document keys. */
+static void batch(const char *path) {
+    unsigned char scratch[64];
+    int64_t revision, revisions[3];
+    CHECK(pure_store_put(path, "alpha", 0, (PureSpan){(const unsigned char *)"a0", 2}, &revision) == PURE_OK);
+    CHECK(pure_store_put(path, "beta", 0, (PureSpan){(const unsigned char *)"b0", 2}, &revision) == PURE_OK);
+    PureDraft *drafts[3];
+    CHECK(pure_draft_open(path, "alpha", &drafts[0]) == PURE_OK && pure_draft_open(path, "beta", &drafts[1]) == PURE_OK);
+    CHECK(pure_state_open(path, "values", &drafts[2]) == PURE_OK && pure_draft_revision(drafts[2]) == 0);
+    PureDraft *bad;
+    CHECK(pure_state_open(path, "bad.name", &bad) == PURE_INVALID && !bad);
+    CHECK(pure_draft_splice(drafts[0], 2, 0, (PureSpan){(const unsigned char *)"+1", 2}) == PURE_OK);
+    CHECK(pure_draft_splice(drafts[1], 0, 2, (PureSpan){(const unsigned char *)"B", 1}) == PURE_OK);
+    CHECK(pure_draft_splice(drafts[2], 0, 0, (PureSpan){(const unsigned char *)"state", 5}) == PURE_OK);
+    Oracle alpha = {(unsigned char *)"a0", 2, 1}, beta = {(unsigned char *)"b0", 2, 1};
+    Oracle alpha_new = {(unsigned char *)"a0+1", 4, 1}, beta_new = {(unsigned char *)"B", 1, 1};
+    Oracle state_new = {(unsigned char *)"state", 5, 0};
+    /* A process that dies anywhere in the commit leaves all three as before,
+     * or all three published once the head is written. */
+    for (int stage = PURE_AFTER_HEADER; stage <= PURE_BEFORE_DIR_SYNC; ++stage) {
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (!child) {
+            crash = 1;
+            fail_stage = stage;
+            pure_draft_commit_all(drafts, 3, revisions);
+            _exit(0);
+        }
+        int status;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 77);
+        PureDraft *state;
+        CHECK(pure_state_open(path, "values", &state) == PURE_OK);
+        if (stage < PURE_BEFORE_DIR_SYNC) {
+            expect(path, "alpha", &alpha);
+            expect(path, "beta", &beta);
+            CHECK(pure_draft_revision(state) == 0 && pure_draft_size(state) == 0);
+            pure_draft_close(state);
+            continue;
+        }
+        Oracle a = alpha_new, b = beta_new, v = state_new;
+        a.revision = b.revision = 2;
+        v.revision = 1;
+        expect(path, "alpha", &a);
+        expect(path, "beta", &b);
+        expect_draft(state, &v, scratch);
+        pure_draft_close(state);
+        /* Undo the crashed commit's effect for the next checks. */
+        CHECK(pure_store_put(path, "alpha", 2, (PureSpan){(const unsigned char *)"a0", 2}, &revision) == PURE_OK);
+    }
+    /* The same batch in this process is now stale on every key. */
+    CHECK(pure_draft_commit_all(drafts, 3, revisions) == PURE_CONFLICT && revisions[0] == 3);
+    for (unsigned i = 0; i < 3; ++i) pure_draft_close(drafts[i]);
+    CHECK(pure_draft_open(path, "alpha", &drafts[0]) == PURE_OK && pure_draft_open(path, "beta", &drafts[1]) == PURE_OK);
+    CHECK(pure_state_open(path, "values", &drafts[2]) == PURE_OK);
+    CHECK(pure_draft_splice(drafts[0], 0, 2, (PureSpan){(const unsigned char *)"A", 1}) == PURE_OK);
+    CHECK(pure_draft_splice(drafts[1], 1, 0, (PureSpan){(const unsigned char *)"!", 1}) == PURE_OK);
+    CHECK(pure_draft_splice(drafts[2], 5, 0, (PureSpan){(const unsigned char *)"+", 1}) == PURE_OK);
+    alpha = (Oracle){(unsigned char *)"a0", 2, 3};
+    beta = (Oracle){(unsigned char *)"B", 1, 2};
+    uint64_t size = file_size(path);
+    for (fail_stage = PURE_AFTER_HEADER; fail_stage <= PURE_BEFORE_RENAME; ++fail_stage) {
+        CHECK(pure_draft_commit_all(drafts, 3, revisions) == PURE_STORE_ERROR);
+        expect(path, "alpha", &alpha);
+        expect(path, "beta", &beta);
+        CHECK(file_size(path) == size);
+    }
+    fail_stage = -1;
+    /* One stale draft stops the whole batch. */
+    PureDraft *other;
+    CHECK(pure_draft_open(path, "beta", &other) == PURE_OK);
+    CHECK(pure_draft_splice(other, 0, 0, (PureSpan){(const unsigned char *)"x", 1}) == PURE_OK);
+    CHECK(pure_draft_commit(other, &revision) == PURE_OK && revision == 3);
+    pure_draft_close(other);
+    CHECK(pure_draft_commit_all(drafts, 3, revisions) == PURE_CONFLICT && revisions[1] == 3);
+    expect(path, "alpha", &alpha);
+    pure_draft_close(drafts[1]);
+    CHECK(pure_draft_open(path, "beta", &drafts[1]) == PURE_OK);
+    CHECK(pure_draft_splice(drafts[1], 0, 0, (PureSpan){(const unsigned char *)"y", 1}) == PURE_OK);
+    CHECK(pure_draft_commit_all(drafts, 3, revisions) == PURE_OK);
+    CHECK(revisions[0] == 4 && revisions[1] == 4 && revisions[2] == 2);
+    expect(path, "alpha", &(Oracle){(unsigned char *)"A", 1, 4});
+    expect(path, "beta", &(Oracle){(unsigned char *)"yxB", 3, 4});
+    expect_draft(drafts[2], &(Oracle){(unsigned char *)"state+", 6, 2}, scratch);
+    /* Drafts continue from the new revisions. */
+    CHECK(pure_draft_splice(drafts[0], 1, 0, (PureSpan){(const unsigned char *)"z", 1}) == PURE_OK);
+    CHECK(pure_draft_commit_all(drafts, 1, revisions) == PURE_OK && revisions[0] == 5);
+    /* Invalid batches change nothing. */
+    PureDraft *twice[2] = {drafts[0], drafts[0]}, *anonymous = pure_draft_new();
+    CHECK(pure_draft_commit_all(twice, 2, revisions) == PURE_INVALID);
+    PureDraft *mixed[2] = {drafts[1], anonymous};
+    CHECK(pure_draft_commit_all(mixed, 2, revisions) == PURE_INVALID);
+    pure_draft_close(anonymous);
+    for (unsigned i = 0; i < 3; ++i) pure_draft_close(drafts[i]);
+    /* Runtime values are not documents: listings skip them and document
+     * operations refuse their names. */
+    char seen[256] = "";
+    CHECK(pure_store_keys(path, list_key, seen) == PURE_OK && !strcmp(seen, "alpha,beta,"));
+    CHECK(pure_store_put(path, ".values", 0, (PureSpan){(const unsigned char *)"x", 1}, &revision) != PURE_OK);
+    /* Many keys, in no particular order, in one commit. */
+    PureDraft *many[50];
+    int64_t many_revisions[50];
+    char key[16];
+    for (unsigned i = 0; i < 50; ++i) {
+        snprintf(key, sizeof(key), "k%02u", (i * 37) % 50);
+        CHECK((i % 2 ? pure_state_open(path, key, &many[i]) : pure_draft_open(path, key, &many[i])) == PURE_OK);
+        CHECK(pure_draft_splice(many[i], 0, 0, (PureSpan){(const unsigned char *)key, strlen(key)}) == PURE_OK);
+    }
+    CHECK(pure_draft_commit_all(many, 50, many_revisions) == PURE_OK);
+    for (unsigned i = 0; i < 50; ++i) {
+        CHECK(many_revisions[i] == 1);
+        snprintf(key, sizeof(key), "k%02u", (i * 37) % 50);
+        PureDraft *check;
+        CHECK((i % 2 ? pure_state_open(path, key, &check) : pure_draft_open(path, key, &check)) == PURE_OK);
+        expect_draft(check, &(Oracle){(unsigned char *)key, strlen(key), 1}, scratch);
+        pure_draft_close(check);
+        pure_draft_close(many[i]);
+    }
+}
+
 static void clean(const char *path) {
     DIR *entries = opendir(path);
     CHECK(entries);
@@ -654,7 +781,7 @@ int main(void) {
     void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
-                                      draft_versions, anonymous_draft};
+                                      draft_versions, anonymous_draft, batch};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -664,6 +791,7 @@ int main(void) {
     }
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
-         "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous\"}");
+         "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
+         "atomic-batch-runtime-keys\"}");
     return 0;
 }

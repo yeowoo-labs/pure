@@ -86,6 +86,12 @@ static bool valid_key(const char *key) {
     return true;
 }
 
+/* Runtime-owned values (app states) live under '.' followed by a valid key.
+ * Document keys never start with '.', so the two never meet. */
+static bool runtime_key(const char *key) {
+    return key && key[0] == '.' && strlen(key) <= KEY && valid_key(key + 1);
+}
+
 static uint64_t decode64(const unsigned char *bytes) {
     uint64_t value = 0;
     for (unsigned i = 0; i < 8; ++i) value |= (uint64_t)bytes[i] << (8 * i);
@@ -839,28 +845,39 @@ static PureResult open_session(const char *path, Session *session) {
     return PURE_OK;
 }
 
-/* The document's new nodes are already appended at writer. Record it in the
- * catalog, then make the commit durable before its head becomes visible. */
-static PureResult publish(Session *session, Writer *writer, const char *key, uint64_t index,
-                          bool found, Entry document, int64_t *revision) {
-    unsigned char record[RECORD] = {0};
-    Entry catalog = {session->head.catalog, session->head.catalog_bytes}, updated;
-    memcpy(record, key, strlen(key));
-    encode64(record + KEY, document.ref);
-    encode64(record + KEY + 8, document.bytes);
-    encode64(record + KEY + 16, (uint64_t)*revision + 1);
-    bool written = rebuild(&session->tree, catalog, index * RECORD, found ? RECORD : 0,
-                           (PureSpan){record, RECORD}, &updated) &&
-                   write_root(&session->tree, writer, &updated, false) && flush(writer);
+/* The documents' new nodes are already appended at writer. Record each in
+ * the catalog (revisions come in as the base and leave as the new one),
+ * then make the commit durable before its head becomes visible: every
+ * document becomes visible at once, or none does. */
+static PureResult publish(Session *session, Writer *writer, size_t count, const char *const *keys,
+                          const Entry *documents, int64_t *revisions) {
+    Entry catalog = {session->head.catalog, session->head.catalog_bytes};
+    bool written = true;
+    for (size_t i = 0; written && i < count; ++i) {
+        unsigned char record[RECORD] = {0};
+        uint64_t index;
+        bool found;
+        Entry current, updated;
+        int64_t stored;
+        memcpy(record, keys[i], strlen(keys[i]));
+        encode64(record + KEY, documents[i].ref);
+        encode64(record + KEY + 8, documents[i].bytes);
+        encode64(record + KEY + 16, (uint64_t)revisions[i] + 1);
+        written = find(&session->tree, catalog, keys[i], &index, &found, &current, &stored) &&
+                  rebuild(&session->tree, catalog, index * RECORD, found ? RECORD : 0,
+                          (PureSpan){record, RECORD}, &updated);
+        catalog = updated;
+    }
+    written = written && write_root(&session->tree, writer, &catalog, false) && flush(writer);
     if (!written || fault(PURE_AFTER_HEADER) || fault(PURE_BEFORE_FILE_SYNC) ||
         !sync_fd(session->fd) || fault(PURE_BEFORE_RENAME)) {
         if (ftruncate(session->fd, (off_t)session->head.end) == 0) sync_fd(session->fd);
         return PURE_STORE_ERROR;
     }
-    Head published = {session->head.seq + 1, writer->at, updated.ref, updated.bytes, session->head.live};
+    Head published = {session->head.seq + 1, writer->at, catalog.ref, catalog.bytes, session->head.live};
     unsigned char slot[SLOT];
     encode_head(slot, &published);
-    ++*revision; /* Past this point the head may already be visible. */
+    for (size_t i = 0; i < count; ++i) ++revisions[i]; /* Past this point the head may already be visible. */
     if (!write_at(session->fd, slot, SLOT, (published.seq % 2) * SLOT) ||
         fault(PURE_BEFORE_DIR_SYNC) || !sync_fd(session->fd)) return PURE_UNCERTAIN;
     if (published.end - DATA > 4 * published.live + COMPACT_SLACK)
@@ -898,14 +915,15 @@ static PureResult mutate(const char *path, const char *key, int64_t expected,
         if (ftruncate(session.fd, (off_t)session.head.end) == 0) sync_fd(session.fd);
         goto finish;
     }
-    result = publish(&session, writer, key, index, found, next, revision);
+    result = publish(&session, writer, 1, &key, &next, revision);
 finish:
     free(writer);
     close_session(&session);
     return result;
 }
 
-/* Keys come from the catalog in ascending byte order. */
+/* Keys come from the catalog in ascending byte order. Runtime values are not
+ * documents and are left out. */
 PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *key),
                            void *context) {
     int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -925,6 +943,7 @@ PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *k
         for (uint64_t i = 0; i < catalog.bytes / RECORD; ++i) {
             if (!read_record(&tree, catalog, i, record, &document, &revision)) { result = PURE_STORE_ERROR; break; }
             memcpy(key, record, KEY);
+            if (runtime_key(key)) continue;
             if (!valid_key(key)) { result = PURE_STORE_ERROR; break; }
             if (!visit(context, key)) break;
         }
@@ -977,7 +996,7 @@ static PureResult load_draft(PureDraft *draft) {
 
 PureResult pure_draft_open(const char *path, const char *key, PureDraft **out) {
     *out = NULL;
-    if (!path || !valid_key(key)) return PURE_INVALID;
+    if (!path || !(valid_key(key) || runtime_key(key))) return PURE_INVALID;
     PureDraft *draft = calloc(1, sizeof(*draft));
     if (!draft || !(draft->path = strdup(path))) { free(draft); return PURE_ALLOCATION; }
     memcpy(draft->key, key, strlen(key) + 1);
@@ -985,6 +1004,14 @@ PureResult pure_draft_open(const char *path, const char *key, PureDraft **out) {
     if (result != PURE_OK) { pure_draft_close(draft); return result; }
     *out = draft;
     return PURE_OK;
+}
+
+PureResult pure_state_open(const char *path, const char *name, PureDraft **out) {
+    char key[KEY + 2];
+    *out = NULL;
+    if (!valid_key(name) || strlen(name) >= KEY) return PURE_INVALID;
+    snprintf(key, sizeof(key), ".%s", name);
+    return pure_draft_open(path, key, out);
 }
 
 PureDraft *pure_draft_new(void) {
@@ -1079,39 +1106,64 @@ void pure_draft_hold(PureDraft *draft, bool held) {
     if (!held) collect(draft);
 }
 
-PureResult pure_draft_commit(PureDraft *draft, int64_t *revision) {
-    *revision = draft->revision;
-    if (!draft->path) return PURE_INVALID;
+PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t *revisions) {
+    for (size_t i = 0; i < count; ++i) {
+        revisions[i] = drafts[i]->revision;
+        if (!drafts[i]->path || strcmp(drafts[i]->path, drafts[0]->path)) return PURE_INVALID;
+        for (size_t k = 0; k < i; ++k) if (!strcmp(drafts[k]->key, drafts[i]->key)) return PURE_INVALID;
+    }
+    if (!count) return PURE_OK;
     Session session;
     Writer *writer = NULL;
-    Entry current, root = draft->root;
-    uint64_t index;
-    int64_t stored;
-    bool found;
-    PureResult result = open_session(draft->path, &session);
-    if (result != PURE_OK) goto finish;
+    Entry *roots = malloc(count * sizeof(*roots));
+    const char **keys = malloc(count * sizeof(*keys));
+    PureResult result = roots && keys ? open_session(drafts[0]->path, &session) : PURE_ALLOCATION;
+    if (result != PURE_OK) {
+        if (roots && keys) close_session(&session);
+        free(roots);
+        free((void *)keys);
+        return result;
+    }
     result = PURE_STORE_ERROR;
-    if (!find(&session.tree, (Entry){session.head.catalog, session.head.catalog_bytes}, draft->key,
-              &index, &found, &current, &stored)) goto finish;
-    if (stored != draft->revision) { *revision = stored; result = PURE_CONFLICT; goto finish; }
-    if (stored == INT64_MAX) { result = PURE_LIMIT; goto finish; }
-    /* After compaction the draft's stored references name the old file. */
-    bool relocate = session.file.st_dev != draft->device || session.file.st_ino != draft->inode;
+    /* Every key must still be at its draft's base revision. */
+    for (size_t i = 0; i < count; ++i) {
+        Entry current;
+        uint64_t index;
+        int64_t stored;
+        bool found;
+        if (!find(&session.tree, (Entry){session.head.catalog, session.head.catalog_bytes}, drafts[i]->key,
+                  &index, &found, &current, &stored)) goto finish;
+        if (stored != drafts[i]->revision) { revisions[i] = stored; result = PURE_CONFLICT; goto finish; }
+        if (stored == INT64_MAX) { result = PURE_LIMIT; goto finish; }
+        roots[i] = drafts[i]->root;
+        keys[i] = drafts[i]->key;
+    }
     writer = malloc(sizeof(*writer));
     if (!writer) goto finish;
     *writer = (Writer){.fd = session.fd, .at = session.head.end};
-    if (!write_root(&draft->tree, writer, &root, relocate)) {
-        if (ftruncate(session.fd, (off_t)session.head.end) == 0) sync_fd(session.fd);
-        goto finish;
+    for (size_t i = 0; i < count; ++i) {
+        /* After compaction a draft's stored references name the old file. */
+        bool relocate = session.file.st_dev != drafts[i]->device || session.file.st_ino != drafts[i]->inode;
+        if (!write_root(&drafts[i]->tree, writer, &roots[i], relocate)) {
+            if (ftruncate(session.fd, (off_t)session.head.end) == 0) sync_fd(session.fd);
+            goto finish;
+        }
     }
-    result = publish(&session, writer, draft->key, index, found, root, revision);
-    /* Rebase while still holding the writer lock; the arena is no longer needed.
-     * If remapping fails the draft keeps equal content at the new revision. */
-    if (result == PURE_OK && load_draft(draft) != PURE_OK) draft->revision = *revision;
+    result = publish(&session, writer, count, keys, roots, revisions);
+    /* Rebase while still holding the writer lock; the arenas are no longer
+     * needed. If remapping fails a draft keeps equal content at its new revision. */
+    for (size_t i = 0; result == PURE_OK && i < count; ++i)
+        if (load_draft(drafts[i]) != PURE_OK) drafts[i]->revision = revisions[i];
 finish:
     free(writer);
+    free(roots);
+    free((void *)keys);
     close_session(&session);
     return result;
+}
+
+PureResult pure_draft_commit(PureDraft *draft, int64_t *revision) {
+    return pure_draft_commit_all(&draft, 1, revision);
 }
 
 PureResult pure_store_put(const char *path, const char *key, int64_t expected,
