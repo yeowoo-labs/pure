@@ -12,7 +12,7 @@
  * operand types (including which text a cursor belongs to), stack heights,
  * forward-only branches, names, constants and effects. */
 enum {
-    PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 8, PURE_MODULE_VIEWS = 24,
+    PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 24,
     PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 512, PURE_MODULE_STACK = 64,
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 40,
     PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 64,
