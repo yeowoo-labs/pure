@@ -105,19 +105,19 @@ document CLI and HTTP host are separately checked at 36,135 B and 44,342 B of
 linked `text`, with libc as their only direct shared
 library. These are regression boundaries for the recorded toolchain, not total
 memory targets. [The current authored policy and total cost](docs/research/069-atomic-authored-size-policy.md).
+The verification device is the local Raspberry Pi 5 (Linux AArch64, 16 KiB
+pages, ext4 on SD); macOS is no longer a completion requirement.
 `make -C prototypes/connections check-portable` runs the C behavior checks
-without Linux-only size/RSS tools; it is the first check to run on Apple Silicon
-macOS with Apple Clang. `make -C prototypes/connections check-portable-tui`
+without Linux-only size/RSS tools. `make -C prototypes/connections check-portable-tui`
 runs both terminal editors through real PTYs without Linux `/proc`; it does not
 measure their RSS. `make -C prototypes/connections BUILD=build/native-checkpoint
 check-native-checkpoint` combines those checks with real CLI document RSS samples
 for 1 MiB creation, read and 1 B revision edit. It adds no runtime code or
 macOS memory ceiling. The storage adapter now exposes the Darwin open flags it uses.
-These checks have passed on Linux AArch64, but no macOS SDK build or
-native run has been completed here, so this is not a macOS support claim.
-The [Apple Silicon CI job](.github/workflows/native-macos-arm64.yml) runs those
-native app, PTY, authored policy, RSS and in-process document-routing checks on a macOS arm64
-runner when this source is hosted on GitHub; a passing run is still required.
+These checks have passed on Linux AArch64. No macOS SDK build or native run
+has been completed, so this is not a macOS support claim. The
+[Apple Silicon CI job](.github/workflows/native-macos-arm64.yml) remains an
+optional portability check for a GitHub-hosted copy.
 The optional `make -C prototypes/connections check-portable-peer` runs real
 authenticated TLS document work for both native peer profiles without Linux
 `/proc`; it requires OpenSSL and has [separate Linux cost evidence](docs/research/058-portable-authenticated-peer-check.md).

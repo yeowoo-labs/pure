@@ -11,6 +11,10 @@
 변경을 주고받는다. CLI의 자동화와 네이티브 UI가 같은 앱 로직을 사용해야 한다.
 현재 브라우저 UI나 Python 요청 클라이언트를 네이티브 앱 완성으로 대체하지 않는다.
 
+검증 기기는 로컬 Raspberry Pi 5(Linux AArch64)다(2026-09-25 변경). 아래의 macOS 관련
+기록과 [Apple Silicon CI 작업](.github/workflows/native-macos-arm64.yml)은 선택적인 이식성
+확인으로 남기며 완료 조건이 아니다. macOS 지원을 주장하지도 않는다.
+
 | 요구 | 완료에 필요한 증거 | 현재 상태 |
 |---|---|---|
 | Pure가 실행·자원·연결을 소유 | 호스트 타입 없는 실행 코어, 실제 입출력 어댑터, 종료·완료·회수 검증 | 저장과 선택한 scalar 앱 입력·상태·복원을 같은 코어에 연결. [045](docs/research/045-owner-thread-async-effects.md)의 선택형 완료 원시 기능과 [048](docs/research/048-immutable-read-write-overlap.md)의 실제 HTTP 호스트에서 수명·기한·종료·쓰기 중 읽기를 검증했다. 인증 피어 통합과 일반 앱 표현은 미완료 |
