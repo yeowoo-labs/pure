@@ -11,7 +11,6 @@
 #ifdef PURE_EMBEDDED_PROGRAM
 #include "embedded-plan.h"
 #endif
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -100,41 +99,38 @@ static bool find_list_prefix(Editor *editor) {
     return true;
 }
 
+typedef struct {
+    DocumentKey *items;
+    size_t count, capacity;
+    bool complete;
+} KeyList;
+
+/* Bound the optional browser to 8,192 names (520 KiB of key storage). */
+static bool collect_key(void *context, const char *key) {
+    KeyList *list = context;
+    if (list->count == 8192) { list->complete = false; return false; }
+    if (list->count == list->capacity) {
+        size_t next = list->capacity ? list->capacity * 2 : 32;
+        DocumentKey *grown = realloc(list->items, next * sizeof(*grown));
+        if (!grown) { list->complete = false; return false; }
+        list->items = grown;
+        list->capacity = next;
+    }
+    memcpy(list->items[list->count++].name, key, strlen(key) + 1);
+    return true;
+}
+
 /* List names from the selected byte store, not from the execution core.
- * Opening a name still goes through the store's checked READ path. Bound the
- * optional browser to 8,192 names (520 KiB of key storage). */
+ * Opening a name still goes through the store's checked READ path. */
 static bool open_list(Editor *editor) {
-    int descriptor = open(editor->store, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    DIR *directory = descriptor >= 0 ? fdopendir(descriptor) : NULL;
-    if (!directory) {
-        if (descriptor >= 0) close(descriptor);
-        snprintf(editor->message, sizeof(editor->message), "Could not read document directory");
-        return false;
-    }
-    DocumentKey *items = NULL;
-    size_t count = 0, capacity = 0;
-    bool complete = true;
-    for (;;) {
-        errno = 0;
-        struct dirent *entry = readdir(directory);
-        if (!entry) { if (errno) complete = false; break; }
-        if (strncmp(entry->d_name, "obj-", 4) || !valid_key(entry->d_name + 4)) continue;
-        if (count == 8192) { complete = false; break; }
-        if (count == capacity) {
-            size_t next = capacity ? capacity * 2 : 32;
-            DocumentKey *grown = realloc(items, next * sizeof(*grown));
-            if (!grown) { complete = false; break; }
-            items = grown;
-            capacity = next;
-        }
-        memcpy(items[count++].name, entry->d_name + 4, strlen(entry->d_name + 4) + 1);
-    }
-    if (closedir(directory)) complete = false;
-    if (!complete) {
-        free(items);
+    KeyList list = {.complete = true};
+    if (pure_store_keys(editor->store, collect_key, &list) != PURE_OK || !list.complete) {
+        free(list.items);
         snprintf(editor->message, sizeof(editor->message), "Document list exceeds 8,192 keys or cannot be read");
         return false;
     }
+    DocumentKey *items = list.items;
+    size_t count = list.count;
     if (count > 1) qsort(items, count, sizeof(*items), compare_document_key);
     close_list(editor);
     editor->documents = items;

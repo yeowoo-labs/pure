@@ -37,6 +37,12 @@ PureResult pure_store_splice(const char *path, const char *key, int64_t expected
                              size_t offset, size_t remove, PureSpan insert,
                              size_t max_size, int64_t *revision);
 
+/* Visit each stored key once; the order is store-defined. Returning false
+ * from visit stops early. key is valid only during the call. Hosts that
+ * browse documents use this instead of reading a store's file layout. */
+PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *key),
+                           void *context);
+
 /* Fault hooks exist only in the separately built unit-test binary. */
 typedef enum {
     PURE_AFTER_HEADER, PURE_BEFORE_FILE_SYNC, PURE_BEFORE_RENAME, PURE_BEFORE_DIR_SYNC,

@@ -8,6 +8,9 @@ CORE = runtime.c
 STORE ?= store.c
 FIXED_PROGRAM ?= examples/editor.pure
 HOST = $(STORE) store-port.c evaluate.c
+# Document browsers list keys through the store. The tree store keeps its own
+# catalog; per-object file stores share a directory listing.
+KEYS = $(if $(filter store-tree.c,$(STORE)),,store-keys.c)
 HEADERS = runtime.h program.h store.h store-port.h flow.h result.h
 all: core fixed-editor
 core: $(BUILD)/libpure-execution.a
@@ -58,11 +61,11 @@ $(BUILD)/storage-plan.h: FORCE examples/storage.pure $(BUILD)/pure-compile
 $(BUILD)/pure-mirror: mirror.c $(HOST) $(CORE) $(HEADERS) $(BUILD)/storage-plan.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(BUILD) mirror.c $(HOST) $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BUILD)/pure-edit-tui-fixed: edit-tui.c $(HOST) $(CORE) $(HEADERS) $(BUILD)/embedded-plan.h | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_EMBEDDED_PROGRAM -I$(BUILD) edit-tui.c $(HOST) $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/pure-edit-tui-fixed: edit-tui.c $(HOST) $(KEYS) $(CORE) $(HEADERS) $(BUILD)/embedded-plan.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_EMBEDDED_PROGRAM -I$(BUILD) edit-tui.c $(HOST) $(KEYS) $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BUILD)/pure-edit-tui: edit-tui.c $(HOST) $(CORE) program.c $(HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) edit-tui.c $(HOST) $(CORE) program.c $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/pure-edit-tui: edit-tui.c $(HOST) $(KEYS) $(CORE) program.c $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) edit-tui.c $(HOST) $(KEYS) $(CORE) program.c $(LDFLAGS) $(LDLIBS) -o $@
 
 # TLS/socket code is linked only when a document peer is explicitly selected.
 $(BUILD)/pure-document-peer: document-peer.c ../common/tls-link.c ../common/tls-link.h $(HOST) program.c $(CORE) $(HEADERS) | $(BUILD)
