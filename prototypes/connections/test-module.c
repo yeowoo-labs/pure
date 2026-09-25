@@ -15,13 +15,19 @@ typedef struct { const char *name, *key; int kind; bool keyed; const F *fields; 
 typedef struct { const char *name; uint32_t start, length; } V;
 typedef struct { uint32_t event, start, length; } H;
 typedef struct { uint8_t op; uint32_t arg; double value; } O;
-/* Text (type 1, ref = constant) and cursor (type 2, ref = text state) states
- * follow the number states; text views follow the number views. */
+/* Text (type 1, ref = constant), cursor (type 2, ref = text state), list
+ * (type 3, ref = record) and index (type 4, ref = list state) states follow
+ * the number states; text views follow the number views. */
 typedef struct { const char *name; uint32_t type, ref; } T;
+/* A record field: a number and its default, or text (text = 1) whose
+ * default is the constant numbered initial. */
+typedef struct { const char *name; uint32_t text; double initial; } RF;
+typedef struct { const char *name; const RF *fields; size_t nfields; } R;
 typedef struct {
     const S *s; size_t ns; const I *in; size_t ni; const V *v; size_t nv;
     const H *h; size_t nh; const O *o; size_t no; const char *const *c; size_t nc;
     const T *t; size_t nt; const char *const *k; size_t nk; const V *tv; size_t ntv;
+    const R *r; size_t nr;
 } Spec;
 
 static unsigned char *put32(unsigned char *p, uint32_t v) {
@@ -36,7 +42,7 @@ static unsigned char *put_double(unsigned char *p, double value) {
     return put32(p + 4, (uint32_t)(bits >> 32));
 }
 
-/* Test-side encoder for format v3; the toolchain has its own. */
+/* Test-side encoder for format v4; the toolchain has its own. */
 static size_t build(unsigned char *out, Spec spec) {
     unsigned char strings[4096], blob[4096];
     size_t used = 0, blob_used = 0;
@@ -53,6 +59,12 @@ static size_t build(unsigned char *out, Spec spec) {
     }
     for (size_t i = 0; i < spec.nv; ++i) text[names++] = spec.v[i].name;
     for (size_t i = 0; i < spec.ntv; ++i) text[names++] = spec.tv[i].name;
+    size_t record_names = names, record_fields = 0;
+    for (size_t i = 0; i < spec.nr; ++i) {
+        text[names++] = spec.r[i].name;
+        for (size_t f = 0; f < spec.r[i].nfields; ++f) text[names++] = spec.r[i].fields[f].name;
+        record_fields += spec.r[i].nfields;
+    }
     for (size_t i = 0; i < names; ++i) {
         size_t length = strlen(text[i]);
         offset[i] = (uint32_t)used;
@@ -65,13 +77,14 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.nk; ++i) { memcpy(blob + blob_used, spec.k[i], strlen(spec.k[i])); blob_used += strlen(spec.k[i]); }
     unsigned char *p = out;
     memset(p, 0, 40);
-    memcpy(p, "PUREMOD3", 8);
+    memcpy(p, "PUREMOD4", 8);
     size_t states = spec.ns + spec.nt, views = spec.nv + spec.ntv;
     p[8] = (unsigned char)states; p[9] = (unsigned char)(states >> 8);
     p[10] = (unsigned char)spec.ni; p[12] = (unsigned char)views; p[14] = (unsigned char)spec.nh;
     put32(p + 16, (uint32_t)spec.no);
     put32(p + 20, (uint32_t)used);
     p[24] = (unsigned char)fields; p[26] = (unsigned char)spec.nc; p[28] = (unsigned char)spec.nk;
+    p[30] = (unsigned char)spec.nr; p[36] = (unsigned char)record_fields;
     put32(p + 32, (uint32_t)blob_used);
     p += 40;
     size_t n = 0;
@@ -98,6 +111,21 @@ static size_t build(unsigned char *out, Spec spec) {
             p = put32(p, spec.in[i].fields[f].type);
         }
     for (size_t i = 0, at = 0; i < spec.nk; ++i) { p = put32(p, (uint32_t)at); p = put32(p, (uint32_t)strlen(spec.k[i])); at += strlen(spec.k[i]); }
+    size_t record_field = record_names;
+    for (size_t i = 0, first = 0; i < spec.nr; ++i) {
+        p = put32(p, offset[record_field]);
+        record_field += 1 + spec.r[i].nfields;
+        *p++ = (unsigned char)first; *p++ = 0; *p++ = (unsigned char)spec.r[i].nfields; *p++ = 0;
+        first += spec.r[i].nfields;
+    }
+    for (size_t i = 0, n = record_names; i < spec.nr; ++i, ++n)
+        for (size_t f = 0; f < spec.r[i].nfields; ++f) {
+            const RF *field = &spec.r[i].fields[f];
+            p = put32(p, offset[++n]);
+            p = put32(p, field->text);
+            if (field->text) { p = put32(p, (uint32_t)field->initial); p = put32(p, 0); }
+            else p = put_double(p, field->initial);
+        }
     for (size_t i = 0; i < spec.nv; ++i) { p = put32(p, offset[n++]); p = put32(p, 0); p = put32(p, spec.v[i].start); p = put32(p, spec.v[i].length); }
     for (size_t i = 0; i < spec.ntv; ++i) { p = put32(p, offset[n++]); p = put32(p, 1); p = put32(p, spec.tv[i].start); p = put32(p, spec.tv[i].length); }
     for (size_t i = 0; i < spec.nh; ++i) { p = put32(p, spec.h[i].event); p = put32(p, spec.h[i].start); p = put32(p, spec.h[i].length); }
@@ -121,7 +149,7 @@ static PureResult load(Spec spec, PureModule *out) {
 }
 
 #define LEN(a) (sizeof(a) / sizeof(*(a)))
-#define SPEC(s, in, v, h, o) ((Spec){s, LEN(s), in, LEN(in), v, LEN(v), h, LEN(h), o, LEN(o), NULL, 0, NULL, 0, NULL, 0, NULL, 0})
+#define SPEC(s, in, v, h, o) ((Spec){s, LEN(s), in, LEN(in), v, LEN(v), h, LEN(h), o, LEN(o), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0})
 
 enum { C = PURE_OP_CONST, L = PURE_OP_LOAD, DT = PURE_OP_DT, ADD = PURE_OP_ADD,
        MUL = PURE_OP_MUL, DIV = PURE_OP_DIV, GT = PURE_OP_GT, MIN = PURE_OP_MIN,
@@ -176,7 +204,7 @@ static void behaviour(void) {
     static const V no_views[1];
     static const H no_handlers[1];
     static const O no_code[1];
-    CHECK(load((Spec){next_states, 2, no_inputs, 0, no_views, 0, no_handlers, 0, no_code, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, &module_b) == PURE_OK);
+    CHECK(load((Spec){next_states, 2, no_inputs, 0, no_views, 0, no_handlers, 0, no_code, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, &module_b) == PURE_OK);
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
     CHECK(app.module == &module_b && app.values[0] == 7 && app.values[1] == 25);
     CHECK(pure_app_replace(&app, &module_a) == PURE_OK);
@@ -252,28 +280,28 @@ static void rejections(void) {
     for (int i = 0; i < 65; ++i) overflow[i] = (O){C, 0, 1};
     overflow[65] = (O){ST, 0, 0};
     const Rejection cases[] = {
-        {"duplicate name", {dup, 2, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"state name", {bad_name, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"state name", {long_name, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"non-finite initial value", {non_finite, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"input key", {s1, 1, bad_key, 1, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"duplicate key", {s1, 1, dup_key, 2, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"duplicate name", {s1, 1, i1, 0, clash, 1, none, 0, load_a, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"view with an effect", {s1, 1, i1, 0, v_store, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"view with an effect", {s1, 1, i1, 0, v_dt, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"empty view", {s1, 1, i1, 0, v_empty, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"handler event", {s1, 1, i1, 1, clash, 0, h_bad_event, 1, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"branch not forward", {s1, 1, i1, 0, clash, 0, h_two, 1, back, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"branch not forward", {s1, 1, i1, 0, clash, 0, h_two, 1, beyond, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"stack underflow", {s1, 1, i1, 0, clash, 0, h_all, 1, under, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"join with a non-empty stack", {s1, 1, i1, 0, clash, 0, h_five, 1, join, 5, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"handler must leave no value", {s1, 1, i1, 0, clash, 0, h_two, 1, leftover, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"no such state", {s1, 1, i1, 0, clash, 0, h_two, 1, unknown_state, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"non-canonical operand", {s1, 1, i1, 0, clash, 0, h_two, 1, nan_const, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"non-canonical operand", {s1, 1, i1, 0, clash, 0, h0, 1, noncanon, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"unreachable instruction", {s1, 1, i1, 0, clash, 0, h_four, 1, unreachable, 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"unknown opcode", {s1, 1, i1, 0, clash, 0, h_two, 1, bad_op, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"stack overflow", {s1, 1, i1, 0, clash, 0, (H[]){{0, 0, 66}}, 1, overflow, 66, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"duplicate name", {dup, 2, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"state name", {bad_name, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"state name", {long_name, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"non-finite initial value", {non_finite, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"input key", {s1, 1, bad_key, 1, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"duplicate key", {s1, 1, dup_key, 2, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"duplicate name", {s1, 1, i1, 0, clash, 1, none, 0, load_a, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"view with an effect", {s1, 1, i1, 0, v_store, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"view with an effect", {s1, 1, i1, 0, v_dt, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"empty view", {s1, 1, i1, 0, v_empty, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"handler event", {s1, 1, i1, 1, clash, 0, h_bad_event, 1, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"branch not forward", {s1, 1, i1, 0, clash, 0, h_two, 1, back, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"branch not forward", {s1, 1, i1, 0, clash, 0, h_two, 1, beyond, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"stack underflow", {s1, 1, i1, 0, clash, 0, h_all, 1, under, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"join with a non-empty stack", {s1, 1, i1, 0, clash, 0, h_five, 1, join, 5, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"handler must leave no value", {s1, 1, i1, 0, clash, 0, h_two, 1, leftover, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"no such state", {s1, 1, i1, 0, clash, 0, h_two, 1, unknown_state, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"non-canonical operand", {s1, 1, i1, 0, clash, 0, h_two, 1, nan_const, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"non-canonical operand", {s1, 1, i1, 0, clash, 0, h0, 1, noncanon, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"unreachable instruction", {s1, 1, i1, 0, clash, 0, h_four, 1, unreachable, 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"unknown opcode", {s1, 1, i1, 0, clash, 0, h_two, 1, bad_op, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"stack overflow", {s1, 1, i1, 0, clash, 0, (H[]){{0, 0, 66}}, 1, overflow, 66, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
     };
     for (size_t i = 0; i < LEN(cases); ++i) {
         PureResult result = load(cases[i].spec, &module_a);
@@ -285,9 +313,9 @@ static void rejections(void) {
     static S many[33];
     static char many_names[33][8];
     for (unsigned i = 0; i < 33; ++i) { snprintf(many_names[i], 8, "s%u", i % 100u); many[i] = (S){many_names[i], 0}; }
-    CHECK(load((Spec){many, 33, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, &module_a) == PURE_LIMIT);
+    CHECK(load((Spec){many, 33, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, &module_a) == PURE_LIMIT);
     static unsigned char bytes[65536];
-    size_t size = build(bytes, (Spec){s1, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0});
+    size_t size = build(bytes, (Spec){s1, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0});
     CHECK(pure_module_load(bytes, size - 1, &module_a, error, sizeof(error)) == PURE_INVALID);
     CHECK(pure_module_load(bytes, size + 1, &module_a, error, sizeof(error)) == PURE_INVALID);
     bytes[0] = 'X';
@@ -499,7 +527,7 @@ static void messages(void) {
     };
     static const H handlers[] = {{1, 0, 2}, {3, 2, 12}, {5, 14, 6}, {7, 20, 14}};
     static const V views[] = {{"count", 0, 0}};
-    Spec spec = {states, 1, inputs, 5, views, 0, handlers, 4, code, LEN(code), collections, 1, NULL, 0, NULL, 0, NULL, 0};
+    Spec spec = {states, 1, inputs, 5, views, 0, handlers, 4, code, LEN(code), collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     editor_spec = spec;
     PureResult loaded = load(spec, &module_a);
     if (loaded != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
@@ -565,22 +593,22 @@ static void messages(void) {
     static const I unkeyed[] = {{"note", NULL, PURE_KIND_MESSAGE, false, NULL, 0}};
     static const O doc_read[] = {{DOC, 0, 0}, {REPLY, 0, 0}};
     static const H note_handler[] = {{1, 0, 2}};
-    bad = (Spec){states, 1, unkeyed, 1, views, 0, note_handler, 1, doc_read, 2, collections, 1, NULL, 0, NULL, 0, NULL, 0};
+    bad = (Spec){states, 1, unkeyed, 1, views, 0, note_handler, 1, doc_read, 2, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "document operation outside"));
     static const F tail_first[] = {{"insert", 2}, {"start", 1}};
     static const I misplaced[] = {{"edit", NULL, PURE_KIND_MESSAGE, true, tail_first, 2}};
-    bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0};
+    bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "message field"));
     static const H even[] = {{2, 0, 0}};
-    bad = (Spec){states, 1, inputs, 1, views, 0, even, 1, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0};
+    bad = (Spec){states, 1, inputs, 1, views, 0, even, 1, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "handler event"));
     static const V field_view[] = {{"v", 0, 1}};
     static const O field_only[] = {{FIELD, 0, 0}};
-    bad = (Spec){states, 1, inputs, 2, field_view, 1, NULL, 0, field_only, 1, collections, 1, NULL, 0, NULL, 0, NULL, 0};
+    bad = (Spec){states, 1, inputs, 2, field_view, 1, NULL, 0, field_only, 1, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view with an effect"));
     static const O branch_value[] = {{C, 0, 1}, {C, 0, 1}, {JZ, 3, 0}, {ST, 0, 0}};
     static const H frame_handler[] = {{0, 0, 4}};
-    bad = (Spec){states, 1, inputs, 0, views, 0, frame_handler, 1, branch_value, 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
+    bad = (Spec){states, 1, inputs, 0, views, 0, frame_handler, 1, branch_value, 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "branch with a non-empty stack"));
 }
 
@@ -698,7 +726,7 @@ static void texts(void) {
     static const V number_views[] = {{"chars", 37, 2}, {"offset", 39, 2}, {"line_no", 41, 2}};
     static const V text_views[] = {{"line", 43, 2}, {"header", 45, 9}, {"ratio", 54, 4}};
     Spec spec = {nums, 1, inputs, LEN(inputs), number_views, 3, handlers, LEN(handlers), code, LEN(code),
-                 NULL, 0, textual, 3, constants, LEN(constants), text_views, 3};
+                 NULL, 0, textual, 3, constants, LEN(constants), text_views, 3, NULL, 0};
     text_spec = spec;
     if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
     PureApp app;
@@ -733,7 +761,7 @@ static void texts(void) {
     static const S fresh[] = {{"fresh", 7}};
     static const T kept[] = {{"note", 1, 0}, {"at", 2, 1}};
     static const char *const other[] = {"ignored"};
-    Spec next = {fresh, 1, inputs, 0, number_views, 0, handlers, 0, code, 0, NULL, 0, kept, 2, other, 1, text_views, 0};
+    Spec next = {fresh, 1, inputs, 0, number_views, 0, handlers, 0, code, 0, NULL, 0, kept, 2, other, 1, text_views, 0, NULL, 0};
     CHECK(load(next, &module_b) == PURE_OK);
     CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 3);
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
@@ -744,7 +772,7 @@ static void texts(void) {
     static const T two[] = {{"one", 1, 0}, {"two", 1, 0}, {"c", 2, 1}};
     static const O wrong_text[] = {{CUL, 3, 0}, {TK, 0, 0}, {TINS, 2, 0}};
     static const H frame[] = {{0, 0, 3}};
-    Spec bad = {nums, 1, inputs, 0, number_views, 0, frame, 1, wrong_text, 3, NULL, 0, two, 3, constants, 1, text_views, 0};
+    Spec bad = {nums, 1, inputs, 0, number_views, 0, frame, 1, wrong_text, 3, NULL, 0, two, 3, constants, 1, text_views, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "cursor of another text"));
     static const O input_in_frame[] = {{CUL, 3, 0}, {TI, 0, 0}, {TINS, 1, 0}};
     bad.o = input_in_frame;
@@ -758,13 +786,13 @@ static void texts(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "no such state"));
     static const V text_as_number[] = {{"v", 0, 1}};
     static const O constant_only[] = {{TK, 0, 0}};
-    bad = (Spec){nums, 1, inputs, 0, text_as_number, 1, NULL, 0, constant_only, 1, NULL, 0, two, 3, constants, 1, NULL, 0};
+    bad = (Spec){nums, 1, inputs, 0, text_as_number, 1, NULL, 0, constant_only, 1, NULL, 0, two, 3, constants, 1, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view must leave one value of its type"));
     static const T cursor_on_number[] = {{"c", 2, 0}};
-    bad = (Spec){nums, 1, inputs, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, cursor_on_number, 1, constants, 1, NULL, 0};
+    bad = (Spec){nums, 1, inputs, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, cursor_on_number, 1, constants, 1, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "state reference"));
     static const char *const broken[] = {"\xc0\xaf"};
-    bad = (Spec){nums, 1, inputs, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, broken, 1, NULL, 0};
+    bad = (Spec){nums, 1, inputs, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, broken, 1, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "text constant"));
 }
 
@@ -831,6 +859,219 @@ static void text_mutations(void) {
     printf("{\"text_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
 }
 
+static Spec list_spec;
+
+enum { LC = PURE_OP_LIST_COUNT, LA = PURE_OP_LIST_APPEND, LI = PURE_OP_LIST_INSERT, LR = PURE_OP_LIST_REMOVE,
+       IG = PURE_OP_ITEM_GET, IS = PURE_OP_ITEM_SET, XL = PURE_OP_INDEX_LOAD, XS = PURE_OP_INDEX_STORE,
+       XM = PURE_OP_INDEX_MOVE, XF = PURE_OP_INDEX_FIRST, XE = PURE_OP_INDEX_LAST, XN = PURE_OP_INDEX_NUM,
+       NOT = PURE_OP_NOT, TITLE = 1, DONE = 1 | 1u << 16 };
+
+static const char *item_title(const PureApp *app, uint32_t list, size_t at) {
+    static char title[64];
+    PureCell cell = pure_list_get(app->lists[list], at, 0);
+    CHECK(cell.size < sizeof(title));
+    if (cell.size) memcpy(title, cell.text, cell.size);
+    title[cell.size] = 0;
+    return title;
+}
+
+/* A task list: made (num), tasks (list of task {title, done}), at (index of
+ * tasks). Indices follow their item across inserts and removes; a failed
+ * event undoes every list change. */
+static void lists(void) {
+    static const S nums[] = {{"made", 0}};
+    static const T states[] = {{"tasks", 3, 0}, {"at", 4, 1}};
+    static const RF task_fields[] = {{"title", 1, 0}, {"done", 0, 0}};
+    static const R records[] = {{"task", task_fields, 2}};
+    static const char *const constants[] = {"", "new", "x"};
+    static const I inputs[] = {
+        {"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("ins", "KeyI"), KEY("del", "Delete"),
+        KEY("up", "ArrowUp"), KEY("down", "ArrowDown"), KEY("toggle", "Space"), KEY("rename", "KeyR"), KEY("bad", "KeyB"),
+    };
+    static const O code[] = {
+        {TI, 0, 0}, {C, 0, 0}, {LA, 1, 0}, {XE, 1, 0}, {XS, 2, 0}, {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, /* 0 typed */
+        {XL, 2, 0}, {TK, 1, 0}, {C, 0, 0}, {LI, 1, 0},                                           /* 9 ins */
+        {XL, 2, 0}, {LR, 1, 0},                                                                  /* 13 del */
+        {XL, 2, 0}, {C, 0, -1}, {XM, 0, 0}, {XS, 2, 0},                                          /* 15 up */
+        {XL, 2, 0}, {C, 0, 1}, {XM, 0, 0}, {XS, 2, 0},                                           /* 19 down */
+        {XL, 2, 0}, {XL, 2, 0}, {IG, DONE, 0}, {NOT, 0, 0}, {IS, DONE, 0},                         /* 23 toggle */
+        {XL, 2, 0}, {XL, 2, 0}, {IG, TITLE, 0}, {TK, 2, 0}, {CAT, 0, 0}, {IS, TITLE, 0},           /* 28 rename */
+        {XL, 2, 0}, {TK, 2, 0}, {IS, TITLE, 0}, {XL, 2, 0}, {LR, 1, 0}, {TK, 1, 0}, {C, 0, 0},     /* 34 bad */
+        {LA, 1, 0}, {C, 0, 1}, {C, 0, 0}, {DIV, 0, 0}, {ST, 0, 0},
+        {LC, 1, 0},                                                                              /* 46 view count */
+        {XL, 2, 0}, {XN, 0, 0},                                                                  /* 47 view position */
+        {XL, 2, 0}, {IG, DONE, 0},                                                               /* 49 view done */
+        {XL, 2, 0}, {IG, TITLE, 0},                                                              /* 51 view current */
+    };
+    static const H handlers[] = {{1, 0, 9}, {3, 9, 4}, {5, 13, 2}, {7, 15, 4}, {9, 19, 4}, {11, 23, 5},
+                                 {13, 28, 6}, {15, 34, 12}};
+    static const V number_views[] = {{"count", 46, 1}, {"position", 47, 2}, {"done", 49, 2}};
+    static const V text_views[] = {{"current", 51, 2}};
+    Spec spec = {nums, 1, inputs, LEN(inputs), number_views, 3, handlers, LEN(handlers), code, LEN(code),
+                 NULL, 0, states, 2, constants, 3, text_views, 1, records, 1};
+    list_spec = spec;
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    double value;
+    CHECK(number_view(&app, 0) == 0 && number_view(&app, 1) == 0 && !pure_app_view(&app, 2, &value));
+    CHECK(pure_app_view_text(&app, 3, text_span, &(Text){{0}, 0}) == PURE_NOT_FOUND);  /* no item yet */
+    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
+    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"b", 1}) == PURE_OK);
+    CHECK(pure_list_count(app.lists[1]) == 2 && app.values[2] == 1 && app.values[0] == 2);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);   /* stops at the first */
+    /* Inserting before the current item: the index follows it. */
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 1);
+    CHECK(!strcmp(item_title(&app, 1, 0), "new") && !strcmp(view_text(&app, 3), "a"));
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && number_view(&app, 2) == 1);
+    CHECK(pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK && !strcmp(view_text(&app, 3), "ax"));
+    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 2);
+    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 2);   /* stops at the last */
+    /* Removing the last item: the index moves to the new last. */
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 1 && pure_list_count(app.lists[1]) == 2);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);
+    /* Removing the current item: the index names the next. */
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0 && !strcmp(view_text(&app, 3), "ax"));
+    /* A failing event undoes a set, a remove and an append. */
+    CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
+    CHECK(pure_list_count(app.lists[1]) == 1 && !strcmp(item_title(&app, 1, 0), "ax") &&
+          pure_list_get(app.lists[1], 0, 1).num == 1 && app.values[2] == 0 && app.values[0] == 2);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 0 && app.values[2] == 0);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_NOT_FOUND && app.fault == PURE_FAULT_NOT_FOUND);
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_NOT_FOUND);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 1 && app.values[2] == 0);
+    for (int i = 0; i < 3; ++i) CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xea\xb0\x80", 3}) == PURE_OK);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 2);
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK);
+
+    /* Replacement keeps the list by name. The same record keeps the list
+     * itself; a changed record keeps each field by name and kind and gives new
+     * fields their default. */
+    static const S no_nums[] = {{"made", 0}};
+    Spec same = {no_nums, 1, inputs, 0, number_views, 0, handlers, 0, code, 0, NULL, 0, states, 2, constants, 3,
+                 text_views, 0, records, 1};
+    CHECK(load(same, &module_b) == PURE_OK);
+    const PureList *before = app.lists[1];
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.lists[1] == before && app.values[2] == 2);
+    static const RF changed_fields[] = {{"done", 0, 0}, {"note", 1, 1}, {"title", 0, 7}, {"rank", 0, 5}};
+    static const R changed[] = {{"task", changed_fields, 4}};
+    Spec next = same;
+    next.r = changed;
+    CHECK(load(next, &module_a) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && pure_list_count(app.lists[1]) == 4 && app.values[2] == 2);
+    PureCell cell = pure_list_get(app.lists[1], 2, 0);
+    CHECK(cell.num == 1);                                           /* done kept by name */
+    cell = pure_list_get(app.lists[1], 2, 1);
+    CHECK(cell.size == 3 && !memcmp(cell.text, "new", 3));          /* note: its default */
+    CHECK(pure_list_get(app.lists[1], 2, 2).num == 7);              /* title is now a number: default */
+    CHECK(pure_list_get(app.lists[1], 0, 3).num == 5);
+    /* A state whose kind changed starts again. */
+    static const T swapped_kinds[] = {{"tasks", 1, 0}, {"at", 3, 0}};
+    next.t = swapped_kinds;
+    CHECK(load(next, &module_b) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && !app.lists[1] && pure_draft_size(app.texts[1]) == 0 &&
+          pure_list_count(app.lists[2]) == 0);
+    pure_app_stop(&app);
+
+    /* Verification of list operations. */
+    static const T two_lists[] = {{"a", 3, 0}, {"b", 3, 0}, {"ia", 4, 1}};
+    static const O other_index[] = {{XL, 3, 0}, {LR, 2, 0}};
+    static const H frame[] = {{0, 0, 2}};
+    Spec bad = {nums, 1, inputs, 0, number_views, 0, frame, 1, other_index, 2, NULL, 0, two_lists, 3, constants, 3,
+                text_views, 0, records, 1};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "index of another list"));
+    static const O swapped[] = {{C, 0, 0}, {TK, 0, 0}, {LA, 1, 0}};
+    static const H frame3[] = {{0, 0, 3}};
+    bad.o = swapped; bad.no = 3; bad.h = frame3;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
+    static const O short_record[] = {{TK, 0, 0}, {LA, 1, 0}};
+    bad.o = short_record; bad.no = 2; bad.h = frame;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "stack underflow"));
+    static const O no_field[] = {{XL, 3, 0}, {IG, 1 | 2u << 16, 0}, {ST, 0, 0}};
+    bad.o = no_field; bad.no = 3; bad.h = frame3;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "no such state"));
+    static const O index_as_number[] = {{XL, 3, 0}, {ST, 0, 0}};
+    bad.o = index_as_number; bad.no = 2; bad.h = frame;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
+    static const V append_view[] = {{"v", 0, 3}};
+    bad = (Spec){nums, 1, inputs, 0, append_view, 1, NULL, 0, (O[]){{TK, 0, 0}, {C, 0, 0}, {LA, 1, 0}}, 3, NULL, 0,
+                 two_lists, 3, constants, 3, NULL, 0, records, 1};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view with an effect"));
+    static const T index_of_number[] = {{"ia", 4, 0}};
+    bad = (Spec){nums, 1, inputs, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, index_of_number, 1, constants, 3, NULL, 0,
+                 records, 1};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "state reference"));
+    static const T list_of_nothing[] = {{"a", 3, 1}};
+    bad.t = list_of_nothing;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "state reference"));
+    bad.t = NULL; bad.nt = 0;
+    static const RF repeated[] = {{"x", 0, 0}, {"x", 1, 0}};
+    bad.r = (R[]){{"task", repeated, 2}};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "duplicate record field"));
+    static const RF far_default[] = {{"x", 1, 3}};
+    bad.r = (R[]){{"task", far_default, 1}};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "record field default"));
+    static const RF infinite[] = {{"x", 0, INFINITY}};
+    bad.r = (R[]){{"task", infinite, 1}};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "record field default"));
+    bad.r = (R[]){{"task", NULL, 0}};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "record"));
+    bad.r = (R[]){{"made", task_fields, 2}};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "duplicate name"));
+}
+
+/* Damaged list modules either fail to load or keep every index on an item
+ * of its list and every text field valid UTF-8. */
+static void list_mutations(void) {
+    static unsigned char valid[65536], bytes[65536];
+    size_t size = build(valid, list_spec);
+    static const char *const words[] = {"a", "\xea\xb0\x80", "\n", ""};
+    uint32_t state = 0x85ebca6bu;
+    unsigned accepted = 0;
+    for (unsigned round = 0; round < 20000; ++round) {
+        memcpy(bytes, valid, size);
+        unsigned flips = 1 + next_random(&state) % 3;
+        for (unsigned f = 0; f < flips; ++f)
+            bytes[next_random(&state) % size] ^= (unsigned char)(1u << (next_random(&state) % 8));
+        if (pure_module_load(bytes, size, &module_b, error, sizeof(error)) != PURE_OK) continue;
+        ++accepted;
+        PureApp app;
+        if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
+        for (unsigned e = 0; e < 24; ++e) {
+            uint32_t input = next_random(&state) % 8;
+            if (module_b.input[input].kind == PURE_KIND_TEXT) {
+                const char *word = words[next_random(&state) % LEN(words)];
+                pure_app_text(&app, input, (PureSpan){(const unsigned char *)word, strlen(word)});
+            } else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
+            else pure_app_frame(&app);
+            for (uint32_t v = 0; v < module_b.views; ++v) {
+                double value;
+                if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_view_text(&app, v, ignore_span, NULL);
+                else pure_app_view(&app, v, &value);
+            }
+            for (uint32_t s = 0; s < module_b.states; ++s) {
+                if (module_b.state_type[s] == PURE_STATE_INDEX) {
+                    size_t count = pure_list_count(app.lists[module_b.state_ref[s]]);
+                    CHECK(app.values[s] == floor(app.values[s]) && app.values[s] >= 0 &&
+                          app.values[s] <= (count ? (double)(count - 1) : 0));
+                } else if (module_b.state_type[s] == PURE_STATE_LIST) {
+                    const PureRecord *record = &module_b.record[module_b.state_ref[s]];
+                    for (size_t at = 0; at < pure_list_count(app.lists[s]); ++at)
+                        for (unsigned f = 0; f < record->count; ++f) {
+                            PureCell cell = pure_list_get(app.lists[s], at, f);
+                            if (module_b.record_field_text[record->first + f])
+                                CHECK(pure_utf8_valid((PureSpan){cell.text, cell.size}));
+                            else CHECK(isfinite(cell.num));
+                        }
+                } else if (module_b.state_type[s] == PURE_STATE_NUM) CHECK(isfinite(app.values[s]));
+            }
+        }
+        pure_app_stop(&app);
+    }
+    printf("{\"list_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
+}
+
 int main(void) {
     behaviour();
     faults();
@@ -840,7 +1081,9 @@ int main(void) {
     message_mutations();
     texts();
     text_mutations();
+    lists();
+    list_mutations();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration\"}");
     return 0;
 }

@@ -2,21 +2,24 @@
 #define PURE_MODULE_H
 #include "flow.h"
 #include "result.h"
+#include "module-list.h"
 #include "state.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-/* Pure module format v3 (docs/design/008-module-format.md). A toolchain such
+/* Pure module format v4 (docs/design/008-module-format.md). A toolchain such
  * as aup produces it; Pure verifies it completely before anything executes:
- * operand types (including which text a cursor belongs to), stack heights,
- * forward-only branches, names, constants and effects. */
+ * operand types (including which text a cursor and which list an index
+ * belongs to), stack heights, forward-only branches, names, records,
+ * constants and effects. */
 enum {
     PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 24,
     PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 512, PURE_MODULE_STACK = 64,
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 40,
     PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 64,
-    PURE_MODULE_CONSTANT_BYTES = 8192
+    PURE_MODULE_CONSTANT_BYTES = 8192, PURE_MODULE_RECORDS = 8, PURE_MODULE_RECORD_FIELDS = 64,
+    PURE_RECORD_FIELDS = 16
 };
 
 typedef enum {
@@ -31,12 +34,17 @@ typedef enum {
     PURE_OP_CUR_LOAD, PURE_OP_CUR_START, PURE_OP_CUR_END, PURE_OP_CUR_MOVE,
     PURE_OP_CUR_STORE, PURE_OP_TEXT_INSERT, PURE_OP_TEXT_REMOVE, PURE_OP_TEXT_LINE,
     PURE_OP_TEXT_SET, PURE_OP_TEXT_FROM, PURE_OP_BYTES_FROM, PURE_OP_CUR_COUNT,
+    PURE_OP_LIST_COUNT, PURE_OP_LIST_APPEND, PURE_OP_LIST_INSERT, PURE_OP_LIST_REMOVE,
+    PURE_OP_ITEM_GET, PURE_OP_ITEM_SET, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE,
+    PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM,
     PURE_OP_COUNT
 } PureOpcode;
 
 typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3 } PureInputKind;
 typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2 } PureFieldType;
-typedef enum { PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2 } PureStateType;
+typedef enum {
+    PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4
+} PureStateType;
 typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1 } PureViewType;
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
@@ -56,8 +64,11 @@ typedef struct {
     uint32_t prefix; /* fixed payload bytes before an optional bytes tail */
 } PureInputShape;
 
+/* A record type: fields numbered from first, each a number or text. */
+typedef struct { uint16_t first, count; } PureRecord;
+
 typedef struct {
-    uint16_t states, inputs, views, handlers, fields, collections, constants;
+    uint16_t states, inputs, views, handlers, fields, collections, constants, records, record_fields;
     uint32_t code_count;
     char state_names[PURE_MODULE_STATES][PURE_MODULE_NAME];
     char input_names[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
@@ -65,7 +76,7 @@ typedef struct {
     char collection_names[PURE_MODULE_COLLECTIONS][PURE_MODULE_NAME];
     char input_keys[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
     uint8_t state_type[PURE_MODULE_STATES];
-    uint16_t state_ref[PURE_MODULE_STATES]; /* text: initial constant; cursor: its text */
+    uint16_t state_ref[PURE_MODULE_STATES]; /* text: constant; cursor: text; list: record; index: list */
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
     double initial[PURE_MODULE_STATES];
@@ -74,6 +85,11 @@ typedef struct {
     PureHandler handler[PURE_MODULE_HANDLERS];
     PureOp code[PURE_MODULE_CODE];
     uint32_t constant_offset[PURE_MODULE_CONSTANTS], constant_length[PURE_MODULE_CONSTANTS];
+    char record_names[PURE_MODULE_RECORDS][PURE_MODULE_NAME];
+    PureRecord record[PURE_MODULE_RECORDS];
+    char record_field_names[PURE_MODULE_RECORD_FIELDS][PURE_MODULE_NAME];
+    uint8_t record_field_text[PURE_MODULE_RECORD_FIELDS];
+    double record_field_default[PURE_MODULE_RECORD_FIELDS]; /* number, or text constant index */
     unsigned char constant_data[PURE_MODULE_CONSTANT_BYTES];
 } PureModule;
 
@@ -108,12 +124,15 @@ typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
 
 /* One app instance: its states and at most one open event. Text states are
  * runtime-owned drafts; cursors are positions the runtime keeps on character
- * boundaries. Every event is atomic: on failure nothing changes. */
+ * boundaries; lists are runtime-owned and an index always names an item
+ * (or 0 in an empty list). Every event is atomic: on failure nothing changes. */
 typedef struct {
     const PureModule *module;
     PureData data;
-    double values[PURE_MODULE_STATES]; /* numbers, and cursor byte positions */
+    double values[PURE_MODULE_STATES]; /* numbers, cursor byte positions and list indices */
     PureDraft *texts[PURE_MODULE_STATES];
+    PureList *lists[PURE_MODULE_STATES];
+    PureUndo undo; /* list changes of the current event */
     PureFault fault;
     uint32_t fault_pc;
     uint64_t ticks, events;

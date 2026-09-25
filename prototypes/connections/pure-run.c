@@ -7,7 +7,8 @@
 /* Test host for a verified module: reads commands from stdin and prints one
  * JSON snapshot per command. Not a product interface.
  *   down NAME | up NAME | frame [N] | type NAME HEX|- | replace PATH | show
- * Text states and text views print as JSON strings; cursors as byte positions. */
+ * Text states and text views print as JSON strings; cursors as byte positions;
+ * lists as arrays of objects; indices as positions. A failed view is null. */
 static const char *const fault_names[] = {"none", "divide", "non_finite", "clamp", "limit", "not_found", "encoding"};
 
 static bool load(const char *path, PureModule *module) {
@@ -36,6 +37,36 @@ static bool json_span(void *context, PureSpan span) {
     return true;
 }
 
+/* A text view is collected first: it may fail after some bytes. */
+typedef struct { unsigned char bytes[1 << 16]; size_t used; bool fits; } Collected;
+
+static bool collect(void *context, PureSpan span) {
+    Collected *c = context;
+    c->fits = c->fits && span.size <= sizeof(c->bytes) - c->used;
+    if (c->fits && span.size) memcpy(c->bytes + c->used, span.data, span.size);
+    if (c->fits) c->used += span.size;
+    return true;
+}
+
+static void show_list(const PureModule *m, const PureList *list, const PureRecord *record) {
+    putchar('[');
+    for (size_t at = 0; at < pure_list_count(list); ++at) {
+        printf("%s{", at ? "," : "");
+        for (unsigned f = 0; f < record->count; ++f) {
+            PureCell cell = pure_list_get(list, at, f);
+            printf("%s\"%s\":", f ? "," : "", m->record_field_names[record->first + f]);
+            if (!m->record_field_text[record->first + f]) printf("%.17g", cell.num);
+            else {
+                putchar('"');
+                json_span(NULL, (PureSpan){cell.text, cell.size});
+                putchar('"');
+            }
+        }
+        putchar('}');
+    }
+    putchar(']');
+}
+
 static void show(PureApp *app, const char *failure) {
     const PureModule *m = app->module;
     printf("{\"states\":{");
@@ -45,16 +76,23 @@ static void show(PureApp *app, const char *failure) {
             putchar('"');
             pure_draft_read(app->texts[i], 0, pure_draft_size(app->texts[i]), json_span, NULL);
             putchar('"');
-        } else printf("%.17g", app->values[i]);
+        } else if (m->state_type[i] == PURE_STATE_LIST) show_list(m, app->lists[i], &m->record[m->state_ref[i]]);
+        else printf("%.17g", app->values[i]);
     }
     printf("},\"views\":{");
     for (uint32_t i = 0; i < m->views; ++i) {
         printf("%s\"%s\":", i ? "," : "", m->view_names[i]);
         double value;
+        static Collected text;
+        text.used = 0;
+        text.fits = true;
         if (m->view_type[i] == PURE_VIEW_TEXT) {
-            putchar('"');
-            if (pure_app_view_text(app, i, json_span, NULL) != PURE_OK) printf("\\u0000failed");
-            putchar('"');
+            if (pure_app_view_text(app, i, collect, &text) != PURE_OK || !text.fits) printf("null");
+            else {
+                putchar('"');
+                json_span(NULL, (PureSpan){text.bytes, text.used});
+                putchar('"');
+            }
         } else if (pure_app_view(app, i, &value)) printf("%.17g", value);
         else printf("null");
     }

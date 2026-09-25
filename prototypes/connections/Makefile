@@ -115,10 +115,10 @@ $(BUILD)/test-async: test-async.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUILD
 $(BUILD)/test-splice: test-splice.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_STORE_TEST test-splice.c program.c $(CORE) $(HOST) $(LDFLAGS) $(LDLIBS) -o $@
 
-# Pure module format v1: loader/verifier/executor, its tests and a test host.
+# Pure modules: loader/verifier/executor, its tests and a test host.
 # Text states are runtime-owned drafts, so the executor links the tree engine.
-MODULE = module.c module-text.c store-tree.c
-MODULE_HEADERS = module.h module-text.h $(HEADERS)
+MODULE = module.c module-list.c module-text.c store-tree.c
+MODULE_HEADERS = module.h module-list.h module-text.h $(HEADERS)
 
 $(BUILD)/test-module: test-module.c $(MODULE) $(MODULE_HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) test-module.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
