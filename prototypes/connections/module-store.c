@@ -42,17 +42,19 @@ static PureResult state(void *context, const char *name, PureDraft **out) {
     return pure_state_open(context, name, out);
 }
 
-/* The document and the app's changed states in one tree commit. */
-static PureResult save(void *context, void *document, PureDraft *const *states, size_t count, int64_t *revision) {
+enum { SAVED = PURE_APP_PENDING + 2 * PURE_MODULE_STATES + 1 };
+
+/* The documents and the app's changed states in one tree commit. */
+static PureResult save(void *context, void *const *documents, size_t document_count, PureDraft *const *states,
+                       size_t count, int64_t *revisions) {
     (void)context;
-    PureDraft *drafts[2 * PURE_MODULE_STATES + 2] = {0};
-    int64_t revisions[2 * PURE_MODULE_STATES + 2] = {0};
-    size_t n = 0;
-    if (count > 2 * PURE_MODULE_STATES + 1) return PURE_LIMIT;
-    if (document) drafts[n++] = document;
-    for (size_t i = 0; i < count; ++i) drafts[n++] = states[i];
-    PureResult result = pure_draft_commit_all(drafts, n, revisions);
-    if (document) *revision = revisions[0];
+    PureDraft *drafts[SAVED] = {0};
+    int64_t all[SAVED] = {0};
+    if (document_count > PURE_APP_PENDING || count > SAVED - document_count) return PURE_LIMIT;
+    for (size_t i = 0; i < document_count; ++i) drafts[i] = documents[i];
+    for (size_t i = 0; i < count; ++i) drafts[document_count + i] = states[i];
+    PureResult result = pure_draft_commit_all(drafts, document_count + count, all);
+    for (size_t i = 0; i < document_count; ++i) revisions[i] = all[i];
     return result;
 }
 

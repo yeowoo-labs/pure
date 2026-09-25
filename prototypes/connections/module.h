@@ -19,7 +19,7 @@ enum {
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 40,
     PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 64,
     PURE_MODULE_CONSTANT_BYTES = 8192, PURE_MODULE_RECORDS = 8, PURE_MODULE_RECORD_FIELDS = 64,
-    PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8
+    PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8, PURE_APP_PENDING = 16
 };
 
 typedef enum {
@@ -123,10 +123,11 @@ typedef struct {
     void (*close)(void *context, void *document);
     /* Optional: the host keeps the app's states. state opens a runtime-owned
      * value by name as a draft (a missing one is empty at revision 0); save
-     * publishes the given state drafts together with document (or NULL),
-     * all or nothing, and names the document's new revision. */
+     * publishes the given documents and state drafts together, all or
+     * nothing, and names each document's new revision. */
     PureResult (*state)(void *context, const char *name, PureDraft **out);
-    PureResult (*save)(void *context, void *document, PureDraft *const *states, size_t count, int64_t *revision);
+    PureResult (*save)(void *context, void *const *documents, size_t document_count, PureDraft *const *states,
+                       size_t count, int64_t *revisions);
 } PureData;
 
 /* A byte or text value inside one event or view: a range of the payload, a
@@ -138,10 +139,15 @@ typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
  * runtime-owned drafts; cursors are positions the runtime keeps on character
  * boundaries; lists are runtime-owned and an index always names an item
  * (or 0 in an empty list). Every event is atomic: on failure nothing changes.
- * When the data host keeps states, the app starts from the stored ones and
- * every key, text and message event stores what it changed with its own
- * commit (with the message's document); frame events are stored with the
- * next one, or by pure_app_save. */
+ *
+ * Saving. When the data host keeps states the app starts from the stored
+ * ones. A save publishes, in one commit, the documents edited by messages and
+ * the states changed since the last save; if it fails, every event since the
+ * last save is undone. By default each key, text and message event saves
+ * before it returns (a frame waits for the next one). Deferred, events apply
+ * at once and a host saves a burst with one commit: an event is durable once
+ * a later save succeeds, and each key's document joins a burst once (a second
+ * message for it saves the burst first). */
 typedef struct {
     const PureModule *module;
     PureData data;
@@ -152,6 +158,14 @@ typedef struct {
     PureDraft *list_drafts[PURE_MODULE_STATES]; /* stored lists, when kept */
     PureDraft *stored_values;                   /* numbers, cursors and indices, when kept */
     PureVersion saved[PURE_MODULE_STATES];      /* text and list versions at the last save */
+    /* Events since the last save: what a failed save returns to, and the
+     * documents messages opened (held until the save). */
+    bool deferred, open;
+    double durable_values[PURE_MODULE_STATES];
+    PureVersion durable_texts[PURE_MODULE_STATES], durable_lists[PURE_MODULE_STATES];
+    uint64_t durable_ticks, durable_events;
+    struct { void *document; char key[65]; bool edited; } pending[PURE_APP_PENDING];
+    unsigned pending_count;
     PureFault fault;
     uint32_t fault_pc;
     uint64_t ticks, events;
@@ -166,8 +180,11 @@ typedef struct {
 } PureApp;
 
 PureResult pure_app_start(PureApp *, const PureModule *, PureData data);
-/* Store every state changed since the last save (after frame events). */
+/* Publish every change since the last save in one commit, or undo them all. */
 PureResult pure_app_save(PureApp *);
+/* Defer saving to pure_app_save (false: save after each event). Needs a data
+ * host that saves documents together (PureData.save). */
+bool pure_app_defer(PureApp *, bool deferred);
 /* Leaves unsaved frame changes unsaved: call pure_app_save first to keep them. */
 void pure_app_stop(PureApp *);
 PureResult pure_app_frame(PureApp *);
@@ -176,9 +193,11 @@ PureResult pure_app_input(PureApp *, uint32_t input, PureEdge);
 PureResult pure_app_text(PureApp *, uint32_t input, PureSpan text);
 /* Deliver a message. base is the revision the sender edited, or -1 for none;
  * a handler that edits the document needs one. payload stays alive until
- * pure_app_finish. On return app->revision is the document's revision. */
+ * pure_app_finish. On return app->revision is the document's revision
+ * (deferred: the revision the next save gives it). */
 PureResult pure_app_message(PureApp *, uint32_t input, const char *key, int64_t base, PureSpan payload);
-/* Visit the reply of the last message in order, without copying. */
+/* Visit the reply of the last message in order, without copying, until the
+ * next event (deferred: copy it before a later save too). */
 PureResult pure_app_reply(const PureApp *, bool (*visit)(void *, PureSpan), void *context);
 void pure_app_finish(PureApp *);
 /* A number view; false for a text view or a failed evaluation. */

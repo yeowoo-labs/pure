@@ -8,7 +8,8 @@
 /* Test host for a verified module: reads commands from stdin and prints one
  * JSON snapshot per command. Not a product interface. With --store the app's
  * states live in that tree store: it starts from them, and frame changes are
- * saved at the end of input or by save.
+ * saved at the end of input or by save. --batch N defers saving and saves
+ * every N commands (and at the end), so N events share one commit.
  *   down NAME | up NAME | frame [N] | type NAME HEX|- | replace PATH | save | show
  * Text states and text views print as JSON strings; cursors as byte positions;
  * lists as arrays of objects; indices as positions; a table view as an array
@@ -134,9 +135,11 @@ static int hex(char c) {
 
 int main(int argc, char **argv) {
     static PureModule modules[2];
-    bool stored = argc == 4 && !strcmp(argv[2], "--store");
-    if ((argc != 2 && !stored) || !load(argv[1], &modules[0])) {
-        if (argc != 2 && !stored) fputs("pure-run MODULE [--store PATH] < commands\n", stderr);
+    bool stored = argc >= 4 && !strcmp(argv[2], "--store");
+    long batch = argc == 6 && stored && !strcmp(argv[4], "--batch") ? strtol(argv[5], NULL, 10) : 0;
+    bool usage = argc != 2 && !(stored && argc == 4) && !(batch > 0 && batch <= 100000);
+    if (usage || !load(argv[1], &modules[0])) {
+        if (usage) fputs("pure-run MODULE [--store PATH [--batch N]] < commands\n", stderr);
         return 2;
     }
     if (stored && pure_store_init(argv[3]) != PURE_OK) { fprintf(stderr, "cannot open store %s\n", argv[3]); return 2; }
@@ -144,6 +147,8 @@ int main(int argc, char **argv) {
     PureApp app;
     PureResult started = pure_app_start(&app, &modules[active], stored ? pure_tree_data(argv[3]) : (PureData){0});
     if (started != PURE_OK) { fprintf(stderr, "cannot start (%d)\n", (int)started); return 2; }
+    if (batch && !pure_app_defer(&app, true)) { fputs("cannot defer saving\n", stderr); return 2; }
+    long unsaved = 0;
     static char line[1 << 16];
     static unsigned char text[1 << 15];
     int status = 0;
@@ -176,6 +181,10 @@ int main(int argc, char **argv) {
         } else if (!strcmp(command, "save")) {
             if (pure_app_save(&app) != PURE_OK) failure = "save failed";
         } else if (strcmp(command, "show")) failure = "unknown command";
+        if (batch && strcmp(command, "show") && ++unsaved == batch) {
+            unsaved = 0;
+            if (pure_app_save(&app) != PURE_OK) failure = "save failed";
+        }
         if (failure) status = 1;
         show(&app, failure);
     }

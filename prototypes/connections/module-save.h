@@ -19,9 +19,10 @@ PureResult pure_save_open_list(PureApp *, const PureModule *m, uint32_t state, P
 PureResult pure_save_open_values(PureApp *, const PureModule *m, double *values, bool load);
 /* Store a list whose record changed in its draft, header and items anew. */
 PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, PureList *list, PureDraft *draft);
-/* Publish every state changed since the last save (values are the pending
- * numbers), with document when not NULL; revision is the document's. */
-PureResult pure_save_commit(PureApp *, const double *values, void *document, int64_t *revision);
+/* Publish the documents and every state changed since the last save
+ * (values are the states' numbers); revisions are the documents'. */
+PureResult pure_save_commit(PureApp *, const double *values, void *const *documents, size_t document_count,
+                            int64_t *revisions);
 
 /* A list with record's fields, taking from `from` each field of the same name
  * and kind and giving the others their defaults (module.c). */

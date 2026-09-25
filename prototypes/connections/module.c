@@ -1075,13 +1075,14 @@ PureResult pure_app_start(PureApp *app, const PureModule *module, PureData data)
     return result;
 }
 
-PureResult pure_app_save(PureApp *app) {
-    int64_t revision;
-    return pure_save_commit(app, app->values, NULL, &revision);
+static bool pending(const PureApp *app, const void *document) {
+    for (unsigned i = 0; i < app->pending_count; ++i) if (app->pending[i].document == document) return true;
+    return false;
 }
 
 void pure_app_finish(PureApp *app) {
-    if (app->document) app->data.close(app->data.context, app->document);
+    /* A document in the unsaved burst stays open until the save. */
+    if (app->document && !pending(app, app->document)) app->data.close(app->data.context, app->document);
     free(app->copied);
     app->document = NULL;
     app->copied = NULL;
@@ -1090,8 +1091,75 @@ void pure_app_finish(PureApp *app) {
     app->arena.used = 0;
 }
 
+/* The start of a burst: what a failed save returns to. Text and stored list
+ * drafts stay held until the save, so every version since stays readable. */
+static void open_burst(PureApp *app) {
+    if (app->open) return;
+    const PureModule *m = app->module;
+    memcpy(app->durable_values, app->values, sizeof(app->values));
+    app->durable_ticks = app->ticks;
+    app->durable_events = app->events;
+    for (uint32_t i = 0; i < m->states; ++i) {
+        if (app->texts[i]) {
+            pure_draft_hold(app->texts[i], true);
+            app->durable_texts[i] = pure_draft_version(app->texts[i]);
+        }
+        if (app->list_drafts[i]) {
+            pure_draft_hold(app->list_drafts[i], true);
+            app->durable_lists[i] = pure_draft_version(app->list_drafts[i]);
+        }
+    }
+    app->open = true;
+}
+
+/* End a burst, keeping it (saved) or undoing all of it. The documents it held
+ * close, except the current event's, which pure_app_finish closes. */
+static void close_burst(PureApp *app, bool keep) {
+    for (unsigned i = 0; i < app->pending_count; ++i)
+        if (app->pending[i].document != app->document) app->data.close(app->data.context, app->pending[i].document);
+    app->pending_count = 0;
+    if (!app->open) return;
+    const PureModule *m = app->module;
+    for (uint32_t i = 0; i < m->states; ++i) {
+        if (app->texts[i]) {
+            if (!keep) pure_draft_restore(app->texts[i], app->durable_texts[i]);
+            pure_draft_hold(app->texts[i], false);
+        }
+        if (app->list_drafts[i]) {
+            if (!keep) pure_draft_restore(app->list_drafts[i], app->durable_lists[i]);
+            pure_draft_hold(app->list_drafts[i], false);
+        }
+    }
+    if (keep) pure_undo_commit(&app->undo);
+    else {
+        pure_undo_rollback(&app->undo, 0);
+        memcpy(app->values, app->durable_values, sizeof(app->values));
+        app->ticks = app->durable_ticks;
+        app->events = app->durable_events;
+    }
+    app->open = false;
+}
+
+PureResult pure_app_save(PureApp *app) {
+    void *documents[PURE_APP_PENDING];
+    int64_t revisions[PURE_APP_PENDING];
+    size_t count = 0;
+    for (unsigned i = 0; i < app->pending_count; ++i)
+        if (app->pending[i].edited) documents[count++] = app->pending[i].document;
+    PureResult result = pure_save_commit(app, app->values, documents, count, revisions);
+    close_burst(app, result == PURE_OK);
+    return result;
+}
+
+bool pure_app_defer(PureApp *app, bool deferred) {
+    if (deferred && !pure_save_enabled(app)) return false;
+    app->deferred = deferred;
+    return true;
+}
+
 void pure_app_stop(PureApp *app) {
     pure_app_finish(app);
+    close_burst(app, true); /* unsaved changes are dropped with the app */
     for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
         pure_draft_close(app->texts[i]);
         pure_list_free(app->lists[i]);
@@ -1104,38 +1172,26 @@ void pure_app_stop(PureApp *app) {
     memset(app, 0, sizeof(*app));
 }
 
-/* Every text draft and stored list draft is held for the event; on failure
- * each returns to the version it had when the event began. */
-typedef struct { PureVersion before[PURE_MODULE_STATES], lists[PURE_MODULE_STATES]; } Texts;
+/* Where one event began inside the burst: a failed event returns there. */
+typedef struct { PureVersion texts[PURE_MODULE_STATES], lists[PURE_MODULE_STATES]; size_t undo; bool opened; } Mark;
 
-static void hold_texts(PureApp *app, Texts *texts) {
+static void mark_event(PureApp *app, Mark *mark) {
+    mark->opened = !app->open;
+    open_burst(app);
     for (uint32_t i = 0; i < app->module->states; ++i) {
-        if (app->texts[i]) {
-            pure_draft_hold(app->texts[i], true);
-            texts->before[i] = pure_draft_version(app->texts[i]);
-        }
-        if (app->list_drafts[i]) {
-            pure_draft_hold(app->list_drafts[i], true);
-            texts->lists[i] = pure_draft_version(app->list_drafts[i]);
-        }
+        if (app->texts[i]) mark->texts[i] = pure_draft_version(app->texts[i]);
+        if (app->list_drafts[i]) mark->lists[i] = pure_draft_version(app->list_drafts[i]);
     }
+    mark->undo = app->undo.count;
 }
 
-/* Texts and stored lists return to their versions and lists undo their log,
- * or all keep what the event did. */
-static void settle(PureApp *app, const Texts *texts, bool keep) {
+static void undo_event(PureApp *app, const Mark *mark) {
     for (uint32_t i = 0; i < app->module->states; ++i) {
-        if (app->texts[i]) {
-            if (!keep) pure_draft_restore(app->texts[i], texts->before[i]);
-            pure_draft_hold(app->texts[i], false);
-        }
-        if (app->list_drafts[i]) {
-            if (!keep) pure_draft_restore(app->list_drafts[i], texts->lists[i]);
-            pure_draft_hold(app->list_drafts[i], false);
-        }
+        if (app->texts[i]) pure_draft_restore(app->texts[i], mark->texts[i]);
+        if (app->list_drafts[i]) pure_draft_restore(app->list_drafts[i], mark->lists[i]);
     }
-    if (keep) pure_undo_commit(&app->undo);
-    else pure_undo_rollback(&app->undo);
+    pure_undo_rollback(&app->undo, mark->undo);
+    if (mark->opened) close_burst(app, true); /* nothing happened: release the holds */
 }
 
 /* All handlers of one event run in module order against pending states. */
@@ -1152,29 +1208,24 @@ static PureResult run_handlers(PureApp *app, uint32_t event, Event *ev, double *
     return PURE_OK;
 }
 
-/* A key or text event stores what it changed before it counts; a frame
- * leaves that to the next event (frames come 60 times a second). */
+/* A key or text event saves before it returns unless saving is deferred; a
+ * frame leaves that to the next event (frames come 60 times a second). */
 static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     double pending[PURE_MODULE_STATES];
-    Texts texts;
-    hold_texts(app, &texts);
+    Mark mark;
+    mark_event(app, &mark);
     PureResult result = run_handlers(app, event, ev, pending);
-    int64_t revision;
-    if (result == PURE_OK && event) result = pure_save_commit(app, pending, NULL, &revision);
-    settle(app, &texts, result == PURE_OK);
-    if (result == PURE_OK) {
-        memcpy(app->values, pending, sizeof(pending));
-        ++app->events;
-    }
-    return result;
+    if (result != PURE_OK) { undo_event(app, &mark); return result; }
+    memcpy(app->values, pending, sizeof(pending));
+    ++app->events;
+    if (!event) ++app->ticks;
+    return event && !app->deferred ? pure_app_save(app) : PURE_OK;
 }
 
 PureResult pure_app_frame(PureApp *app) {
     pure_app_finish(app);
     Event ev = {.app = app, .arena = &app->arena, .dt = 1.0 / 60.0};
-    PureResult result = dispatch(app, 0, &ev);
-    if (result == PURE_OK) ++app->ticks;
-    return result;
+    return dispatch(app, 0, &ev);
 }
 
 PureResult pure_app_input(PureApp *app, uint32_t input, PureEdge edge) {
@@ -1220,32 +1271,47 @@ PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64
         return PURE_INVALID;
     const PureInputShape *shape = &m->input[input];
     if (payload.size < shape->prefix) return fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
-    app->payload = payload;
     if (shape->keyed && m->collections) {
         if (!app->data.open) return PURE_INVALID;
+        /* A key joins a burst once, so its revision moves once per save. */
+        bool seen = app->pending_count == PURE_APP_PENDING;
+        for (unsigned i = 0; i < app->pending_count && !seen; ++i) seen = !strcmp(app->pending[i].key, key);
+        if (seen) {
+            PureResult saved = pure_app_save(app);
+            if (saved != PURE_OK) return saved;
+        }
         PureResult opened = app->data.open(app->data.context, 0, key, &app->document, &app->revision);
-        if (opened != PURE_OK) { app->document = NULL; pure_app_finish(app); return opened; }
+        if (opened != PURE_OK) { app->document = NULL; return opened; }
         if (base >= 0 && base != app->revision) { pure_app_finish(app); return PURE_CONFLICT; }
     }
+    app->payload = payload;
     Event ev = {.app = app, .shape = shape, .arena = &app->arena, .exists = app->revision > 0};
-    double pending[PURE_MODULE_STATES];
-    Texts texts;
-    hold_texts(app, &texts);
-    PureResult result = run_handlers(app, 1 + 2 * input, &ev, pending);
+    double pending_values[PURE_MODULE_STATES];
+    Mark mark;
+    mark_event(app, &mark);
+    PureResult result = run_handlers(app, 1 + 2 * input, &ev, pending_values);
     if (result == PURE_OK && ev.modified && base < 0) result = PURE_INVALID;
-    /* Commit rebases the working version and releasing texts may reclaim
+    /* A save rebases an edited document and releasing texts may reclaim
      * earlier text versions: keep such a reply by copying it first. */
     if (result == PURE_OK && app->has_reply &&
         ((app->reply.source == FROM_DOCUMENT && ev.modified) || app->reply.source == FROM_TEXT))
         result = keep_reply(app);
-    if (result == PURE_OK)
-        result = pure_save_commit(app, pending, ev.modified ? app->document : NULL, &app->revision);
-    /* States, texts and lists change only with a successful commit (or no document edit). */
-    settle(app, &texts, result == PURE_OK);
-    if (result == PURE_OK) {
-        memcpy(app->values, pending, sizeof(pending));
-        ++app->events;
-    } else if (result != PURE_UNCERTAIN) pure_app_finish(app);
+    if (result != PURE_OK) {
+        undo_event(app, &mark);
+        pure_app_finish(app);
+        return result;
+    }
+    memcpy(app->values, pending_values, sizeof(pending_values));
+    ++app->events;
+    if (app->document) {
+        app->pending[app->pending_count].document = app->document;
+        app->pending[app->pending_count].edited = ev.modified;
+        memcpy(app->pending[app->pending_count++].key, key, strlen(key) + 1);
+        app->revision += ev.modified; /* a save moves an edited document one revision */
+    }
+    if (app->deferred) return PURE_OK;
+    result = pure_app_save(app);
+    if (result != PURE_OK) pure_app_finish(app);
     return result;
 }
 
@@ -1359,6 +1425,10 @@ static PureResult keep_list(PureList **out, PureList *from, const PureModule *ol
  * a state the new module drops stays stored as it was. */
 PureResult pure_app_replace(PureApp *app, const PureModule *module) {
     pure_app_finish(app);
+    if (app->open || app->pending_count) {
+        PureResult saved = pure_app_save(app); /* the burst belongs to the module that made it */
+        if (saved != PURE_OK) return saved;
+    }
     const PureModule *old = app->module;
     bool stored = pure_save_enabled(app);
     double values[PURE_MODULE_STATES] = {0};

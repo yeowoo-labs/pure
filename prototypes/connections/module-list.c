@@ -234,9 +234,9 @@ PureCell pure_list_get(const PureList *list, size_t at, unsigned field) {
     return list->items[at][field];
 }
 
-void pure_undo_rollback(PureUndo *undo) {
+void pure_undo_rollback(PureUndo *undo, size_t mark) {
     Entry *entries = undo->entries;
-    for (size_t i = undo->count; i-- > 0;) {
+    for (size_t i = undo->count; i-- > mark;) {
         Entry *e = &entries[i];
         if (e->change == INSERTED) free_item(e->list, take(e->list, e->at));
         else if (e->change == REMOVED) place(e->list, e->at, e->item); /* capacity is still there */
@@ -245,7 +245,7 @@ void pure_undo_rollback(PureUndo *undo) {
             e->list->items[e->at][e->field] = e->old;
         }
     }
-    undo->count = 0;
+    undo->count = mark;
 }
 
 void pure_undo_commit(PureUndo *undo) {

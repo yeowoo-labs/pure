@@ -1574,6 +1574,144 @@ static void stored_states(void) {
     stored_migration();
 }
 
+/* ---- Deferred saving ---------------------------------------------------- */
+
+typedef struct { uint32_t input; const char *word; } Step;
+
+static PureResult apply_step(PureApp *app, Step step) {
+    if (step.word) return pure_app_text(app, step.input, (PureSpan){(const unsigned char *)step.word, strlen(step.word)});
+    return pure_app_input(app, step.input, PURE_EDGE_DOWN);
+}
+
+/* Deferred events apply at once and last only through a save: an app that
+ * stops without saving comes back as it was at the last save. The oracle is
+ * an app in memory that replays exactly the saved events. */
+static void deferred_equivalence(Spec spec, const char *const *words, size_t word_count, uint32_t seed) {
+    char *path = new_store();
+    CHECK(load(spec, &module_a) == PURE_OK);
+    static Step history[2000];
+    size_t saved = 0, applied = 0;
+    PureApp memory, stored;
+    CHECK(pure_app_start(&memory, &module_a, (PureData){0}) == PURE_OK);
+    CHECK(pure_app_start(&stored, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_app_defer(&stored, true) && !pure_app_defer(&memory, true));
+    unsigned lost = 0, saves = 0;
+    for (unsigned step = 0; step < 600; ++step) {
+        Step next = {next_random(&seed) % module_a.inputs, NULL};
+        if (module_a.input[next.input].kind == PURE_KIND_TEXT) next.word = words[next_random(&seed) % word_count];
+        PureResult a = apply_step(&memory, next), b = apply_step(&stored, next);
+        CHECK(a == b);
+        if (a == PURE_OK) history[applied++] = next;
+        same_states(&memory, &stored);
+        uint32_t roll = next_random(&seed) % 16;
+        if (roll < 3) {
+            CHECK(pure_app_save(&stored) == PURE_OK);
+            saved = applied;
+            ++saves;
+        } else if (roll == 3) {
+            /* Stop without saving: only saved events come back. */
+            pure_app_stop(&stored);
+            pure_app_stop(&memory);
+            CHECK(pure_app_start(&stored, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&stored, true));
+            CHECK(pure_app_start(&memory, &module_a, (PureData){0}) == PURE_OK);
+            for (size_t k = 0; k < saved; ++k) CHECK(apply_step(&memory, history[k]) == PURE_OK);
+            lost += (unsigned)(applied - saved);
+            applied = saved;
+            same_states(&memory, &stored);
+        }
+    }
+    CHECK(saves > 50 && lost > 0);
+    pure_app_stop(&memory);
+    pure_app_stop(&stored);
+    remove_store(path);
+}
+
+/* A burst of events is saved with one commit: when that commit fails every
+ * event of the burst is undone, and a process that dies while saving comes
+ * back with all of the burst or none of it. */
+static void deferred_bursts(void) {
+    char *path = new_store();
+    Spec spec = {crash_nums, 1, crash_inputs, 1, NULL, 0, crash_handlers, 1, crash_code, LEN(crash_code), NULL, 0,
+                 crash_states, 4, crash_constants, 2, NULL, 0, crash_records, 1, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&app, true));
+    for (int i = 0; i < 5; ++i) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(consistent(&app) == 5 && app.events == 5);
+    for (fail_stage = PURE_AFTER_HEADER; fail_stage <= PURE_BEFORE_RENAME; fail_stage += 2) {
+        CHECK(pure_app_save(&app) == PURE_STORE_ERROR && consistent(&app) == 0 && app.events == 0);
+        for (int i = 0; i < 5; ++i) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    }
+    fail_stage = -1;
+    CHECK(pure_app_save(&app) == PURE_OK && consistent(&app) == 5);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == 5);
+    pure_app_stop(&app);
+    unsigned expected = 5;
+    for (int stage = PURE_AFTER_HEADER; stage <= PURE_BEFORE_DIR_SYNC; ++stage) {
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (!child) {
+            PureApp doomed;
+            if (pure_app_start(&doomed, &module_a, pure_tree_data(path)) != PURE_OK || !pure_app_defer(&doomed, true)) _exit(1);
+            for (int i = 0; i < 7; ++i) if (pure_app_input(&doomed, 0, PURE_EDGE_DOWN) != PURE_OK) _exit(2);
+            crash = 1;
+            fail_stage = stage;
+            pure_app_save(&doomed);
+            _exit(0);
+        }
+        int status;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 77);
+        if (stage == PURE_BEFORE_DIR_SYNC) expected += 7;
+        CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected);
+        pure_app_stop(&app);
+    }
+    remove_store(path);
+}
+
+/* Messages in a burst: documents of different keys commit together with the
+ * states, each moving one revision; a second message for a key saves the
+ * burst first, and so does a full burst. */
+static void deferred_messages(void) {
+    char *path = new_store();
+    CHECK(load(editor_spec, &module_a) == PURE_OK);
+    PureApp app;
+    unsigned char buffer[64];
+    char key[8];
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&app, true));
+    for (int i = 0; i < 3; ++i) {
+        snprintf(key, sizeof(key), "k%d", i);
+        CHECK(pure_app_message(&app, 1, key, 0, edit_payload(buffer, 0, 0, "ab")) == PURE_OK && app.revision == 1);
+    }
+    CHECK(app.values[0] == 3 && app.pending_count == 3 && app.open);
+    /* The same key again: the burst is saved first, then this edit joins a new one. */
+    CHECK(pure_app_message(&app, 1, "k0", 1, edit_payload(buffer, 2, 0, "c")) == PURE_OK && app.revision == 2);
+    CHECK(app.pending_count == 1 && app.values[0] == 4);
+    CHECK(pure_app_message(&app, 1, "k1", 0, edit_payload(buffer, 0, 0, "x")) == PURE_CONFLICT);
+    CHECK(pure_app_save(&app) == PURE_OK && !app.open && !app.pending_count);
+    for (int i = 0; i < PURE_APP_PENDING + 1; ++i) {
+        snprintf(key, sizeof(key), "m%d", i);
+        CHECK(pure_app_message(&app, 1, key, 0, edit_payload(buffer, 0, 0, "y")) == PURE_OK);
+        CHECK(app.pending_count == (i < PURE_APP_PENDING ? (unsigned)i + 1 : 1)); /* full: saved on the way */
+    }
+    pure_app_stop(&app);           /* the last edit was never saved */
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 4 + PURE_APP_PENDING);
+    CHECK(pure_app_message(&app, 0, "k0", -1, (PureSpan){0}) == PURE_OK && app.revision == 2 && replied(&app, "abc"));
+    CHECK(pure_app_message(&app, 0, "m16", -1, (PureSpan){0}) == PURE_NOT_FOUND);
+    CHECK(pure_app_message(&app, 0, "m15", -1, (PureSpan){0}) == PURE_OK && replied(&app, "y"));
+    pure_app_stop(&app);
+    remove_store(path);
+}
+
+static void deferred(void) {
+    static const char *const list_words[] = {"a", "\xea\xb0\x80", "", "\n", "\xf0\x9f\x98\x80"};
+    static const char *const text_words[] = {"a", "\xea\xb0\x80", "\n", "\xf0\x9f\x98\x80", "xy\nz", ""};
+    deferred_equivalence(list_spec, list_words, LEN(list_words), 0x2545f491u);
+    deferred_equivalence(text_spec, text_words, LEN(text_words), 0x1b873593u);
+    deferred_bursts();
+    deferred_messages();
+}
+
 int main(void) {
     behaviour();
     faults();
@@ -1588,7 +1726,8 @@ int main(void) {
     tables();
     table_mutations();
     stored_states();
+    deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts\"}");
     return 0;
 }

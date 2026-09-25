@@ -244,9 +244,15 @@ PureResult pure_save_open_values(PureApp *app, const PureModule *m, double *valu
 
 static bool same_version(PureVersion a, PureVersion b) { return a.ref == b.ref && a.bytes == b.bytes; }
 
-PureResult pure_save_commit(PureApp *app, const double *values, void *document, int64_t *revision) {
-    if (!pure_save_enabled(app))
-        return document ? app->data.commit(app->data.context, document, revision) : PURE_OK;
+PureResult pure_save_commit(PureApp *app, const double *values, void *const *documents, size_t document_count,
+                            int64_t *revisions) {
+    if (!pure_save_enabled(app)) {
+        /* Without a host that saves together, a save has one document at most. */
+        PureResult result = PURE_OK;
+        for (size_t i = 0; i < document_count && result == PURE_OK; ++i)
+            result = app->data.commit(app->data.context, documents[i], &revisions[i]);
+        return result;
+    }
     const PureModule *m = app->module;
     PureDraft *drafts[2 * PURE_MODULE_STATES + 1];
     uint32_t states[2 * PURE_MODULE_STATES + 1];
@@ -278,9 +284,8 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *document, 
             drafts[count++] = app->stored_values;
         }
     }
-    if (!count && !document) return PURE_OK;
-    int64_t ignored;
-    PureResult result = app->data.save(app->data.context, document, drafts, count, document ? revision : &ignored);
+    if (!count && !document_count) return PURE_OK;
+    PureResult result = app->data.save(app->data.context, documents, document_count, drafts, count, revisions);
     for (size_t k = 0; result == PURE_OK && k < count; ++k)
         if (states[k] != UINT32_MAX) app->saved[states[k]] = pure_draft_version(drafts[k]);
     if (values_changed) {

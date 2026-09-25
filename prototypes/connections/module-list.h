@@ -35,7 +35,8 @@ void pure_list_mirror(PureList *, PureDraft *, size_t header);
 PureResult pure_list_write(PureList *);
 /* Append the items stored in bytes; each field is checked. Before mirroring. */
 PureResult pure_list_read(PureList *, const unsigned char *bytes, size_t size);
-void pure_undo_rollback(PureUndo *);
+/* Undo the changes logged after mark (a count taken earlier), newest first. */
+void pure_undo_rollback(PureUndo *, size_t mark);
 void pure_undo_commit(PureUndo *);
 void pure_undo_free(PureUndo *);
 #endif
