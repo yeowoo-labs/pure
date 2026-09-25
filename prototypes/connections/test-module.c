@@ -1099,7 +1099,7 @@ static const char *cell_text(PureApp *app, uint32_t column, size_t row) {
     return t.text;
 }
 
-enum { ROW = PURE_OP_ROW, EQ = PURE_OP_EQ, LT = PURE_OP_LT };
+enum { ROW = PURE_OP_ROW, EQ = PURE_OP_EQ, LT = PURE_OP_LT, PICK = PURE_OP_PICK, SLIDE = PURE_OP_SLIDE };
 
 /* A table view has a row per item; its columns read the row and may branch.
  * A value crosses a join when every path brings the same stack. */
@@ -1193,6 +1193,35 @@ static void tables(void) {
         CHECK(load(bad, &module_b) == (open == 8 ? PURE_OK : PURE_INVALID));
     }
     CHECK(strstr(error, "more than 8 joins ahead"));
+
+    /* PICK copies a value from below, SLIDE drops values under the top: a
+     * value used twice is computed once. (3 + 4) * (3 + 4) with a text between. */
+    static const O picked[] = {{C, 0, 3}, {C, 0, 4}, {ADD, 0, 0}, {TK, 1, 0}, {PICK, 1, 0}, {PICK, 2, 0}, {MUL, 0, 0},
+                               {SLIDE, 2, 0}};
+    static const V squared[] = {{"sq", 0, 8}};
+    bad = (Spec){nums, 1, inputs, 0, squared, 1, NULL, 0, picked, 8, NULL, 0, NULL, 0, constants, 2, NULL, 0, NULL, 0, NULL, 0};
+    CHECK(load(bad, &module_b) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK && number_view(&app, 0) == 49);
+    pure_app_stop(&app);
+    static const O pick_text[] = {{TK, 1, 0}, {C, 0, 1}, {PICK, 1, 0}, {SLIDE, 2, 0}};
+    static const V text_left[] = {{"t", 0, 4}};
+    bad.v = NULL; bad.nv = 0; bad.tv = text_left; bad.ntv = 1; bad.o = pick_text; bad.no = 4;
+    CHECK(load(bad, &module_b) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK && !strcmp(view_text(&app, 0), "x"));
+    pure_app_stop(&app);
+    static const O pick_type[] = {{TK, 1, 0}, {PICK, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {SLIDE, 1, 0}};
+    static const V five[] = {{"sq", 0, 5}}, three[] = {{"sq", 0, 3}};
+    bad.o = pick_type; bad.no = 5; bad.tv = NULL; bad.ntv = 0; bad.v = five; bad.nv = 1;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));   /* a copy keeps its type */
+    static const O pick_far[] = {{C, 0, 1}, {PICK, 1, 0}, {SLIDE, 1, 0}};
+    bad.o = pick_far; bad.no = 3; bad.v = three;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "stack underflow"));
+    static const O slide_all[] = {{C, 0, 1}, {C, 0, 2}, {SLIDE, 2, 0}};
+    bad.o = slide_all;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "stack underflow"));
+    static const O slide_none[] = {{C, 0, 1}, {C, 0, 2}, {SLIDE, 0, 0}};
+    bad.o = slide_none;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "stack underflow"));
 }
 
 /* Damaged table modules either fail to load or evaluate every cell safely. */
@@ -1247,6 +1276,6 @@ int main(void) {
     tables();
     table_mutations();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide\"}");
     return 0;
 }

@@ -82,6 +82,9 @@ static const struct { unsigned char pops, in[3], out, where; } signature[PURE_OP
     [PURE_OP_INDEX_LAST] = {0, {0}, T_INDEX, READ},
     [PURE_OP_INDEX_NUM] = {1, {T_INDEX}, T_NUM, READ},
     [PURE_OP_ROW] = {0, {0}, T_INDEX, IN_ROW},
+    /* Stack copies: their types come from the values they move. */
+    [PURE_OP_PICK] = {0, {0}, 0, READ},
+    [PURE_OP_SLIDE] = {0, {0}, 0, READ},
 };
 
 static uint32_t read16(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
@@ -152,7 +155,7 @@ static bool uses_arg(uint8_t op) {
     case PURE_OP_TEXT_LINE: case PURE_OP_TEXT_SET: case PURE_OP_CUR_COUNT: case PURE_OP_LIST_COUNT:
     case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: case PURE_OP_ITEM_GET:
     case PURE_OP_ITEM_SET: case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: case PURE_OP_INDEX_FIRST:
-    case PURE_OP_INDEX_LAST: case PURE_OP_ROW:
+    case PURE_OP_INDEX_LAST: case PURE_OP_ROW: case PURE_OP_PICK: case PURE_OP_SLIDE:
         return true;
     default: return false;
     }
@@ -260,6 +263,18 @@ static bool verify_block(const PureModule *m, PureBlock block, int view, int row
         default: break;
         }
         if (!known) return reject(error, size, "operand names no such state, field, constant or unit", pc);
+        /* PICK copies the value arg below the top; SLIDE drops arg values under the top. */
+        if (op->op == PURE_OP_PICK || op->op == PURE_OP_SLIDE) {
+            bool pick = op->op == PURE_OP_PICK;
+            if (pick ? arg >= (uint32_t)height : !arg || arg >= (uint32_t)height)
+                return reject(error, size, "stack underflow", pc);
+            if (pick && height == PURE_MODULE_STACK) return reject(error, size, "stack overflow", pc);
+            int from = height - 1 - (int)arg, to = pick ? height++ : from;
+            types[to] = pick ? types[from] : types[height - 1];
+            owners[to] = pick ? owners[from] : owners[height - 1];
+            if (!pick) height = from + 1;
+            continue;
+        }
         /* Operand types, bottom to top; record operations take their fields. */
         unsigned char need[PURE_RECORD_FIELDS + 2];
         unsigned pops = signature[op->op].pops;
@@ -992,6 +1007,8 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             stack[sp++].bytes.owner = (uint16_t)op->arg;
             ++pc;
             continue;
+        case PURE_OP_PICK: stack[sp] = stack[sp - 1 - op->arg]; ++sp; ++pc; continue;
+        case PURE_OP_SLIDE: stack[sp - 1 - op->arg] = stack[sp - 1]; sp -= op->arg; ++pc; continue;
         default: break;
         }
         b = stack[--sp].num;
