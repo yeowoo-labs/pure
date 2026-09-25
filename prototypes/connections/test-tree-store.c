@@ -572,6 +572,39 @@ static void draft_versions(const char *path) {
     pure_draft_close(draft);
 }
 
+/* A draft without a store: edits, versions, restore and reclamation. */
+static void anonymous_draft(const char *path) {
+    (void)path;
+    Oracle o = {malloc(CAPACITY), 0, 0};
+    unsigned char *scratch = malloc(CAPACITY), insert[3000];
+    PureDraft *draft = pure_draft_new();
+    CHECK(draft && o.bytes && scratch && pure_draft_size(draft) == 0 && pure_draft_revision(draft) == 0);
+    uint32_t state = 42;
+    for (unsigned step = 0; step < 4000; ++step) {
+        size_t count = random_value(&state) % (step % 50 ? 12 : sizeof(insert));
+        size_t offset = o.size ? random_value(&state) % (o.size + 1) : 0;
+        size_t remove = o.size - offset ? random_value(&state) % (o.size - offset + 1) % 32 : 0;
+        fill(insert, count, &state);
+        bool abandon = random_value(&state) % 5 == 0;
+        pure_draft_hold(draft, true);
+        PureVersion before = pure_draft_version(draft);
+        CHECK(pure_draft_splice(draft, offset, remove, (PureSpan){insert, count}) == PURE_OK);
+        if (abandon) pure_draft_restore(draft, before);
+        else apply(&o, offset, remove, insert, count);
+        pure_draft_hold(draft, false);
+        if (step % 37 == 0) expect_draft(draft, &o, scratch);
+    }
+    expect_draft(draft, &o, scratch);
+    int64_t revision;
+    CHECK(pure_draft_commit(draft, &revision) == PURE_INVALID);
+    size_t nodes, bytes;
+    pure_draft_test_arena(draft, &nodes, &bytes);
+    CHECK(bytes < 2 * o.size + 65536);
+    pure_draft_close(draft);
+    free(o.bytes);
+    free(scratch);
+}
+
 /* A failed commit changes neither the store nor the draft. */
 static void draft_faults(const char *path) {
     unsigned char scratch[64];
@@ -621,7 +654,7 @@ int main(void) {
     void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
-                                      draft_versions};
+                                      draft_versions, anonymous_draft};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -631,6 +664,6 @@ int main(void) {
     }
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
-         "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions\"}");
+         "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous\"}");
     return 0;
 }

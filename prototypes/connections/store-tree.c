@@ -987,6 +987,10 @@ PureResult pure_draft_open(const char *path, const char *key, PureDraft **out) {
     return PURE_OK;
 }
 
+PureDraft *pure_draft_new(void) {
+    return calloc(1, sizeof(PureDraft)); /* no path: nothing mapped, nothing to commit */
+}
+
 void pure_draft_close(PureDraft *draft) {
     if (!draft) return;
     release_tree(&draft->tree);
@@ -1066,6 +1070,10 @@ PureResult pure_draft_read(const PureDraft *draft, size_t offset, size_t length,
     return pure_draft_read_version(draft, pure_draft_version(draft), offset, length, visit, context);
 }
 
+void pure_draft_restore(PureDraft *draft, PureVersion version) {
+    draft->root = (Entry){version.ref, version.bytes};
+}
+
 void pure_draft_hold(PureDraft *draft, bool held) {
     draft->held = held;
     if (!held) collect(draft);
@@ -1073,6 +1081,7 @@ void pure_draft_hold(PureDraft *draft, bool held) {
 
 PureResult pure_draft_commit(PureDraft *draft, int64_t *revision) {
     *revision = draft->revision;
+    if (!draft->path) return PURE_INVALID;
     Session session;
     Writer *writer = NULL;
     Entry current, root = draft->root;

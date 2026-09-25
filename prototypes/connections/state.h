@@ -12,6 +12,9 @@
  * appends only the draft's new extents. One owner thread per draft. */
 typedef struct PureDraft PureDraft;
 
+/* A working value with no stored base, for runtime-owned state such as an
+ * app's text. It edits and reads like any draft but cannot be committed. */
+PureDraft *pure_draft_new(void);
 /* A missing key opens as an empty draft at revision 0; commit creates it. */
 PureResult pure_draft_open(const char *path, const char *key, PureDraft **out);
 /* Memory only. Fails without change on a bad range or when memory runs out. */
@@ -32,6 +35,8 @@ PureResult pure_draft_read_version(const PureDraft *, PureVersion, size_t offset
                                    bool (*visit)(void *, PureSpan), void *context);
 /* While held, edits keep every earlier version's nodes (one transaction). */
 void pure_draft_hold(PureDraft *, bool held);
+/* Abandon edits made since version was taken; the draft was held since then. */
+void pure_draft_restore(PureDraft *, PureVersion);
 /* Publish if the key is still at the draft's base revision. On success the
  * draft continues from the new revision; on any failure it is unchanged. */
 PureResult pure_draft_commit(PureDraft *, int64_t *revision);
