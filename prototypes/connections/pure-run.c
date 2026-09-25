@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
     }
     unsigned active = 0;
     PureApp app;
-    pure_app_start(&app, &modules[active]);
+    pure_app_start(&app, &modules[active], (PureData){0});
     char line[4096];
     int status = 0;
     while (fgets(line, sizeof(line), stdin)) {

@@ -116,13 +116,17 @@ $(BUILD)/test-splice: test-splice.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUI
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_STORE_TEST test-splice.c program.c $(CORE) $(HOST) $(LDFLAGS) $(LDLIBS) -o $@
 
 # Pure module format v1: loader/verifier/executor, its tests and a test host.
-$(BUILD)/test-module: test-module.c module.c module.h result.h | $(BUILD)
+$(BUILD)/test-module: test-module.c module.c module.h state.h result.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) test-module.c module.c $(LDFLAGS) -lm $(LDLIBS) -o $@
 
 $(BUILD)/pure-run: pure-run.c module.c module.h result.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) pure-run.c module.c $(LDFLAGS) -lm $(LDLIBS) -o $@
 
-check-module: $(BUILD)/test-module $(BUILD)/pure-run
+# The document CLI contract driven by a module on the tree store.
+$(BUILD)/pure-edit-module: edit-module.c module.c module-store.c store-tree.c module.h module-store.h $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) edit-module.c module.c module-store.c store-tree.c $(LDFLAGS) -lm $(LDLIBS) -o $@
+
+check-module: $(BUILD)/test-module $(BUILD)/pure-run $(BUILD)/pure-edit-module
 	$(BUILD)/test-module
 
 $(BUILD)/test-tree-store: test-tree-store.c store-tree.c $(HEADERS) | $(BUILD)
