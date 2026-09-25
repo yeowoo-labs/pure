@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -Werror
 BUILD ?= build
 
-.PHONY: all core async-core editor fixed-editor fixed-server fixed-tui source-tui compiler mirror window server async-server document-peer document-server check check-policy check-policy-peer check-portable check-portable-tui check-paged-portable check-tree check-portable-peer check-native-checkpoint check-mirror check-core check-async check-async-server check-async-service-scale check-profile check-fixed-profile check-fixed-server check-service-scale check-tui-profile check-source-tui-profile check-tui check-source-tui check-release check-micro-memory check-hybrid check-flat-export check-copy-range check-peer-profile check-document-server-profile check-window-profile check-document-peer check-document-server FORCE
+.PHONY: all core async-core editor fixed-editor fixed-server fixed-tui source-tui compiler mirror window server async-server document-peer document-server check check-policy check-policy-peer check-portable check-portable-tui check-paged-portable check-tree check-module check-portable-peer check-native-checkpoint check-mirror check-core check-async check-async-server check-async-service-scale check-profile check-fixed-profile check-fixed-server check-service-scale check-tui-profile check-source-tui-profile check-tui check-source-tui check-release check-micro-memory check-hybrid check-flat-export check-copy-range check-peer-profile check-document-server-profile check-window-profile check-document-peer check-document-server FORCE
 CORE = runtime.c
 STORE ?= store.c
 FIXED_PROGRAM ?= examples/editor.pure
@@ -114,6 +114,16 @@ $(BUILD)/test-async: test-async.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUILD
 
 $(BUILD)/test-splice: test-splice.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_STORE_TEST test-splice.c program.c $(CORE) $(HOST) $(LDFLAGS) $(LDLIBS) -o $@
+
+# Pure module format v1: loader/verifier/executor, its tests and a test host.
+$(BUILD)/test-module: test-module.c module.c module.h result.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) test-module.c module.c $(LDFLAGS) -lm $(LDLIBS) -o $@
+
+$(BUILD)/pure-run: pure-run.c module.c module.h result.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) pure-run.c module.c $(LDFLAGS) -lm $(LDLIBS) -o $@
+
+check-module: $(BUILD)/test-module $(BUILD)/pure-run
+	$(BUILD)/test-module
 
 $(BUILD)/test-tree-store: test-tree-store.c store-tree.c $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-tree-store.c store-tree.c $(LDFLAGS) $(LDLIBS) -o $@
