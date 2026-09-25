@@ -1,4 +1,5 @@
 #include "module.h"
+#include "module-text.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,9 +15,13 @@ typedef struct { const char *name, *key; int kind; bool keyed; const F *fields; 
 typedef struct { const char *name; uint32_t start, length; } V;
 typedef struct { uint32_t event, start, length; } H;
 typedef struct { uint8_t op; uint32_t arg; double value; } O;
+/* Text (type 1, ref = constant) and cursor (type 2, ref = text state) states
+ * follow the number states; text views follow the number views. */
+typedef struct { const char *name; uint32_t type, ref; } T;
 typedef struct {
     const S *s; size_t ns; const I *in; size_t ni; const V *v; size_t nv;
     const H *h; size_t nh; const O *o; size_t no; const char *const *c; size_t nc;
+    const T *t; size_t nt; const char *const *k; size_t nk; const V *tv; size_t ntv;
 } Spec;
 
 static unsigned char *put32(unsigned char *p, uint32_t v) {
@@ -31,14 +36,15 @@ static unsigned char *put_double(unsigned char *p, double value) {
     return put32(p + 4, (uint32_t)(bits >> 32));
 }
 
-/* Test-side encoder for format v2; the toolchain has its own. */
+/* Test-side encoder for format v3; the toolchain has its own. */
 static size_t build(unsigned char *out, Spec spec) {
-    unsigned char strings[4096];
-    size_t used = 0;
+    unsigned char strings[4096], blob[4096];
+    size_t used = 0, blob_used = 0;
     const char *text[512];
     uint32_t offset[512];
     size_t names = 0;
     for (size_t i = 0; i < spec.ns; ++i) text[names++] = spec.s[i].name;
+    for (size_t i = 0; i < spec.nt; ++i) text[names++] = spec.t[i].name;
     for (size_t i = 0; i < spec.nc; ++i) text[names++] = spec.c[i];
     for (size_t i = 0; i < spec.ni; ++i) {
         text[names++] = spec.in[i].name;
@@ -46,6 +52,7 @@ static size_t build(unsigned char *out, Spec spec) {
         for (size_t f = 0; f < spec.in[i].nfields; ++f) text[names++] = spec.in[i].fields[f].name;
     }
     for (size_t i = 0; i < spec.nv; ++i) text[names++] = spec.v[i].name;
+    for (size_t i = 0; i < spec.ntv; ++i) text[names++] = spec.tv[i].name;
     for (size_t i = 0; i < names; ++i) {
         size_t length = strlen(text[i]);
         offset[i] = (uint32_t)used;
@@ -55,17 +62,21 @@ static size_t build(unsigned char *out, Spec spec) {
     }
     size_t fields = 0;
     for (size_t i = 0; i < spec.ni; ++i) fields += spec.in[i].nfields;
+    for (size_t i = 0; i < spec.nk; ++i) { memcpy(blob + blob_used, spec.k[i], strlen(spec.k[i])); blob_used += strlen(spec.k[i]); }
     unsigned char *p = out;
-    memset(p, 0, 32);
-    memcpy(p, "PUREMOD2", 8);
-    p[8] = (unsigned char)spec.ns; p[9] = (unsigned char)(spec.ns >> 8);
-    p[10] = (unsigned char)spec.ni; p[12] = (unsigned char)spec.nv; p[14] = (unsigned char)spec.nh;
+    memset(p, 0, 40);
+    memcpy(p, "PUREMOD3", 8);
+    size_t states = spec.ns + spec.nt, views = spec.nv + spec.ntv;
+    p[8] = (unsigned char)states; p[9] = (unsigned char)(states >> 8);
+    p[10] = (unsigned char)spec.ni; p[12] = (unsigned char)views; p[14] = (unsigned char)spec.nh;
     put32(p + 16, (uint32_t)spec.no);
     put32(p + 20, (uint32_t)used);
-    p[24] = (unsigned char)fields; p[26] = (unsigned char)spec.nc;
-    p += 32;
+    p[24] = (unsigned char)fields; p[26] = (unsigned char)spec.nc; p[28] = (unsigned char)spec.nk;
+    put32(p + 32, (uint32_t)blob_used);
+    p += 40;
     size_t n = 0;
     for (size_t i = 0; i < spec.ns; ++i) { p = put32(p, offset[n++]); p = put32(p, 0); p = put_double(p, spec.s[i].initial); }
+    for (size_t i = 0; i < spec.nt; ++i) { p = put32(p, offset[n++]); p = put32(p, spec.t[i].type); p = put32(p, spec.t[i].ref); p = put32(p, 0); }
     for (size_t i = 0; i < spec.nc; ++i) { p = put32(p, offset[n++]); p = put32(p, 1); p = put32(p, 1); }
     uint32_t field_offsets[64], field_start = 0;
     size_t nf = 0;
@@ -74,7 +85,7 @@ static size_t build(unsigned char *out, Spec spec) {
         p = put32(p, offset[n++]);
         *p++ = (unsigned char)(in->kind ? in->kind : 1); *p++ = in->keyed; *p++ = 0; *p++ = 0;
         p = put32(p, in->kind ? 0 : offset[n++]);
-        uint32_t first = in->kind ? field_start : 0; /* key inputs have no fields */
+        uint32_t first = in->kind == PURE_KIND_MESSAGE ? field_start : 0; /* only messages have fields */
         *p++ = (unsigned char)first; *p++ = (unsigned char)(first >> 8);
         *p++ = (unsigned char)in->nfields; *p++ = 0;
         for (size_t f = 0; f < in->nfields; ++f) field_offsets[nf++] = offset[n++];
@@ -86,7 +97,9 @@ static size_t build(unsigned char *out, Spec spec) {
             p = put32(p, field_offsets[nf++]);
             p = put32(p, spec.in[i].fields[f].type);
         }
-    for (size_t i = 0; i < spec.nv; ++i) { p = put32(p, offset[n++]); p = put32(p, spec.v[i].start); p = put32(p, spec.v[i].length); }
+    for (size_t i = 0, at = 0; i < spec.nk; ++i) { p = put32(p, (uint32_t)at); p = put32(p, (uint32_t)strlen(spec.k[i])); at += strlen(spec.k[i]); }
+    for (size_t i = 0; i < spec.nv; ++i) { p = put32(p, offset[n++]); p = put32(p, 0); p = put32(p, spec.v[i].start); p = put32(p, spec.v[i].length); }
+    for (size_t i = 0; i < spec.ntv; ++i) { p = put32(p, offset[n++]); p = put32(p, 1); p = put32(p, spec.tv[i].start); p = put32(p, spec.tv[i].length); }
     for (size_t i = 0; i < spec.nh; ++i) { p = put32(p, spec.h[i].event); p = put32(p, spec.h[i].start); p = put32(p, spec.h[i].length); }
     for (size_t i = 0; i < spec.no; ++i) {
         *p++ = spec.o[i].op; *p++ = 0; *p++ = 0; *p++ = 0;
@@ -94,7 +107,8 @@ static size_t build(unsigned char *out, Spec spec) {
         p = put_double(p, spec.o[i].value);
     }
     memcpy(p, strings, used);
-    return (size_t)(p + used - out);
+    memcpy(p + used, blob, blob_used);
+    return (size_t)(p + used + blob_used - out);
 }
 
 static PureModule module_a, module_b;
@@ -107,7 +121,7 @@ static PureResult load(Spec spec, PureModule *out) {
 }
 
 #define LEN(a) (sizeof(a) / sizeof(*(a)))
-#define SPEC(s, in, v, h, o) ((Spec){s, LEN(s), in, LEN(in), v, LEN(v), h, LEN(h), o, LEN(o), NULL, 0})
+#define SPEC(s, in, v, h, o) ((Spec){s, LEN(s), in, LEN(in), v, LEN(v), h, LEN(h), o, LEN(o), NULL, 0, NULL, 0, NULL, 0, NULL, 0})
 
 enum { C = PURE_OP_CONST, L = PURE_OP_LOAD, DT = PURE_OP_DT, ADD = PURE_OP_ADD,
        MUL = PURE_OP_MUL, DIV = PURE_OP_DIV, GT = PURE_OP_GT, MIN = PURE_OP_MIN,
@@ -136,11 +150,11 @@ static const H counter_handlers[] = {{1, 7, 4}, {3, 11, 11}, {0, 22, 4}};
 static void behaviour(void) {
     /* width at 1..7 leaves two values: rejected at load. */
     CHECK(load(SPEC(counter_states, counter_inputs, counter_views, counter_handlers, counter_code), &module_a) == PURE_INVALID);
-    CHECK(strstr(error, "view must leave one value"));
+    CHECK(strstr(error, "view must leave one value of its type"));
     static const V views[] = {{"label", 0, 1}, {"width", 26, 7}};
     CHECK(load(SPEC(counter_states, counter_inputs, views, counter_handlers, counter_code), &module_a) == PURE_OK);
     PureApp app;
-    pure_app_start(&app, &module_a, (PureData){0});
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     double value;
     CHECK(pure_app_view(&app, 1, &value) && value == 40);
     for (int i = 0; i < 25; ++i) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
@@ -162,11 +176,12 @@ static void behaviour(void) {
     static const V no_views[1];
     static const H no_handlers[1];
     static const O no_code[1];
-    CHECK(load((Spec){next_states, 2, no_inputs, 0, no_views, 0, no_handlers, 0, no_code, 0, NULL, 0}, &module_b) == PURE_OK);
-    pure_app_replace(&app, &module_b);
+    CHECK(load((Spec){next_states, 2, no_inputs, 0, no_views, 0, no_handlers, 0, no_code, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, &module_b) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
     CHECK(app.module == &module_b && app.values[0] == 7 && app.values[1] == 25);
-    pure_app_replace(&app, &module_a);
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK);
     CHECK(app.values[0] == 25 && app.values[1] == 3);
+    pure_app_stop(&app);
 }
 
 /* A fault leaves every state exactly as before the event. */
@@ -185,7 +200,7 @@ static void faults(void) {
     static const V views[] = {{"low", 21, 4}, {"high", 25, 4}};
     CHECK(load(SPEC(states, inputs, views, handlers, code), &module_a) == PURE_OK);
     PureApp app;
-    pure_app_start(&app, &module_a, (PureData){0});
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     const PureFault expected[] = {PURE_FAULT_DIVIDE, PURE_FAULT_NON_FINITE, PURE_FAULT_CLAMP};
     for (uint32_t i = 0; i < 3; ++i) {
         CHECK(pure_app_input(&app, i, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == expected[i]);
@@ -196,6 +211,7 @@ static void faults(void) {
     double value;
     CHECK(pure_app_view(&app, 0, &value) && value == 0 && signbit(value));
     CHECK(pure_app_view(&app, 1, &value) && value == 0 && !signbit(value));
+    pure_app_stop(&app);
 }
 
 typedef struct { const char *reason; Spec spec; PureResult result; } Rejection;
@@ -236,28 +252,28 @@ static void rejections(void) {
     for (int i = 0; i < 65; ++i) overflow[i] = (O){C, 0, 1};
     overflow[65] = (O){ST, 0, 0};
     const Rejection cases[] = {
-        {"duplicate name", {dup, 2, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0}, PURE_INVALID},
-        {"state name", {bad_name, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0}, PURE_INVALID},
-        {"state name", {long_name, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0}, PURE_INVALID},
-        {"non-finite initial value", {non_finite, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0}, PURE_INVALID},
-        {"input key", {s1, 1, bad_key, 1, clash, 0, none, 0, load_a, 0, NULL, 0}, PURE_INVALID},
-        {"duplicate key", {s1, 1, dup_key, 2, clash, 0, none, 0, load_a, 0, NULL, 0}, PURE_INVALID},
-        {"duplicate name", {s1, 1, i1, 0, clash, 1, none, 0, load_a, 1, NULL, 0}, PURE_INVALID},
-        {"view with an effect", {s1, 1, i1, 0, v_store, 1, none, 0, store, 3, NULL, 0}, PURE_INVALID},
-        {"view with an effect", {s1, 1, i1, 0, v_dt, 1, none, 0, store, 3, NULL, 0}, PURE_INVALID},
-        {"empty view", {s1, 1, i1, 0, v_empty, 1, none, 0, store, 3, NULL, 0}, PURE_INVALID},
-        {"handler event", {s1, 1, i1, 1, clash, 0, h_bad_event, 1, store, 3, NULL, 0}, PURE_INVALID},
-        {"branch not forward", {s1, 1, i1, 0, clash, 0, h_two, 1, back, 2, NULL, 0}, PURE_INVALID},
-        {"branch not forward", {s1, 1, i1, 0, clash, 0, h_two, 1, beyond, 2, NULL, 0}, PURE_INVALID},
-        {"stack underflow", {s1, 1, i1, 0, clash, 0, h_all, 1, under, 1, NULL, 0}, PURE_INVALID},
-        {"join with a non-empty stack", {s1, 1, i1, 0, clash, 0, h_five, 1, join, 5, NULL, 0}, PURE_INVALID},
-        {"handler must leave no value", {s1, 1, i1, 0, clash, 0, h_two, 1, leftover, 2, NULL, 0}, PURE_INVALID},
-        {"unknown state", {s1, 1, i1, 0, clash, 0, h_two, 1, unknown_state, 2, NULL, 0}, PURE_INVALID},
-        {"non-canonical operand", {s1, 1, i1, 0, clash, 0, h_two, 1, nan_const, 2, NULL, 0}, PURE_INVALID},
-        {"non-canonical operand", {s1, 1, i1, 0, clash, 0, h0, 1, noncanon, 3, NULL, 0}, PURE_INVALID},
-        {"unreachable instruction", {s1, 1, i1, 0, clash, 0, h_four, 1, unreachable, 4, NULL, 0}, PURE_INVALID},
-        {"unknown opcode", {s1, 1, i1, 0, clash, 0, h_two, 1, bad_op, 2, NULL, 0}, PURE_INVALID},
-        {"stack overflow", {s1, 1, i1, 0, clash, 0, (H[]){{0, 0, 66}}, 1, overflow, 66, NULL, 0}, PURE_INVALID},
+        {"duplicate name", {dup, 2, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"state name", {bad_name, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"state name", {long_name, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"non-finite initial value", {non_finite, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"input key", {s1, 1, bad_key, 1, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"duplicate key", {s1, 1, dup_key, 2, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"duplicate name", {s1, 1, i1, 0, clash, 1, none, 0, load_a, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"view with an effect", {s1, 1, i1, 0, v_store, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"view with an effect", {s1, 1, i1, 0, v_dt, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"empty view", {s1, 1, i1, 0, v_empty, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"handler event", {s1, 1, i1, 1, clash, 0, h_bad_event, 1, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"branch not forward", {s1, 1, i1, 0, clash, 0, h_two, 1, back, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"branch not forward", {s1, 1, i1, 0, clash, 0, h_two, 1, beyond, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"stack underflow", {s1, 1, i1, 0, clash, 0, h_all, 1, under, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"join with a non-empty stack", {s1, 1, i1, 0, clash, 0, h_five, 1, join, 5, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"handler must leave no value", {s1, 1, i1, 0, clash, 0, h_two, 1, leftover, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"no such state", {s1, 1, i1, 0, clash, 0, h_two, 1, unknown_state, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"non-canonical operand", {s1, 1, i1, 0, clash, 0, h_two, 1, nan_const, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"non-canonical operand", {s1, 1, i1, 0, clash, 0, h0, 1, noncanon, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"unreachable instruction", {s1, 1, i1, 0, clash, 0, h_four, 1, unreachable, 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"unknown opcode", {s1, 1, i1, 0, clash, 0, h_two, 1, bad_op, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"stack overflow", {s1, 1, i1, 0, clash, 0, (H[]){{0, 0, 66}}, 1, overflow, 66, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
     };
     for (size_t i = 0; i < LEN(cases); ++i) {
         PureResult result = load(cases[i].spec, &module_a);
@@ -269,9 +285,9 @@ static void rejections(void) {
     static S many[33];
     static char many_names[33][8];
     for (unsigned i = 0; i < 33; ++i) { snprintf(many_names[i], 8, "s%u", i % 100u); many[i] = (S){many_names[i], 0}; }
-    CHECK(load((Spec){many, 33, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0}, &module_a) == PURE_LIMIT);
+    CHECK(load((Spec){many, 33, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, &module_a) == PURE_LIMIT);
     static unsigned char bytes[65536];
-    size_t size = build(bytes, (Spec){s1, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0});
+    size_t size = build(bytes, (Spec){s1, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0});
     CHECK(pure_module_load(bytes, size - 1, &module_a, error, sizeof(error)) == PURE_INVALID);
     CHECK(pure_module_load(bytes, size + 1, &module_a, error, sizeof(error)) == PURE_INVALID);
     bytes[0] = 'X';
@@ -300,13 +316,14 @@ static void mutations(void) {
         if (pure_module_load(bytes, size, &module_a, error, sizeof(error)) != PURE_OK) continue;
         ++accepted;
         PureApp app;
-        pure_app_start(&app, &module_a, (PureData){0});
+        CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
         for (unsigned e = 0; e < 16; ++e) {
             if (e % 3 == 0) pure_app_frame(&app);
             else pure_app_input(&app, e % 4, e & 1 ? PURE_EDGE_UP : PURE_EDGE_DOWN);
             for (uint32_t v = 0; v < module_a.views; ++v) { double value; pure_app_view(&app, v, &value); }
             for (uint32_t s = 0; s < module_a.states; ++s) CHECK(isfinite(app.values[s]));
         }
+        pure_app_stop(&app);
     }
     printf("{\"module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
 }
@@ -482,13 +499,13 @@ static void messages(void) {
     };
     static const H handlers[] = {{1, 0, 2}, {3, 2, 12}, {5, 14, 6}, {7, 20, 14}};
     static const V views[] = {{"count", 0, 0}};
-    Spec spec = {states, 1, inputs, 5, views, 0, handlers, 4, code, LEN(code), collections, 1};
+    Spec spec = {states, 1, inputs, 5, views, 0, handlers, 4, code, LEN(code), collections, 1, NULL, 0, NULL, 0, NULL, 0};
     editor_spec = spec;
     PureResult loaded = load(spec, &module_a);
     if (loaded != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
     Memory memory = {.limit = 100};
     PureApp app;
-    pure_app_start(&app, &module_a, fake_data(&memory));
+    CHECK(pure_app_start(&app, &module_a, fake_data(&memory)) == PURE_OK);
     unsigned char buffer[64];
 
     CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_NOT_FOUND && app.revision == 0);
@@ -524,7 +541,7 @@ static void messages(void) {
     CHECK(app.values[0] == 2);
     /* Another key is its own document. */
     CHECK(pure_app_message(&app, 1, "other", 0, edit_payload(buffer, 0, 0, "abc")) == PURE_OK && app.revision == 1);
-    pure_app_finish(&app);
+    pure_app_stop(&app);
     CHECK(memory.opened == memory.closed);
     for (size_t i = 0; i < memory.count; ++i) free(memory.docs[i].bytes);
 
@@ -544,26 +561,26 @@ static void messages(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
     static const O far_field[] = {{FIELD, 3, 0}, {REPLY, 0, 0}};
     bad.o = far_field; bad.h = edit_handler2;
-    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "unknown field"));
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "no such state, field"));
     static const I unkeyed[] = {{"note", NULL, PURE_KIND_MESSAGE, false, NULL, 0}};
     static const O doc_read[] = {{DOC, 0, 0}, {REPLY, 0, 0}};
     static const H note_handler[] = {{1, 0, 2}};
-    bad = (Spec){states, 1, unkeyed, 1, views, 0, note_handler, 1, doc_read, 2, collections, 1};
+    bad = (Spec){states, 1, unkeyed, 1, views, 0, note_handler, 1, doc_read, 2, collections, 1, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "document operation outside"));
     static const F tail_first[] = {{"insert", 2}, {"start", 1}};
     static const I misplaced[] = {{"edit", NULL, PURE_KIND_MESSAGE, true, tail_first, 2}};
-    bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, collections, 1};
+    bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "message field"));
     static const H even[] = {{2, 0, 0}};
-    bad = (Spec){states, 1, inputs, 1, views, 0, even, 1, NULL, 0, collections, 1};
+    bad = (Spec){states, 1, inputs, 1, views, 0, even, 1, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "handler event"));
     static const V field_view[] = {{"v", 0, 1}};
     static const O field_only[] = {{FIELD, 0, 0}};
-    bad = (Spec){states, 1, inputs, 2, field_view, 1, NULL, 0, field_only, 1, collections, 1};
+    bad = (Spec){states, 1, inputs, 2, field_view, 1, NULL, 0, field_only, 1, collections, 1, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view with an effect"));
     static const O branch_value[] = {{C, 0, 1}, {C, 0, 1}, {JZ, 3, 0}, {ST, 0, 0}};
     static const H frame_handler[] = {{0, 0, 4}};
-    bad = (Spec){states, 1, inputs, 0, views, 0, frame_handler, 1, branch_value, 4, NULL, 0};
+    bad = (Spec){states, 1, inputs, 0, views, 0, frame_handler, 1, branch_value, 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "branch with a non-empty stack"));
 }
 
@@ -582,7 +599,7 @@ static void message_mutations(void) {
         ++accepted;
         Memory memory = {.limit = 64};
         PureApp app;
-        pure_app_start(&app, &module_b, fake_data(&memory));
+        CHECK(pure_app_start(&app, &module_b, fake_data(&memory)) == PURE_OK);
         unsigned char payload[32];
         for (unsigned e = 0; e < 12; ++e) {
             for (size_t k = 0; k < sizeof(payload); ++k) payload[k] = (unsigned char)next_random(&state);
@@ -600,11 +617,218 @@ static void message_mutations(void) {
             pure_app_frame(&app);
             for (uint32_t s = 0; s < module_b.states; ++s) CHECK(isfinite(app.values[s]));
         }
-        pure_app_finish(&app);
+        pure_app_stop(&app);
         CHECK(memory.opened == memory.closed);
         for (size_t i = 0; i < memory.count; ++i) free(memory.docs[i].bytes);
     }
     printf("{\"message_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
+}
+
+static Spec text_spec;
+
+typedef struct { char text[256]; size_t size; } Text;
+
+static bool text_span(void *context, PureSpan span) {
+    Text *t = context;
+    CHECK(t->size + span.size < sizeof(t->text));
+    memcpy(t->text + t->size, span.data, span.size);
+    t->size += span.size;
+    t->text[t->size] = 0;
+    return true;
+}
+
+static const char *view_text(PureApp *app, uint32_t view) {
+    static Text t;
+    t.size = 0;
+    t.text[0] = 0;
+    CHECK(pure_app_view_text(app, view, text_span, &t) == PURE_OK);
+    return t.text;
+}
+
+static const char *state_text(const PureApp *app, uint32_t state) {
+    static Text t;
+    t.size = 0;
+    t.text[0] = 0;
+    CHECK(pure_draft_read(app->texts[state], 0, pure_draft_size(app->texts[state]), text_span, &t) == PURE_OK);
+    return t.text;
+}
+
+static double number_view(PureApp *app, uint32_t view) {
+    double value;
+    CHECK(pure_app_view(app, view, &value));
+    return value;
+}
+
+enum { CUL = PURE_OP_CUR_LOAD, CS = PURE_OP_CUR_STORE, CM = PURE_OP_CUR_MOVE, TI = PURE_OP_TEXT_INPUT,
+       TINS = PURE_OP_TEXT_INSERT, TREM = PURE_OP_TEXT_REMOVE, TL = PURE_OP_TEXT_LOAD, TK = PURE_OP_TEXT_CONST,
+       CHR = PURE_OP_CHARS, NT = PURE_OP_NUM_TEXT, CAT = PURE_OP_CONCAT, TLN = PURE_OP_TEXT_LINE,
+       CC = PURE_OP_CUR_COUNT, CST = PURE_OP_CUR_START };
+
+/* A small text editor module: states edits (num), note (text), at (cursor in
+ * note), title (text). The runtime keeps at on character boundaries and
+ * moves it with edits; a failed event restores text and cursor. */
+static void texts(void) {
+    static const S nums[] = {{"edits", 0}};
+    static const T textual[] = {{"note", 1, 0}, {"at", 2, 1}, {"title", 1, 1}};
+    static const char *const constants[] = {"\xea\xb0\x80" "a\nbc", "\xeb\xa9\x94\xeb\xaa\xa8", "XYZ",
+                                            " \xc2\xb7 ", "\xec\x9e\x90"};
+    static const I inputs[] = {
+        {"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("left", "ArrowLeft"), KEY("right", "ArrowRight"),
+        KEY("up", "ArrowUp"), KEY("down", "ArrowDown"), KEY("back", "Backspace"), KEY("home", "Home"), KEY("bad", "KeyB"),
+    };
+    static const O code[] = {
+        {CUL, 2, 0}, {TI, 0, 0}, {TINS, 1, 0}, {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},  /* 0 typed */
+        {CUL, 2, 0}, {C, 0, -1}, {CM, 0, 0}, {CS, 2, 0},                                     /* 7 left */
+        {CUL, 2, 0}, {C, 0, 1}, {CM, 0, 0}, {CS, 2, 0},                                      /* 11 right */
+        {CUL, 2, 0}, {C, 0, -1}, {CM, 1, 0}, {CS, 2, 0},                                     /* 15 up */
+        {CUL, 2, 0}, {C, 0, 1}, {CM, 1, 0}, {CS, 2, 0},                                      /* 19 down */
+        {CUL, 2, 0}, {C, 0, -1}, {CM, 0, 0}, {CUL, 2, 0}, {TREM, 1, 0},                       /* 23 back */
+        {CST, 1, 0}, {CS, 2, 0},                                                            /* 28 home */
+        {CUL, 2, 0}, {TK, 2, 0}, {TINS, 1, 0}, {C, 0, 1}, {C, 0, 0}, {DIV, 0, 0}, {ST, 0, 0}, /* 30 bad */
+        {TL, 1, 0}, {CHR, 0, 0},                                                            /* 37 view chars */
+        {CUL, 2, 0}, {CC, 0, 0},                                                             /* 39 view offset */
+        {CUL, 2, 0}, {CC, 1, 0},                                                             /* 41 view line_no */
+        {CUL, 2, 0}, {TLN, 1, 0},                                                            /* 43 view line */
+        {TL, 3, 0}, {TK, 3, 0}, {CAT, 0, 0}, {TL, 1, 0}, {CHR, 0, 0}, {NT, 0, 0}, {CAT, 0, 0},
+        {TK, 4, 0}, {CAT, 0, 0},                                                            /* 45 view header */
+        {C, 0, 1}, {C, 0, 3}, {DIV, 0, 0}, {NT, 0, 0},                                      /* 54 view ratio */
+    };
+    static const H handlers[] = {{1, 0, 7}, {3, 7, 4}, {5, 11, 4}, {7, 15, 4}, {9, 19, 4}, {11, 23, 5},
+                                 {13, 28, 2}, {15, 30, 7}};
+    static const V number_views[] = {{"chars", 37, 2}, {"offset", 39, 2}, {"line_no", 41, 2}};
+    static const V text_views[] = {{"line", 43, 2}, {"header", 45, 9}, {"ratio", 54, 4}};
+    Spec spec = {nums, 1, inputs, LEN(inputs), number_views, 3, handlers, LEN(handlers), code, LEN(code),
+                 NULL, 0, textual, 3, constants, LEN(constants), text_views, 3};
+    text_spec = spec;
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80" "a\nbc") && app.values[2] == 0);
+    for (int i = 0; i < 6; ++i) CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(app.values[2] == 7);                               /* stops at the end */
+    CHECK(number_view(&app, 0) == 5 && number_view(&app, 2) == 2 && !strcmp(view_text(&app, 3), "bc"));
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 4);   /* up keeps column 2 */
+    const char *han = "\xed\x95\x9c";
+    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)han, 3}) == PURE_OK);
+    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80" "a\xed\x95\x9c\nbc") && app.values[2] == 7 && app.values[0] == 1);
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 4);   /* back over 3 bytes */
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 3);
+    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80\nbc"));
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);   /* stops at the start */
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);   /* nothing before */
+    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 4);   /* down to column 0 */
+    /* A failing event restores the text, the cursor and the states. */
+    CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
+    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80\nbc") && app.values[2] == 4 && app.values[0] == 1);
+    CHECK(!strcmp(view_text(&app, 4), "\xeb\xa9\x94\xeb\xaa\xa8 \xc2\xb7 4\xec\x9e\x90"));
+    CHECK(!strcmp(view_text(&app, 5), "0.3333333333333333"));
+    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xff", 1}) == PURE_INVALID);
+    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xed\xa0\x80", 3}) == PURE_INVALID); /* surrogate */
+    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xf0\x9f\x98\x80", 4}) == PURE_OK);
+    CHECK(app.values[2] == 8 && number_view(&app, 1) == 3);   /* offset in characters */
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 4);  /* back over the emoji */
+    CHECK(pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);
+    /* Replacement keeps the text and its cursor by name. */
+    static const S fresh[] = {{"fresh", 7}};
+    static const T kept[] = {{"note", 1, 0}, {"at", 2, 1}};
+    static const char *const other[] = {"ignored"};
+    Spec next = {fresh, 1, inputs, 0, number_views, 0, handlers, 0, code, 0, NULL, 0, kept, 2, other, 1, text_views, 0};
+    CHECK(load(next, &module_b) == PURE_OK);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 3);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
+    CHECK(app.values[0] == 7 && app.values[2] == 3 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\n\xf0\x9f\x98\x80" "bc"));
+    pure_app_stop(&app);
+
+    /* Verification of text operations. */
+    static const T two[] = {{"one", 1, 0}, {"two", 1, 0}, {"c", 2, 1}};
+    static const O wrong_text[] = {{CUL, 3, 0}, {TK, 0, 0}, {TINS, 2, 0}};
+    static const H frame[] = {{0, 0, 3}};
+    Spec bad = {nums, 1, inputs, 0, number_views, 0, frame, 1, wrong_text, 3, NULL, 0, two, 3, constants, 1, text_views, 0};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "cursor of another text"));
+    static const O input_in_frame[] = {{CUL, 3, 0}, {TI, 0, 0}, {TINS, 1, 0}};
+    bad.o = input_in_frame;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "text input outside"));
+    static const O store_text[] = {{TK, 0, 0}, {ST, 0, 0}};
+    static const H frame2[] = {{0, 0, 2}};
+    bad.o = store_text; bad.no = 2; bad.h = frame2;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
+    static const O load_text[] = {{L, 1, 0}, {ST, 0, 0}};
+    bad.o = load_text;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "no such state"));
+    static const V text_as_number[] = {{"v", 0, 1}};
+    static const O constant_only[] = {{TK, 0, 0}};
+    bad = (Spec){nums, 1, inputs, 0, text_as_number, 1, NULL, 0, constant_only, 1, NULL, 0, two, 3, constants, 1, NULL, 0};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view must leave one value of its type"));
+    static const T cursor_on_number[] = {{"c", 2, 0}};
+    bad = (Spec){nums, 1, inputs, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, cursor_on_number, 1, constants, 1, NULL, 0};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "state reference"));
+    static const char *const broken[] = {"\xc0\xaf"};
+    bad = (Spec){nums, 1, inputs, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, broken, 1, NULL, 0};
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "text constant"));
+}
+
+static bool ignore_span(void *context, PureSpan span) {
+    (void)context;
+    CHECK(pure_utf8_valid(span) || span.size);
+    return true;
+}
+
+/* Damaged text modules either fail to load or edit text safely: every cursor
+ * stays within its text and every text stays valid UTF-8. */
+static void text_mutations(void) {
+    static unsigned char valid[65536], bytes[65536];
+    size_t size = build(valid, text_spec);
+    static const char *const words[] = {"a", "\xea\xb0\x80", "\n", "\xf0\x9f\x98\x80", "xy\nz", ""};
+    uint32_t state = 0x1b873593u;
+    unsigned accepted = 0;
+    for (unsigned round = 0; round < 20000; ++round) {
+        memcpy(bytes, valid, size);
+        unsigned flips = 1 + next_random(&state) % 3;
+        for (unsigned f = 0; f < flips; ++f)
+            bytes[next_random(&state) % size] ^= (unsigned char)(1u << (next_random(&state) % 8));
+        if (pure_module_load(bytes, size, &module_b, error, sizeof(error)) != PURE_OK) continue;
+        ++accepted;
+        PureApp app;
+        if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
+        for (unsigned e = 0; e < 16; ++e) {
+            uint32_t input = next_random(&state) % 8;
+            if (module_b.input[input].kind == PURE_KIND_TEXT) {
+                const char *word = words[next_random(&state) % LEN(words)];
+                pure_app_text(&app, input, (PureSpan){(const unsigned char *)word, strlen(word)});
+            } else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
+            else pure_app_frame(&app);
+            for (uint32_t v = 0; v < module_b.views; ++v) {
+                double value;
+                if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_view_text(&app, v, ignore_span, NULL);
+                else pure_app_view(&app, v, &value);
+            }
+            for (uint32_t s = 0; s < module_b.states; ++s) {
+                if (module_b.state_type[s] == PURE_STATE_CURSOR) {
+                    PureDraft *text = app.texts[module_b.state_ref[s]];
+                    size_t length = pure_draft_size(text), at = (size_t)app.values[s];
+                    CHECK(app.values[s] >= 0 && at <= length && app.values[s] == (double)at);
+                    if (at < length) { /* never inside a multi-byte character */
+                        Text t = {{0}, 0};
+                        pure_draft_read(text, at, 1, text_span, &t);
+                        CHECK(((unsigned char)t.text[0] & 0xC0) != 0x80);
+                    }
+                } else if (module_b.state_type[s] == PURE_STATE_TEXT) {
+                    unsigned utf8 = 0;
+                    bool ok = true;
+                    Text t = {{0}, 0};
+                    if (pure_draft_size(app.texts[s]) < 200) {
+                        pure_draft_read(app.texts[s], 0, pure_draft_size(app.texts[s]), text_span, &t);
+                        ok = pure_utf8_step(&utf8, (PureSpan){(const unsigned char *)t.text, t.size}) &&
+                             pure_utf8_complete(utf8);
+                    }
+                    CHECK(ok);
+                } else CHECK(isfinite(app.values[s]));
+            }
+        }
+        pure_app_stop(&app);
+    }
+    printf("{\"text_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
 }
 
 int main(void) {
@@ -614,7 +838,9 @@ int main(void) {
     mutations();
     messages();
     message_mutations();
+    texts();
+    text_mutations();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace\"}");
     return 0;
 }

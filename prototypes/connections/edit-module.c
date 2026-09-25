@@ -157,7 +157,10 @@ int main(int argc, char **argv) {
         }
     }
     PureApp app;
-    pure_app_start(&app, &module, pure_tree_data(store_path));
+    if (pure_app_start(&app, &module, pure_tree_data(store_path)) != PURE_OK) {
+        free(payload);
+        fputs("allocation\n", stderr); return 2;
+    }
     PureResult status = pure_app_message(&app, (uint32_t)input, key, show ? -1 : (int64_t)expected,
                                          (PureSpan){payload, prefix + length});
     size_t reply = 0;
@@ -172,7 +175,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "{\"revision\":\"%" PRId64 "\",\"bytes\":%zu}\n", app.revision, reply);
     } else if (printf("{\"revision\":\"%" PRId64 "\",\"reply_bytes\":%zu}\n", app.revision, reply) < 0) exit_code = 2;
     if (fflush(stdout)) exit_code = 2;
-    pure_app_finish(&app);
+    pure_app_stop(&app);
     free(payload);
     return exit_code;
 usage:

@@ -7,15 +7,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Pure module format v2 (docs/design/008-module-format.md). A toolchain such
+/* Pure module format v3 (docs/design/008-module-format.md). A toolchain such
  * as aup produces it; Pure verifies it completely before anything executes:
- * operand types, stack heights, forward-only branches, names and effects.
- * Fixed capacity: loading and running allocate nothing except a copied reply. */
+ * operand types (including which text a cursor belongs to), stack heights,
+ * forward-only branches, names, constants and effects. */
 enum {
     PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 8, PURE_MODULE_VIEWS = 24,
     PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 512, PURE_MODULE_STACK = 64,
-    PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 32,
-    PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1
+    PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 40,
+    PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 64,
+    PURE_MODULE_CONSTANT_BYTES = 8192
 };
 
 typedef enum {
@@ -24,15 +25,24 @@ typedef enum {
     PURE_OP_EQ, PURE_OP_NE, PURE_OP_AND, PURE_OP_OR, PURE_OP_NOT, PURE_OP_MIN,
     PURE_OP_MAX, PURE_OP_CLAMP, PURE_OP_STORE, PURE_OP_JZ, PURE_OP_JMP,
     PURE_OP_FIELD, PURE_OP_DOC, PURE_OP_DOC_SIZE, PURE_OP_LEN, PURE_OP_REPLACE,
-    PURE_OP_REPLY, PURE_OP_REQUIRE, PURE_OP_COUNT
+    PURE_OP_REPLY, PURE_OP_REQUIRE,
+    PURE_OP_TEXT_CONST, PURE_OP_TEXT_LOAD, PURE_OP_TEXT_INPUT, PURE_OP_NUM_TEXT,
+    PURE_OP_CONCAT, PURE_OP_CHARS, PURE_OP_LINES, PURE_OP_TEXT_BYTES,
+    PURE_OP_CUR_LOAD, PURE_OP_CUR_START, PURE_OP_CUR_END, PURE_OP_CUR_MOVE,
+    PURE_OP_CUR_STORE, PURE_OP_TEXT_INSERT, PURE_OP_TEXT_REMOVE, PURE_OP_TEXT_LINE,
+    PURE_OP_TEXT_SET, PURE_OP_TEXT_FROM, PURE_OP_BYTES_FROM, PURE_OP_CUR_COUNT,
+    PURE_OP_COUNT
 } PureOpcode;
 
-typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2 } PureInputKind;
+typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3 } PureInputKind;
 typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2 } PureFieldType;
+typedef enum { PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2 } PureStateType;
+typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1 } PureViewType;
+typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
 typedef enum {
     PURE_FAULT_NONE, PURE_FAULT_DIVIDE, PURE_FAULT_NON_FINITE, PURE_FAULT_CLAMP,
-    PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND
+    PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING
 } PureFault;
 
 typedef struct { double value; uint32_t arg; uint8_t op; } PureOp;
@@ -47,19 +57,24 @@ typedef struct {
 } PureInputShape;
 
 typedef struct {
-    uint16_t states, inputs, views, handlers, fields, collections;
+    uint16_t states, inputs, views, handlers, fields, collections, constants;
     uint32_t code_count;
     char state_names[PURE_MODULE_STATES][PURE_MODULE_NAME];
     char input_names[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
     char view_names[PURE_MODULE_VIEWS][PURE_MODULE_NAME];
     char collection_names[PURE_MODULE_COLLECTIONS][PURE_MODULE_NAME];
     char input_keys[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
+    uint8_t state_type[PURE_MODULE_STATES];
+    uint16_t state_ref[PURE_MODULE_STATES]; /* text: initial constant; cursor: its text */
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
     double initial[PURE_MODULE_STATES];
+    uint8_t view_type[PURE_MODULE_VIEWS];
     PureBlock view_code[PURE_MODULE_VIEWS];
     PureHandler handler[PURE_MODULE_HANDLERS];
     PureOp code[PURE_MODULE_CODE];
+    uint32_t constant_offset[PURE_MODULE_CONSTANTS], constant_length[PURE_MODULE_CONSTANTS];
+    unsigned char constant_data[PURE_MODULE_CONSTANT_BYTES];
 } PureModule;
 
 /* Decode and verify. On failure out is unspecified and error names the rule. */
@@ -72,7 +87,8 @@ int pure_module_view(const PureModule *, const char *name);
 
 /* Keyed collections live in a data host (for example the tree store). One
  * event opens at most one document, the message's key, at its current
- * version; edits stay in that working version until the event commits it. */
+ * version; edits stay in that working version until the event commits it.
+ * A version's bytes field is the value's size. */
 typedef struct {
     void *context;
     PureResult (*open)(void *context, uint32_t collection, const char *key,
@@ -85,31 +101,38 @@ typedef struct {
     void (*close)(void *context, void *document);
 } PureData;
 
-/* A byte value: a range of the event's payload, of a document version, or of
- * a reply copied before commit. Internal to one event. */
-typedef struct { uint8_t source; PureVersion version; uint64_t offset, length; } PureBytes;
+/* A byte or text value inside one event or view: a range of the payload, a
+ * document or text version, a module constant, a copy or the event's arena. */
+typedef struct { uint8_t source; uint16_t owner; PureVersion version; uint64_t offset, length; } PureBytes;
+typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
 
-/* One app instance: state values of a module and at most one open event.
- * Every event is atomic: on failure states and documents are unchanged. */
+/* One app instance: its states and at most one open event. Text states are
+ * runtime-owned drafts; cursors are positions the runtime keeps on character
+ * boundaries. Every event is atomic: on failure nothing changes. */
 typedef struct {
     const PureModule *module;
     PureData data;
-    double values[PURE_MODULE_STATES];
+    double values[PURE_MODULE_STATES]; /* numbers, and cursor byte positions */
+    PureDraft *texts[PURE_MODULE_STATES];
     PureFault fault;
     uint32_t fault_pc;
     uint64_t ticks, events;
-    /* Current message event, kept until pure_app_finish. */
+    /* Current message or text event, kept until pure_app_finish. */
     void *document;
     PureSpan payload;
     bool has_reply;
     PureBytes reply;
     unsigned char *copied;
     int64_t revision;
+    PureArena arena, view_arena;
 } PureApp;
 
-void pure_app_start(PureApp *, const PureModule *, PureData data);
+PureResult pure_app_start(PureApp *, const PureModule *, PureData data);
+void pure_app_stop(PureApp *);
 PureResult pure_app_frame(PureApp *);
 PureResult pure_app_input(PureApp *, uint32_t input, PureEdge);
+/* Deliver committed text (for example from an input method). Not UTF-8: invalid. */
+PureResult pure_app_text(PureApp *, uint32_t input, PureSpan text);
 /* Deliver a message. base is the revision the sender edited, or -1 for none;
  * a handler that edits the document needs one. payload stays alive until
  * pure_app_finish. On return app->revision is the document's revision. */
@@ -117,8 +140,12 @@ PureResult pure_app_message(PureApp *, uint32_t input, const char *key, int64_t 
 /* Visit the reply of the last message in order, without copying. */
 PureResult pure_app_reply(const PureApp *, bool (*visit)(void *, PureSpan), void *context);
 void pure_app_finish(PureApp *);
-bool pure_app_view(const PureApp *, uint32_t view, double *out);
-/* Switch to another verified module. States keep their value by name; new
- * states start at their initial value. The module must outlive the app. */
-void pure_app_replace(PureApp *, const PureModule *);
+/* A number view; false for a text view or a failed evaluation. */
+bool pure_app_view(PureApp *, uint32_t view, double *out);
+/* A text view, lent in order until the next view evaluation. */
+PureResult pure_app_view_text(PureApp *, uint32_t view, bool (*visit)(void *, PureSpan), void *context);
+/* Switch to another verified module. States keep their value by name (text
+ * states keep their content, cursors their position in that text); new states
+ * start at their initial value. The module must outlive the app. */
+PureResult pure_app_replace(PureApp *, const PureModule *);
 #endif

@@ -116,15 +116,19 @@ $(BUILD)/test-splice: test-splice.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUI
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_STORE_TEST test-splice.c program.c $(CORE) $(HOST) $(LDFLAGS) $(LDLIBS) -o $@
 
 # Pure module format v1: loader/verifier/executor, its tests and a test host.
-$(BUILD)/test-module: test-module.c module.c module.h state.h result.h | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) test-module.c module.c $(LDFLAGS) -lm $(LDLIBS) -o $@
+# Text states are runtime-owned drafts, so the executor links the tree engine.
+MODULE = module.c module-text.c store-tree.c
+MODULE_HEADERS = module.h module-text.h $(HEADERS)
 
-$(BUILD)/pure-run: pure-run.c module.c module.h result.h | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) pure-run.c module.c $(LDFLAGS) -lm $(LDLIBS) -o $@
+$(BUILD)/test-module: test-module.c $(MODULE) $(MODULE_HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) test-module.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
+
+$(BUILD)/pure-run: pure-run.c $(MODULE) $(MODULE_HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) pure-run.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
 
 # The document CLI contract driven by a module on the tree store.
-$(BUILD)/pure-edit-module: edit-module.c module.c module-store.c store-tree.c module.h module-store.h $(HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) edit-module.c module.c module-store.c store-tree.c $(LDFLAGS) -lm $(LDLIBS) -o $@
+$(BUILD)/pure-edit-module: edit-module.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) edit-module.c module-store.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
 
 check-module: $(BUILD)/test-module $(BUILD)/pure-run $(BUILD)/pure-edit-module
 	$(BUILD)/test-module
