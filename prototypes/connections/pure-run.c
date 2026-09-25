@@ -8,7 +8,8 @@
  * JSON snapshot per command. Not a product interface.
  *   down NAME | up NAME | frame [N] | type NAME HEX|- | replace PATH | show
  * Text states and text views print as JSON strings; cursors as byte positions;
- * lists as arrays of objects; indices as positions. A failed view is null. */
+ * lists as arrays of objects; indices as positions; a table view as an array
+ * with an object of its columns per row. A failed view or cell is null. */
 static const char *const fault_names[] = {"none", "divide", "non_finite", "clamp", "limit", "not_found", "encoding"};
 
 static bool load(const char *path, PureModule *module) {
@@ -67,6 +68,27 @@ static void show_list(const PureModule *m, const PureList *list, const PureRecor
     putchar(']');
 }
 
+/* A number or text view, or a column at a row. */
+static void show_value(PureApp *app, uint32_t view, size_t row) {
+    const PureModule *m = app->module;
+    static Collected text;
+    text.used = 0;
+    text.fits = true;
+    double value;
+    bool column = m->view_table[view];
+    if (m->view_type[view] == PURE_VIEW_TEXT) {
+        PureResult result = column ? pure_app_cell_text(app, view, row, collect, &text)
+                                   : pure_app_view_text(app, view, collect, &text);
+        if (result != PURE_OK || !text.fits) printf("null");
+        else {
+            putchar('"');
+            json_span(NULL, (PureSpan){text.bytes, text.used});
+            putchar('"');
+        }
+    } else if (column ? pure_app_cell(app, view, row, &value) : pure_app_view(app, view, &value)) printf("%.17g", value);
+    else printf("null");
+}
+
 static void show(PureApp *app, const char *failure) {
     const PureModule *m = app->module;
     printf("{\"states\":{");
@@ -80,21 +102,23 @@ static void show(PureApp *app, const char *failure) {
         else printf("%.17g", app->values[i]);
     }
     printf("},\"views\":{");
+    bool first = true;
     for (uint32_t i = 0; i < m->views; ++i) {
-        printf("%s\"%s\":", i ? "," : "", m->view_names[i]);
-        double value;
-        static Collected text;
-        text.used = 0;
-        text.fits = true;
-        if (m->view_type[i] == PURE_VIEW_TEXT) {
-            if (pure_app_view_text(app, i, collect, &text) != PURE_OK || !text.fits) printf("null");
-            else {
-                putchar('"');
-                json_span(NULL, (PureSpan){text.bytes, text.used});
-                putchar('"');
+        if (m->view_table[i]) continue;
+        printf("%s\"%s\":", first ? "" : ",", m->view_names[i]);
+        first = false;
+        if (m->view_type[i] != PURE_VIEW_TABLE) { show_value(app, i, 0); continue; }
+        putchar('[');
+        for (size_t row = 0; row < pure_app_rows(app, i); ++row) {
+            printf("%s{", row ? "," : "");
+            for (uint32_t c = 0, shown = 0; c < m->views; ++c) {
+                if (m->view_table[c] != i + 1) continue;
+                printf("%s\"%s\":", shown++ ? "," : "", m->view_names[c]);
+                show_value(app, c, row);
             }
-        } else if (pure_app_view(app, i, &value)) printf("%.17g", value);
-        else printf("null");
+            putchar('}');
+        }
+        putchar(']');
     }
     printf("},\"tick\":%llu,\"successfulEvents\":%llu,\"fault\":\"%s\",\"error\":%s%s%s}\n",
            (unsigned long long)app->ticks, (unsigned long long)app->events, fault_names[app->fault],

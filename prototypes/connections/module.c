@@ -12,9 +12,9 @@ enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 
 enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7 };
 enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA };
 /* Where an opcode may appear. */
-enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16 };
+enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32 };
 enum { READ = IN_VIEW | IN_HANDLER };
-static const unsigned char magic[8] = {'P','U','R','E','M','O','D','4'};
+static const unsigned char magic[8] = {'P','U','R','E','M','O','D','5'};
 
 /* Operand types popped (bottom to top), the type pushed, and where allowed. */
 static const struct { unsigned char pops, in[3], out, where; } signature[PURE_OP_COUNT] = {
@@ -39,8 +39,8 @@ static const struct { unsigned char pops, in[3], out, where; } signature[PURE_OP
     [PURE_OP_MAX] = {2, {T_NUM, T_NUM}, T_NUM, READ},
     [PURE_OP_CLAMP] = {3, {T_NUM, T_NUM, T_NUM}, T_NUM, READ},
     [PURE_OP_STORE] = {1, {T_NUM}, 0, IN_HANDLER},
-    [PURE_OP_JZ] = {1, {T_NUM}, 0, IN_HANDLER},
-    [PURE_OP_JMP] = {0, {0}, 0, IN_HANDLER},
+    [PURE_OP_JZ] = {1, {T_NUM}, 0, READ},
+    [PURE_OP_JMP] = {0, {0}, 0, READ},
     [PURE_OP_FIELD] = {0, {0}, T_FIELD, IN_MESSAGE},
     [PURE_OP_DOC] = {0, {0}, T_BYTES, IN_KEYED},
     [PURE_OP_DOC_SIZE] = {0, {0}, T_NUM, IN_KEYED},
@@ -81,6 +81,7 @@ static const struct { unsigned char pops, in[3], out, where; } signature[PURE_OP
     [PURE_OP_INDEX_FIRST] = {0, {0}, T_INDEX, READ},
     [PURE_OP_INDEX_LAST] = {0, {0}, T_INDEX, READ},
     [PURE_OP_INDEX_NUM] = {1, {T_INDEX}, T_NUM, READ},
+    [PURE_OP_ROW] = {0, {0}, T_INDEX, IN_ROW},
 };
 
 static uint32_t read16(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
@@ -151,7 +152,7 @@ static bool uses_arg(uint8_t op) {
     case PURE_OP_TEXT_LINE: case PURE_OP_TEXT_SET: case PURE_OP_CUR_COUNT: case PURE_OP_LIST_COUNT:
     case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: case PURE_OP_ITEM_GET:
     case PURE_OP_ITEM_SET: case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: case PURE_OP_INDEX_FIRST:
-    case PURE_OP_INDEX_LAST:
+    case PURE_OP_INDEX_LAST: case PURE_OP_ROW:
         return true;
     default: return false;
     }
@@ -170,35 +171,62 @@ static unsigned char field_type(const PureModule *m, uint32_t list, uint32_t fie
     return m->record_field_text[m->record[m->state_ref[list]].first + field] ? T_TEXT : T_NUM;
 }
 
+/* The stack a branch brings to its target, while the target is ahead. */
+typedef struct { uint32_t target; int height; unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK]; } Join;
+
+static bool same_stack(const Join *join, int height, const unsigned char *types, const unsigned char *owners) {
+    return join->height == height && !memcmp(join->types, types, (size_t)height) &&
+           !memcmp(join->owners, owners, (size_t)height);
+}
+
 /* Types and heights are checked per instruction; a cursor's type records
  * which text it belongs to and an index's type which list. Branches go
- * forward within the block and every join happens with an empty operand
- * stack, so control flow never merges typed values. Handlers end empty,
- * views with one value of their type. */
-static bool verify_block(const PureModule *m, PureBlock block, int view, uint32_t event,
+ * forward within the block. Every path into a join brings the same stack
+ * (types and owners), so a value may cross a join, as in a conditional
+ * expression; at most 8 joins with a non-empty stack are ahead at once.
+ * Handlers end empty, views with one value of their type. A column (row
+ * is its list) may read the row it is evaluated for. */
+static bool verify_block(const PureModule *m, PureBlock block, int view, int row, uint32_t event,
                          char *error, size_t size, unsigned index) {
     if (block.start > m->code_count || block.length > m->code_count - block.start)
         return reject(error, size, "code range outside module", index);
     if (view >= 0 && !block.length) return reject(error, size, "empty view", index);
     int input = view >= 0 ? -1 : event_input(event);
     const PureInputShape *shape = input >= 0 ? &m->input[input] : NULL;
-    unsigned where = view >= 0 ? IN_VIEW : IN_HANDLER;
+    unsigned where = view >= 0 ? IN_VIEW | (row >= 0 ? IN_ROW : 0) : IN_HANDLER;
     if (shape && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE | (shape->keyed ? IN_KEYED : 0);
     if (shape && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
     unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK], target[PURE_MODULE_CODE + 1] = {0};
+    Join joins[PURE_MODULE_JOINS];
+    unsigned open = 0;
     int height = 0;
     bool reachable = true;
     for (uint32_t i = 0; i <= block.length; ++i) {
         uint32_t pc = block.start + i;
-        if (!reachable && target[i]) { reachable = true; height = 0; }
-        else if (target[i] && height) return reject(error, size, "join with a non-empty stack", pc);
+        /* Branches here brought an empty stack (target) or the stack of a join. */
+        unsigned join = open;
+        for (unsigned k = 0; k < open; ++k) if (joins[k].target == pc) join = k;
+        if (join < open) {
+            if (target[i] || (reachable && !same_stack(&joins[join], height, types, owners)))
+                return reject(error, size, "join with different stacks", pc);
+            height = joins[join].height;
+            memcpy(types, joins[join].types, (size_t)height);
+            memcpy(owners, joins[join].owners, (size_t)height);
+            joins[join] = joins[--open];
+            reachable = true;
+        } else if (target[i]) {
+            if (reachable && height) return reject(error, size, "join with different stacks", pc);
+            height = 0;
+            reachable = true;
+        }
         if (i == block.length) break;
         if (!reachable) return reject(error, size, "unreachable instruction", pc);
         const PureOp *op = &m->code[pc];
         if (op->op >= PURE_OP_COUNT) return reject(error, size, "unknown opcode", pc);
         unsigned allowed = signature[op->op].where;
         if (!(allowed & where)) {
-            if (view >= 0) return reject(error, size, "view with an effect or branch", pc);
+            if (allowed & IN_ROW) return reject(error, size, "row outside a column", pc);
+            if (view >= 0) return reject(error, size, "view with an effect", pc);
             if (allowed & IN_KEYED) return reject(error, size, "document operation outside a keyed message handler", pc);
             if (allowed & IN_TEXT) return reject(error, size, "text input outside a text handler", pc);
             return reject(error, size, "message operation outside a message handler", pc);
@@ -228,6 +256,7 @@ static bool verify_block(const PureModule *m, PureBlock block, int view, uint32_
                     item_field(arg) < m->record[m->state_ref[list_of(arg)]].count;
             break;
         case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: known = state_of(m, arg, PURE_STATE_INDEX); break;
+        case PURE_OP_ROW: known = (int)arg == row; break;
         default: break;
         }
         if (!known) return reject(error, size, "operand names no such state, field, constant or unit", pc);
@@ -275,7 +304,7 @@ static bool verify_block(const PureModule *m, PureBlock block, int view, uint32_
             if (height == PURE_MODULE_STACK) return reject(error, size, "stack overflow", pc);
             owners[height] = (unsigned char)(op->op == PURE_OP_CUR_LOAD || op->op == PURE_OP_INDEX_LOAD ? m->state_ref[arg] :
                               op->op == PURE_OP_CUR_START || op->op == PURE_OP_CUR_END ||
-                              op->op == PURE_OP_INDEX_FIRST || op->op == PURE_OP_INDEX_LAST ? arg :
+                              op->op == PURE_OP_INDEX_FIRST || op->op == PURE_OP_INDEX_LAST || op->op == PURE_OP_ROW ? arg :
                               op->op == PURE_OP_INDEX_MOVE ? index_owner :
                               owner >= 0 ? (unsigned)owner : 0);
             types[height++] = out;
@@ -283,8 +312,20 @@ static bool verify_block(const PureModule *m, PureBlock block, int view, uint32_
         if (op->op == PURE_OP_JZ || op->op == PURE_OP_JMP) {
             if (arg <= pc || arg > block.start + block.length)
                 return reject(error, size, "branch not forward within its block", pc);
-            if (height) return reject(error, size, "branch with a non-empty stack", pc);
-            target[arg - block.start] = 1;
+            unsigned join = open;
+            for (unsigned k = 0; k < open; ++k) if (joins[k].target == arg) join = k;
+            if (!height) {
+                if (join < open) return reject(error, size, "join with different stacks", pc);
+                target[arg - block.start] = 1;
+            } else if (join < open) {
+                if (!same_stack(&joins[join], height, types, owners)) return reject(error, size, "join with different stacks", pc);
+            } else {
+                if (target[arg - block.start]) return reject(error, size, "join with different stacks", pc);
+                if (open == PURE_MODULE_JOINS) return reject(error, size, "more than 8 joins ahead", pc);
+                joins[open] = (Join){.target = arg, .height = height};
+                memcpy(joins[open].types, types, (size_t)height);
+                memcpy(joins[open++].owners, owners, (size_t)height);
+            }
             if (op->op == PURE_OP_JMP) reachable = false;
         }
     }
@@ -446,12 +487,22 @@ PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
             (out->state_type[i] == PURE_STATE_LIST && out->state_ref[i] >= out->records) ||
             (out->state_type[i] == PURE_STATE_INDEX && !state_of(out, out->state_ref[i], PURE_STATE_LIST)))
             return reject(error, error_size, "state reference", i), PURE_INVALID;
+    /* A table names its list in place of code; its columns follow it. */
     for (uint32_t i = 0; i < out->views; ++i, at += VIEW_BYTES) {
         if (!name_at(text, strings, read32(at), true, out->view_names[i]))
             return reject(error, error_size, "view name", i), PURE_INVALID;
-        if (read32(at + 4) > PURE_VIEW_TEXT) return reject(error, error_size, "view type", i), PURE_INVALID;
-        out->view_type[i] = (uint8_t)read32(at + 4);
+        out->view_type[i] = at[4];
+        out->view_table[i] = (uint16_t)read16(at + 6);
         out->view_code[i] = (PureBlock){read32(at + 8), read32(at + 12)};
+        uint32_t table = out->view_table[i];
+        if (at[4] > PURE_VIEW_TABLE || at[5] || (table && (table > i || out->view_type[table - 1] != PURE_VIEW_TABLE ||
+                                                           at[4] == PURE_VIEW_TABLE)))
+            return reject(error, error_size, "view type", i), PURE_INVALID;
+        if (at[4] == PURE_VIEW_TABLE) {
+            if (!state_of(out, out->view_code[i].start, PURE_STATE_LIST) || out->view_code[i].length)
+                return reject(error, error_size, "table list", i), PURE_INVALID;
+            out->view_list[i] = (uint16_t)out->view_code[i].start;
+        } else if (table) out->view_list[i] = out->view_list[table - 1];
     }
     for (uint32_t i = 0; i < out->handlers; ++i, at += HANDLER_BYTES) {
         uint32_t event = read32(at);
@@ -472,14 +523,22 @@ PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
     for (uint32_t i = 0; i < out->records; ++i) names[count++] = out->record_names[i];
     for (uint32_t i = 0; i < out->collections; ++i) names[count++] = out->collection_names[i];
     for (uint32_t i = 0; i < out->inputs; ++i) names[count++] = out->input_names[i];
-    for (uint32_t i = 0; i < out->views; ++i) names[count++] = out->view_names[i];
+    for (uint32_t i = 0; i < out->views; ++i) if (!out->view_table[i]) names[count++] = out->view_names[i];
     for (size_t i = 0; i < count; ++i)
         for (size_t k = 0; k < i; ++k)
             if (!strcmp(names[i], names[k])) return reject(error, error_size, "duplicate name", (unsigned)i), PURE_INVALID;
+    /* Column names are unique within their table. */
     for (uint32_t i = 0; i < out->views; ++i)
-        if (!verify_block(out, out->view_code[i], out->view_type[i], 0, error, error_size, i)) return PURE_INVALID;
+        for (uint32_t k = 0; k < i; ++k)
+            if (out->view_table[i] && out->view_table[k] == out->view_table[i] &&
+                !strcmp(out->view_names[i], out->view_names[k]))
+                return reject(error, error_size, "duplicate column", i), PURE_INVALID;
+    for (uint32_t i = 0; i < out->views; ++i)
+        if (out->view_type[i] != PURE_VIEW_TABLE &&
+            !verify_block(out, out->view_code[i], out->view_type[i], out->view_table[i] ? out->view_list[i] : -1, 0,
+                          error, error_size, i)) return PURE_INVALID;
     for (uint32_t i = 0; i < out->handlers; ++i)
-        if (!verify_block(out, out->handler[i].code, -1, out->handler[i].event, error, error_size, i))
+        if (!verify_block(out, out->handler[i].code, -1, -1, out->handler[i].event, error, error_size, i))
             return PURE_INVALID;
     return PURE_OK;
 }
@@ -492,7 +551,17 @@ static int find(const char (*names)[PURE_MODULE_NAME], unsigned count, const cha
 
 int pure_module_state(const PureModule *m, const char *name) { return find(m->state_names, m->states, name); }
 int pure_module_input(const PureModule *m, const char *name) { return find(m->input_names, m->inputs, name); }
-int pure_module_view(const PureModule *m, const char *name) { return find(m->view_names, m->views, name); }
+int pure_module_view(const PureModule *m, const char *name) {
+    for (uint32_t i = 0; i < m->views; ++i)
+        if (!m->view_table[i] && !strcmp(m->view_names[i], name)) return (int)i;
+    return -1;
+}
+
+int pure_module_column(const PureModule *m, uint32_t table, const char *name) {
+    for (uint32_t i = 0; i < m->views; ++i)
+        if (m->view_table[i] == table + 1 && !strcmp(m->view_names[i], name)) return (int)i;
+    return -1;
+}
 
 /* ---- Execution ------------------------------------------------------ */
 
@@ -506,6 +575,7 @@ typedef struct {
     const PureInputShape *shape; /* message, or NULL */
     PureArena *arena;
     double dt;
+    size_t row; /* the row a column is evaluated for */
     bool modified, exists;
 } Event;
 
@@ -917,6 +987,11 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             continue;
         }
         case PURE_OP_INDEX_NUM: ++pc; continue; /* the position itself */
+        case PURE_OP_ROW:
+            stack[sp].num = (double)ev->row;
+            stack[sp++].bytes.owner = (uint16_t)op->arg;
+            ++pc;
+            continue;
         default: break;
         }
         b = stack[--sp].num;
@@ -1133,11 +1208,11 @@ PureResult pure_app_reply(const PureApp *app, bool (*visit)(void *, PureSpan), v
 }
 
 /* A view that fails reports it by its result; the fault stays the last event's. */
-static PureResult evaluate(PureApp *app, uint32_t view, Slot *out) {
+static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     double values[PURE_MODULE_STATES];
     memcpy(values, app->values, sizeof(values));
     app->view_arena.used = 0;
-    Event ev = {.app = app, .arena = &app->view_arena};
+    Event ev = {.app = app, .arena = &app->view_arena, .row = row};
     PureFault fault = app->fault;
     uint32_t fault_pc = app->fault_pc;
     PureResult result = run(app->module, values, app->module->view_code[view], &ev, out);
@@ -1146,18 +1221,43 @@ static PureResult evaluate(PureApp *app, uint32_t view, Slot *out) {
     return result;
 }
 
+/* A view outside a table (column false), or a column and a row of its table. */
+static PureResult view_of(PureApp *app, uint32_t view, bool column, size_t row, uint8_t type, Slot *slot) {
+    const PureModule *m = app->module;
+    if (view >= m->views || m->view_type[view] != type || (m->view_table[view] != 0) != column) return PURE_INVALID;
+    if (column && row >= pure_list_count(app->lists[m->view_list[view]])) return PURE_NOT_FOUND;
+    return evaluate(app, view, row, slot);
+}
+
 bool pure_app_view(PureApp *app, uint32_t view, double *out) {
-    if (view >= app->module->views || app->module->view_type[view] != PURE_VIEW_NUM) return false;
     Slot slot;
-    if (evaluate(app, view, &slot) != PURE_OK) return false;
+    if (view_of(app, view, false, 0, PURE_VIEW_NUM, &slot) != PURE_OK) return false;
     *out = slot.num;
     return true;
 }
 
 PureResult pure_app_view_text(PureApp *app, uint32_t view, bool (*visit)(void *, PureSpan), void *context) {
-    if (view >= app->module->views || app->module->view_type[view] != PURE_VIEW_TEXT) return PURE_INVALID;
     Slot slot;
-    PureResult result = evaluate(app, view, &slot);
+    PureResult result = view_of(app, view, false, 0, PURE_VIEW_TEXT, &slot);
+    return result == PURE_OK ? visit_value(app, &app->view_arena, slot.bytes, visit, context) : result;
+}
+
+size_t pure_app_rows(const PureApp *app, uint32_t table) {
+    const PureModule *m = app->module;
+    if (table >= m->views || m->view_type[table] != PURE_VIEW_TABLE) return 0;
+    return pure_list_count(app->lists[m->view_list[table]]);
+}
+
+bool pure_app_cell(PureApp *app, uint32_t column, size_t row, double *out) {
+    Slot slot;
+    if (view_of(app, column, true, row, PURE_VIEW_NUM, &slot) != PURE_OK) return false;
+    *out = slot.num;
+    return true;
+}
+
+PureResult pure_app_cell_text(PureApp *app, uint32_t column, size_t row, bool (*visit)(void *, PureSpan), void *context) {
+    Slot slot;
+    PureResult result = view_of(app, column, true, row, PURE_VIEW_TEXT, &slot);
     return result == PURE_OK ? visit_value(app, &app->view_arena, slot.bytes, visit, context) : result;
 }
 

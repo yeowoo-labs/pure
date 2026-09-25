@@ -8,18 +8,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Pure module format v4 (docs/design/008-module-format.md). A toolchain such
+/* Pure module format v5 (docs/design/008-module-format.md). A toolchain such
  * as aup produces it; Pure verifies it completely before anything executes:
  * operand types (including which text a cursor and which list an index
- * belongs to), stack heights, forward-only branches, names, records,
- * constants and effects. */
+ * belongs to), stack heights and the stack at every join, forward-only
+ * branches, names, records, tables, constants and effects. */
 enum {
-    PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 24,
+    PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 64,
     PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 512, PURE_MODULE_STACK = 64,
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 40,
     PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 64,
     PURE_MODULE_CONSTANT_BYTES = 8192, PURE_MODULE_RECORDS = 8, PURE_MODULE_RECORD_FIELDS = 64,
-    PURE_RECORD_FIELDS = 16
+    PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8
 };
 
 typedef enum {
@@ -36,7 +36,7 @@ typedef enum {
     PURE_OP_TEXT_SET, PURE_OP_TEXT_FROM, PURE_OP_BYTES_FROM, PURE_OP_CUR_COUNT,
     PURE_OP_LIST_COUNT, PURE_OP_LIST_APPEND, PURE_OP_LIST_INSERT, PURE_OP_LIST_REMOVE,
     PURE_OP_ITEM_GET, PURE_OP_ITEM_SET, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE,
-    PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM,
+    PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_ROW,
     PURE_OP_COUNT
 } PureOpcode;
 
@@ -45,7 +45,9 @@ typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2 } PureFieldType;
 typedef enum {
     PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4
 } PureStateType;
-typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1 } PureViewType;
+/* A table view has one row per item of a list; its columns are number or
+ * text views evaluated for one row at a time. */
+typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2 } PureViewType;
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
 typedef enum {
@@ -81,6 +83,8 @@ typedef struct {
     PureField field[PURE_MODULE_FIELDS];
     double initial[PURE_MODULE_STATES];
     uint8_t view_type[PURE_MODULE_VIEWS];
+    uint16_t view_table[PURE_MODULE_VIEWS]; /* a column's table view + 1, or 0 */
+    uint16_t view_list[PURE_MODULE_VIEWS];  /* the list of a table or column */
     PureBlock view_code[PURE_MODULE_VIEWS];
     PureHandler handler[PURE_MODULE_HANDLERS];
     PureOp code[PURE_MODULE_CODE];
@@ -96,10 +100,11 @@ typedef struct {
 /* Decode and verify. On failure out is unspecified and error names the rule. */
 PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
                             char *error, size_t error_size);
-/* Index of a name, or -1. */
+/* Index of a name, or -1. Views are those outside tables. */
 int pure_module_state(const PureModule *, const char *name);
 int pure_module_input(const PureModule *, const char *name);
 int pure_module_view(const PureModule *, const char *name);
+int pure_module_column(const PureModule *, uint32_t table, const char *name);
 
 /* Keyed collections live in a data host (for example the tree store). One
  * event opens at most one document, the message's key, at its current
@@ -163,6 +168,11 @@ void pure_app_finish(PureApp *);
 bool pure_app_view(PureApp *, uint32_t view, double *out);
 /* A text view, lent in order until the next view evaluation. */
 PureResult pure_app_view_text(PureApp *, uint32_t view, bool (*visit)(void *, PureSpan), void *context);
+/* The rows of a table view (its list's items), or 0 for another view. A
+ * host evaluates only the cells it shows. */
+size_t pure_app_rows(const PureApp *, uint32_t table);
+bool pure_app_cell(PureApp *, uint32_t column, size_t row, double *out);
+PureResult pure_app_cell_text(PureApp *, uint32_t column, size_t row, bool (*visit)(void *, PureSpan), void *context);
 /* Switch to another verified module. States keep their value by name (text
  * states keep their content, cursors their position in that text); new states
  * start at their initial value. The module must outlive the app. */
