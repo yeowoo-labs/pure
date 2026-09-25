@@ -117,14 +117,14 @@ $(BUILD)/test-splice: test-splice.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUI
 
 # Pure modules: loader/verifier/executor, its tests and a test host.
 # Text states are runtime-owned drafts, so the executor links the tree engine.
-MODULE = module.c module-list.c module-text.c store-tree.c
-MODULE_HEADERS = module.h module-list.h module-text.h $(HEADERS)
+MODULE = module.c module-list.c module-save.c module-text.c store-tree.c
+MODULE_HEADERS = module.h module-list.h module-save.h module-text.h $(HEADERS)
 
-$(BUILD)/test-module: test-module.c $(MODULE) $(MODULE_HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) test-module.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
+$(BUILD)/test-module: test-module.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-module.c module-store.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
 
-$(BUILD)/pure-run: pure-run.c $(MODULE) $(MODULE_HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) pure-run.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
+$(BUILD)/pure-run: pure-run.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) pure-run.c module-store.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
 
 # The document CLI contract driven by a module on the tree store.
 $(BUILD)/pure-edit-module: edit-module.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)

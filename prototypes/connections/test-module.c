@@ -1,11 +1,26 @@
+#define _POSIX_C_SOURCE 200809L
 #include "module.h"
+#include "module-store.h"
 #include "module-text.h"
+#include "store.h"
+#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); abort(); } } while (0)
+
+/* Store faults: a stage fails (or the process dies there when crash is set). */
+static int fail_stage = -1;
+static int crash;
+int pure_store_test_fault(PureStoreStage stage) {
+    if ((int)stage != fail_stage) return 0;
+    if (crash) _exit(77);
+    return 1;
+}
 
 typedef struct { const char *name; double initial; } S;
 typedef struct { const char *name; uint32_t type; } F;
@@ -477,7 +492,7 @@ static void fake_close(void *context, void *document) {
 }
 
 static PureData fake_data(Memory *m) {
-    return (PureData){m, fake_open, fake_version, fake_read, fake_splice, fake_commit, fake_close};
+    return (PureData){m, fake_open, fake_version, fake_read, fake_splice, fake_commit, fake_close, NULL, NULL};
 }
 
 typedef struct { unsigned char bytes[256]; size_t size, spans; } Collected;
@@ -1262,6 +1277,303 @@ static void table_mutations(void) {
     printf("{\"table_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
 }
 
+/* ---- Stored states ---------------------------------------------------- */
+
+static char *new_store(void) {
+    static char path[64];
+    snprintf(path, sizeof(path), "/tmp/pure-module-store-XXXXXX");
+    CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
+    return path;
+}
+
+static void remove_store(const char *path) {
+    DIR *entries = opendir(path);
+    CHECK(entries);
+    struct dirent *entry;
+    while ((entry = readdir(entries)))
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) CHECK(unlinkat(dirfd(entries), entry->d_name, 0) == 0);
+    CHECK(closedir(entries) == 0 && rmdir(path) == 0);
+}
+
+typedef struct { unsigned char bytes[4096]; size_t size; } Bytes;
+
+static bool bytes_span(void *context, PureSpan span) {
+    Bytes *b = context;
+    CHECK(b->size + span.size <= sizeof(b->bytes));
+    memcpy(b->bytes + b->size, span.data, span.size);
+    b->size += span.size;
+    return true;
+}
+
+/* Two apps of one module hold equal states: numbers bit for bit, texts and
+ * list items byte for byte. */
+static void same_states(const PureApp *a, const PureApp *b) {
+    const PureModule *m = a->module;
+    for (uint32_t i = 0; i < m->states; ++i) {
+        if (m->state_type[i] == PURE_STATE_TEXT) {
+            static Bytes x, y;
+            x.size = y.size = 0;
+            CHECK(pure_draft_read(a->texts[i], 0, pure_draft_size(a->texts[i]), bytes_span, &x) == PURE_OK);
+            CHECK(pure_draft_read(b->texts[i], 0, pure_draft_size(b->texts[i]), bytes_span, &y) == PURE_OK);
+            CHECK(x.size == y.size && !memcmp(x.bytes, y.bytes, x.size));
+        } else if (m->state_type[i] == PURE_STATE_LIST) {
+            const PureRecord *r = &m->record[m->state_ref[i]];
+            CHECK(pure_list_count(a->lists[i]) == pure_list_count(b->lists[i]));
+            for (size_t at = 0; at < pure_list_count(a->lists[i]); ++at)
+                for (unsigned f = 0; f < r->count; ++f) {
+                    PureCell x = pure_list_get(a->lists[i], at, f), y = pure_list_get(b->lists[i], at, f);
+                    CHECK(!memcmp(&x.num, &y.num, sizeof(x.num)) && x.size == y.size && (!x.size || !memcmp(x.text, y.text, x.size)));
+                }
+        } else CHECK(!memcmp(&a->values[i], &b->values[i], sizeof(double)));
+    }
+}
+
+/* The same random events on an app in memory and on one whose states are
+ * stored and which restarts from them every few events: equal after every
+ * step, failed events included. */
+static void stored_equivalence(Spec spec, const char *const *words, size_t word_count, uint32_t seed) {
+    char *path = new_store();
+    CHECK(load(spec, &module_a) == PURE_OK);
+    PureApp memory, stored;
+    CHECK(pure_app_start(&memory, &module_a, (PureData){0}) == PURE_OK);
+    CHECK(pure_app_start(&stored, &module_a, pure_tree_data(path)) == PURE_OK);
+    unsigned restarts = 0;
+    for (unsigned step = 0; step < 400; ++step) {
+        uint32_t input = next_random(&seed) % module_a.inputs;
+        PureResult a, b;
+        if (module_a.input[input].kind == PURE_KIND_TEXT) {
+            const char *word = words[next_random(&seed) % word_count];
+            PureSpan text = {(const unsigned char *)word, strlen(word)};
+            a = pure_app_text(&memory, input, text);
+            b = pure_app_text(&stored, input, text);
+        } else {
+            a = pure_app_input(&memory, input, PURE_EDGE_DOWN);
+            b = pure_app_input(&stored, input, PURE_EDGE_DOWN);
+        }
+        CHECK(a == b);
+        same_states(&memory, &stored);
+        if (next_random(&seed) % 7 == 0) {
+            pure_app_stop(&stored);
+            CHECK(pure_app_start(&stored, &module_a, pure_tree_data(path)) == PURE_OK);
+            same_states(&memory, &stored);
+            ++restarts;
+        }
+    }
+    CHECK(restarts > 20);
+    pure_app_stop(&memory);
+    pure_app_stop(&stored);
+    remove_store(path);
+}
+
+/* One event changes a number, a text and a list; the process dies at each
+ * commit stage. Starting again finds all three as before or all as after. */
+enum { NOTE = 1, TASKS = 3 };
+static const S crash_nums[] = {{"n", 0}};
+static const T crash_states[] = {{"note", 1, 0}, {"at", 2, 1}, {"tasks", 3, 0}, {"i", 4, 3}};
+static const RF crash_fields[] = {{"title", 1, 0}, {"done", 0, 0}};
+static const R crash_records[] = {{"task", crash_fields, 2}};
+static const char *const crash_constants[] = {"", "x"};
+static const I crash_inputs[] = {KEY("go", "KeyG")};
+static const O crash_code[] = {
+    {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},              /* n = n + 1 */
+    {CUL, 2, 0}, {TK, 1, 0}, {TINS, 1, 0},                      /* note.insert(at, "x") */
+    {TK, 1, 0}, {L, 0, 0}, {LA, 3, 0},                          /* tasks.append(task { "x", n }) */
+    {XE, 3, 0}, {XS, 4, 0},                                     /* i = tasks.last */
+};
+static const H crash_handlers[] = {{1, 0, 12}};
+
+static unsigned consistent(const PureApp *app) {
+    unsigned n = (unsigned)app->values[0];
+    CHECK(app->values[0] == n && pure_draft_size(app->texts[NOTE]) == n && app->values[2] == n);
+    CHECK(pure_list_count(app->lists[TASKS]) == n && app->values[4] == (n ? n - 1 : 0));
+    for (unsigned k = 0; k < n; ++k) CHECK(pure_list_get(app->lists[TASKS], k, 1).num == k + 1);
+    return n;
+}
+
+static void stored_crashes(void) {
+    char *path = new_store();
+    Spec spec = {crash_nums, 1, crash_inputs, 1, NULL, 0, crash_handlers, 1, crash_code, LEN(crash_code), NULL, 0,
+                 crash_states, 4, crash_constants, 2, NULL, 0, crash_records, 1, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && consistent(&app) == 1);
+    pure_app_stop(&app);
+    unsigned expected = 1;
+    for (int stage = PURE_AFTER_HEADER; stage <= PURE_BEFORE_DIR_SYNC; ++stage) {
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (!child) {
+            PureApp doomed;
+            if (pure_app_start(&doomed, &module_a, pure_tree_data(path)) != PURE_OK) _exit(1);
+            crash = 1;
+            fail_stage = stage;
+            pure_app_input(&doomed, 0, PURE_EDGE_DOWN);
+            _exit(0);
+        }
+        int status;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 77);
+        if (stage == PURE_BEFORE_DIR_SYNC) ++expected; /* the head was written */
+        CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected);
+        pure_app_stop(&app);
+    }
+    /* A failed commit leaves the app and the store as they were; after an
+     * uncertain one the app no longer matches the store and its events fail
+     * until it starts again, from what the store has. */
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    for (fail_stage = PURE_AFTER_HEADER; fail_stage <= PURE_BEFORE_RENAME; ++fail_stage) {
+        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_STORE_ERROR && consistent(&app) == expected);
+    }
+    fail_stage = PURE_BEFORE_DIR_SYNC;
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_UNCERTAIN && consistent(&app) == expected);
+    fail_stage = -1;
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_CONFLICT && consistent(&app) == expected);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected + 1);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && consistent(&app) == expected + 2);
+    pure_app_stop(&app);
+    remove_store(path);
+}
+
+/* Frame changes are stored by the next event or by a save; a stop alone
+ * leaves them out. */
+static void stored_frames(void) {
+    char *path = new_store();
+    static const O code[] = {{L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}};
+    static const H handlers[] = {{0, 0, 4}, {1, 0, 0}};
+    Spec spec = {crash_nums, 1, crash_inputs, 1, NULL, 0, handlers, 2, code, 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
+                 NULL, 0, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    for (int i = 0; i < 5; ++i) CHECK(pure_app_frame(&app) == PURE_OK);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 0);
+    for (int i = 0; i < 3; ++i) CHECK(pure_app_frame(&app) == PURE_OK);
+    CHECK(pure_app_save(&app) == PURE_OK);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 3);
+    for (int i = 0; i < 2; ++i) CHECK(pure_app_frame(&app) == PURE_OK);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 5);
+    pure_app_stop(&app);
+    remove_store(path);
+}
+
+static bool list_keys(void *context, const char *key) {
+    strcat(context, key);
+    strcat(context, ",");
+    return true;
+}
+
+/* A message's document and the states its handlers change commit together. */
+static void stored_messages(void) {
+    char *path = new_store();
+    CHECK(load(editor_spec, &module_a) == PURE_OK);
+    PureApp app;
+    unsigned char buffer[64];
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 0, 0, "hello")) == PURE_OK && app.revision == 1);
+    CHECK(app.values[0] == 1);
+    CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 0, 0, "x")) == PURE_CONFLICT && app.values[0] == 1);
+    /* An edit past the size guard fails: neither the document nor the count moves. */
+    CHECK(pure_app_message(&app, 3, "doc", 1, edit_payload(buffer, 5, 0, "-world")) == PURE_LIMIT && app.values[0] == 1);
+    CHECK(pure_app_message(&app, 3, "doc", 1, edit_payload(buffer, 5, 0, "!")) == PURE_OK && app.values[0] == 2);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 2);
+    CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_OK && app.revision == 2 && replied(&app, "hello!"));
+    pure_app_stop(&app);
+    /* Documents stay documents: the app's states are not among the keys. */
+    char seen[256] = "";
+    CHECK(pure_store_keys(path, list_keys, seen) == PURE_OK && !strcmp(seen, "doc,"));
+    remove_store(path);
+}
+
+/* A stored list whose record changed keeps each field by name, when the app
+ * starts from it and when its module is replaced; stored values that no
+ * longer fit fall back, and damaged stored values stop the start. */
+static void stored_migration(void) {
+    char *path = new_store();
+    static const RF changed_fields[] = {{"done", 0, 0}, {"note", 1, 1}, {"title", 1, 0}, {"rank", 0, 5}};
+    static const R changed[] = {{"task", changed_fields, 4}};
+    Spec before = {crash_nums, 1, crash_inputs, 1, NULL, 0, crash_handlers, 1, crash_code, LEN(crash_code), NULL, 0,
+                   crash_states, 4, crash_constants, 2, NULL, 0, crash_records, 1, NULL, 0};
+    Spec after = before;
+    after.r = changed;
+    after.h = NULL;
+    after.nh = 0;
+    CHECK(load(before, &module_a) == PURE_OK && load(after, &module_b) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    pure_app_stop(&app);
+    for (int round = 0; round < 2; ++round) { /* migrated, then stored as migrated */
+        CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && pure_list_count(app.lists[TASKS]) == 2);
+        PureCell note = pure_list_get(app.lists[TASKS], 1, 1), title = pure_list_get(app.lists[TASKS], 1, 2);
+        CHECK(pure_list_get(app.lists[TASKS], 1, 0).num == 2 && pure_list_get(app.lists[TASKS], 1, 3).num == 5);
+        CHECK(note.size == 1 && note.text[0] == 'x' && title.size == 1 && title.text[0] == 'x');
+        CHECK(app.values[0] == 2 && app.values[4] == 1 && pure_draft_size(app.texts[NOTE]) == 2);
+        pure_app_stop(&app);
+    }
+    /* Back to the first record by replacing the module; the next save stores it. */
+    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == 3);
+    pure_app_stop(&app);
+    /* Stored numbers that no longer fit their state start again. */
+    PureDraft *values;
+    int64_t revision;
+    CHECK(pure_state_open(path, "values", &values) == PURE_OK);
+    unsigned char record[64] = "PVS1";
+    size_t at = 4;
+    const char *names[] = {"at", "i", "n"};
+    double stored[] = {100, 7.5, 9};
+    uint8_t types[] = {PURE_STATE_CURSOR, PURE_STATE_INDEX, PURE_STATE_NUM};
+    for (unsigned k = 0; k < 3; ++k) {
+        record[at++] = types[k];
+        record[at++] = (unsigned char)strlen(names[k]);
+        memcpy(record + at, names[k], strlen(names[k]));
+        at += strlen(names[k]);
+        uint64_t bits;
+        memcpy(&bits, &stored[k], sizeof(bits));
+        for (unsigned b = 0; b < 8; ++b) record[at++] = (unsigned char)(bits >> (8 * b));
+    }
+    CHECK(pure_draft_splice(values, 0, pure_draft_size(values), (PureSpan){record, at}) == PURE_OK);
+    CHECK(pure_draft_commit(values, &revision) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(app.values[0] == 9 && app.values[2] == 0 && app.values[4] == 0);
+    pure_app_stop(&app);
+    /* Damaged stored lists and texts are refused, not replaced. */
+    const char *damaged[] = {"list-tasks", "text-note"};
+    for (unsigned k = 0; k < 2; ++k) {
+        PureDraft *draft;
+        CHECK(pure_state_open(path, damaged[k], &draft) == PURE_OK);
+        CHECK(pure_draft_splice(draft, 0, 0, (PureSpan){(const unsigned char *)"\xff", 1}) == PURE_OK);
+        CHECK(pure_draft_commit(draft, &revision) == PURE_OK);
+        CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_STORE_ERROR);
+        CHECK(pure_draft_splice(draft, 0, 1, (PureSpan){0}) == PURE_OK && pure_draft_commit(draft, &revision) == PURE_OK);
+        pure_draft_close(draft);
+    }
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_list_count(app.lists[TASKS]) == 3 && pure_draft_size(app.texts[NOTE]) == 3 && app.values[0] == 9);
+    pure_app_stop(&app);
+    pure_draft_close(values);
+    remove_store(path);
+}
+
+static void stored_states(void) {
+    static const char *const list_words[] = {"a", "\xea\xb0\x80", "", "\n", "\xf0\x9f\x98\x80"};
+    static const char *const text_words[] = {"a", "\xea\xb0\x80", "\n", "\xf0\x9f\x98\x80", "xy\nz", ""};
+    stored_equivalence(list_spec, list_words, LEN(list_words), 0x9e3779b9u);
+    stored_equivalence(text_spec, text_words, LEN(text_words), 0x7f4a7c15u);
+    stored_crashes();
+    stored_frames();
+    stored_messages();
+    stored_migration();
+}
+
 int main(void) {
     behaviour();
     faults();
@@ -1275,7 +1587,8 @@ int main(void) {
     list_mutations();
     tables();
     table_mutations();
+    stored_states();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration\"}");
     return 0;
 }

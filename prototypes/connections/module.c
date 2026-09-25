@@ -1,4 +1,5 @@
 #include "module.h"
+#include "module-save.h"
 #include "module-text.h"
 #include <math.h>
 #include <stdio.h>
@@ -1056,14 +1057,27 @@ static PureList *new_list(const PureModule *m, uint32_t record) {
 PureResult pure_app_start(PureApp *app, const PureModule *module, PureData data) {
     *app = (PureApp){.module = module, .data = data, .fault_pc = UINT32_MAX};
     memcpy(app->values, module->initial, sizeof(double) * module->states);
-    for (uint32_t i = 0; i < module->states; ++i) {
-        PureResult result = PURE_OK;
-        if (module->state_type[i] == PURE_STATE_TEXT) result = new_text(&app->texts[i], module, module->state_ref[i]);
-        if (module->state_type[i] == PURE_STATE_LIST && !(app->lists[i] = new_list(module, module->state_ref[i])))
-            result = PURE_ALLOCATION;
-        if (result != PURE_OK) { pure_app_stop(app); return result; }
+    bool kept = pure_save_enabled(app);
+    PureResult result = PURE_OK;
+    for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i) {
+        if (module->state_type[i] == PURE_STATE_TEXT)
+            result = kept ? pure_save_open_text(app, module, i, &app->texts[i], &app->saved[i]) :
+                     new_text(&app->texts[i], module, module->state_ref[i]);
+        if (module->state_type[i] == PURE_STATE_LIST) {
+            if (kept) result = pure_save_open_list(app, module, i, &app->lists[i], &app->list_drafts[i], &app->saved[i]);
+            else if (!(app->lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
+        }
     }
-    return PURE_OK;
+    /* Stored numbers, cursors and indices apply once their texts and lists are in. */
+    if (result == PURE_OK && kept) result = pure_save_open_values(app, module, app->values, true);
+    if (result == PURE_OK) result = pure_app_save(app);
+    if (result != PURE_OK) pure_app_stop(app);
+    return result;
+}
+
+PureResult pure_app_save(PureApp *app) {
+    int64_t revision;
+    return pure_save_commit(app, app->values, NULL, &revision);
 }
 
 void pure_app_finish(PureApp *app) {
@@ -1081,33 +1095,45 @@ void pure_app_stop(PureApp *app) {
     for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
         pure_draft_close(app->texts[i]);
         pure_list_free(app->lists[i]);
+        pure_draft_close(app->list_drafts[i]);
     }
+    pure_draft_close(app->stored_values);
     pure_undo_free(&app->undo);
     free(app->arena.bytes);
     free(app->view_arena.bytes);
     memset(app, 0, sizeof(*app));
 }
 
-/* Every text draft is held for the event; on failure each returns to the
- * version it had when the event began. */
-typedef struct { PureVersion before[PURE_MODULE_STATES]; } Texts;
+/* Every text draft and stored list draft is held for the event; on failure
+ * each returns to the version it had when the event began. */
+typedef struct { PureVersion before[PURE_MODULE_STATES], lists[PURE_MODULE_STATES]; } Texts;
 
 static void hold_texts(PureApp *app, Texts *texts) {
-    for (uint32_t i = 0; i < app->module->states; ++i)
+    for (uint32_t i = 0; i < app->module->states; ++i) {
         if (app->texts[i]) {
             pure_draft_hold(app->texts[i], true);
             texts->before[i] = pure_draft_version(app->texts[i]);
         }
+        if (app->list_drafts[i]) {
+            pure_draft_hold(app->list_drafts[i], true);
+            texts->lists[i] = pure_draft_version(app->list_drafts[i]);
+        }
+    }
 }
 
-/* Texts return to their versions and lists undo their log, or both keep
- * what the event did. */
+/* Texts and stored lists return to their versions and lists undo their log,
+ * or all keep what the event did. */
 static void settle(PureApp *app, const Texts *texts, bool keep) {
-    for (uint32_t i = 0; i < app->module->states; ++i)
+    for (uint32_t i = 0; i < app->module->states; ++i) {
         if (app->texts[i]) {
             if (!keep) pure_draft_restore(app->texts[i], texts->before[i]);
             pure_draft_hold(app->texts[i], false);
         }
+        if (app->list_drafts[i]) {
+            if (!keep) pure_draft_restore(app->list_drafts[i], texts->lists[i]);
+            pure_draft_hold(app->list_drafts[i], false);
+        }
+    }
     if (keep) pure_undo_commit(&app->undo);
     else pure_undo_rollback(&app->undo);
 }
@@ -1126,11 +1152,15 @@ static PureResult run_handlers(PureApp *app, uint32_t event, Event *ev, double *
     return PURE_OK;
 }
 
+/* A key or text event stores what it changed before it counts; a frame
+ * leaves that to the next event (frames come 60 times a second). */
 static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     double pending[PURE_MODULE_STATES];
     Texts texts;
     hold_texts(app, &texts);
     PureResult result = run_handlers(app, event, ev, pending);
+    int64_t revision;
+    if (result == PURE_OK && event) result = pure_save_commit(app, pending, NULL, &revision);
     settle(app, &texts, result == PURE_OK);
     if (result == PURE_OK) {
         memcpy(app->values, pending, sizeof(pending));
@@ -1208,8 +1238,8 @@ PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64
     if (result == PURE_OK && app->has_reply &&
         ((app->reply.source == FROM_DOCUMENT && ev.modified) || app->reply.source == FROM_TEXT))
         result = keep_reply(app);
-    if (result == PURE_OK && ev.modified)
-        result = app->data.commit(app->data.context, app->document, &app->revision);
+    if (result == PURE_OK)
+        result = pure_save_commit(app, pending, ev.modified ? app->document : NULL, &app->revision);
     /* States, texts and lists change only with a successful commit (or no document edit). */
     settle(app, &texts, result == PURE_OK);
     if (result == PURE_OK) {
@@ -1278,21 +1308,18 @@ PureResult pure_app_cell_text(PureApp *app, uint32_t column, size_t row, bool (*
     return result == PURE_OK ? visit_value(app, &app->view_arena, slot.bytes, visit, context) : result;
 }
 
-/* A kept list keeps its items. When its record changed, each field takes the
- * old field of the same name and kind, or its default. */
-static PureResult keep_list(PureList **out, PureList *from, const PureModule *old, uint32_t old_record,
-                            const PureModule *m, uint32_t record) {
-    const PureRecord *r = &m->record[record], *o = &old->record[old_record];
+/* A list with record's fields: each takes the field of `from` with the same
+ * name and kind, or its default. */
+PureResult pure_list_migrate(PureList **out, const PureList *from, const char *const *names,
+                             const uint8_t *text, unsigned count, const PureModule *m, uint32_t record) {
+    const PureRecord *r = &m->record[record];
     int source[PURE_RECORD_FIELDS];
-    bool same = r->count == o->count;
     for (unsigned f = 0; f < r->count; ++f) {
         source[f] = -1;
-        for (unsigned k = 0; k < o->count; ++k)
-            if (!strcmp(m->record_field_names[r->first + f], old->record_field_names[o->first + k]) &&
-                m->record_field_text[r->first + f] == old->record_field_text[o->first + k]) source[f] = (int)k;
-        same = same && source[f] == (int)f;
+        for (unsigned k = 0; k < count; ++k)
+            if (!strcmp(m->record_field_names[r->first + f], names[k]) && m->record_field_text[r->first + f] == text[k])
+                source[f] = (int)k;
     }
-    if (same) { *out = from; return PURE_OK; }
     if (!(*out = new_list(m, record))) return PURE_ALLOCATION;
     PureResult result = PURE_OK;
     for (size_t at = 0; result == PURE_OK && at < pure_list_count(from); ++at) {
@@ -1311,26 +1338,55 @@ static PureResult keep_list(PureList **out, PureList *from, const PureModule *ol
     return result;
 }
 
+/* A kept list keeps its items; with the same record it is the same list. */
+static PureResult keep_list(PureList **out, PureList *from, const PureModule *old, uint32_t old_record,
+                            const PureModule *m, uint32_t record) {
+    const PureRecord *r = &m->record[record], *o = &old->record[old_record];
+    const char *names[PURE_RECORD_FIELDS];
+    bool same = r->count == o->count;
+    for (unsigned k = 0; k < o->count; ++k) {
+        names[k] = old->record_field_names[o->first + k];
+        same = same && !strcmp(names[k], m->record_field_names[r->first + k]) &&
+               old->record_field_text[o->first + k] == m->record_field_text[r->first + k];
+    }
+    if (same) { *out = from; return PURE_OK; }
+    return pure_list_migrate(out, from, names, old->record_field_text + o->first, o->count, m, record);
+}
+
+/* States keep their values by name and kind. With stored states, a state new
+ * to this app starts from its stored value, a list whose record changed is
+ * stored again, and the next event or save publishes the new module's states;
+ * a state the new module drops stays stored as it was. */
 PureResult pure_app_replace(PureApp *app, const PureModule *module) {
     pure_app_finish(app);
     const PureModule *old = app->module;
+    bool stored = pure_save_enabled(app);
     double values[PURE_MODULE_STATES] = {0};
-    PureDraft *texts[PURE_MODULE_STATES] = {0};
+    PureDraft *texts[PURE_MODULE_STATES] = {0}, *list_drafts[PURE_MODULE_STATES] = {0};
     PureList *lists[PURE_MODULE_STATES] = {0};
+    PureVersion saved[PURE_MODULE_STATES] = {{0, 0}}, before[PURE_MODULE_STATES] = {{0, 0}};
     int kept[PURE_MODULE_STATES];
+    bool rewrite[PURE_MODULE_STATES] = {false};
     PureResult result = PURE_OK;
     for (uint32_t i = 0; i < module->states; ++i) {
         int previous = pure_module_state(old, module->state_names[i]);
         kept[i] = previous >= 0 && old->state_type[previous] == module->state_type[i] ? previous : -1;
+        if (kept[i] >= 0) saved[i] = app->saved[kept[i]];
         if (module->state_type[i] == PURE_STATE_TEXT) {
             if (kept[i] >= 0) texts[i] = app->texts[kept[i]];
-            else if (result == PURE_OK) result = new_text(&texts[i], module, module->state_ref[i]);
+            else if (result == PURE_OK)
+                result = stored ? pure_save_open_text(app, module, i, &texts[i], &saved[i]) :
+                         new_text(&texts[i], module, module->state_ref[i]);
         } else if (module->state_type[i] == PURE_STATE_LIST) {
             if (result != PURE_OK) continue;
-            if (kept[i] >= 0)
+            if (kept[i] >= 0) {
                 result = keep_list(&lists[i], app->lists[kept[i]], old, old->state_ref[kept[i]], module,
                                    module->state_ref[i]);
-            else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
+                list_drafts[i] = app->list_drafts[kept[i]];
+                rewrite[i] = result == PURE_OK && list_drafts[i] && lists[i] != app->lists[kept[i]];
+            } else if (stored) {
+                result = pure_save_open_list(app, module, i, &lists[i], &list_drafts[i], &saved[i]);
+            } else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
         } else values[i] = kept[i] >= 0 ? app->values[kept[i]] : module->initial[i];
     }
     /* A cursor or index keeps its position only while its text or list is the
@@ -1341,25 +1397,50 @@ PureResult pure_app_replace(PureApp *app, const PureModule *module) {
         bool same = kept[i] >= 0 && kept[owner] >= 0 && old->state_ref[kept[i]] == (unsigned)kept[owner];
         values[i] = same ? app->values[kept[i]] : 0;
     }
+    if (result == PURE_OK && stored) result = pure_save_open_values(app, module, values, false);
+    /* Store the lists whose record changed last, so that a failure can put
+     * every draft back as it was. */
+    for (uint32_t i = 0; i < module->states; ++i)
+        if (rewrite[i]) {
+            before[i] = pure_draft_version(list_drafts[i]);
+            pure_draft_hold(list_drafts[i], true);
+        }
+    for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i)
+        if (rewrite[i]) result = pure_save_rewrite_list(module, i, lists[i], list_drafts[i]);
+    for (uint32_t i = 0; i < module->states; ++i)
+        if (rewrite[i]) {
+            if (result != PURE_OK) pure_draft_restore(list_drafts[i], before[i]);
+            pure_draft_hold(list_drafts[i], false);
+        }
     if (result != PURE_OK) {
         for (uint32_t i = 0; i < module->states; ++i) {
-            if (texts[i] && kept[i] < 0) pure_draft_close(texts[i]);
-            if (lists[i] && (kept[i] < 0 || lists[i] != app->lists[kept[i]])) pure_list_free(lists[i]);
+            if (kept[i] >= 0) {
+                if (lists[i] && lists[i] != app->lists[kept[i]]) pure_list_free(lists[i]);
+                continue;
+            }
+            pure_draft_close(texts[i]);
+            pure_list_free(lists[i]);
+            pure_draft_close(list_drafts[i]);
         }
         return result;
     }
     for (uint32_t i = 0; i < old->states; ++i) {
-        bool reused = false;
-        for (uint32_t k = 0; k < module->states; ++k)
+        bool reused = false, draft_reused = false;
+        for (uint32_t k = 0; k < module->states; ++k) {
             reused = reused || (texts[k] && texts[k] == app->texts[i]) || (lists[k] && lists[k] == app->lists[i]);
+            draft_reused = draft_reused || (list_drafts[k] && list_drafts[k] == app->list_drafts[i]);
+        }
         if (!reused) {
             pure_draft_close(app->texts[i]);
             pure_list_free(app->lists[i]);
         }
+        if (!draft_reused) pure_draft_close(app->list_drafts[i]);
     }
     memcpy(app->values, values, sizeof(values));
     memcpy(app->texts, texts, sizeof(texts));
     memcpy(app->lists, lists, sizeof(lists));
+    memcpy(app->list_drafts, list_drafts, sizeof(list_drafts));
+    memcpy(app->saved, saved, sizeof(saved));
     app->module = module;
     return PURE_OK;
 }

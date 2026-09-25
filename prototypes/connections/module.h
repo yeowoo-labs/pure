@@ -121,6 +121,12 @@ typedef struct {
     PureResult (*splice)(void *context, void *document, size_t offset, size_t remove, PureSpan insert);
     PureResult (*commit)(void *context, void *document, int64_t *revision);
     void (*close)(void *context, void *document);
+    /* Optional: the host keeps the app's states. state opens a runtime-owned
+     * value by name as a draft (a missing one is empty at revision 0); save
+     * publishes the given state drafts together with document (or NULL),
+     * all or nothing, and names the document's new revision. */
+    PureResult (*state)(void *context, const char *name, PureDraft **out);
+    PureResult (*save)(void *context, void *document, PureDraft *const *states, size_t count, int64_t *revision);
 } PureData;
 
 /* A byte or text value inside one event or view: a range of the payload, a
@@ -131,7 +137,11 @@ typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
 /* One app instance: its states and at most one open event. Text states are
  * runtime-owned drafts; cursors are positions the runtime keeps on character
  * boundaries; lists are runtime-owned and an index always names an item
- * (or 0 in an empty list). Every event is atomic: on failure nothing changes. */
+ * (or 0 in an empty list). Every event is atomic: on failure nothing changes.
+ * When the data host keeps states, the app starts from the stored ones and
+ * every key, text and message event stores what it changed with its own
+ * commit (with the message's document); frame events are stored with the
+ * next one, or by pure_app_save. */
 typedef struct {
     const PureModule *module;
     PureData data;
@@ -139,6 +149,9 @@ typedef struct {
     PureDraft *texts[PURE_MODULE_STATES];
     PureList *lists[PURE_MODULE_STATES];
     PureUndo undo; /* list changes of the current event */
+    PureDraft *list_drafts[PURE_MODULE_STATES]; /* stored lists, when kept */
+    PureDraft *stored_values;                   /* numbers, cursors and indices, when kept */
+    PureVersion saved[PURE_MODULE_STATES];      /* text and list versions at the last save */
     PureFault fault;
     uint32_t fault_pc;
     uint64_t ticks, events;
@@ -153,6 +166,9 @@ typedef struct {
 } PureApp;
 
 PureResult pure_app_start(PureApp *, const PureModule *, PureData data);
+/* Store every state changed since the last save (after frame events). */
+PureResult pure_app_save(PureApp *);
+/* Leaves unsaved frame changes unsaved: call pure_app_save first to keep them. */
 void pure_app_stop(PureApp *);
 PureResult pure_app_frame(PureApp *);
 PureResult pure_app_input(PureApp *, uint32_t input, PureEdge);

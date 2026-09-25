@@ -1,12 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
-#include "module.h"
+#include "module-store.h"
+#include "store.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* Test host for a verified module: reads commands from stdin and prints one
- * JSON snapshot per command. Not a product interface.
- *   down NAME | up NAME | frame [N] | type NAME HEX|- | replace PATH | show
+ * JSON snapshot per command. Not a product interface. With --store the app's
+ * states live in that tree store: it starts from them, and frame changes are
+ * saved at the end of input or by save.
+ *   down NAME | up NAME | frame [N] | type NAME HEX|- | replace PATH | save | show
  * Text states and text views print as JSON strings; cursors as byte positions;
  * lists as arrays of objects; indices as positions; a table view as an array
  * with an object of its columns per row. A failed view or cell is null. */
@@ -131,13 +134,16 @@ static int hex(char c) {
 
 int main(int argc, char **argv) {
     static PureModule modules[2];
-    if (argc != 2 || !load(argv[1], &modules[0])) {
-        if (argc != 2) fputs("pure-run MODULE < commands\n", stderr);
+    bool stored = argc == 4 && !strcmp(argv[2], "--store");
+    if ((argc != 2 && !stored) || !load(argv[1], &modules[0])) {
+        if (argc != 2 && !stored) fputs("pure-run MODULE [--store PATH] < commands\n", stderr);
         return 2;
     }
+    if (stored && pure_store_init(argv[3]) != PURE_OK) { fprintf(stderr, "cannot open store %s\n", argv[3]); return 2; }
     unsigned active = 0;
     PureApp app;
-    if (pure_app_start(&app, &modules[active], (PureData){0}) != PURE_OK) { fputs("cannot start\n", stderr); return 2; }
+    PureResult started = pure_app_start(&app, &modules[active], stored ? pure_tree_data(argv[3]) : (PureData){0});
+    if (started != PURE_OK) { fprintf(stderr, "cannot start (%d)\n", (int)started); return 2; }
     static char line[1 << 16];
     static unsigned char text[1 << 15];
     int status = 0;
@@ -167,10 +173,13 @@ int main(int argc, char **argv) {
             if (!load(argument, &modules[!active])) failure = "invalid module";
             else if (pure_app_replace(&app, &modules[!active]) != PURE_OK) failure = "replace failed";
             else active = !active;
+        } else if (!strcmp(command, "save")) {
+            if (pure_app_save(&app) != PURE_OK) failure = "save failed";
         } else if (strcmp(command, "show")) failure = "unknown command";
         if (failure) status = 1;
         show(&app, failure);
     }
+    if (pure_app_save(&app) != PURE_OK) { fputs("cannot save\n", stderr); status = 1; }
     pure_app_stop(&app);
     return status;
 }
