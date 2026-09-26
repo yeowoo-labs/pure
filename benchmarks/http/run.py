@@ -70,8 +70,8 @@ def main():
     servers = {
         'pure-program': lambda d: [PURE / 'build/tree/pure-connections', '--program', PURE / 'examples/editor.pure',
                                    '--store', d, '--port', '0', '--budget', str(args.budget)],
-        'pure-module': lambda d: [PURE / 'build/pure-connections-module', '--module', args.module, '--store', d,
-                                  '--port', '0', '--budget', str(args.budget)],
+        'pure-serve': lambda d: [PURE / 'build/pure-serve', '--module', args.module, '--store', d, '--port', '0',
+                                 '--budget', str(args.budget)],
         'axum-memory': lambda d: [axum, '--port', '0'],
         'axum-durable': lambda d: [axum, '--port', '0', '--durable', d],
         'axum-atomic': lambda d: [axum, '--port', '0', '--atomic', d],
