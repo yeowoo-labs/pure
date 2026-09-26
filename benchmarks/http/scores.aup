@@ -1,0 +1,22 @@
+# The scoreboard of the app benchmarks (run.py --suite app), which the axum
+# and drogon baselines write by hand: pure-serve serves its views and inputs,
+# with no routes, handlers or storage code written.
+record Entry {
+  name: text
+  points = 0
+}
+state board: list of Entry by name
+input score = message {
+  points: u32
+  name: bytes
+}
+on score {
+  if !board.has(text(score.name)) { board.add(Entry { name: text(score.name) }) }
+  board[text(score.name)].points = board[text(score.name)].points + score.points
+  reply score.name
+}
+view total = sum(e.points for e in board)
+view leaders = each e in board {
+  name = e.name
+  points = e.points
+}

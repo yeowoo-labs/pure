@@ -3,6 +3,12 @@
 // If-Match / If-None-Match: *, a PUT body of u32le start, u32le remove, then
 // the bytes to insert; the reply is the inserted bytes; ETag is the revision.
 //
+// The scoreboard app of the app benchmarks (see axum-baseline): POST
+// /inputs/score?points=N adds N to the name in the body, GET /views/total and
+// GET /views/leaders?from=F&count=C read it. Durable (either flag), each score
+// is appended to DIR/scores.log and fdatasynced before the answer, blocking
+// the handler's loop as the document handlers do; the log is replayed at start.
+//
 // drogon-baseline --port P [--durable DIR | --atomic DIR]
 // --durable writes the document and fdatasyncs before answering (not crash
 // safe); --atomic writes key.tmp, fsyncs it, renames it over the key and
@@ -17,6 +23,7 @@
 #include <unistd.h>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -122,6 +129,94 @@ static HttpResponsePtr edit(const HttpRequestPtr &request, const std::string &ke
     return tagged(k200OK, doc->revision, "none", std::string(insert));
 }
 
+static std::mutex board_lock;
+static std::map<std::string, uint64_t> board; /* points by name, in name (byte) order */
+static int board_log = -1;
+
+/* Replay the log up to its last whole record, and keep it open for appending. */
+static void open_board() {
+    if (durable.empty()) return;
+    board_log = open((durable + "/scores.log").c_str(), O_RDWR | O_CREAT, 0644);
+    std::string bytes;
+    char chunk[65536];
+    for (ssize_t n; (n = read(board_log, chunk, sizeof(chunk))) > 0;) bytes.append(chunk, (size_t)n);
+    size_t at = 0;
+    while (at + 4 <= bytes.size()) {
+        uint32_t length, points;
+        memcpy(&length, bytes.data() + at, 4);
+        if (at + 8 + length > bytes.size()) break;
+        memcpy(&points, bytes.data() + at + 4 + length, 4);
+        board[bytes.substr(at + 4, length)] += points;
+        at += 8 + length;
+    }
+    if (ftruncate(board_log, (off_t)at) || lseek(board_log, 0, SEEK_END) < 0) abort();
+}
+
+static HttpResponsePtr score(const HttpRequestPtr &request) {
+    const std::string &given = request->getParameter("points");
+    char *end = nullptr;
+    unsigned long points = strtoul(given.c_str(), &end, 10);
+    std::string name(request->body());
+    if (given.empty() || !end || *end || points > UINT32_MAX) return tagged(k400BadRequest, 0, "request", "");
+    std::lock_guard<std::mutex> guard(board_lock);
+    if (board_log >= 0) {
+        uint32_t length = (uint32_t)name.size(), added = (uint32_t)points;
+        std::string record(reinterpret_cast<const char *>(&length), 4);
+        record += name;
+        record.append(reinterpret_cast<const char *>(&added), 4);
+        if (!write_all(board_log, record) || fdatasync(board_log)) return tagged(k500InternalServerError, 0, "storage", "");
+    }
+    board[name] += points;
+    return tagged(k200OK, 0, "none", std::move(name));
+}
+
+static HttpResponsePtr text(std::string body, ContentType type) {
+    auto response = HttpResponse::newHttpResponse();
+    response->setContentTypeCode(type);
+    response->addHeader("X-Pure-Error", "none");
+    response->setBody(std::move(body));
+    return response;
+}
+
+static HttpResponsePtr total() {
+    std::lock_guard<std::mutex> guard(board_lock);
+    uint64_t sum = 0;
+    for (auto &entry : board) sum += entry.second;
+    return text(std::to_string(sum), CT_TEXT_PLAIN);
+}
+
+static void json_text(std::string &out, const std::string &text) {
+    out += '"';
+    for (unsigned char c : text) {
+        if (c == '"' || c == '\\') out += '\\', out += (char)c;
+        else if (c < 0x20) {
+            char escape[8];
+            snprintf(escape, sizeof(escape), "\\u%04x", c);
+            out += escape;
+        } else out += (char)c;
+    }
+    out += '"';
+}
+
+static HttpResponsePtr leaders(const HttpRequestPtr &request) {
+    const std::string &from_text = request->getParameter("from"), &count_text = request->getParameter("count");
+    size_t from = from_text.empty() ? 0 : strtoull(from_text.c_str(), nullptr, 10);
+    size_t count = count_text.empty() ? SIZE_MAX : strtoull(count_text.c_str(), nullptr, 10);
+    std::lock_guard<std::mutex> guard(board_lock);
+    size_t rows = board.size();
+    if (from > rows) from = rows;
+    std::string out = "{\"rows\":" + std::to_string(rows) + ",\"from\":" + std::to_string(from) + ",\"items\":[";
+    auto entry = board.begin();
+    std::advance(entry, from);
+    for (size_t i = 0; entry != board.end() && i < count; ++entry, ++i) {
+        out += i ? ",{\"name\":" : "{\"name\":";
+        json_text(out, entry->first);
+        out += ",\"points\":" + std::to_string(entry->second) + "}";
+    }
+    out += "]}";
+    return text(std::move(out), CT_APPLICATION_JSON);
+}
+
 /* drogon listens once per event loop (SO_REUSEPORT): port 0 would give each
  * loop a port of its own, so a free port is chosen first. */
 static uint16_t free_port() {
@@ -150,6 +245,23 @@ int main(int argc, char **argv) {
         }
     }
     if (!durable.empty()) mkdir(durable.c_str(), 0755);
+    open_board();
+    app().registerHandler(
+        "/inputs/score",
+        [](const HttpRequestPtr &request, std::function<void(const HttpResponsePtr &)> &&callback) {
+            callback(score(request));
+        },
+        {Post});
+    app().registerHandler(
+        "/views/total",
+        [](const HttpRequestPtr &, std::function<void(const HttpResponsePtr &)> &&callback) { callback(total()); },
+        {Get});
+    app().registerHandler(
+        "/views/leaders",
+        [](const HttpRequestPtr &request, std::function<void(const HttpResponsePtr &)> &&callback) {
+            callback(leaders(request));
+        },
+        {Get});
     app().registerHandler(
         "/objects/{key}",
         [](const HttpRequestPtr &request, std::function<void(const HttpResponsePtr &)> &&callback,

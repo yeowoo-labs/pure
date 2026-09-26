@@ -2,11 +2,14 @@
 /* HTTP/1.1 load for Pure's benchmarks: N connections on one epoll thread,
  * each sending one request at a time and measuring its latency.
  *
- * load PORT CONNECTIONS SECONDS get|put KEYS [keep-alive|close] [BODY]
+ * load PORT CONNECTIONS SECONDS get|put|score|total|page KEYS [keep-alive|close] [BODY]
  * get: GET /objects/kI for I in [0, KEYS).
  * put: connection C edits its own key kC (C mod KEYS), inserting BODY bytes
  *      at 0 with If-Match on the revision it last saw (If-None-Match: * at
  *      first); a 412 takes the revision from the ETag and tries again.
+ * The scoreboard app: score posts a point for kC (POST /inputs/score?points=1,
+ * the name as the body), total reads GET /views/total and page GET
+ * /views/leaders?from=0&count=20.
  * Prints one JSON line: requests/s, statuses, latency percentiles (µs). */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -64,12 +67,26 @@ static uint64_t percentile(uint64_t total, double p) {
 }
 
 static int port, connections_count, keys;
+static enum { GET, PUT, SCORE, TOTAL, PAGE } method;
 static bool put, keep_alive;
 static char *body;
 static size_t body_bytes;
 static int epoll_fd;
 
 static void prepare(Connection *c) {
+    const char *closing = keep_alive ? "" : "Connection: close\r\n";
+    if (method >= SCORE) {
+        char name[16];
+        int length = snprintf(name, sizeof(name), "k%d", c->key);
+        c->request_size = (size_t)(method == SCORE ?
+            snprintf(c->request, sizeof(c->request), "POST /inputs/score?points=1 HTTP/1.1\r\nHost: localhost\r\n"
+                     "Content-Length: %d\r\n%s\r\n%s", length, closing, name) :
+            snprintf(c->request, sizeof(c->request), "GET /views/%s HTTP/1.1\r\nHost: localhost\r\n%s\r\n",
+                     method == TOTAL ? "total" : "leaders?from=0&count=20", closing));
+        c->sent = c->received = c->body_sent = c->body_size = 0;
+        c->started = now_us();
+        return;
+    }
     char condition[64] = "";
     if (put) {
         if (c->revision) snprintf(condition, sizeof(condition), "If-Match: \"%llu\"\r\n", (unsigned long long)c->revision);
@@ -123,13 +140,16 @@ static bool complete(Connection *c, int *status, bool *closing, size_t *length) 
 
 int main(int argc, char **argv) {
     if (argc < 6) {
-        fputs("load PORT CONNECTIONS SECONDS get|put KEYS [keep-alive|close] [BODY]\n", stderr);
+        fputs("load PORT CONNECTIONS SECONDS get|put|score|total|page KEYS [keep-alive|close] [BODY]\n", stderr);
         return 2;
     }
     port = atoi(argv[1]);
     connections_count = atoi(argv[2]);
     double seconds = atof(argv[3]);
-    put = !strcmp(argv[4], "put");
+    static const char *const methods[] = {"get", "put", "score", "total", "page"};
+    for (method = GET; method <= PAGE && strcmp(argv[4], methods[method]); ++method) {}
+    if (method > PAGE) { fprintf(stderr, "load: unknown method %s\n", argv[4]); return 2; }
+    put = method == PUT;
     keys = atoi(argv[5]);
     keep_alive = argc > 6 && !strcmp(argv[6], "keep-alive");
     body_bytes = argc > 7 ? strtoul(argv[7], NULL, 10) : 16;

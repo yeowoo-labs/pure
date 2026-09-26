@@ -16,6 +16,10 @@ result several times over. Each round therefore runs the servers in a
 rotated order, each on a fresh store, and every write workload first times
 the device (an in-place 4 KiB write + fdatasync); the table shows that probe
 next to each result.
+
+--suite app serves the scoreboard of scores.aup (built by aup) with pure-serve,
+against the same scoreboard written by hand in axum and drogon: durable score
+posts, a sum and a page of 20 rows as JSON.
 """
 import argparse
 import json
@@ -70,6 +74,15 @@ def put(port, key, body, expected):
     assert response.status == 200, (key, response.status)
 
 
+def post_score(port, name):
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
+    connection.request('POST', '/inputs/score?points=1', name.encode(), {'Content-Length': str(len(name))})
+    response = connection.getresponse()
+    response.read()
+    connection.close()
+    assert response.status == 200, (name, response.status)
+
+
 def probe_ms(directory, count=16):
     """Median time of an in-place 4 KiB write + fdatasync on the store device."""
     path = directory / 'device-probe'
@@ -97,7 +110,8 @@ def load(port, connections, seconds, method, keys, mode, body=16):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--module', type=Path, required=True, help='editor.pmod built by aup')
+    parser.add_argument('--module', type=Path, required=True, help='editor.pmod built by aup, or scores.pmod for --suite app')
+    parser.add_argument('--suite', choices=['documents', 'app'], default='documents')
     parser.add_argument('--directory', type=Path, default=Path('/var/tmp'))
     parser.add_argument('--seconds', type=float, default=5)
     parser.add_argument('--only', default='')
@@ -130,6 +144,17 @@ def main():
         ('put 16B, 64 conn, keep-alive', dict(connections=64, method='put', keys=64, mode='keep-alive')),
         ('put 16B, 8 conn, keep-alive', dict(connections=8, method='put', keys=8, mode='keep-alive')),
     ]
+    app = args.suite == 'app'
+    if app:
+        # Durable posts write (the method is put for the device probe); reads are a sum and a page.
+        workloads = [
+            ('score, 64 conn, keep-alive', dict(connections=64, method='score', keys=64, mode='keep-alive', writes=True)),
+            ('score, 8 conn, keep-alive', dict(connections=8, method='score', keys=8, mode='keep-alive', writes=True)),
+            ('total, 64 conn, keep-alive', dict(connections=64, method='total', keys=64, mode='keep-alive')),
+            ('page 20 rows, 64 conn, keep-alive', dict(connections=64, method='page', keys=64, mode='keep-alive')),
+        ]
+        for name in ('pure-program', 'pure-serve-3', 'axum-atomic', 'drogon-atomic'):
+            del servers[name]  # one owner of the board's states; atomic is durable for a log
     if args.workloads:
         workloads = [w for w in workloads if re.search(args.workloads, w[0])]
     chosen = [name for name in servers if not args.only or name in args.only.split(',')]
@@ -144,12 +169,13 @@ def main():
                 process, port = start(servers[name](directory))
                 idle = rss_kib(process.pid, 'VmRSS:')
                 for key in range(64):
-                    put(port, f'k{key}', b'x' * 56, 0)
+                    if app: post_score(port, f'k{key}')
+                    else: put(port, f'k{key}', b'x' * 56, 0)
                 for label, workload in workloads:
                     if workload.get('big'):
                         # the 1 MiB document is k0 for this workload
                         put(port, 'k0', b'B' * (1 << 20), 1)
-                    probe = probe_ms(base) if workload['method'] == 'put' else None
+                    probe = probe_ms(base) if workload['method'] == 'put' or workload.get('writes') else None
                     used = cpu_seconds(process.pid)
                     measured = load(port, workload['connections'], args.seconds, workload['method'],
                                     workload['keys'], workload['mode'])
