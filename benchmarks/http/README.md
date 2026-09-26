@@ -1,10 +1,12 @@
 # HTTP 벤치마크
 
-Pure의 문서 서버들과 같은 계약의 axum 서비스를 같은 기기·코어 배정·부하 생성기로 잰다([075](../../docs/research/075-http-host-against-axum.md)).
+Pure의 문서 서버들과 같은 계약의 axum(Rust)·drogon(C++) 서비스를 같은 기기·코어 배정·부하 생성기로 잰다
+([075](../../docs/research/075-http-host-against-axum.md)).
 
 ```sh
 cc -O2 -std=c17 -o load load.c
 (cd axum-baseline && cargo build --release)
+drogon-baseline/build.sh   # Debian의 drogon 패키지를 설치하지 않고 .deps에 풀어 빌드한다
 make -C ../../prototypes/connections build/pure-serve
 make -C ../../prototypes/connections BUILD=build/tree STORE=store-tree.c build/tree/pure-connections
 aup build ../../../aup/examples/editor.aup -o editor.pmod

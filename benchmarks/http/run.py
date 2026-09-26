@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""HTTP benchmarks: Pure's document servers against an axum service with the
-same contract, on the same machine, with the same load generator.
+"""HTTP benchmarks: Pure's document servers against axum (Rust) and drogon (C++)
+services with the same contract, on the same machine, with the same load
+generator.
 
 Servers are pinned to CPUs 0-2 and the load to CPU 3; stores live under
 --directory (use the device you care about: fsync costs are the device's).
 Prints one JSON object per (server, workload, round) and a summary table of
-medians over rounds.
+medians over rounds. The load generator has one core, so near its limit the
+servers' CPU time tells them apart: 2xx/cpu-s is answers per second of server
+CPU (all threads, user and system).
 
 Durable writes are only comparable on a device in the same state. An SD card
 slows down under sustained syncs, so the order of runs alone can change a
@@ -17,6 +20,7 @@ next to each result.
 import argparse
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -40,6 +44,12 @@ def start(args):
     assert ready, 'server did not start'
     port = json.loads(process.stdout.readline())['port']
     return process, port
+
+
+def cpu_seconds(pid):
+    """User and system time of every thread of the process."""
+    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
 
 
 def rss_kib(pid, field):
@@ -91,12 +101,13 @@ def main():
     parser.add_argument('--directory', type=Path, default=Path('/var/tmp'))
     parser.add_argument('--seconds', type=float, default=5)
     parser.add_argument('--only', default='')
-    parser.add_argument('--workloads', default='', help='run only workloads whose label starts with one of these')
+    parser.add_argument('--workloads', default='', help='run only workloads whose label matches this regular expression')
     parser.add_argument('--rounds', type=int, default=1, help='repeat every server, rotating their order')
     parser.add_argument('--pause', type=float, default=0, help='seconds to rest the device between runs')
     parser.add_argument('--budget', type=int, default=64 << 20, help="Pure's payload budget in bytes")
     args = parser.parse_args()
     axum = HERE / 'axum-baseline/target/release/axum-baseline'
+    drogon = HERE / 'drogon-baseline/drogon-baseline'
     base = Path(tempfile.mkdtemp(dir=args.directory, prefix='pure-http-bench-'))
     servers = {
         'pure-program': lambda d: [PURE / 'build/tree/pure-connections', '--program', PURE / 'examples/editor.pure',
@@ -108,6 +119,9 @@ def main():
         'axum-memory': lambda d: [axum, '--port', '0'],
         'axum-durable': lambda d: [axum, '--port', '0', '--durable', d],
         'axum-atomic': lambda d: [axum, '--port', '0', '--atomic', d],
+        'drogon-memory': lambda d: [drogon, '--port', '0'],
+        'drogon-durable': lambda d: [drogon, '--port', '0', '--durable', d],
+        'drogon-atomic': lambda d: [drogon, '--port', '0', '--atomic', d],
     }
     workloads = [
         ('get 64B, 64 conn, close', dict(connections=64, method='get', keys=64, mode='close')),
@@ -117,7 +131,7 @@ def main():
         ('put 16B, 8 conn, keep-alive', dict(connections=8, method='put', keys=8, mode='keep-alive')),
     ]
     if args.workloads:
-        workloads = [w for w in workloads if w[0].startswith(tuple(args.workloads.split(',')))]
+        workloads = [w for w in workloads if re.search(args.workloads, w[0])]
     chosen = [name for name in servers if not args.only or name in args.only.split(',')]
     results = []
     try:
@@ -136,10 +150,13 @@ def main():
                         # the 1 MiB document is k0 for this workload
                         put(port, 'k0', b'B' * (1 << 20), 1)
                     probe = probe_ms(base) if workload['method'] == 'put' else None
+                    used = cpu_seconds(process.pid)
                     measured = load(port, workload['connections'], args.seconds, workload['method'],
                                     workload['keys'], workload['mode'])
+                    used = cpu_seconds(process.pid) - used
                     measured.update(server=name, workload=label, round=round_, probe_ms=probe,
-                                    rss_kib=rss_kib(process.pid, 'VmRSS:'),
+                                    rss_kib=rss_kib(process.pid, 'VmRSS:'), cpu_seconds=round(used, 2),
+                                    ok_per_cpu_second=round(measured['2xx'] / used) if used else 0,
                                     ok_per_second=round(measured['2xx'] / args.seconds), idle_rss_kib=idle)
                     results.append(measured)
                     print(json.dumps(measured), flush=True)
@@ -155,8 +172,8 @@ def main():
     median = lambda rows, field: statistics.median(r[field] for r in rows)
     print()
     print(f"medians over {args.rounds} round(s)")
-    print(f"{'workload':32s} {'server':14s} {'2xx/s':>9s} {'p50 us':>8s} {'p99 us':>8s} {'errors':>7s} "
-          f"{'non-2xx':>8s} {'probe ms':>9s}")
+    print(f"{'workload':32s} {'server':14s} {'2xx/s':>9s} {'2xx/cpu-s':>10s} {'p50 us':>8s} {'p99 us':>8s} "
+          f"{'errors':>7s} {'non-2xx':>8s} {'probe ms':>9s}")
     for label, _ in workloads:
         for name in chosen:
             rows = [r for r in results if r['server'] == name and r['workload'] == label]
@@ -164,7 +181,8 @@ def main():
                 continue
             probes = [r['probe_ms'] for r in rows if r['probe_ms'] is not None]
             probe = f"{min(probes):.1f}-{max(probes):.1f}" if probes else '-'
-            print(f"{label:32s} {name:14s} {median(rows, 'ok_per_second'):9.0f} {median(rows, 'p50_us'):8.0f} "
+            print(f"{label:32s} {name:14s} {median(rows, 'ok_per_second'):9.0f} "
+                  f"{median(rows, 'ok_per_cpu_second'):10.0f} {median(rows, 'p50_us'):8.0f} "
                   f"{median(rows, 'p99_us'):8.0f} {sum(r['errors'] for r in rows):7d} "
                   f"{sum(r['4xx'] + r['5xx'] for r in rows):8d} {probe:>9s}")
     print()
