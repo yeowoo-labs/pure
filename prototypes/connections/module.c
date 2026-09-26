@@ -206,17 +206,19 @@ static bool same_stack(const Join *join, int height, const unsigned char *types,
  * in it); the block around treats it as one instruction and may not branch
  * into it. Returns why the block is refused, with at moved to the
  * instruction when one is at fault, or NULL. */
-PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, int view, int row, uint32_t event,
-                                uint32_t *at) {
+PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int view, int row, uint32_t event, uint32_t *at);
+
+/* target marks, per instruction of the block, a branch into it with an empty stack. */
+PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, int view, int row, uint32_t event,
+                                         uint32_t *at, unsigned char *target) {
 #define REFUSE(why) do { *at = pc; return why; } while (0)
-    if (block.start > m->code_count || block.length > m->code_count - block.start) return "code range outside module";
     if (view >= 0 && !block.length) return "empty view";
     int input = view >= 0 ? -1 : event_input(event);
     const PureInputShape *shape = input >= 0 ? &m->input[input] : NULL;
     unsigned where = view >= 0 ? IN_VIEW | (row >= 0 ? IN_ROW : 0) : IN_HANDLER;
     if (shape && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE | (shape->keyed ? IN_KEYED : 0);
     if (shape && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
-    unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK], target[PURE_MODULE_CODE + 1] = {0};
+    unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK];
     Join joins[PURE_MODULE_JOINS];
     unsigned open = 0;
     int height = 0;
@@ -360,6 +362,49 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
 #undef REFUSE
 }
 
+PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, int view, int row, uint32_t event,
+                                          uint32_t *at) {
+    if (block.start > m->code_count || block.length > m->code_count - block.start) return "code range outside module";
+    unsigned char *target = calloc((size_t)block.length + 1, 1);
+    if (!target) return "out of memory";
+    const char *why = verify_code(m, block, view, row, event, at, target);
+    free(target);
+    return why;
+}
+
+PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
+    FILE *file = fopen(path, "rb");
+    unsigned char *bytes = NULL;
+    size_t size = 0, capacity = 0;
+    bool ok = file != NULL;
+    /* The largest module is some 2 MiB: code, strings and constants at their limits. */
+    while (ok && !feof(file) && capacity < (8u << 20)) {
+        capacity = capacity ? capacity * 2 : 1 << 16;
+        unsigned char *grown = realloc(bytes, capacity);
+        if (!grown) { ok = false; break; }
+        bytes = grown;
+        size += fread(bytes + size, 1, capacity - size, file);
+        ok = !ferror(file);
+    }
+    ok = ok && feof(file);
+    if (file) fclose(file);
+    PureResult result = PURE_NOT_FOUND;
+    if (!ok) {
+        if (error_size) snprintf(error, error_size, "cannot read %s", path);
+        pure_module_release(out);
+    } else result = pure_module_load(bytes, size, out, error, error_size);
+    free(bytes);
+    return result;
+}
+
+void pure_module_release(PureModule *m) {
+    free(m->storage);
+    m->storage = NULL;
+    m->code = NULL;
+    m->constant_offset = m->constant_length = NULL;
+    m->constant_data = NULL;
+}
+
 PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
                             char *error, size_t error_size) {
     const unsigned char *p = bytes;
@@ -368,6 +413,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     PureResult result = PURE_INVALID;
 #define REFUSE(message, index) do { why = message; bad = (uint32_t)(index); goto refused; } while (0)
     if (error_size) error[0] = 0;
+    pure_module_release(out);
     memset(out, 0, sizeof(*out));
     if (!p || size < PURE_MODULE_HEADER || memcmp(p, magic, sizeof(magic))) REFUSE("not a Pure module v5", 0);
     out->states = (uint16_t)read16(p + 8);
@@ -399,9 +445,20 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         (size_t)out->views * VIEW_BYTES + (size_t)out->handlers * HANDLER_BYTES +
         (size_t)out->code_count * OP_BYTES + strings + constant_bytes;
     if (size != expected) REFUSE("module size", expected);
+    /* The code, the constants' offsets and lengths, then their bytes, in one block. */
+    size_t storage = (size_t)out->code_count * sizeof(PureOp) + (size_t)out->constants * 2 * sizeof(uint32_t) +
+                     constant_bytes;
+    if (!(out->storage = malloc(storage ? storage : 1))) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
+    out->code = out->storage;
+    out->constant_offset = (uint32_t *)(out->code + out->code_count);
+    out->constant_length = out->constant_offset + out->constants;
+    out->constant_data = (unsigned char *)(out->constant_length + out->constants);
     const unsigned char *at = p + PURE_MODULE_HEADER;
     const unsigned char *text = p + size - constant_bytes - strings;
-    memcpy(out->constant_data, p + size - constant_bytes, constant_bytes);
+    if (constant_bytes) memcpy(out->constant_data, p + size - constant_bytes, constant_bytes);
     for (uint32_t i = 0; i < out->states; ++i, at += STATE_BYTES) {
         out->state_type[i] = (uint8_t)read32(at + 4);
         if (!name_at(text, strings, read32(at), true, out->state_names[i])) REFUSE("state name", i);
@@ -579,6 +636,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     return PURE_OK;
 refused:
     if (error_size) snprintf(error, error_size, "%s (%u)", why, bad);
+    pure_module_release(out);
     return result;
 #undef REFUSE
 }

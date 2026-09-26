@@ -15,10 +15,10 @@
  * branches, names, records, tables, constants and effects. */
 enum {
     PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 64,
-    PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 512, PURE_MODULE_STACK = 64,
+    PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 65535, PURE_MODULE_STACK = 64,
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 40,
-    PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 64,
-    PURE_MODULE_CONSTANT_BYTES = 8192, PURE_MODULE_RECORDS = 8, PURE_MODULE_RECORD_FIELDS = 64,
+    PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 4096,
+    PURE_MODULE_CONSTANT_BYTES = 1 << 20, PURE_MODULE_RECORDS = 8, PURE_MODULE_RECORD_FIELDS = 64,
     PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8, PURE_APP_PENDING = 256
 };
 
@@ -118,19 +118,28 @@ typedef struct {
     uint16_t view_list[PURE_MODULE_VIEWS];  /* the list of a table or column */
     PureBlock view_code[PURE_MODULE_VIEWS];
     PureHandler handler[PURE_MODULE_HANDLERS];
-    PureOp code[PURE_MODULE_CODE];
-    uint32_t constant_offset[PURE_MODULE_CONSTANTS], constant_length[PURE_MODULE_CONSTANTS];
+    /* The code and the text constants, sized to the module in one block
+     * (storage) that load takes and pure_module_release gives back. */
+    PureOp *code;
+    uint32_t *constant_offset, *constant_length;
+    unsigned char *constant_data;
+    void *storage;
     char record_names[PURE_MODULE_RECORDS][PURE_MODULE_NAME];
     PureRecord record[PURE_MODULE_RECORDS];
     char record_field_names[PURE_MODULE_RECORD_FIELDS][PURE_MODULE_NAME];
     uint8_t record_field_text[PURE_MODULE_RECORD_FIELDS];
     double record_field_default[PURE_MODULE_RECORD_FIELDS]; /* number, or text constant index */
-    unsigned char constant_data[PURE_MODULE_CONSTANT_BYTES];
 } PureModule;
 
-/* Decode and verify. On failure out is unspecified and error names the rule. */
+/* Decode and verify into out, which must be zeroed (a static one is) or hold
+ * a loaded module: what it held is given back first. On failure out holds
+ * nothing and error names the rule. */
 PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
                             char *error, size_t error_size);
+/* Give back a loaded module's code and constants (no app may still run it). */
+void pure_module_release(PureModule *);
+/* Read a module file whole and load it (NOT_FOUND when it cannot be read). */
+PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size);
 /* Index of a name, or -1. Views are those outside tables. */
 int pure_module_state(const PureModule *, const char *name);
 int pure_module_input(const PureModule *, const char *name);

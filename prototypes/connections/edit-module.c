@@ -89,19 +89,11 @@ int main(int argc, char **argv) {
     if (!show && !number(argv[at + 2], INT64_MAX, &expected)) goto usage;
     if (edit && (!number(argv[at + 3], UINT32_MAX, &offset) || !number(argv[at + 4], UINT32_MAX, &remove))) goto usage;
 
-    static unsigned char image[1 << 17];
     static PureModule module;
     char error[160];
-    FILE *source = fopen(module_path, "rb");
-    size_t image_size = source ? fread(image, 1, sizeof(image), source) : 0;
-    if (!source || ferror(source) || image_size == sizeof(image)) {
-        if (source) fclose(source);
-        fputs("Module: cannot read module\n", stderr);
-        return 2;
-    }
-    fclose(source);
-    if (pure_module_load(image, image_size, &module, error, sizeof(error)) != PURE_OK) {
-        fprintf(stderr, "Module: %s\n", error);
+    PureResult read = pure_module_read(module_path, &module, error, sizeof(error));
+    if (read != PURE_OK) {
+        fprintf(stderr, "Module: %s\n", read == PURE_NOT_FOUND ? "cannot read module" : error);
         return 2;
     }
     int input = pure_module_input(&module, show ? "show" : "edit");

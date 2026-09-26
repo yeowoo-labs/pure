@@ -1268,14 +1268,9 @@ static bool replies_borrow(const PureModule *m, uint32_t input) {
 /* ---- Main ------------------------------------------------------------- */
 
 static bool load_module(PureModule *m, const char *path, bool *documents, uint32_t *show_out, uint32_t *edit_out) {
-    static unsigned char bytes[1 << 17];
-    char error[128];
-    FILE *file = fopen(path, "rb");
-    size_t size = file ? fread(bytes, 1, sizeof(bytes), file) : 0;
-    bool read_ok = file && !ferror(file) && size < sizeof(bytes);
-    if (file) fclose(file);
-    if (!read_ok || pure_module_load(bytes, size, m, error, sizeof(error)) != PURE_OK) {
-        fprintf(stderr, "Module: %s\n", read_ok ? error : "cannot read");
+    char error[160];
+    if (pure_module_read(path, m, error, sizeof(error)) != PURE_OK) {
+        fprintf(stderr, "Module: %s\n", error);
         return false;
     }
     /* Documents are served when the module has show and edit, as keyed messages. */

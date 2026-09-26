@@ -18,18 +18,10 @@ static const char *const fault_names[] = {"none", "divide", "non_finite", "clamp
 /* time MS sets the time events see (milliseconds since 1970); tick NAME is a timer's tick. */
 
 static bool load(const char *path, PureModule *module) {
-    FILE *file = fopen(path, "rb");
-    static unsigned char bytes[1 << 17];
-    size_t size = file ? fread(bytes, 1, sizeof(bytes), file) : 0;
-    bool ok = file && !ferror(file) && size < sizeof(bytes);
-    if (file) fclose(file);
-    char error[128];
-    if (!ok) { fprintf(stderr, "cannot read %s\n", path); return false; }
-    if (pure_module_load(bytes, size, module, error, sizeof(error)) != PURE_OK) {
-        fprintf(stderr, "%s: %s\n", path, error);
-        return false;
-    }
-    return true;
+    char error[160];
+    if (pure_module_read(path, module, error, sizeof(error)) == PURE_OK) return true;
+    fprintf(stderr, "%s: %s\n", path, error);
+    return false;
 }
 
 static bool json_span(void *context, PureSpan span) {
