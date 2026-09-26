@@ -48,9 +48,12 @@ typedef struct {
     size_t size;          /* leaf bytes, child count, or next free slot + 1 */
     unsigned height;      /* FREE for a reclaimed slot */
 } Node;
+/* One mapped version of the file, shared by the drafts of a store handle. */
+typedef struct { const unsigned char *map; uint64_t end; unsigned refs; } Mapping;
 typedef struct {
     const unsigned char *map;
     uint64_t end;
+    Mapping *shared; /* map belongs to this shared mapping, not to the tree */
     Node *nodes;
     size_t count, capacity, free_head, free_count; /* free_head is slot + 1 */
     size_t bytes; /* payload held by arena nodes, including unreachable ones */
@@ -182,8 +185,15 @@ static bool map_tree(int fd, const Head *head, Tree *tree) {
     return true;
 }
 
+static void release_mapping(Mapping *mapping) {
+    if (!mapping || --mapping->refs) return;
+    munmap((void *)mapping->map, (size_t)mapping->end);
+    free(mapping);
+}
+
 static void release_tree(Tree *tree) {
-    if (tree->map) munmap((void *)tree->map, (size_t)tree->end);
+    if (tree->shared) release_mapping(tree->shared);
+    else if (tree->map) munmap((void *)tree->map, (size_t)tree->end);
     for (size_t i = 0; i < tree->count; ++i) {
         free(tree->nodes[i].bytes);
         free(tree->nodes[i].children);
@@ -953,8 +963,20 @@ PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *k
     return result;
 }
 
-struct PureDraft {
+/* A store kept open by one owner thread: its current file and a mapping of
+ * its newest version, shared by the drafts opened through it. */
+struct PureStore {
     char *path;
+    int directory, fd;
+    dev_t device;
+    ino_t inode;
+    Head head;
+    Mapping *mapping;
+};
+
+struct PureDraft {
+    PureStore *store; /* the handle it was opened through, or NULL */
+    char *path;       /* owned unless opened through a store handle */
     char key[KEY + 1];
     Tree tree;        /* the base file's mapping plus this draft's node arena */
     dev_t device;     /* identity of the base file; compaction replaces it */
@@ -1021,8 +1043,108 @@ PureDraft *pure_draft_new(void) {
 void pure_draft_close(PureDraft *draft) {
     if (!draft) return;
     release_tree(&draft->tree);
-    free(draft->path);
+    if (!draft->store) free(draft->path);
     free(draft);
+}
+
+/* Bring the handle to the newest published version: the same file and head
+ * cost two system calls; a new commit maps again, a compaction reopens. */
+static PureResult refresh(PureStore *store) {
+    struct stat info;
+    if (fstatat(store->directory, tree_name, &info, AT_SYMLINK_NOFOLLOW) || !S_ISREG(info.st_mode))
+        return PURE_STORE_ERROR;
+    if (store->fd < 0 || info.st_dev != store->device || info.st_ino != store->inode) {
+        int fd = openat(store->directory, tree_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0 || fstat(fd, &info)) { if (fd >= 0) close(fd); return PURE_STORE_ERROR; }
+        if (store->fd >= 0) close(store->fd);
+        store->fd = fd;
+        store->device = info.st_dev;
+        store->inode = info.st_ino;
+        store->head = (Head){0};
+    }
+    Head head;
+    if (!read_head(store->fd, &head)) return PURE_STORE_ERROR;
+    if (store->mapping && head.seq == store->head.seq && head.end == store->head.end) return PURE_OK;
+    Tree tree;
+    Mapping *mapping = malloc(sizeof(*mapping));
+    if (!mapping) return PURE_ALLOCATION;
+    if (!map_tree(store->fd, &head, &tree)) { free(mapping); return PURE_STORE_ERROR; }
+    *mapping = (Mapping){tree.map, tree.end, 1};
+    release_mapping(store->mapping);
+    store->mapping = mapping;
+    store->head = head;
+    return PURE_OK;
+}
+
+/* Base a draft on the handle's newest version of its key, sharing the mapping.
+ * On failure the draft is unchanged. */
+static PureResult rebase(PureDraft *draft) {
+    PureStore *store = draft->store;
+    Mapping *mapping = store->mapping;
+    Tree tree = {.map = mapping->map, .end = mapping->end, .shared = mapping};
+    Entry document;
+    uint64_t index;
+    int64_t revision;
+    bool found;
+    if (!find(&tree, (Entry){store->head.catalog, store->head.catalog_bytes}, draft->key, &index, &found, &document,
+              &revision)) return PURE_STORE_ERROR;
+    ++mapping->refs;
+    release_tree(&draft->tree);
+    draft->tree = tree;
+    draft->device = store->device;
+    draft->inode = store->inode;
+    draft->root = document;
+    draft->revision = revision;
+    draft->live = 0;
+    return PURE_OK;
+}
+
+PureResult pure_store_open(const char *path, PureStore **out) {
+    *out = NULL;
+    PureStore *store = calloc(1, sizeof(*store));
+    if (!store || !path || !(store->path = strdup(path))) { free(store); return PURE_ALLOCATION; }
+    store->fd = -1;
+    store->directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    PureResult result = store->directory < 0 ? PURE_STORE_ERROR : refresh(store);
+    if (result != PURE_OK) { pure_store_close(store); return result; }
+    *out = store;
+    return PURE_OK;
+}
+
+void pure_store_close(PureStore *store) {
+    if (!store) return;
+    release_mapping(store->mapping);
+    if (store->fd >= 0) close(store->fd);
+    if (store->directory >= 0) close(store->directory);
+    free(store->path);
+    free(store);
+}
+
+static PureResult open_through(PureStore *store, const char *key, PureDraft **out) {
+    *out = NULL;
+    PureResult result = refresh(store);
+    if (result != PURE_OK) return result;
+    PureDraft *draft = calloc(1, sizeof(*draft));
+    if (!draft) return PURE_ALLOCATION;
+    *draft = (PureDraft){.store = store, .path = store->path};
+    memcpy(draft->key, key, strlen(key) + 1);
+    result = rebase(draft);
+    if (result != PURE_OK) { free(draft); return result; }
+    *out = draft;
+    return PURE_OK;
+}
+
+PureResult pure_store_draft(PureStore *store, const char *key, PureDraft **out) {
+    *out = NULL;
+    return store && valid_key(key) ? open_through(store, key, out) : PURE_INVALID;
+}
+
+PureResult pure_store_state(PureStore *store, const char *name, PureDraft **out) {
+    char key[KEY + 2];
+    *out = NULL;
+    if (!store || !valid_key(name) || strlen(name) >= KEY) return PURE_INVALID;
+    snprintf(key, sizeof(key), ".%s", name);
+    return open_through(store, key, out);
 }
 
 size_t pure_draft_size(const PureDraft *draft) { return (size_t)draft->root.bytes; }
@@ -1151,9 +1273,18 @@ PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t
     }
     result = publish(&session, writer, count, keys, roots, revisions);
     /* Rebase while still holding the writer lock; the arenas are no longer
-     * needed. If remapping fails a draft keeps equal content at its new revision. */
-    for (size_t i = 0; result == PURE_OK && i < count; ++i)
-        if (load_draft(drafts[i]) != PURE_OK) drafts[i]->revision = revisions[i];
+     * needed. Drafts of a store handle share one new mapping. If remapping
+     * fails a draft keeps equal content at its new revision. */
+    PureStore *refreshed = NULL;
+    for (size_t i = 0; result == PURE_OK && i < count; ++i) {
+        PureStore *store = drafts[i]->store;
+        bool rebased;
+        if (store) {
+            if (store != refreshed && refresh(store) == PURE_OK) refreshed = store;
+            rebased = store == refreshed && rebase(drafts[i]) == PURE_OK;
+        } else rebased = load_draft(drafts[i]) == PURE_OK;
+        if (!rebased) drafts[i]->revision = revisions[i];
+    }
 finish:
     free(writer);
     free(roots);

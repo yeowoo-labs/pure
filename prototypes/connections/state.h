@@ -21,6 +21,15 @@ PureResult pure_draft_open(const char *path, const char *key, PureDraft **out);
  * under a name that is never a document key (hosts listing documents do not
  * see it). name is a valid key of at most 63 bytes. */
 PureResult pure_state_open(const char *path, const char *name, PureDraft **out);
+/* A store kept open by one owner thread. Drafts opened through it share one
+ * mapping of the newest version, and opening one checks only whether the file
+ * changed; commits of its drafts map the new version once. It must outlive
+ * its drafts. */
+typedef struct PureStore PureStore;
+PureResult pure_store_open(const char *path, PureStore **out);
+void pure_store_close(PureStore *);
+PureResult pure_store_draft(PureStore *, const char *key, PureDraft **out);
+PureResult pure_store_state(PureStore *, const char *name, PureDraft **out);
 /* Memory only. Fails without change on a bad range or when memory runs out. */
 PureResult pure_draft_splice(PureDraft *, size_t offset, size_t remove, PureSpan insert);
 size_t pure_draft_size(const PureDraft *);

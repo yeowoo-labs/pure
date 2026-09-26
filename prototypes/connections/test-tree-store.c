@@ -765,6 +765,65 @@ static void batch(const char *path) {
     }
 }
 
+/* A store handle shares one mapping among its drafts, sees commits made by
+ * other writers when a draft opens, follows a compaction that replaced the
+ * file, and maps a batch it committed once. */
+static void store_handle(const char *path) {
+    unsigned char scratch[64];
+    int64_t revision, revisions[3];
+    CHECK(pure_store_put(path, "shared", 0, (PureSpan){(const unsigned char *)"one", 3}, &revision) == PURE_OK);
+    PureStore *store;
+    CHECK(pure_store_open(path, &store) == PURE_OK);
+    PureDraft *a, *b, *state, *bad;
+    CHECK(pure_store_draft(store, "shared", &a) == PURE_OK);
+    expect_draft(a, &(Oracle){(unsigned char *)"one", 3, 1}, scratch);
+    CHECK(pure_store_draft(store, "bad.key", &bad) == PURE_INVALID && !bad);
+    /* Another writer commits: the next draft sees it, the open one keeps its version. */
+    CHECK(pure_store_put(path, "shared", 1, (PureSpan){(const unsigned char *)"two", 3}, &revision) == PURE_OK);
+    CHECK(pure_store_draft(store, "shared", &b) == PURE_OK);
+    expect_draft(b, &(Oracle){(unsigned char *)"two", 3, 2}, scratch);
+    expect_draft(a, &(Oracle){(unsigned char *)"one", 3, 1}, scratch);
+    CHECK(pure_draft_splice(a, 3, 0, (PureSpan){(const unsigned char *)"!", 1}) == PURE_OK);
+    CHECK(pure_draft_commit(a, &revision) == PURE_CONFLICT && revision == 2);
+    pure_draft_close(a);
+    /* A batch of handle drafts, a runtime value among them. */
+    CHECK(pure_store_state(store, "values", &state) == PURE_OK && pure_draft_revision(state) == 0);
+    CHECK(pure_store_draft(store, "other", &a) == PURE_OK);
+    CHECK(pure_draft_splice(b, 3, 0, (PureSpan){(const unsigned char *)"+", 1}) == PURE_OK);
+    CHECK(pure_draft_splice(state, 0, 0, (PureSpan){(const unsigned char *)"v", 1}) == PURE_OK);
+    CHECK(pure_draft_splice(a, 0, 0, (PureSpan){(const unsigned char *)"o", 1}) == PURE_OK);
+    PureDraft *batch[3] = {b, state, a};
+    CHECK(pure_draft_commit_all(batch, 3, revisions) == PURE_OK && revisions[0] == 3 && revisions[1] == 1);
+    expect(path, "shared", &(Oracle){(unsigned char *)"two+", 4, 3});
+    expect_draft(state, &(Oracle){(unsigned char *)"v", 1, 1}, scratch);
+    /* Other writers grow the file past compaction: it is replaced under the handle. */
+    unsigned char *big = malloc(100000);
+    uint32_t seed = 5;
+    CHECK(big);
+    fill(big, 100000, &seed);
+    int64_t filler = 0;
+    char name[512];
+    struct stat before, replaced;
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    CHECK(stat(name, &before) == 0);
+    for (int i = 0; i < 8; ++i) CHECK(pure_store_put(path, "filler", filler, (PureSpan){big, 100000}, &filler) == PURE_OK);
+    CHECK(stat(name, &replaced) == 0 && replaced.st_ino != before.st_ino);
+    free(big);
+    PureDraft *after;
+    CHECK(pure_store_draft(store, "shared", &after) == PURE_OK);
+    expect_draft(after, &(Oracle){(unsigned char *)"two+", 4, 3}, scratch);
+    /* Drafts of the old file still read and commit (their extents are copied). */
+    expect_draft(b, &(Oracle){(unsigned char *)"two+", 4, 3}, scratch);
+    CHECK(pure_draft_splice(b, 0, 0, (PureSpan){(const unsigned char *)">", 1}) == PURE_OK);
+    CHECK(pure_draft_commit(b, &revision) == PURE_OK && revision == 4);
+    expect(path, "shared", &(Oracle){(unsigned char *)">two+", 5, 4});
+    pure_draft_close(after);
+    pure_draft_close(a);
+    pure_draft_close(b);
+    pure_draft_close(state);
+    pure_store_close(store);
+}
+
 static void clean(const char *path) {
     DIR *entries = opendir(path);
     CHECK(entries);
@@ -781,7 +840,7 @@ int main(void) {
     void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
-                                      draft_versions, anonymous_draft, batch};
+                                      draft_versions, anonymous_draft, batch, store_handle};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -792,6 +851,6 @@ int main(void) {
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
-         "atomic-batch-runtime-keys\"}");
+         "atomic-batch-runtime-keys-store-handle\"}");
     return 0;
 }
