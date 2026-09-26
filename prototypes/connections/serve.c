@@ -437,9 +437,9 @@ static void start_request(Connection *c, size_t head_size) {
     host->by_slot[c->ticket.slot] = c;
     host->routes[c->ticket.slot] = route;
     if (!write) { c->phase = WAITING; return; }
-    unsigned char *ingress = pure_runtime_ingress(c->ticket, NULL);
-    memcpy(ingress, c->fields, c->field_bytes);
-    c->body = ingress + c->field_bytes;
+    unsigned char *ingress = pure_runtime_ingress(c->ticket, NULL); /* NULL for no bytes, as a key press */
+    if (c->field_bytes) memcpy(ingress, c->fields, c->field_bytes);
+    c->body = ingress ? ingress + c->field_bytes : NULL;
     size_t take = c->in_used < c->body_size ? c->in_used : c->body_size;
     if (take) memcpy(c->body, c->in, take);
     memmove(c->in, c->in + take, c->in_used - take);
@@ -589,8 +589,6 @@ static bool put_bytes(Output *o, const void *bytes, size_t size) {
     return true;
 }
 
-static bool put_text(Output *o, const char *text) { return put_bytes(o, text, strlen(text)); }
-
 static bool put_span(void *context, PureSpan span) { return put_bytes(context, span.data, span.size); }
 
 /* A JSON string's contents: quotes, backslashes and control bytes escaped,
@@ -623,9 +621,11 @@ static void put_number(Output *o, double value) {
 static PureResult show_view(PureApp *app, const Route *route, size_t available, PureResource *out, const char **type) {
     const PureModule *m = app->module;
     uint32_t view = route->target;
+    /* Room for a page of short rows at once. */
     Output o = {0};
     PureResult status = PURE_OK;
     double value;
+    if (m->view_type[view] == PURE_VIEW_TABLE && !(o.bytes = malloc(o.capacity = 1024))) return PURE_ALLOCATION;
     if (m->view_type[view] == PURE_VIEW_NUM) {
         *type = "text/plain; charset=utf-8";
         if (pure_app_view(app, view, &value)) put_number(&o, value);
@@ -637,34 +637,38 @@ static PureResult show_view(PureApp *app, const Route *route, size_t available, 
         *type = "application/json";
         size_t rows = pure_app_rows(app, view), from = route->from < rows ? route->from : rows;
         size_t end = from + (route->count < rows - from ? route->count : rows - from);
+        /* Each column's key, ,"name": (the first row's first without the comma), made once. */
+        struct { uint32_t view; size_t length; char key[PURE_MODULE_NAME + 4]; } columns[PURE_MODULE_VIEWS];
+        unsigned count = 0;
+        for (uint32_t column = 0; column < m->views; ++column)
+            if (m->view_table[column] == view + 1) {
+                columns[count].view = column;
+                columns[count].length = (size_t)snprintf(columns[count].key, sizeof(columns[count].key), ",\"%s\":",
+                                                         m->view_names[column]);
+                ++count;
+            }
         char head[80];
-        snprintf(head, sizeof(head), "{\"rows\":%zu,\"from\":%zu,\"items\":[", rows, from);
-        put_text(&o, head);
+        put_bytes(&o, head, (size_t)snprintf(head, sizeof(head), "{\"rows\":%zu,\"from\":%zu,\"items\":[", rows, from));
         for (size_t row = from; row < end && !o.failed; ++row) {
-            put_text(&o, row > from ? ",{" : "{");
-            bool first = true;
-            for (uint32_t column = 0; column < m->views; ++column) {
-                if (m->view_table[column] != view + 1) continue;
-                put_text(&o, first ? "\"" : ",\"");
-                put_text(&o, m->view_names[column]);
-                put_text(&o, "\":");
-                first = false;
-                if (m->view_type[column] == PURE_VIEW_NUM) {
-                    if (pure_app_cell(app, column, row, &value)) put_number(&o, value);
-                    else put_text(&o, "null");
+            put_bytes(&o, ",{" + (row == from), 2 - (row == from));
+            for (unsigned k = 0; k < count; ++k) {
+                put_bytes(&o, columns[k].key + !k, columns[k].length - !k);
+                if (m->view_type[columns[k].view] == PURE_VIEW_NUM) {
+                    if (pure_app_cell(app, columns[k].view, row, &value)) put_number(&o, value);
+                    else put_bytes(&o, "null", 4);
                     continue;
                 }
                 size_t mark = o.size;
-                put_text(&o, "\"");
-                if (pure_app_cell_text(app, column, row, put_json_span, &o) == PURE_OK) put_text(&o, "\"");
+                put_bytes(&o, "\"", 1);
+                if (pure_app_cell_text(app, columns[k].view, row, put_json_span, &o) == PURE_OK) put_bytes(&o, "\"", 1);
                 else if (!o.failed) {
                     o.size = mark;
-                    put_text(&o, "null");
+                    put_bytes(&o, "null", 4);
                 }
             }
-            put_text(&o, "}");
+            put_bytes(&o, "}", 1);
         }
-        put_text(&o, "]}");
+        put_bytes(&o, "]}", 2);
     }
     if (status == PURE_OK && !o.bytes && !(o.bytes = malloc(1))) o.failed = true; /* an empty value has a buffer too */
     if (status == PURE_OK && o.failed) status = PURE_ALLOCATION;
