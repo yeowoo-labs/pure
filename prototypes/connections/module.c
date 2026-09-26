@@ -1259,14 +1259,50 @@ bool pure_app_defer(PureApp *app, bool deferred) {
     return true;
 }
 
+/* ---- Snapshots. Snapshots of one app form a chain from oldest to newest,
+ * each holding the next, so they go oldest first. List items the app lets go
+ * while a snapshot is its newest may be read by that one and older ones, so
+ * they go with it. */
+struct PureSnapshot {
+    unsigned refs;
+    const PureModule *module;
+    uint64_t changes;
+    double values[PURE_MODULE_STATES];
+    PureDraft *texts[PURE_MODULE_STATES];
+    PureList *lists[PURE_MODULE_STATES];
+    PureRetired retired;
+    struct PureSnapshot *newer;
+};
+
+void pure_snapshot_hold(PureSnapshot *snapshot) { __atomic_add_fetch(&snapshot->refs, 1, __ATOMIC_RELAXED); }
+
+void pure_snapshot_release(PureSnapshot *snapshot) {
+    while (snapshot && !__atomic_sub_fetch(&snapshot->refs, 1, __ATOMIC_ACQ_REL)) {
+        PureSnapshot *newer = snapshot->newer;
+        for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
+            pure_draft_close(snapshot->texts[i]);
+            pure_list_free(snapshot->lists[i]);
+        }
+        pure_retired_free(&snapshot->retired);
+        free(snapshot);
+        snapshot = newer;
+    }
+}
+
 void pure_app_stop(PureApp *app) {
     pure_app_finish(app);
     close_burst(app, true); /* unsaved changes are dropped with the app */
-    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
+    for (uint32_t i = 0; i < PURE_MODULE_STATES && !app->reading; ++i) {
         pure_draft_close(app->texts[i]);
         pure_list_free(app->lists[i]);
         pure_draft_close(app->list_drafts[i]);
     }
+    /* Items the newest snapshot may still read go when it goes. */
+    if (app->snapshot) {
+        app->snapshot->retired = app->retired;
+        pure_snapshot_release(app->snapshot);
+    } else
+        pure_retired_free(&app->retired);
     pure_draft_close(app->stored_values);
     free(app->pending);
     pure_undo_free(&app->undo);
@@ -1578,6 +1614,50 @@ PureResult pure_app_cell_text(PureApp *app, uint32_t column, size_t row, bool (*
     Slot slot;
     PureResult result = view_of(app, column, true, row, PURE_VIEW_TEXT, &slot);
     return result == PURE_OK ? visit_value(app, &app->view_arena, slot.bytes, visit, context) : result;
+}
+
+PureSnapshot *pure_app_snapshot(PureApp *app) {
+    if (app->open || app->reading) return NULL;
+    const PureModule *m = app->module;
+    PureSnapshot *made = calloc(1, sizeof(*made)), *last = app->snapshot;
+    if (!made) return NULL;
+    made->refs = 1;
+    made->module = m;
+    made->changes = app->changes;
+    memcpy(made->values, app->values, sizeof(made->values));
+    bool ok = true;
+    for (uint32_t i = 0; i < m->states && ok; ++i) {
+        if (app->texts[i]) ok = (made->texts[i] = pure_draft_freeze(app->texts[i])) != NULL;
+        if (!ok || !app->lists[i]) continue;
+        if (last && last->lists[i] && pure_list_current(last->lists[i], app->lists[i])) {
+            pure_list_hold(last->lists[i]);
+            made->lists[i] = last->lists[i];
+        } else
+            ok = (made->lists[i] = pure_list_share(app->lists[i], &app->retired)) != NULL;
+    }
+    if (!ok) {
+        pure_snapshot_release(made);
+        return NULL;
+    }
+    made->refs = last ? 3 : 2; /* the app's, the caller's and the last one's */
+    if (last) {
+        last->retired = app->retired;
+        last->newer = made;
+        pure_snapshot_release(last);
+    } else
+        pure_retired_free(&app->retired); /* shared only by a snapshot never made */
+    app->retired = (PureRetired){0};
+    app->snapshot = made;
+    return made;
+}
+
+void pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
+    reader->module = snapshot->module;
+    reader->reading = true;
+    reader->changes = snapshot->changes; /* what the row cache is fresh for */
+    memcpy(reader->values, snapshot->values, sizeof(reader->values));
+    memcpy(reader->texts, snapshot->texts, sizeof(reader->texts));
+    memcpy(reader->lists, snapshot->lists, sizeof(reader->lists));
 }
 
 /* A list with record's fields: each takes the field of `from` with the same

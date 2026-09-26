@@ -22,12 +22,26 @@
 typedef struct { double num; unsigned char *text; size_t size; } PureCell;
 typedef struct PureList PureList;
 typedef struct { void *entries; size_t count, capacity; } PureUndo;
+/* Items a list let go while a shared copy may still read them. */
+typedef struct { void *entries; size_t count, capacity; } PureRetired;
 
 enum { PURE_LIST_ITEMS = 65536 };
 
 PureList *pure_list_new(unsigned fields, const uint8_t *text_fields);
 void pure_list_free(PureList *);
 size_t pure_list_count(const PureList *);
+/* Share the items as they are with a read-only copy (for readers on other
+ * threads), without copying them: from then on the list copies an item it
+ * changes, and items it lets go go to retired instead of being freed, since
+ * the copy may still read them. The copy is freed with pure_list_free, on any
+ * thread, when its last reference goes (pure_list_hold takes one more). Only
+ * between events (no change waits to be committed or undone). */
+PureList *pure_list_share(PureList *, PureRetired *retired);
+void pure_list_hold(PureList *copy);
+/* Whether copy shares list's items as they are now. */
+bool pure_list_current(const PureList *copy, const PureList *list);
+/* Free items retired while no copy that shared them remains. */
+void pure_retired_free(PureRetired *);
 /* Insert a copy of cells (text bytes are copied) before position at. A NULL
  * log means the change is not undone. */
 PureResult pure_list_insert(PureList *, size_t at, const PureCell *cells, PureUndo *);

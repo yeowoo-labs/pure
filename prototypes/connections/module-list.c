@@ -9,25 +9,75 @@ struct PureList {
     uint8_t text_fields[16];
     PureCell **items;
     size_t count, capacity;
-    PureDraft *draft; /* the stored copy, or NULL */
-    size_t header;    /* draft bytes before the first item */
+    PureDraft *draft;     /* the stored copy, or NULL */
+    size_t header;        /* draft bytes before the first item */
+    uint64_t id, version; /* which list, and a number every change moves on */
+    uint64_t shares;      /* copies made so far: an item made before the last one is shared */
+    PureRetired *retired; /* where shared items go when the list lets them go */
+    unsigned refs;        /* a shared copy's references */
+    bool copy;            /* a shared copy: it owns its item array, not its items */
 };
 
-typedef enum { INSERTED, REMOVED, CHANGED } Change;
+typedef enum { INSERTED, REMOVED, CHANGED, REPLACED } Change;
 typedef struct {
     Change change;
     PureList *list;
     size_t at;
     unsigned field;
-    PureCell *item; /* REMOVED: the removed item */
+    PureCell *item; /* REMOVED: the removed item; REPLACED: the shared item a copy replaced */
     PureCell old;   /* CHANGED: the replaced cell */
 } Entry;
+typedef struct { PureCell *item; uint16_t text; uint8_t fields; } Retired;
+
+static uint64_t lists_made;
+
+/* An item's cells follow the list's share count when the item was made. One
+ * made before the last share may be read by a shared copy, so it never
+ * changes again (a change copies it) and is retired instead of freed. */
+static PureCell *new_item(const PureList *list) {
+    uint64_t *made = calloc(1, sizeof(*made) + (list->fields ? list->fields : 1) * sizeof(PureCell));
+    if (!made) return NULL;
+    *made = list->shares;
+    return (PureCell *)(made + 1);
+}
+
+static bool shared(const PureList *list, const PureCell *item) { return ((const uint64_t *)item)[-1] < list->shares; }
+
+static void free_cells(PureCell *item, unsigned fields, unsigned text) {
+    for (unsigned f = 0; f < fields; ++f)
+        if (text >> f & 1) free(item[f].text);
+    free((uint64_t *)item - 1);
+}
+
+static unsigned text_mask(const PureList *list) {
+    unsigned text = 0;
+    for (unsigned f = 0; f < list->fields; ++f) text |= (unsigned)(list->text_fields[f] != 0) << f;
+    return text;
+}
 
 static void free_item(const PureList *list, PureCell *item) {
-    if (!item) return;
-    for (unsigned f = 0; f < list->fields; ++f)
-        if (list->text_fields[f]) free(item[f].text);
-    free(item);
+    if (item) free_cells(item, list->fields, text_mask(list));
+}
+
+/* The list no longer has item: free it, or retire it while a copy may read it. */
+static void let_go(PureList *list, PureCell *item) {
+    if (!shared(list, item)) { free_item(list, item); return; }
+    PureRetired *retired = list->retired;
+    if (retired->count == retired->capacity) {
+        size_t capacity = retired->capacity ? 2 * retired->capacity : 16;
+        Retired *grown = realloc(retired->entries, capacity * sizeof(*grown));
+        if (!grown) return; /* kept for good rather than freed while read */
+        retired->entries = grown;
+        retired->capacity = capacity;
+    }
+    ((Retired *)retired->entries)[retired->count++] = (Retired){item, (uint16_t)text_mask(list), (uint8_t)list->fields};
+}
+
+void pure_retired_free(PureRetired *retired) {
+    Retired *entries = retired->entries;
+    for (size_t i = 0; i < retired->count; ++i) free_cells(entries[i].item, entries[i].fields, entries[i].text);
+    free(entries);
+    *retired = (PureRetired){0};
 }
 
 PureList *pure_list_new(unsigned fields, const uint8_t *text_fields) {
@@ -36,17 +86,44 @@ PureList *pure_list_new(unsigned fields, const uint8_t *text_fields) {
     if (!list) return NULL;
     list->fields = fields;
     memcpy(list->text_fields, text_fields, fields);
+    list->id = __atomic_add_fetch(&lists_made, 1, __ATOMIC_RELAXED);
     return list;
 }
 
 void pure_list_free(PureList *list) {
     if (!list) return;
-    for (size_t i = 0; i < list->count; ++i) free_item(list, list->items[i]);
+    if (list->copy) {
+        if (__atomic_sub_fetch(&list->refs, 1, __ATOMIC_ACQ_REL)) return;
+    } else
+        for (size_t i = 0; i < list->count; ++i) let_go(list, list->items[i]);
     free(list->items);
     free(list);
 }
 
 size_t pure_list_count(const PureList *list) { return list->count; }
+
+PureList *pure_list_share(PureList *list, PureRetired *retired) {
+    PureList *copy = malloc(sizeof(*copy));
+    PureCell **items = list->count ? malloc(list->count * sizeof(*items)) : NULL;
+    if (!copy || (list->count && !items)) {
+        free(copy);
+        free(items);
+        return NULL;
+    }
+    if (list->count) memcpy(items, list->items, list->count * sizeof(*items));
+    *copy = (PureList){.fields = list->fields, .items = items, .count = list->count, .capacity = list->count,
+                       .id = list->id, .version = list->version, .refs = 1, .copy = true};
+    memcpy(copy->text_fields, list->text_fields, sizeof(copy->text_fields));
+    list->retired = retired;
+    ++list->shares;
+    return copy;
+}
+
+void pure_list_hold(PureList *copy) { __atomic_add_fetch(&copy->refs, 1, __ATOMIC_RELAXED); }
+
+bool pure_list_current(const PureList *copy, const PureList *list) {
+    return copy->id == list->id && copy->version == list->version;
+}
 
 static bool log_change(PureUndo *undo, Entry entry) {
     if (undo->count == undo->capacity) {
@@ -154,12 +231,14 @@ static void place(PureList *list, size_t at, PureCell *item) {
     memmove(list->items + at + 1, list->items + at, (list->count - at) * sizeof(*list->items));
     list->items[at] = item;
     ++list->count;
+    ++list->version;
 }
 
 static PureCell *take(PureList *list, size_t at) {
     PureCell *item = list->items[at];
     memmove(list->items + at, list->items + at + 1, (list->count - at - 1) * sizeof(*list->items));
     --list->count;
+    ++list->version;
     return item;
 }
 
@@ -172,7 +251,7 @@ PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, Pu
         list->items = items;
         list->capacity = capacity;
     }
-    PureCell *item = calloc(list->fields ? list->fields : 1, sizeof(*item));
+    PureCell *item = new_item(list);
     if (!item) return PURE_ALLOCATION;
     for (unsigned f = 0; f < list->fields; ++f)
         if (!copy_cell(list, f, cells[f], &item[f])) { free_item(list, item); return PURE_ALLOCATION; }
@@ -206,19 +285,33 @@ PureResult pure_list_remove(PureList *list, size_t at, PureUndo *undo) {
     return PURE_OK;
 }
 
+/* A shared item's copy with every field but one (left empty). */
+static PureCell *copy_item(const PureList *list, const PureCell *item, unsigned except) {
+    PureCell *fresh = new_item(list);
+    for (unsigned f = 0; fresh && f < list->fields; ++f)
+        if (f != except && !copy_cell(list, f, item[f], &fresh[f])) {
+            free_item(list, fresh);
+            fresh = NULL;
+        }
+    return fresh;
+}
+
 PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell value, PureUndo *undo) {
     if (at >= list->count) return PURE_NOT_FOUND;
     PureCell copy, *item = list->items[at];
     if (!copy_cell(list, field, value, &copy)) return PURE_ALLOCATION;
+    PureCell *fresh = shared(list, item) ? copy_item(list, item, field) : item;
     size_t size = list->draft ? cell_bytes(list, field, copy) : 0;
     unsigned char *bytes = size ? malloc(size) : NULL;
-    if (size && !bytes) { free(copy.text); return PURE_ALLOCATION; }
-    if (bytes) encode_cell(list, field, copy, bytes);
-    if (!log_change(undo, (Entry){.change = CHANGED, .list = list, .at = at, .field = field, .old = item[field]})) {
+    Entry entry = fresh == item ? (Entry){.change = CHANGED, .list = list, .at = at, .field = field, .old = item[field]} :
+                                  (Entry){.change = REPLACED, .list = list, .at = at, .item = item};
+    if (!fresh || (size && !bytes) || !log_change(undo, entry)) {
         free(bytes);
         free(copy.text);
+        if (fresh != item) free_item(list, fresh);
         return PURE_ALLOCATION;
     }
+    if (bytes) encode_cell(list, field, copy, bytes);
     size_t within = 0;
     for (unsigned f = 0; f < field; ++f) within += cell_bytes(list, f, item[f]);
     PureResult result = mirror(list, at, within, cell_bytes(list, field, item[field]), bytes, size);
@@ -226,9 +319,12 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
     if (result != PURE_OK) {
         --undo->count;
         free(copy.text);
+        if (fresh != item) free_item(list, fresh);
         return result;
     }
-    item[field] = copy;
+    fresh[field] = copy;
+    list->items[at] = fresh;
+    ++list->version;
     return PURE_OK;
 }
 
@@ -303,9 +399,14 @@ void pure_undo_rollback(PureUndo *undo, size_t mark) {
         Entry *e = &entries[i];
         if (e->change == INSERTED) free_item(e->list, take(e->list, e->at));
         else if (e->change == REMOVED) place(e->list, e->at, e->item); /* capacity is still there */
-        else {
+        else if (e->change == REPLACED) {
+            free_item(e->list, e->list->items[e->at]);
+            e->list->items[e->at] = e->item;
+            ++e->list->version;
+        } else {
             if (e->list->text_fields[e->field]) free(e->list->items[e->at][e->field].text);
             e->list->items[e->at][e->field] = e->old;
+            ++e->list->version;
         }
     }
     undo->count = mark;
@@ -315,7 +416,7 @@ void pure_undo_commit(PureUndo *undo) {
     Entry *entries = undo->entries;
     for (size_t i = 0; i < undo->count; ++i) {
         Entry *e = &entries[i];
-        if (e->change == REMOVED) free_item(e->list, e->item);
+        if (e->change == REMOVED || e->change == REPLACED) let_go(e->list, e->item);
         else if (e->change == CHANGED && e->list->text_fields[e->field]) free(e->old.text);
     }
     undo->count = 0;

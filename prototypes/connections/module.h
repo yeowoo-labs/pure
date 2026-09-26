@@ -228,6 +228,9 @@ typedef struct {
     unsigned char *copied;
     int64_t revision;
     PureArena arena, view_arena;
+    struct PureSnapshot *snapshot; /* the newest snapshot made, or NULL */
+    PureRetired retired;           /* list items let go since it was made */
+    bool reading;                  /* a reader: its states are a snapshot's */
 } PureApp;
 
 PureResult pure_app_start(PureApp *, const PureModule *, PureData data);
@@ -274,4 +277,23 @@ PureResult pure_app_cell_text(PureApp *, uint32_t column, size_t row, bool (*vis
  * states keep their content, cursors their position in that text); new states
  * start at their initial value. The module must outlive the app. */
 PureResult pure_app_replace(PureApp *, const PureModule *);
+
+/* Readers on other threads. Right after a save an app can make a snapshot of
+ * its saved states, for evaluating views anywhere while it keeps applying
+ * events: numbers are copied; text states share their stored versions and
+ * lists their items (a list unchanged since the last snapshot shares that
+ * snapshot's copy), so the cost does not grow with the text. NULL when a
+ * change waits for a save, when a text state is not all stored (for example
+ * without a data host that keeps states), or when memory runs out. The caller
+ * gets a reference; the app keeps its own until the next snapshot. */
+typedef struct PureSnapshot PureSnapshot;
+PureSnapshot *pure_app_snapshot(PureApp *);
+void pure_snapshot_hold(PureSnapshot *);
+/* On any thread; the last reference frees it. */
+void pure_snapshot_release(PureSnapshot *);
+/* Show a snapshot's states in reader, a zeroed app or a reader before: its
+ * views read them while the snapshot is held, with the reader's own arena and
+ * row cache (one thread at a time). It applies no events. pure_app_stop frees
+ * the reader and leaves the snapshot alone. */
+void pure_app_read(PureApp *reader, const PureSnapshot *);
 #endif

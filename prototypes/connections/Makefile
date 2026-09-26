@@ -126,7 +126,7 @@ $(BUILD)/test-splice: test-splice.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUI
 # Text states are runtime-owned drafts, so the executor links the tree engine.
 
 $(BUILD)/test-module: test-module.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-module.c module-store.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-module.c module-store.c $(MODULE) $(LDFLAGS) -pthread -lm $(LDLIBS) -o $@
 
 $(BUILD)/pure-run: pure-run.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) pure-run.c module-store.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@

@@ -1288,6 +1288,19 @@ PureDraft *pure_draft_new(void) {
     return calloc(1, sizeof(PureDraft)); /* no path: nothing mapped, nothing to commit */
 }
 
+PureDraft *pure_draft_freeze(const PureDraft *draft) {
+    if (!draft->tree.shared || (draft->root.ref & MEMORY_BIT)) return NULL;
+    PureDraft *frozen = calloc(1, sizeof(*frozen));
+    if (!frozen) return NULL;
+    Mapping *mapping = draft->tree.shared;
+    __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
+    *frozen = (PureDraft){.tree = {.map = mapping->map, .end = mapping->end, .shared = mapping},
+                          .device = draft->device, .inode = draft->inode, .root = draft->root,
+                          .revision = draft->revision};
+    memcpy(frozen->key, draft->key, sizeof(frozen->key));
+    return frozen;
+}
+
 void pure_draft_close(PureDraft *draft) {
     if (!draft) return;
     release_tree(&draft->tree);

@@ -5,6 +5,7 @@
 #include "store.h"
 #include <dirent.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2195,6 +2196,230 @@ static void keyed_mutations(void) {
     printf("{\"keyed_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
 }
 
+/* ---- Snapshots. Everything an app's states and views show, as text (safe
+ * on any thread): a reader of a snapshot must show what the app showed. */
+typedef struct { char *text; size_t used, size; } Shown;
+
+static bool show_span(void *context, PureSpan span) {
+    Shown *s = context;
+    CHECK(s->used + span.size < s->size);
+    if (span.size) memcpy(s->text + s->used, span.data, span.size);
+    s->used += span.size;
+    return true;
+}
+
+static void show(Shown *s, const char *format, double value) {
+    int n = snprintf(s->text + s->used, s->size - s->used, format, value);
+    CHECK(n >= 0 && (size_t)n < s->size - s->used);
+    s->used += (size_t)n;
+}
+
+static void describe(PureApp *app, Shown *s) {
+    const PureModule *m = app->module;
+    s->used = 0;
+    for (uint32_t i = 0; i < m->states; ++i) {
+        if (m->state_type[i] == PURE_STATE_TEXT)
+            CHECK(pure_draft_read(app->texts[i], 0, pure_draft_size(app->texts[i]), show_span, s) == PURE_OK);
+        else if (m->state_type[i] == PURE_STATE_LIST) {
+            const PureRecord *r = &m->record[m->state_ref[i]];
+            for (size_t at = 0; at < pure_list_count(app->lists[i]); ++at)
+                for (unsigned f = 0; f < r->count; ++f) {
+                    PureCell cell = pure_list_get(app->lists[i], at, f);
+                    if (m->record_field_text[r->first + f]) show_span(s, (PureSpan){cell.text, cell.size});
+                    else show(s, "%g", cell.num);
+                    show(s, f + 1 < r->count ? "," : ";", 0);
+                }
+        } else show(s, "%g", app->values[i]);
+        show(s, "|", 0);
+    }
+    for (uint32_t v = 0; v < m->views; ++v) {
+        double value;
+        if (m->view_table[v] || m->view_type[v] == PURE_VIEW_TABLE) continue;
+        if (m->view_type[v] == PURE_VIEW_TEXT) {
+            if (pure_app_view_text(app, v, show_span, s) != PURE_OK) show(s, "!", 0);
+        } else if (pure_app_view(app, v, &value)) show(s, "%g", value);
+        else show(s, "!", 0);
+        show(s, "|", 0);
+    }
+    s->text[s->used] = 0;
+}
+
+/* One random event of the keyed app (see keyed), saved as it returns. */
+static void keyed_event(PureApp *app, uint32_t *seed) {
+    static const char *const names[] = {"a", "b", "ab", "", "\xea\xb0\x80", "zz", "bob", "m", "q", "c"};
+    uint32_t input = next_random(seed) % app->module->inputs;
+    if (app->module->input[input].kind == PURE_KIND_TEXT) type_text(app, input, names[next_random(seed) % LEN(names)]);
+    else pure_app_input(app, input, PURE_EDGE_DOWN);
+}
+
+/* A snapshot shows the states of the save before it, as they were, however
+ * the app goes on (items it changes or drops, a module it switches to, even
+ * after it stops and its store closes); a change not saved yet refuses one,
+ * and a save that fails is never shown. */
+static size_t snapshot_retired, snapshot_reads;
+
+static void snapshots_kept(Spec spec, const Spec *other, void (*event)(PureApp *, uint32_t *), unsigned steps) {
+    enum { KEPT = 8, SIZE = 1 << 16 };
+    static char texts[KEPT + 2][SIZE];
+    char *path = new_store();
+    PureStore *store;
+    CHECK(load(spec, &module_a) == PURE_OK && pure_store_open(path, &store) == PURE_OK);
+    CHECK(!other || load(*other, &module_b) == PURE_OK);
+    PureApp app, reader = {0};
+    CHECK(pure_app_start(&app, &module_a, pure_store_data(store)) == PURE_OK);
+    PureSnapshot *kept[KEPT] = {NULL};
+    Shown seen[KEPT], now = {texts[KEPT], 0, SIZE}, shown = {texts[KEPT + 1], 0, SIZE};
+    for (unsigned k = 0; k < KEPT; ++k) seen[k] = (Shown){texts[k], 0, SIZE};
+    uint32_t seed = 0x51a95u;
+    for (unsigned step = 0; step < steps; ++step) {
+        /* Late on, another module (the keyed app unkeyed), and back if it can. */
+        if (other && (step == steps - 400 || step == steps - 300))
+            CHECK(pure_app_replace(&app, app.module == &module_a ? &module_b : &module_a) != PURE_INVALID);
+        event(&app, &seed);
+        snapshot_retired += app.retired.count;
+        PureSnapshot *made = pure_app_snapshot(&app);
+        CHECK(made);
+        describe(&app, &now);
+        pure_app_read(&reader, made);
+        describe(&reader, &shown);
+        CHECK(!strcmp(now.text, shown.text));
+        unsigned slot = next_random(&seed) % KEPT;
+        if (kept[slot]) {
+            pure_app_read(&reader, kept[slot]);
+            describe(&reader, &shown);
+            CHECK(!strcmp(seen[slot].text, shown.text));
+            pure_snapshot_release(kept[slot]);
+        }
+        kept[slot] = made;
+        memcpy(seen[slot].text, now.text, now.used + 1);
+    }
+    /* Deferred: an unsaved change refuses a snapshot, and a failed save
+     * leaves the one before it true. */
+    CHECK(pure_app_defer(&app, true));
+    describe(&app, &now);
+    PureResult saved = PURE_OK;
+    for (unsigned tries = 0; tries < 64 && saved == PURE_OK; ++tries) {
+        event(&app, &seed);
+        if (!app.open) continue;
+        CHECK(!pure_app_snapshot(&app));
+        fail_stage = PURE_AFTER_HEADER;
+        saved = pure_app_save(&app); /* OK when the event changed nothing */
+        fail_stage = -1;
+    }
+    CHECK(saved == PURE_STORE_ERROR);
+    PureSnapshot *made = pure_app_snapshot(&app);
+    CHECK(made);
+    pure_app_read(&reader, made);
+    describe(&reader, &shown);
+    CHECK(!strcmp(now.text, shown.text));
+    pure_snapshot_release(made);
+    /* The kept ones outlive the app and its store. */
+    pure_app_stop(&app);
+    pure_store_close(store);
+    for (unsigned k = 0; k < KEPT; ++k) {
+        pure_app_read(&reader, kept[k]);
+        describe(&reader, &shown);
+        CHECK(!strcmp(seen[k].text, shown.text));
+        pure_snapshot_release(kept[k]);
+    }
+    pure_app_stop(&reader);
+    remove_store(path);
+}
+
+/* Readers on two threads take the newest snapshot while the app applies
+ * events and makes one after each save: each shows what the app showed. */
+typedef struct {
+    pthread_mutex_t lock;
+    PureSnapshot *newest;
+    char *seen;
+    bool done;
+    unsigned reads;
+} Published;
+
+static void *read_newest(void *context) {
+    Published *p = context;
+    PureApp reader = {0};
+    static _Thread_local char a[1 << 16], b[1 << 16];
+    Shown expected = {a, 0, sizeof(a)}, shown = {b, 0, sizeof(b)};
+    for (bool done = false; !done;) {
+        pthread_mutex_lock(&p->lock);
+        PureSnapshot *s = p->newest;
+        if (s) {
+            pure_snapshot_hold(s);
+            strcpy(expected.text, p->seen);
+        }
+        done = p->done;
+        pthread_mutex_unlock(&p->lock);
+        if (!s) continue;
+        pure_app_read(&reader, s);
+        describe(&reader, &shown);
+        CHECK(!strcmp(expected.text, shown.text));
+        pure_snapshot_release(s);
+        __atomic_add_fetch(&p->reads, 1, __ATOMIC_RELAXED);
+    }
+    pure_app_stop(&reader);
+    return NULL;
+}
+
+static void snapshots_read(Spec spec, void (*event)(PureApp *, uint32_t *), unsigned steps) {
+    static char seen[1 << 16], now[1 << 16];
+    char *path = new_store();
+    PureStore *store;
+    CHECK(load(spec, &module_a) == PURE_OK && pure_store_open(path, &store) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_store_data(store)) == PURE_OK);
+    Published p = {.lock = PTHREAD_MUTEX_INITIALIZER, .seen = seen};
+    pthread_t readers[2];
+    for (unsigned r = 0; r < 2; ++r) CHECK(pthread_create(&readers[r], NULL, read_newest, &p) == 0);
+    Shown shown = {now, 0, sizeof(now)};
+    uint32_t seed = 0x7eadu;
+    for (unsigned step = 0; step < steps; ++step) {
+        event(&app, &seed);
+        PureSnapshot *made = pure_app_snapshot(&app);
+        CHECK(made);
+        describe(&app, &shown);
+        pthread_mutex_lock(&p.lock);
+        PureSnapshot *old = p.newest;
+        p.newest = made;
+        memcpy(seen, shown.text, shown.used + 1);
+        pthread_mutex_unlock(&p.lock);
+        pure_snapshot_release(old);
+    }
+    pthread_mutex_lock(&p.lock);
+    p.done = true;
+    pthread_mutex_unlock(&p.lock);
+    for (unsigned r = 0; r < 2; ++r) CHECK(pthread_join(readers[r], NULL) == 0);
+    CHECK(p.reads > steps / 4);
+    snapshot_reads += p.reads;
+    pure_snapshot_release(p.newest);
+    pure_app_stop(&app);
+    pure_store_close(store);
+    remove_store(path);
+}
+
+static void crash_event(PureApp *app, uint32_t *seed) {
+    (void)seed;
+    CHECK(pure_app_input(app, 0, PURE_EDGE_DOWN) == PURE_OK);
+}
+
+static void snapshots(void) {
+    Spec keyed = keyed_spec(keyed_states, keyed_code, LEN(keyed_code), keyed_handlers, LEN(keyed_handlers));
+    Spec crashing = {crash_nums, 1, crash_inputs, 1, NULL, 0, crash_handlers, 1, crash_code, LEN(crash_code), NULL, 0,
+                     crash_states, 4, crash_constants, 2, NULL, 0, crash_records, 1, NULL, 0};
+    Spec unkeyed = keyed_spec(unkeyed_states, unkeyed_code, LEN(unkeyed_code), unkeyed_handlers, 1);
+    snapshots_kept(keyed, &unkeyed, keyed_event, 3000);
+    snapshots_kept(crashing, NULL, crash_event, 300);
+    snapshots_read(keyed, keyed_event, 3000);
+    snapshots_read(crashing, crash_event, 300);
+    /* Without stored states (texts only in memory) there is no snapshot. */
+    CHECK(load(crashing, &module_a) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && !pure_app_snapshot(&app));
+    pure_app_stop(&app);
+    CHECK(snapshot_retired > 100);
+    printf("{\"snapshots\":6600,\"items_retired\":%zu,\"reads_on_threads\":%zu}\n", snapshot_retired, snapshot_reads);
+}
+
 /* A message of a text, a number, bytes and a u32, in that order: the prefix
  * holds the text's length, the number and the u32; the text's bytes come
  * first after it and the bytes (the last variable field) take the rest. A
@@ -2331,6 +2556,7 @@ int main(void) {
     filters();
     keyed();
     keyed_mutations();
+    snapshots();
     fold_mutations();
     pointing();
     list_mutations();
@@ -2339,6 +2565,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields-timers-now\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields-timers-now-snapshots\"}");
     return 0;
 }

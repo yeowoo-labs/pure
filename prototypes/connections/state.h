@@ -35,7 +35,8 @@ PureResult pure_store_state(PureStore *, const char *name, PureDraft **out);
  * nodes from (NULL for other drafts). Spans that mapping holds stay readable
  * until the reference is released, after the draft closes and after the
  * store moves on. Spans of a draft's unsaved edits are not in it. Take it on
- * the handle's owner thread; the reference may be released on any thread. */
+ * the handle's owner thread (a frozen draft's on any); the reference may be
+ * released on any thread. */
 typedef struct PureMapping PureMapping;
 PureMapping *pure_draft_mapping(const PureDraft *);
 bool pure_mapping_holds(const PureMapping *, PureSpan);
@@ -60,6 +61,12 @@ typedef struct { uint64_t ref, bytes; } PureVersion;
 PureVersion pure_draft_version(const PureDraft *);
 PureResult pure_draft_read_version(const PureDraft *, PureVersion, size_t offset, size_t length,
                                    bool (*visit)(void *, PureSpan), void *context);
+/* A read-only copy of a draft opened through a store handle, at its current
+ * version, when that version is all stored (no edits since its last commit,
+ * as right after one): it shares the draft's mapping, and since reading
+ * changes nothing it may be read, lend its mapping and close on any thread.
+ * NULL otherwise, or when memory runs out. */
+PureDraft *pure_draft_freeze(const PureDraft *);
 /* While held, edits keep every earlier version's nodes (one transaction). */
 void pure_draft_hold(PureDraft *, bool held);
 /* Abandon edits made since version was taken; the draft was held since then. */
