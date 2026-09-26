@@ -56,7 +56,17 @@ size_t pure_utf8_newlines(PureSpan span) {
 
 size_t pure_format_number(double value, char out[32]) {
     if (value == 0) { memcpy(out, "0", 2); return 1; }
-    if (value == floor(value) && fabs(value) < 1e15) return (size_t)snprintf(out, 32, "%.0f", value);
+    if (value == floor(value) && fabs(value) < 1e15) {
+        /* An integer's digits, without printf (the common case, many times cheaper). */
+        char digits[16];
+        uint64_t n = (uint64_t)fabs(value);
+        size_t count = 0, length = 0;
+        do { digits[count++] = (char)('0' + n % 10); n /= 10; } while (n);
+        if (value < 0) out[length++] = '-';
+        while (count) out[length++] = digits[--count];
+        out[length] = 0;
+        return length;
+    }
     for (int precision = 1; precision <= 17; ++precision) {
         snprintf(out, 32, "%.*g", precision, value);
         if (strtod(out, NULL) == value) break;
