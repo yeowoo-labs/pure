@@ -97,6 +97,8 @@ static const struct { unsigned char pops, in[3], out, where, arg, of; } signatur
     [PURE_OP_TEXT_COMPARE] = {2, {T_TEXT, T_TEXT}, T_NUM, READ, A_RELATION, O_ANY},
     [PURE_OP_LIST_FIND] = {1, {T_KEY}, T_INDEX, READ, A_KEYED, O_ARG},
     [PURE_OP_LIST_HAS] = {1, {T_KEY}, T_NUM, READ, A_KEYED, O_ANY},
+    [PURE_OP_NOW] = {0, {0}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
+    [PURE_OP_FLOOR] = NUMS(1), [PURE_OP_MOD] = NUMS(2),
 };
 #undef NUMS
 #undef STATE
@@ -446,6 +448,12 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                 REFUSE("text input shape", i);
             continue;
         }
+        if (shape->kind == PURE_KIND_TIMER) {
+            shape->period = read32(at + 8);
+            if (shape->keyed || shape->field_start || shape->field_count || !shape->period ||
+                shape->period > PURE_TIMER_LONGEST) REFUSE("timer input", i);
+            continue;
+        }
         if (shape->kind != PURE_KIND_MESSAGE || read32(at + 8) || shape->field_start != next_field ||
             shape->field_count > out->fields - next_field) REFUSE("message shape", i);
         /* The prefix holds the fixed fields and the variable fields' lengths
@@ -771,6 +779,8 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         case PURE_OP_CONST: stack[sp++].num = op->value; continue;
         case PURE_OP_LOAD: stack[sp++].num = values[arg]; continue;
         case PURE_OP_DT: stack[sp++].num = ev->dt; continue;
+        case PURE_OP_NOW: stack[sp++].num = app->now; continue;
+        case PURE_OP_FLOOR: top->num = floor(top->num); continue;
         case PURE_OP_STORE: case PURE_OP_CUR_STORE: values[arg] = stack[--sp].num; continue;
         case PURE_OP_JZ: if (stack[--sp].num == 0) pc = arg; continue;
         case PURE_OP_JMP: pc = arg; continue;
@@ -1069,6 +1079,12 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         case PURE_OP_AND: value = a != 0 && b != 0; break;
         case PURE_OP_OR: value = a != 0 || b != 0; break;
         case PURE_OP_MIN: value = minimum(a, b); break;
+        case PURE_OP_MOD: /* the divisor's sign, as floor division leaves it (a zero too) */
+            if (b == 0) { kind = PURE_FAULT_DIVIDE; goto failed; }
+            value = fmod(a, b);
+            if (value != 0 && (value < 0) != (b < 0)) value += b;
+            else if (value == 0) value = copysign(0.0, b);
+            break;
         default: value = maximum(a, b); break;
         }
         if (!isfinite(value)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
@@ -1264,6 +1280,13 @@ PureResult pure_app_frame(PureApp *app) {
     pure_app_finish(app);
     Event ev = {.app = app, .arena = &app->arena, .dt = 1.0 / 60.0};
     return dispatch(app, 0, &ev);
+}
+
+PureResult pure_app_tick(PureApp *app, uint32_t input) {
+    if (input >= app->module->inputs || app->module->input[input].kind != PURE_KIND_TIMER) return PURE_INVALID;
+    pure_app_finish(app);
+    Event ev = {.app = app, .arena = &app->arena};
+    return dispatch(app, 1 + 2 * input, &ev);
 }
 
 PureResult pure_app_input(PureApp *app, uint32_t input, PureEdge edge) {

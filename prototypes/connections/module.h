@@ -38,6 +38,7 @@ typedef enum {
     PURE_OP_ITEM_GET, PURE_OP_ITEM_SET, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE,
     PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_ROW,
     PURE_OP_PICK, PURE_OP_SLIDE, PURE_OP_FOLD, PURE_OP_TEXT_COMPARE, PURE_OP_LIST_FIND, PURE_OP_LIST_HAS,
+    PURE_OP_NOW, PURE_OP_FLOOR, PURE_OP_MOD,
     PURE_OP_COUNT
 } PureOpcode;
 /* FOLD's argument: the kind (bits 0-7), the list state (8-15) and the length
@@ -50,7 +51,9 @@ typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PUR
  * comparisons (LT LE GT GE EQ NE); texts order by their bytes. */
 typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PURE_EQUAL, PURE_NOT_EQUAL } PureRelation;
 
-typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3 } PureInputKind;
+/* A timer ticks every `period` milliseconds while a host runs the app. */
+typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3, PURE_KIND_TIMER = 4 } PureInputKind;
+enum { PURE_TIMER_LONGEST = 86400000 };
 /* A message field: a u32le or a binary64 (fixed, at its offset in the
  * payload's prefix), or bytes or text of any length. The prefix also holds
  * each variable field's u32le length but the last one's (its offset is
@@ -86,7 +89,8 @@ typedef struct {
     uint8_t kind;
     bool keyed;
     uint16_t field_start, field_count;
-    uint32_t prefix; /* fixed payload bytes before an optional bytes tail */
+    uint32_t prefix; /* fixed payload bytes before the variable fields */
+    uint32_t period; /* a timer's, in milliseconds */
 } PureInputShape;
 
 /* A record type: fields numbered from first, each a number or text. */
@@ -198,6 +202,9 @@ typedef struct {
     PureFault fault;
     uint32_t fault_pc;
     uint64_t ticks, events;
+    /* The time events see as now, in milliseconds since 1970 (UTC). The host
+     * sets it, so a script can replay any time; views never see it. */
+    double now;
     uint64_t changes; /* counts every change of states, never back: what a filter's rows are fresh for */
     struct PureRows { uint32_t table; uint64_t changes; size_t *items, count, capacity; } *rows; /* a filtered table's items */
     unsigned row_tables;
@@ -220,6 +227,8 @@ bool pure_app_defer(PureApp *, bool deferred);
 /* Leaves unsaved frame changes unsaved: call pure_app_save first to keep them. */
 void pure_app_stop(PureApp *);
 PureResult pure_app_frame(PureApp *);
+/* A timer input's tick: an event saved like a key's. */
+PureResult pure_app_tick(PureApp *, uint32_t input);
 PureResult pure_app_input(PureApp *, uint32_t input, PureEdge);
 /* Point an index state at the item at position (0 first), as a user pointing
  * at a row: an event with no handler, saved like a key event. NOT_FOUND past

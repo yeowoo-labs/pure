@@ -27,6 +27,8 @@ typedef struct { const char *name; uint32_t type; } F;
 /* kind 0 is a key input; otherwise PURE_KIND_MESSAGE with fields. */
 typedef struct { const char *name, *key; int kind; bool keyed; const F *fields; size_t nfields; } I;
 #define KEY(name, key) {name, key, 0, false, NULL, 0}
+/* A timer's period (milliseconds) rides in nfields. */
+#define TIMER(name, period) {name, NULL, PURE_KIND_TIMER, false, NULL, period}
 typedef struct { const char *name; uint32_t start, length; } V;
 typedef struct { uint32_t event, start, length; } H;
 typedef struct { uint8_t op; uint32_t arg; double value; } O;
@@ -73,7 +75,8 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.ni; ++i) {
         text[names++] = spec.in[i].name;
         if (!spec.in[i].kind) text[names++] = spec.in[i].key;
-        for (size_t f = 0; f < spec.in[i].nfields; ++f) text[names++] = spec.in[i].fields[f].name;
+        for (size_t f = 0; spec.in[i].kind != PURE_KIND_TIMER && f < spec.in[i].nfields; ++f)
+            text[names++] = spec.in[i].fields[f].name;
     }
     for (size_t i = 0; i < spec.nv; ++i) text[names++] = spec.v[i].name;
     for (size_t i = 0; i < spec.ntv; ++i) text[names++] = spec.tv[i].name;
@@ -92,7 +95,7 @@ static size_t build(unsigned char *out, Spec spec) {
         used += length;
     }
     size_t fields = 0;
-    for (size_t i = 0; i < spec.ni; ++i) fields += spec.in[i].nfields;
+    for (size_t i = 0; i < spec.ni; ++i) fields += spec.in[i].kind == PURE_KIND_TIMER ? 0 : spec.in[i].nfields;
     for (size_t i = 0; i < spec.nk; ++i) { memcpy(blob + blob_used, spec.k[i], strlen(spec.k[i])); blob_used += strlen(spec.k[i]); }
     unsigned char *p = out;
     memset(p, 0, 40);
@@ -121,16 +124,17 @@ static size_t build(unsigned char *out, Spec spec) {
         const I *in = &spec.in[i];
         p = put32(p, offset[n++]);
         *p++ = (unsigned char)(in->kind ? in->kind : 1); *p++ = in->keyed; *p++ = 0; *p++ = 0;
-        p = put32(p, in->kind ? 0 : offset[n++]);
+        bool timer = in->kind == PURE_KIND_TIMER;
+        p = put32(p, timer ? (uint32_t)in->nfields : in->kind ? 0 : offset[n++]);
         uint32_t first = in->kind == PURE_KIND_MESSAGE ? field_start : 0; /* only messages have fields */
         *p++ = (unsigned char)first; *p++ = (unsigned char)(first >> 8);
-        *p++ = (unsigned char)in->nfields; *p++ = 0;
-        for (size_t f = 0; f < in->nfields; ++f) field_offsets[nf++] = offset[n++];
-        field_start += (uint32_t)in->nfields;
+        *p++ = (unsigned char)(timer ? 0 : in->nfields); *p++ = 0;
+        for (size_t f = 0; !timer && f < in->nfields; ++f) field_offsets[nf++] = offset[n++];
+        field_start += timer ? 0 : (uint32_t)in->nfields;
     }
     nf = 0;
     for (size_t i = 0; i < spec.ni; ++i)
-        for (size_t f = 0; f < spec.in[i].nfields; ++f) {
+        for (size_t f = 0; spec.in[i].kind != PURE_KIND_TIMER && f < spec.in[i].nfields; ++f) {
             p = put32(p, field_offsets[nf++]);
             p = put32(p, spec.in[i].fields[f].type);
         }
@@ -2259,6 +2263,57 @@ static void message_fields(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
 }
 
+/* A timer's tick sees the time the host set; floor and a floored modulo
+ * take it apart. now is for handlers only. */
+enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
+static void timers(void) {
+    static const S nums[] = {{"clock", 0}, {"seconds", 0}, {"ticks", 0}, {"rest", 0}};
+    static const I inputs[] = {TIMER("tick", 1000), KEY("left", "KeyL"), KEY("zero", "KeyZ")};
+    static const O code[] = {
+        {NOW, 0, 0}, {ST, 0, 0}, {NOW, 0, 0}, {C, 0, 1000}, {DIV, 0, 0}, {FLOOR, 0, 0}, {C, 0, 60}, {MOD, 0, 0},
+        {ST, 1, 0}, {L, 2, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 2, 0},                      /* 0 tick */
+        {C, 0, -7}, {C, 0, 3}, {MOD, 0, 0}, {C, 0, 7}, {C, 0, -3}, {MOD, 0, 0}, {C, 0, 10}, {MUL, 0, 0},
+        {ADD, 0, 0}, {ST, 3, 0},                                                         /* 13 left: 2 + -20 */
+        {C, 0, 1}, {C, 0, 0}, {MOD, 0, 0}, {ST, 3, 0},                                   /* 23 zero */
+    };
+    static const H handlers[] = {{1, 0, 13}, {3, 13, 10}, {5, 23, 4}};
+    static const V one_view[] = {{"v", 0, 1}};
+    Spec spec = SPEC(nums, inputs, one_view, handlers, code);
+    spec.nv = 0;
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    CHECK(module_a.input[0].kind == PURE_KIND_TIMER && module_a.input[0].period == 1000);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    app.now = 1700000123456.0;
+    CHECK(pure_app_tick(&app, 0) == PURE_OK && app.values[0] == 1700000123456.0 &&
+          app.values[1] == (double)(1700000123 % 60) && app.values[2] == 1);
+    CHECK(pure_app_tick(&app, 1) == PURE_INVALID && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_INVALID);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[3] == 2 - 20);
+    /* A zero takes the divisor's sign too. */
+    static const O zeros[] = {{C, 0, -6}, {C, 0, 3}, {MOD, 0, 0}, {ST, 0, 0}, {C, 0, 6}, {C, 0, -3}, {MOD, 0, 0}, {ST, 1, 0}};
+    static const H zero_handler[] = {{3, 0, 8}};
+    Spec signs = spec;
+    signs.o = zeros; signs.no = 8; signs.h = zero_handler; signs.nh = 1;
+    CHECK(load(signs, &module_b) == PURE_OK);
+    PureApp zero;
+    CHECK(pure_app_start(&zero, &module_b, (PureData){0}) == PURE_OK && pure_app_input(&zero, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(zero.values[0] == 0 && !signbit(zero.values[0]) && zero.values[1] == 0 && signbit(zero.values[1]));
+    pure_app_stop(&zero);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
+    pure_app_stop(&app);
+    /* A timer's period is 1 ms to a day, and it has nothing else; now is for handlers. */
+    static const I no_period[] = {TIMER("tick", 0)}, too_long[] = {TIMER("tick", PURE_TIMER_LONGEST + 1)};
+    static const O now_view[] = {{NOW, 0, 0}};
+    Spec bad = spec;
+    bad.in = no_period; bad.ni = 1; bad.nh = 1; bad.o = code; bad.no = 13;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "timer input"));
+    bad.in = too_long;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "timer input"));
+    bad = SPEC(nums, inputs, one_view, handlers, now_view);
+    bad.nh = 0;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view with an effect"));
+}
+
 int main(void) {
     behaviour();
     faults();
@@ -2266,6 +2321,7 @@ int main(void) {
     mutations();
     messages();
     message_fields();
+    timers();
     message_mutations();
     texts();
     marks();
@@ -2283,6 +2339,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields-timers-now\"}");
     return 0;
 }

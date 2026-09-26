@@ -10,11 +10,12 @@
  * states live in that tree store: it starts from them, and frame changes are
  * saved at the end of input or by save. --batch N defers saving and saves
  * every N commands (and at the end), so N events share one commit.
- *   down NAME | up NAME | frame [N] | type NAME HEX|- | replace PATH | save | show
+ *   down NAME | up NAME | frame [N] | type NAME HEX|- | tick NAME | time MS | replace PATH | save | show
  * Text states and text views print as JSON strings; cursors as byte positions;
  * lists as arrays of objects; indices as positions; a table view as an array
  * with an object of its columns per row. A failed view or cell is null. */
 static const char *const fault_names[] = {"none", "divide", "non_finite", "clamp", "limit", "not_found", "encoding", "exists"};
+/* time MS sets the time events see (milliseconds since 1970); tick NAME is a timer's tick. */
 
 static bool load(const char *path, PureModule *module) {
     FILE *file = fopen(path, "rb");
@@ -169,6 +170,15 @@ int main(int argc, char **argv) {
                 text[i] = (unsigned char)(hex(data[2 * i]) << 4 | hex(data[2 * i + 1]));
             if (input < 0) failure = "unknown input";
             else if (pure_app_text(&app, (uint32_t)input, (PureSpan){text, length}) != PURE_OK) failure = "event failed";
+        } else if (!strcmp(command, "tick")) {
+            int input = pure_module_input(app.module, argument);
+            if (input < 0) failure = "unknown input";
+            else if (pure_app_tick(&app, (uint32_t)input) != PURE_OK) failure = "event failed";
+        } else if (!strcmp(command, "time")) {
+            char *end;
+            double now = strtod(argument, &end);
+            if (!*argument || *end || !(now >= 0 && now < 1e15)) failure = "time";
+            else app.now = now;
         } else if (!strcmp(command, "frame")) {
             long count = *argument ? strtol(argument, NULL, 10) : 1;
             if (count < 1 || count > 600) failure = "frame count";
