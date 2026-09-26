@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -58,12 +59,15 @@ typedef struct Connection {
     size_t body_size, received, in_used;
     unsigned char *body;
     PureTicket ticket;
-    PureTransfer transfer;
+    struct iovec *out, small[4]; /* the answer: its head, then its body's extents */
+    size_t out_count, out_at;
+    PureMapping *mapping;        /* keeps store extents the answer borrows mapped */
     char head[320];
     char in[HEADER_LIMIT]; /* the header being read, then pipelined bytes */
 } Connection;
 
-/* One request applied in the current burst. */
+/* One request applied in the current burst. A read answered from the store
+ * lends its extents: extents point into mapping, which the answer keeps. */
 typedef struct {
     Connection *connection;
     PureTicket ticket;
@@ -72,6 +76,9 @@ typedef struct {
     int64_t revision;
     PureResource resource;
     PureSpan reply;
+    struct iovec *extents;
+    size_t extent_count, extent_size;
+    PureMapping *mapping;
     char key[65];
 } Applied;
 
@@ -123,12 +130,22 @@ static void release_ticket(void *owner) {
     c->body = NULL;
 }
 
+/* Everything an answer borrowed goes back: the request's payload and ticket,
+ * the store extents. */
+static void finish_output(Connection *c) {
+    release_ticket(c);
+    pure_mapping_release(c->mapping);
+    c->mapping = NULL;
+    if (c->out != c->small) free(c->out);
+    c->out = NULL;
+    c->out_count = c->out_at = 0;
+}
+
 /* Events of this round may still name c: it is reused after the round. */
 static void close_connection(Connection *c) {
     if (c->phase == CLOSED) return;
     Host *host = c->host;
-    if (c->transfer.active) pure_transfer_abort(&c->transfer);
-    else release_ticket(c);
+    finish_output(c);
     close(c->fd); /* also leaves the epoll set */
     c->phase = CLOSED;
     host->table[c->index] = NULL;
@@ -137,17 +154,30 @@ static void close_connection(Connection *c) {
     --host->active;
 }
 
-static void respond(Connection *c, int status, const char *reason, const char *error, int64_t revision,
-                    PureSpan body) {
+/* Answer with a body of `count` extents (`size` bytes in all). The answer
+ * takes the mapping reference; one writev sends as much as the socket takes. */
+static void respond_extents(Connection *c, int status, const char *reason, const char *error, int64_t revision,
+                            const struct iovec *extents, size_t count, size_t size, PureMapping *mapping) {
     char tag[48] = "";
     if (revision > 0) snprintf(tag, sizeof(tag), "ETag: \"%" PRId64 "\"\r\n", revision);
     int length = snprintf(c->head, sizeof(c->head),
         "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\n%sContent-Type: application/octet-stream\r\n"
         "Cache-Control: no-store\r\nX-Pure-Error: %s\r\n%s\r\n",
-        status, reason, body.size, c->keep_alive ? "" : "Connection: close\r\n", error, tag);
+        status, reason, size, c->keep_alive ? "" : "Connection: close\r\n", error, tag);
+    c->mapping = mapping;
+    c->out = count < sizeof(c->small) / sizeof(*c->small) ? c->small : malloc((count + 1) * sizeof(*c->out));
     c->phase = WRITING;
-    pure_transfer_init(&c->transfer, (PureSpan){(const unsigned char *)c->head, (size_t)length}, body, c,
-                       release_ticket);
+    if (!c->out) { c->keep_alive = false; c->out = c->small; count = 0; } /* cannot send it: the close tells */
+    c->out[0] = (struct iovec){c->head, (size_t)length};
+    if (count) memcpy(c->out + 1, extents, count * sizeof(*extents));
+    c->out_count = count + 1;
+    c->out_at = 0;
+}
+
+static void respond(Connection *c, int status, const char *reason, const char *error, int64_t revision,
+                    PureSpan body) {
+    struct iovec extent = {(void *)body.data, body.size};
+    respond_extents(c, status, reason, error, revision, &extent, body.size ? 1 : 0, body.size, NULL);
 }
 
 /* A request the host cannot read further: answer and close. */
@@ -325,25 +355,24 @@ static void drive(Connection *c) {
         }
         if (c->phase == WRITING) {
             if (!c->writable) return;
-            PureTransfer *t = &c->transfer;
-            struct iovec parts[2];
-            int count = 0;
-            for (size_t part = t->part; part < 2; ++part) {
-                size_t offset = part == t->part ? t->offset : 0;
-                if (t->spans[part].size > offset)
-                    parts[count++] = (struct iovec){(void *)(t->spans[part].data + offset), t->spans[part].size - offset};
-            }
-            ssize_t n = count ? writev(c->fd, parts, count) : 0;
+            size_t left = c->out_count - c->out_at;
+            ssize_t n = writev(c->fd, c->out + c->out_at, (int)(left < IOV_MAX ? left : IOV_MAX));
             if (n < 0 && errno == EAGAIN) { c->writable = false; return; }
             if (n < 0 && errno == EINTR) continue;
             if (n < 0) { close_connection(c); return; }
-            for (size_t left = (size_t)n; left && t->active;) {
-                PureSpan next = pure_transfer_next(t, left);
-                if (!pure_transfer_consume(t, next.size)) abort();
-                left -= next.size;
+            for (size_t sent = (size_t)n; c->out_at < c->out_count;) {
+                struct iovec *v = &c->out[c->out_at];
+                if (sent < v->iov_len) {
+                    v->iov_base = (char *)v->iov_base + sent;
+                    v->iov_len -= sent;
+                    break;
+                }
+                sent -= v->iov_len;
+                ++c->out_at;
             }
-            if (t->active) continue;
+            if (c->out_at < c->out_count) continue;
             /* Answered: the next request may already be here. */
+            finish_output(c);
             c->deadline = now_ms() + c->host->timeout_ms;
             if (!c->keep_alive) { close_connection(c); return; }
             c->phase = READING_HEAD;
@@ -377,6 +406,17 @@ static bool measure_reply(void *context, PureSpan span) {
     return true;
 }
 
+/* The reply's extents, if the store mapping holds every one. */
+typedef struct { struct iovec *extents; size_t count; const PureMapping *mapping; bool held; } Gather;
+
+static bool gather_extents(void *context, PureSpan span) {
+    Gather *g = context;
+    if (!span.size) return true;
+    g->held = g->held && pure_mapping_holds(g->mapping, span);
+    if (g->held) g->extents[g->count++] = (struct iovec){(void *)span.data, span.size};
+    return g->held;
+}
+
 static bool copy_reply(void *context, PureSpan span) {
     Reply *r = context;
     if (span.size) memcpy(r->bytes + r->size, span.data, span.size);
@@ -405,6 +445,20 @@ static void apply_effect(Host *host, const PureEffect *effect, Applied *out) {
     }
     if (reply.size > effect->available) { out->status = PURE_BUDGET; return; }
     if (!reply.size) return;
+    /* A stored document is lent, extent by extent, not copied. */
+    PureMapping *mapping = app->document ? pure_draft_mapping(app->document) : NULL;
+    if (mapping) {
+        Gather gather = {malloc(reply.spans * sizeof(struct iovec)), 0, mapping, true};
+        if (gather.extents && pure_app_reply(app, gather_extents, &gather) == PURE_OK && gather.held) {
+            out->extents = gather.extents;
+            out->extent_count = gather.count;
+            out->extent_size = reply.size;
+            out->mapping = mapping;
+            return;
+        }
+        free(gather.extents);
+        pure_mapping_release(mapping);
+    }
     unsigned char *copy = malloc(reply.size);
     if (!copy) { out->status = PURE_ALLOCATION; return; }
     reply = (Reply){.bytes = copy};
@@ -423,10 +477,19 @@ static void finish_burst(Host *host, size_t count) {
         if (!pure_runtime_complete(a->ticket, status, a->input == PURE_INPUT_READ ? &a->resource : NULL,
                                    status == PURE_OK ? a->reply : (PureSpan){0}, a->revision)) abort();
         Connection *c = a->connection;
-        if (!c || c->phase != WAITING || c->ticket.generation != a->ticket.generation) continue;
-        PureOutcome result;
-        if (!pure_runtime_result(a->ticket, &result)) abort();
-        answer(c, result);
+        bool waiting = c && c->phase == WAITING && c->ticket.generation == a->ticket.generation;
+        if (waiting && status == PURE_OK && a->mapping) {
+            respond_extents(c, 200, "OK", "none", a->revision, a->extents, a->extent_count, a->extent_size, a->mapping);
+            a->mapping = NULL;
+        }
+        pure_mapping_release(a->mapping);
+        free(a->extents);
+        if (!waiting) continue;
+        if (c->phase == WAITING) {
+            PureOutcome result;
+            if (!pure_runtime_result(a->ticket, &result)) abort();
+            answer(c, result);
+        }
         drive(c); /* most answers fit the socket buffer at once */
     }
 }
@@ -515,7 +578,9 @@ static void accept_all(Host *host) {
         c->readable = c->writable = c->keep_alive = true;
         c->deadline = now_ms() + host->timeout_ms;
         c->ticket = (PureTicket){0};
-        c->transfer = (PureTransfer){0};
+        c->out = NULL;
+        c->out_count = c->out_at = 0;
+        c->mapping = NULL;
         c->body = NULL;
         c->in_used = 0;
         struct epoll_event event = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.ptr = c};

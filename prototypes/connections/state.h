@@ -30,6 +30,16 @@ PureResult pure_store_open(const char *path, PureStore **out);
 void pure_store_close(PureStore *);
 PureResult pure_store_draft(PureStore *, const char *key, PureDraft **out);
 PureResult pure_store_state(PureStore *, const char *name, PureDraft **out);
+/* Stored extents can outlive their draft: pure_draft_mapping takes a
+ * reference to the mapping a draft opened through a handle reads its stored
+ * nodes from (NULL for other drafts). Spans that mapping holds stay readable
+ * until the reference is released, after the draft closes and after the
+ * store moves on. Spans of a draft's unsaved edits are not in it. Use it on
+ * the handle's owner thread. */
+typedef struct PureMapping PureMapping;
+PureMapping *pure_draft_mapping(const PureDraft *);
+bool pure_mapping_holds(const PureMapping *, PureSpan);
+void pure_mapping_release(PureMapping *);
 /* Pinned, drafts open at the version found when pinning, without checking
  * the file each time (a host pins for one burst of requests); commits made
  * through the handle still move it on. */

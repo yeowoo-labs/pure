@@ -53,8 +53,9 @@ typedef struct {
     size_t size;          /* leaf bytes, child count, or next free slot + 1 */
     unsigned height;      /* FREE for a reclaimed slot */
 } Node;
-/* One mapped version of the file, shared by the drafts of a store handle. */
-typedef struct { const unsigned char *map; uint64_t end; unsigned refs; } Mapping;
+/* One mapped version of the file, shared by the drafts of a store handle
+ * and by whoever still sends extents from it. */
+typedef struct PureMapping { const unsigned char *map; uint64_t end; unsigned refs; } Mapping;
 typedef struct {
     const unsigned char *map;
     uint64_t end;
@@ -1140,6 +1141,19 @@ void pure_store_close(PureStore *store) {
     free(store->path);
     free(store);
 }
+
+PureMapping *pure_draft_mapping(const PureDraft *draft) {
+    Mapping *mapping = draft->tree.shared;
+    if (mapping) ++mapping->refs;
+    return mapping;
+}
+
+bool pure_mapping_holds(const PureMapping *mapping, PureSpan span) {
+    uintptr_t base = (uintptr_t)mapping->map, at = (uintptr_t)span.data;
+    return !span.size || (span.data && at >= base && at - base <= mapping->end && span.size <= mapping->end - (at - base));
+}
+
+void pure_mapping_release(PureMapping *mapping) { release_mapping(mapping); }
 
 PureResult pure_store_pin(PureStore *store, bool pinned) {
     store->pinned = false;
