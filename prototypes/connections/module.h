@@ -37,7 +37,7 @@ typedef enum {
     PURE_OP_LIST_COUNT, PURE_OP_LIST_APPEND, PURE_OP_LIST_INSERT, PURE_OP_LIST_REMOVE,
     PURE_OP_ITEM_GET, PURE_OP_ITEM_SET, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE,
     PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_ROW,
-    PURE_OP_PICK, PURE_OP_SLIDE, PURE_OP_FOLD,
+    PURE_OP_PICK, PURE_OP_SLIDE, PURE_OP_FOLD, PURE_OP_TEXT_COMPARE, PURE_OP_LIST_FIND, PURE_OP_LIST_HAS,
     PURE_OP_COUNT
 } PureOpcode;
 /* FOLD's argument: the kind (bits 0-7), the list state (8-15) and the length
@@ -46,6 +46,9 @@ typedef enum {
  * max and min take a value and an include flag from their block; first gives
  * the index of the first item whose block leaves a non-zero number. */
 typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PURE_FOLD_FIRST } PureFold;
+/* TEXT_COMPARE's argument: the relation, in the order of the number
+ * comparisons (LT LE GT GE EQ NE); texts order by their bytes. */
+typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PURE_EQUAL, PURE_NOT_EQUAL } PureRelation;
 
 typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3 } PureInputKind;
 typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2 } PureFieldType;
@@ -61,9 +64,11 @@ enum { PURE_CURSOR_STAYS = 1 };
 typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2 } PureViewType;
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
+/* EXISTS: an item with that key is already in the keyed list (the event
+ * reports PURE_CONFLICT). */
 typedef enum {
     PURE_FAULT_NONE, PURE_FAULT_DIVIDE, PURE_FAULT_NON_FINITE, PURE_FAULT_CLAMP,
-    PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING
+    PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING, PURE_FAULT_EXISTS
 } PureFault;
 
 typedef struct { double value; uint32_t arg; uint8_t op; } PureOp;
@@ -91,6 +96,9 @@ typedef struct {
     uint8_t state_type[PURE_MODULE_STATES];
     uint16_t state_ref[PURE_MODULE_STATES]; /* text: constant; cursor: text; list: record; index: list */
     uint8_t state_flags[PURE_MODULE_STATES]; /* cursor: PURE_CURSOR_STAYS */
+    /* A keyed list: its key field + 1 (0: none). Its items stay in key order
+     * (numbers by value, texts by bytes), each key once, and keys do not change. */
+    uint8_t state_key[PURE_MODULE_STATES];
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
     double initial[PURE_MODULE_STATES];

@@ -1981,6 +1981,216 @@ static void pointing(void) {
     remove_store(path);
 }
 
+/* Keyed lists: items in key order (texts by bytes, numbers by value), each
+ * key once; found by key; a list that becomes keyed is put in order with
+ * its indices following their items, or refused when two items share a key. */
+enum { FIND = PURE_OP_LIST_FIND, HAS = PURE_OP_LIST_HAS, TCMP = PURE_OP_TEXT_COMPARE,
+       PEOPLE = 1, K_AT = 2, SCORES = 3, K_NAME = 0, K_VISITS = 1u << 16 };
+static const S keyed_nums[] = {{"n", 0}};
+static const T keyed_states[] = {{"people", 3 | 1 << 8, 0}, {"at", 4, 1}, {"scores", 3 | 1 << 8, 1}};
+static const T unkeyed_states[] = {{"people", 3, 0}, {"at", 4, 1}, {"scores", 3, 1}};
+static const RF person_fields[] = {{"name", 1, 0}, {"visits", 0, 0}};
+static const RF score_fields[] = {{"score", 0, 0}};
+static const R keyed_records[] = {{"person", person_fields, 2}, {"score", score_fields, 1}};
+static const char *const keyed_constants[] = {"", "bob", "m"};
+static const I keyed_inputs[] = {
+    {"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, {"seek", NULL, PURE_KIND_TEXT, false, NULL, 0},
+    {"has", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("drop", "Delete"), KEY("bump", "KeyB"),
+    KEY("two", "KeyN"), KEY("zero", "KeyO"), KEY("minus_zero", "KeyM"), {"twice", NULL, PURE_KIND_TEXT, false, NULL, 0},
+};
+static const O keyed_code[] = {
+    {TI, 0, 0}, {C, 0, 0}, {LA, PEOPLE, 0}, {TI, 0, 0}, {FIND, PEOPLE, 0}, {XS, K_AT, 0},        /* 0 typed: add, point at it */
+    {TI, 0, 0}, {FIND, PEOPLE, 0}, {XS, K_AT, 0},                                               /* 6 seek */
+    {TI, 0, 0}, {HAS, PEOPLE, 0}, {ST, 0, 0},                                                   /* 9 has */
+    {XL, K_AT, 0}, {LR, PEOPLE, 0},                                                             /* 12 drop */
+    {XL, K_AT, 0}, {XL, K_AT, 0}, {IG, PEOPLE | K_VISITS, 0}, {C, 0, 1}, {ADD, 0, 0},            /* 14 bump */
+    {IS, PEOPLE | K_VISITS, 0},
+    {C, 0, 2}, {LA, SCORES, 0}, {C, 0, 0}, {LA, SCORES, 0}, {C, 0, -0.0}, {LA, SCORES, 0},       /* 20 two, zero, minus_zero */
+    {TI, 0, 0}, {C, 0, 0}, {LA, PEOPLE, 0}, {TI, 0, 0}, {C, 0, 0}, {LA, PEOPLE, 0},              /* 26 twice: always exists */
+    {LC, PEOPLE, 0},                                                                            /* 32 view count */
+    {XL, K_AT, 0}, {XN, 0, 0},                                                                  /* 33 view position */
+    {XL, K_AT, 0}, {IG, PEOPLE | K_NAME, 0}, {TK, 1, 0}, {TCMP, PURE_EQUAL, 0},                  /* 35 view is_bob */
+    {XL, K_AT, 0}, {IG, PEOPLE | K_NAME, 0}, {TK, 2, 0}, {TCMP, PURE_LESS, 0},                   /* 39 view before_m */
+    {LC, SCORES, 0},                                                                            /* 43 view scores */
+    {XL, K_AT, 0}, {IG, PEOPLE | K_NAME, 0},                                                    /* 44 view current */
+};
+static const H keyed_handlers[] = {{1, 0, 6}, {3, 6, 3}, {5, 9, 3}, {7, 12, 2}, {9, 14, 6}, {11, 20, 2}, {13, 22, 2},
+                                   {15, 24, 2}, {17, 26, 6}};
+static const V keyed_views[] = {{"count", 32, 1}, {"position", 33, 2}, {"is_bob", 35, 4}, {"before_m", 39, 4},
+                                {"scores_count", 43, 1}};
+static const V keyed_text_views[] = {{"current", 44, 2}};
+/* Unkeyed, the same states: typed appends and points at the new last item. */
+static const O unkeyed_code[] = {{TI, 0, 0}, {C, 0, 0}, {LA, PEOPLE, 0}, {XE, PEOPLE, 0}, {XS, K_AT, 0}};
+static const H unkeyed_handlers[] = {{1, 0, 5}};
+
+static Spec keyed_spec(const T *states, const O *code, size_t count, const H *handlers, size_t nhandlers) {
+    bool views = code == keyed_code;
+    return (Spec){keyed_nums, 1, keyed_inputs, LEN(keyed_inputs), keyed_views, views ? LEN(keyed_views) : 0, handlers,
+                  nhandlers, code, count, NULL, 0, states, LEN(keyed_states), keyed_constants, LEN(keyed_constants),
+                  keyed_text_views, views ? 1 : 0, keyed_records, 2, NULL, 0};
+}
+
+static PureResult type_text(PureApp *app, uint32_t input, const char *text) {
+    return pure_app_text(app, input, (PureSpan){(const unsigned char *)text, strlen(text)});
+}
+
+/* A list's first field (text) of every item, comma separated. */
+static const char *names_of(const PureApp *app, uint32_t list) {
+    static char out[512];
+    size_t used = 0;
+    for (size_t at = 0; at < pure_list_count(app->lists[list]); ++at) {
+        PureCell cell = pure_list_get(app->lists[list], at, 0);
+        CHECK(used + cell.size + 2 < sizeof(out));
+        if (at) out[used++] = ',';
+        if (cell.size) memcpy(out + used, cell.text, cell.size);
+        used += cell.size;
+    }
+    out[used] = 0;
+    return out;
+}
+
+static void keyed(void) {
+    CHECK(load(keyed_spec(keyed_states, keyed_code, LEN(keyed_code), keyed_handlers, LEN(keyed_handlers)), &module_a) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    for (const char *const *word = (const char *const[]){"m", "b", "z", "a", NULL}; *word; ++word)
+        CHECK(type_text(&app, 0, *word) == PURE_OK);
+    CHECK(!strcmp(names_of(&app, PEOPLE), "a,b,m,z") && app.values[K_AT] == 0 && !strcmp(view_text(&app, 5), "a"));
+    /* A key once: the add fails, and so does an event whose second add repeats its first. */
+    CHECK(type_text(&app, 0, "b") == PURE_CONFLICT && app.fault == PURE_FAULT_EXISTS);
+    CHECK(type_text(&app, 8, "c") == PURE_CONFLICT && !strcmp(names_of(&app, PEOPLE), "a,b,m,z") && app.values[K_AT] == 0);
+    CHECK(type_text(&app, 1, "z") == PURE_OK && app.values[K_AT] == 3 && !strcmp(view_text(&app, 5), "z"));
+    CHECK(type_text(&app, 1, "q") == PURE_NOT_FOUND && app.fault == PURE_FAULT_NOT_FOUND && app.values[K_AT] == 3);
+    CHECK(type_text(&app, 2, "m") == PURE_OK && app.values[0] == 1);
+    CHECK(type_text(&app, 2, "c") == PURE_OK && app.values[0] == 0);
+    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && pure_list_get(app.lists[PEOPLE], 3, 1).num == 1);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && !strcmp(names_of(&app, PEOPLE), "a,b,m"));
+    CHECK(app.values[K_AT] == 2 && number_view(&app, 2) == 0 && number_view(&app, 3) == 0);  /* "m": not bob, not before m */
+    CHECK(type_text(&app, 1, "b") == PURE_OK && number_view(&app, 2) == 0 && number_view(&app, 3) == 1);
+    CHECK(type_text(&app, 0, "bob") == PURE_OK && number_view(&app, 2) == 1 && number_view(&app, 3) == 1);
+    /* Bytes order texts: a text before the longer ones it begins, UTF-8 after ASCII, the empty text first. */
+    CHECK(type_text(&app, 0, "\xea\xb0\x80") == PURE_OK && type_text(&app, 0, "ab") == PURE_OK);
+    CHECK(type_text(&app, 0, "") == PURE_OK && type_text(&app, 0, "") == PURE_CONFLICT);
+    CHECK(!strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,m,\xea\xb0\x80") && app.values[K_AT] == 0);
+    /* Numbers order by value, and -0 is the key 0. */
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_CONFLICT && number_view(&app, 4) == 2);
+    CHECK(pure_list_get(app.lists[SCORES], 0, 0).num == 0 && !signbit(pure_list_get(app.lists[SCORES], 0, 0).num) &&
+          pure_list_get(app.lists[SCORES], 1, 0).num == 2);
+
+    /* Replacing: unkeyed, the list stays as it is and takes appends at its end. */
+    CHECK(load(keyed_spec(unkeyed_states, unkeyed_code, LEN(unkeyed_code), unkeyed_handlers, 1), &module_b) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && type_text(&app, 0, "c") == PURE_OK);
+    CHECK(!strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,m,\xea\xb0\x80,c") && app.values[K_AT] == 7);
+    CHECK(pure_app_point(&app, K_AT, 6) == PURE_OK);                     /* at the Korean name */
+    /* Keyed again: put in order, the index following its item. */
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && !strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,c,m,\xea\xb0\x80"));
+    CHECK(app.values[K_AT] == 7 && !strcmp(view_text(&app, 5), "\xea\xb0\x80"));
+    /* Two items with one key cannot become keyed: the app keeps its module and items. */
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && type_text(&app, 0, "a") == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_a) == PURE_CONFLICT && app.module == &module_b && pure_list_count(app.lists[PEOPLE]) == 9);
+    pure_app_stop(&app);
+
+    /* Stored: a list that becomes keyed is stored in order, once. */
+    char *path = new_store();
+    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK);
+    for (const char *const *word = (const char *const[]){"m", "b", "z", NULL}; *word; ++word)
+        CHECK(type_text(&app, 0, *word) == PURE_OK);
+    CHECK(pure_app_point(&app, K_AT, 1) == PURE_OK);
+    pure_app_stop(&app);
+    for (int round = 0; round < 2; ++round) {
+        CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+        CHECK(!strcmp(names_of(&app, PEOPLE), "b,m,z") && app.values[K_AT] == 0);
+        pure_app_stop(&app);
+    }
+    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && type_text(&app, 0, "m") == PURE_OK);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_CONFLICT);
+    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && !strcmp(names_of(&app, PEOPLE), "b,m,z,m"));
+    pure_app_stop(&app);
+    remove_store(path);
+    static const char *const words[] = {"a", "b", "ab", "", "\xea\xb0\x80", "zz"};
+    for (uint32_t seed = 1; seed <= 3; ++seed)
+        stored_equivalence(keyed_spec(keyed_states, keyed_code, LEN(keyed_code), keyed_handlers, LEN(keyed_handlers)),
+                           words, LEN(words), seed * 0x9e3779b9u);
+
+    /* What a keyed list and a text comparison may not be. */
+    static const O insert[] = {{XF, PEOPLE, 0}, {TK, 0, 0}, {C, 0, 0}, {LI, PEOPLE, 0}};
+    static const O set_key[] = {{XL, K_AT, 0}, {TK, 0, 0}, {IS, PEOPLE | K_NAME, 0}};
+    static const O find_number[] = {{C, 0, 1}, {FIND, PEOPLE, 0}, {XS, K_AT, 0}};
+    static const O find[] = {{TI, 0, 0}, {FIND, PEOPLE, 0}, {XS, K_AT, 0}};
+    static const O relation[] = {{TI, 0, 0}, {TI, 0, 0}, {TCMP, PURE_NOT_EQUAL + 1, 0}, {ST, 0, 0}};
+    static const O compare_numbers[] = {{C, 0, 1}, {C, 0, 1}, {TCMP, PURE_EQUAL, 0}, {ST, 0, 0}};
+    static const T far_key[] = {{"people", 3 | 3 << 8, 0}, {"at", 4, 1}, {"scores", 3, 1}};
+    static const T keyed_index[] = {{"people", 3, 0}, {"at", 4 | 1 << 8, 1}, {"scores", 3, 1}};
+    static const struct { const T *states; const O *code; size_t count; const char *reason; } refused[] = {
+        {keyed_states, insert, LEN(insert), "insert by position into a keyed list"},
+        {keyed_states, set_key, LEN(set_key), "change of a keyed list's key"},
+        {keyed_states, find_number, LEN(find_number), "operand type"},
+        {unkeyed_states, find, LEN(find), "no such state"},
+        {keyed_states, relation, LEN(relation), "no such state"},
+        {keyed_states, compare_numbers, LEN(compare_numbers), "operand type"},
+        {far_key, unkeyed_code, LEN(unkeyed_code), "state reference"},
+        {keyed_index, unkeyed_code, LEN(unkeyed_code), "state reference"},
+    };
+    for (size_t i = 0; i < LEN(refused); ++i) {
+        H handler = {1, 0, (uint32_t)refused[i].count};
+        if (load(keyed_spec(refused[i].states, refused[i].code, refused[i].count, &handler, 1), &module_b) != PURE_INVALID ||
+            !strstr(error, refused[i].reason)) {
+            fprintf(stderr, "keyed case %zu: expected '%s', got '%s'\n", i, refused[i].reason, error);
+            abort();
+        }
+    }
+}
+
+/* Damaged keyed modules: whatever loads keeps every keyed list in strict key
+ * order and every index on an item. */
+static void keyed_mutations(void) {
+    static unsigned char valid[65536], bytes[65536];
+    size_t size = build(valid, keyed_spec(keyed_states, keyed_code, LEN(keyed_code), keyed_handlers, LEN(keyed_handlers)));
+    static const char *const words[] = {"a", "b", "ab", "", "\xea\xb0\x80"};
+    uint32_t state = 0x6c8e9cf5u;
+    unsigned accepted = 0;
+    for (unsigned round = 0; round < 20000; ++round) {
+        memcpy(bytes, valid, size);
+        for (unsigned f = 0, flips = 1 + next_random(&state) % 3; f < flips; ++f)
+            bytes[next_random(&state) % size] ^= (unsigned char)(1u << (next_random(&state) % 8));
+        if (pure_module_load(bytes, size, &module_b, error, sizeof(error)) != PURE_OK) continue;
+        ++accepted;
+        PureApp app;
+        if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
+        for (unsigned e = 0; e < 24; ++e) {
+            uint32_t input = next_random(&state) % module_b.inputs;
+            if (module_b.input[input].kind == PURE_KIND_TEXT) type_text(&app, input, words[next_random(&state) % LEN(words)]);
+            else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
+            for (uint32_t v = 0; v < module_b.views; ++v) {
+                double value;
+                if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_view_text(&app, v, ignore_span, NULL);
+                else pure_app_view(&app, v, &value);
+            }
+            for (uint32_t s = 0; s < module_b.states; ++s) {
+                if (module_b.state_type[s] == PURE_STATE_INDEX) {
+                    size_t count = pure_list_count(app.lists[module_b.state_ref[s]]);
+                    CHECK(app.values[s] == floor(app.values[s]) && app.values[s] >= 0 &&
+                          app.values[s] <= (count ? (double)(count - 1) : 0));
+                }
+                if (module_b.state_type[s] != PURE_STATE_LIST || !module_b.state_key[s]) continue;
+                unsigned key = module_b.state_key[s] - 1u;
+                bool text = module_b.record_field_text[module_b.record[module_b.state_ref[s]].first + key];
+                for (size_t at = 1; at < pure_list_count(app.lists[s]); ++at) {
+                    PureCell a = pure_list_get(app.lists[s], at - 1, key), b = pure_list_get(app.lists[s], at, key);
+                    if (!text) { CHECK(a.num < b.num); continue; }
+                    size_t shorter = a.size < b.size ? a.size : b.size;
+                    int order = shorter ? memcmp(a.text, b.text, shorter) : 0;
+                    CHECK(order < 0 || (!order && a.size < b.size));
+                }
+            }
+        }
+        pure_app_stop(&app);
+    }
+    printf("{\"keyed_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
+}
+
 int main(void) {
     behaviour();
     faults();
@@ -1994,6 +2204,8 @@ int main(void) {
     lists();
     folds();
     filters();
+    keyed();
+    keyed_mutations();
     fold_mutations();
     pointing();
     list_mutations();
@@ -2002,6 +2214,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order\"}");
     return 0;
 }

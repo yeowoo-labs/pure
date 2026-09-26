@@ -236,6 +236,67 @@ PureCell pure_list_get(const PureList *list, size_t at, unsigned field) {
     return list->items[at][field];
 }
 
+/* How two cells of a field order: numbers by value (-0 and +0 are one key),
+ * texts by their bytes. */
+static int order(const PureList *list, unsigned field, PureCell a, PureCell b) {
+    if (!list->text_fields[field]) return (a.num > b.num) - (a.num < b.num);
+    size_t shorter = a.size < b.size ? a.size : b.size;
+    int bytes = shorter ? memcmp(a.text, b.text, shorter) : 0;
+    return bytes ? (bytes > 0) - (bytes < 0) : (a.size > b.size) - (a.size < b.size);
+}
+
+size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *found) {
+    size_t low = 0, high = list->count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (order(list, field, list->items[middle][field], key) < 0) low = middle + 1;
+        else high = middle;
+    }
+    *found = low < list->count && !order(list, field, list->items[low][field], key);
+    return low;
+}
+
+/* Positions sorted by their items' field, stably (spare holds count). */
+PURE_COLD static void merge_sort(const PureList *list, unsigned field, size_t *at, size_t *spare, size_t count) {
+    if (count < 2) return;
+    size_t half = count / 2, i = 0, j = half, k = 0;
+    merge_sort(list, field, at, spare, half);
+    merge_sort(list, field, at + half, spare, count - half);
+    while (i < half && j < count)
+        spare[k++] = order(list, field, list->items[at[j]][field], list->items[at[i]][field]) < 0 ? at[j++] : at[i++];
+    while (i < half) spare[k++] = at[i++];
+    while (j < count) spare[k++] = at[j++];
+    memcpy(at, spare, count * sizeof(*at));
+}
+
+PURE_COLD PureResult pure_list_sorted(const PureList *list, unsigned field, PureList **out, size_t *moved) {
+    *out = NULL;
+    bool ordered = true;
+    for (size_t i = 1; i < list->count && ordered; ++i)
+        ordered = order(list, field, list->items[i - 1][field], list->items[i][field]) < 0;
+    if (ordered) return PURE_OK;
+    size_t *at = malloc(2 * list->count * sizeof(*at));
+    if (!at) return PURE_ALLOCATION;
+    for (size_t i = 0; i < list->count; ++i) at[i] = i;
+    merge_sort(list, field, at, at + list->count, list->count);
+    PureResult result = PURE_OK;
+    for (size_t i = 1; i < list->count && result == PURE_OK; ++i)
+        if (!order(list, field, list->items[at[i - 1]][field], list->items[at[i]][field])) result = PURE_CONFLICT;
+    PureList *sorted = result == PURE_OK ? pure_list_new(list->fields, list->text_fields) : NULL;
+    if (result == PURE_OK && !sorted) result = PURE_ALLOCATION;
+    for (size_t i = 0; result == PURE_OK && i < list->count; ++i) {
+        result = pure_list_insert(sorted, i, list->items[at[i]], NULL);
+        moved[at[i]] = i;
+    }
+    free(at);
+    if (result != PURE_OK) {
+        pure_list_free(sorted);
+        return result;
+    }
+    *out = sorted;
+    return PURE_OK;
+}
+
 void pure_undo_rollback(PureUndo *undo, size_t mark) {
     Entry *entries = undo->entries;
     for (size_t i = undo->count; i-- > mark;) {

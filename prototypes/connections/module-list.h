@@ -34,6 +34,15 @@ PureResult pure_list_insert(PureList *, size_t at, const PureCell *cells, PureUn
 PureResult pure_list_remove(PureList *, size_t at, PureUndo *);
 PureResult pure_list_set(PureList *, size_t at, unsigned field, PureCell value, PureUndo *);
 PureCell pure_list_get(const PureList *, size_t at, unsigned field);
+/* In a list ordered by field (a keyed list): the first position whose item's
+ * field does not order below key (numbers by value, texts by bytes), and
+ * whether that item's field is key. */
+size_t pure_list_seek(const PureList *, unsigned field, PureCell key, bool *found);
+/* The list's items ordered by field, as a keyed list keeps them: *out is NULL
+ * when they already are, or a new list in that order with moved[position
+ * before] = position after for every item. CONFLICT when two items have the
+ * same key (nothing is made). */
+PureResult pure_list_sorted(const PureList *, unsigned field, PureList **out, size_t *moved);
 /* A list may keep a stored copy in a draft: header bytes, then each item's
  * fields in order (a number as its binary64 bits, little-endian; a text as a
  * u32le length and its bytes). Every change splices the draft as well, and a

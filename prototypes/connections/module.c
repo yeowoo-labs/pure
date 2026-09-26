@@ -9,18 +9,19 @@
 enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 8,
        CONSTANT_BYTES = 8, RECORD_BYTES = 8, RECORD_FIELD_BYTES = 16, VIEW_BYTES = 16,
        HANDLER_BYTES = 12, OP_BYTES = 16 };
-/* T_FIELD and T_ITEM stand for the type of the message or record field named. */
-enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7 };
+/* T_FIELD and T_ITEM stand for the type of the message or record field
+ * named, T_KEY for the type of the named keyed list's key. */
+enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8 };
 enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA };
 /* Where an opcode may appear. */
 enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32 };
 enum { READ = IN_VIEW | IN_HANDLER };
 /* What an argument names: nothing (it is 0), a state of one type (A_STATE +
  * the type), a list and one of its record's fields, a message field, the
- * collection, a constant, a unit, the column's row, a branch target or a
- * stack depth. */
+ * collection, a constant, a unit, the column's row, a branch target, a stack
+ * depth, a fold, a relation or a keyed list. */
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_INDEX + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
-       A_ROW, A_TARGET, A_DEPTH, A_FOLD };
+       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED };
 /* A fold's block is verified as a column that leaves one number (count) or
  * two (a value and whether to include it), a table's filter as a column that
  * leaves one: these stand for a view type. */
@@ -93,6 +94,9 @@ static const struct { unsigned char pops, in[3], out, where, arg, of; } signatur
     [PURE_OP_PICK] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
     [PURE_OP_SLIDE] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
     [PURE_OP_FOLD] = {0, {0}, T_NUM, READ, A_FOLD, O_ANY},
+    [PURE_OP_TEXT_COMPARE] = {2, {T_TEXT, T_TEXT}, T_NUM, READ, A_RELATION, O_ANY},
+    [PURE_OP_LIST_FIND] = {1, {T_KEY}, T_INDEX, READ, A_KEYED, O_ARG},
+    [PURE_OP_LIST_HAS] = {1, {T_KEY}, T_NUM, READ, A_KEYED, O_ANY},
 };
 #undef NUMS
 #undef STATE
@@ -174,6 +178,8 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_UNIT: return arg <= PURE_UNIT_LINE;
     case A_ROW: return (int)arg == row;
     case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_FIRST && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
+    case A_RELATION: return arg <= PURE_NOT_EQUAL;
+    case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
     case A_NONE: case A_TARGET: case A_DEPTH: return true;
     default: return state_of(m, arg, (uint8_t)(kind - A_STATE));
     }
@@ -249,6 +255,10 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
         if ((kind == A_NONE && arg) || (op->op == PURE_OP_CONST ? !isfinite(op->value) : op->value != 0))
             REFUSE("non-canonical operand");
         if (!names_arg(m, kind, arg, shape, row)) REFUSE("operand names no such state, field, constant or unit");
+        /* A keyed list places its items by key, and an item's key stays. */
+        if (op->op == PURE_OP_LIST_INSERT && m->state_key[arg]) REFUSE("insert by position into a keyed list");
+        if (op->op == PURE_OP_ITEM_SET && m->state_key[list_of(arg)] == item_field(arg) + 1)
+            REFUSE("change of a keyed list's key");
         /* PICK copies the value arg below the top; SLIDE drops arg values under the top. */
         if (kind == A_DEPTH) {
             bool pick = op->op == PURE_OP_PICK;
@@ -286,6 +296,8 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
             pops += record->count;
         } else if (op->op == PURE_OP_ITEM_SET) {
             need[pops++] = field_type(m, list_of(arg), item_field(arg));
+        } else if (need[0] == T_KEY) {
+            need[0] = field_type(m, arg, m->state_key[arg] - 1u);
         }
         if (height < (int)pops) REFUSE("stack underflow");
         height -= (int)pops;
@@ -393,11 +405,14 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             out->initial[i] = read_double(at + 8);
             if (!isfinite(out->initial[i])) REFUSE("non-finite initial value", i);
         } else {
+            /* Flags: a mark (cursor), or a keyed list's key field + 1. */
             uint32_t flags = read32(at + 12);
-            if ((flags && (out->state_type[i] != PURE_STATE_CURSOR || flags != PURE_CURSOR_STAYS)) ||
+            bool cursor = out->state_type[i] == PURE_STATE_CURSOR, list = out->state_type[i] == PURE_STATE_LIST;
+            if ((flags && !(cursor && flags == PURE_CURSOR_STAYS) && !(list && flags <= PURE_RECORD_FIELDS)) ||
                 read32(at + 8) > UINT16_MAX) REFUSE("state reference", i);
             out->state_ref[i] = (uint16_t)read32(at + 8);
-            out->state_flags[i] = (uint8_t)flags;
+            out->state_flags[i] = cursor ? (uint8_t)flags : 0;
+            out->state_key[i] = list ? (uint8_t)flags : 0;
         }
     }
     for (uint32_t i = 0; i < out->collections; ++i, at += COLLECTION_BYTES) {
@@ -484,7 +499,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t i = 0; i < out->states; ++i)
         if ((out->state_type[i] == PURE_STATE_TEXT && out->state_ref[i] >= out->constants) ||
             (out->state_type[i] == PURE_STATE_CURSOR && !state_of(out, out->state_ref[i], PURE_STATE_TEXT)) ||
-            (out->state_type[i] == PURE_STATE_LIST && out->state_ref[i] >= out->records) ||
+            (out->state_type[i] == PURE_STATE_LIST &&
+             (out->state_ref[i] >= out->records || out->state_key[i] > out->record[out->state_ref[i]].count)) ||
             (out->state_type[i] == PURE_STATE_INDEX && !state_of(out, out->state_ref[i], PURE_STATE_LIST)))
             REFUSE("state reference", i);
     /* A table names its list in place of code; its columns follow it. */
@@ -599,7 +615,8 @@ typedef struct {
 static PureResult fault(PureApp *app, PureFault kind, uint32_t pc) {
     app->fault = kind;
     app->fault_pc = pc;
-    return kind == PURE_FAULT_LIMIT ? PURE_LIMIT : kind == PURE_FAULT_NOT_FOUND ? PURE_NOT_FOUND : PURE_INVALID;
+    return kind == PURE_FAULT_LIMIT ? PURE_LIMIT : kind == PURE_FAULT_NOT_FOUND ? PURE_NOT_FOUND :
+           kind == PURE_FAULT_EXISTS ? PURE_CONFLICT : PURE_INVALID;
 }
 
 static bool reserve(PureArena *arena, size_t more) {
@@ -904,6 +921,12 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
                     return status;
                 cells[f] = (PureCell){stack[base + f].num, (unsigned char *)span.data, span.size};
             }
+            if (m->state_key[arg]) { /* a keyed list places the item by its key */
+                bool found;
+                unsigned key = m->state_key[arg] - 1u;
+                at = pure_list_seek(list, key, cells[key], &found);
+                if (found) { arena->used = mark; kind = PURE_FAULT_EXISTS; goto failed; }
+            }
             status = pure_list_insert(list, at, cells, &app->undo);
             arena->used = mark;
             if (status != PURE_OK) goto refused;
@@ -976,6 +999,42 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             if (!isfinite(total)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
             stack[sp].num = total;
             stack[sp++].bytes.owner = (uint16_t)(arg >> 8 & 0xFF); /* first: the list the index is in */
+            continue;
+        }
+        case PURE_OP_TEXT_COMPARE: {
+            /* Texts order by their bytes: a shorter text before a longer one it begins. */
+            PureBytes right = stack[--sp].bytes, left = stack[sp - 1].bytes;
+            size_t mark = arena->used;
+            PureSpan a, b;
+            if (!reserve(arena, (size_t)(left.length + right.length))) return PURE_ALLOCATION;
+            if ((status = contiguous(app, arena, left, &a)) != PURE_OK ||
+                (status = contiguous(app, arena, right, &b)) != PURE_OK) return status;
+            size_t shorter = a.size < b.size ? a.size : b.size;
+            int order = shorter ? memcmp(a.data, b.data, shorter) : 0;
+            if (!order) order = (a.size > b.size) - (a.size < b.size);
+            arena->used = mark;
+            stack[sp - 1].num = arg == PURE_LESS ? order < 0 : arg == PURE_LESS_EQUAL ? order <= 0 :
+                                arg == PURE_GREATER ? order > 0 : arg == PURE_GREATER_EQUAL ? order >= 0 :
+                                arg == PURE_EQUAL ? order == 0 : order != 0;
+            continue;
+        }
+        case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: {
+            /* A keyed list's item by key, found by halving: FIND gives its index, HAS whether it is there. */
+            unsigned key = m->state_key[arg] - 1u;
+            size_t mark = arena->used;
+            PureCell cell = {top->num, NULL, 0};
+            if (text_field(m, arg, key)) {
+                PureSpan span;
+                if ((status = contiguous(app, arena, top->bytes, &span)) != PURE_OK) return status;
+                cell = (PureCell){0, (unsigned char *)span.data, span.size};
+            }
+            bool found;
+            size_t at = pure_list_seek(app->lists[arg], key, cell, &found);
+            arena->used = mark;
+            if (op->op == PURE_OP_LIST_HAS) { top->num = found; continue; }
+            if (!found) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
+            top->num = (double)at;
+            top->bytes.owner = (uint16_t)arg;
             continue;
         }
         case PURE_OP_PICK: stack[sp] = stack[sp - 1 - arg]; ++sp; continue;
@@ -1489,6 +1548,25 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
             } else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
         } else values[i] = kept[i] >= 0 ? app->values[kept[i]] : module->initial[i];
     }
+    /* A keyed list keeps its items in key order: one that was not keyed, or
+     * keyed by another field, is put in order and its indices follow their
+     * items. Two items with one key refuse the module: nothing is dropped. */
+    size_t *moved[PURE_MODULE_STATES] = {0};
+    for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i) {
+        if (module->state_type[i] != PURE_STATE_LIST || !module->state_key[i]) continue;
+        size_t count = pure_list_count(lists[i]);
+        PureList *sorted = NULL;
+        if (count && !(moved[i] = malloc(count * sizeof(**moved)))) result = PURE_ALLOCATION;
+        else result = pure_list_sorted(lists[i], module->state_key[i] - 1u, &sorted, moved[i]);
+        if (!sorted) {
+            free(moved[i]);
+            moved[i] = NULL;
+            continue;
+        }
+        if (kept[i] < 0 || lists[i] != app->lists[kept[i]]) pure_list_free(lists[i]);
+        lists[i] = sorted;
+        rewrite[i] = list_drafts[i] != NULL;
+    }
     /* A cursor or index keeps its position only while its text or list is the
      * one it belonged to. */
     for (uint32_t i = 0; i < module->states; ++i) {
@@ -1498,8 +1576,14 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         values[i] = same ? app->values[kept[i]] : 0;
     }
     if (result == PURE_OK && stored) result = pure_save_open_values(app, module, values, kept, texts, lists);
-    /* Store the lists whose record changed last, so that a failure can put
-     * every draft back as it was. */
+    for (uint32_t i = 0; i < module->states; ++i) {
+        uint32_t list = module->state_ref[i];
+        if (module->state_type[i] == PURE_STATE_INDEX && moved[list] && values[i] < (double)pure_list_count(lists[list]))
+            values[i] = (double)moved[list][(size_t)values[i]];
+    }
+    for (uint32_t i = 0; i < module->states; ++i) free(moved[i]);
+    /* Store the lists whose record or order changed last, so that a failure
+     * can put every draft back as it was. */
     for (uint32_t i = 0; i < module->states; ++i)
         if (rewrite[i]) {
             before[i] = pure_draft_version(list_drafts[i]);

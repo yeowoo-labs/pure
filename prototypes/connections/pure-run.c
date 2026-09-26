@@ -14,7 +14,7 @@
  * Text states and text views print as JSON strings; cursors as byte positions;
  * lists as arrays of objects; indices as positions; a table view as an array
  * with an object of its columns per row. A failed view or cell is null. */
-static const char *const fault_names[] = {"none", "divide", "non_finite", "clamp", "limit", "not_found", "encoding"};
+static const char *const fault_names[] = {"none", "divide", "non_finite", "clamp", "limit", "not_found", "encoding", "exists"};
 
 static bool load(const char *path, PureModule *module) {
     FILE *file = fopen(path, "rb");
