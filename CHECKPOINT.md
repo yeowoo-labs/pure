@@ -15,10 +15,10 @@
 | 앱 표현 | 상태(수, text와 커서·마크, 레코드의 리스트와 키 있는 리스트, 인덱스), 입력(키, text, 필드 있는 메시지, 타이머), 원자적 이벤트 핸들러, 순수 보기(조건식, 표와 걸러진 표, count·sum·max·min·first), `fn`·`use` 라이브러리, text 비교, 시간(`now`, `every`, `floor`, `%`). 로드할 때 타입·스택·합류·커서와 인덱스의 소속을 모두 검증하고 이벤트의 실행량에 상한이 있다 | 008, aup `docs/design/002-dsl-direction.md`, aup `make check`(파이썬 참조 모델 대조, 진단 132건) |
 | 영속 | 선언한 상태가 곧 영속 상태다. 트리 저장소에 커밋당 동기화 한 번, 이벤트 묶음마다 저장 한 번. `kill -9` 뒤 확인 응답한 이벤트가 모두 남는다. 레코드·키가 바뀐 모듈로 바꿔도 데이터가 이름으로 옮겨진다 | [076](docs/research/076-one-sync-commit.md), 008 상태 영속·교체 |
 | 인터페이스 | 한 명세가 TUI(셀 단위 갱신), CLI, 문장(NUI), 웹 GUI가 된다. 저장하면 실행 중인 앱이 상태를 이어 새 모듈로 바뀐다(`aup watch`, `vega … --watch`) | Vega `docs/design/001-first-component.md`, Vega `make check`(가상 터미널, 헤드리스 Chromium 포함) |
-| HTTP 서비스 | 보기가 GET, 입력이 POST다(JSON 본문, 라우터 코드 없음). 답은 저장 뒤에 나가고, 상태를 가진 앱은 연결 스레드 여럿과 소유자 하나로 돈다 | 008 HTTP 호스트, [077](docs/research/077-apps-as-http-services.md) |
-| 성능(Pi 5) | 문서 서버: 작은 GET 151.6k/s, 1 MiB GET 2,794/s(axum 1,372, drogon 708), 충돌 안전 PUT은 axum-atomic의 5.1–5.8배. 앱 서비스(aup 22줄 대 손으로 쓴 서비스): 내구성 있는 쓰기 약 76배, 20행 JSON GET 145k/s(axum 95k, drogon 144k), 최대 RSS 3.4 MiB(axum 6.4, drogon 11.6) | [075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md) |
+| HTTP 서비스 | 보기가 GET, 입력이 POST다(JSON 본문, 라우터 코드 없음). 답은 저장 뒤에 나간다. 상태를 가진 앱은 소유자 스레드 하나가 입력을 적용하고, 연결 스레드는 마지막 저장의 스냅숏으로 보기를 답한다(쓰기가 동기화하는 동안에도 읽기는 기다리지 않는다) | 008 HTTP 호스트, [077](docs/research/077-apps-as-http-services.md), [080](docs/research/080-snapshot-reads.md) |
+| 성능(Pi 5) | 문서 서버: 작은 GET 151.6k/s, 1 MiB GET 2,794/s(axum 1,372, drogon 708), 충돌 안전 PUT은 axum-atomic의 5.1–5.8배. 앱 서비스(aup 22줄 대 손으로 쓴 서비스): 내구성 있는 쓰기 약 76배, 20행 JSON GET 145k/s(axum 95k, drogon 144k), 쓰기와 섞인 읽기 149k/s·p99 0.6 ms(axum·drogon 내구 1.1–1.3k/s·p99 111–156 ms), 최대 RSS 3.0–4.1 MiB(axum 6.4, drogon 11.6) | [075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md), [080](docs/research/080-snapshot-reads.md) |
 
-남은 것: macOS 검증, `bool`·`i64`, 소유자 밖에서의 읽기와 저장·적용의 겹치기(077 다음 결정), 앱 라우트의 인증·TLS(문서
+남은 것: macOS 검증, `bool`·`i64`, 저장과 적용의 겹치기(로드맵 단기 2, 080 다음 결정), 앱 라우트의 인증·TLS(문서
 피어의 TLS는 있다), aup·Vega의 배포 묶음.
 
 ## 공개할 작업물과 완료 증거

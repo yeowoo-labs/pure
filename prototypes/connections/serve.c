@@ -116,9 +116,11 @@ typedef struct {
     const char *type; /* a view's content type */
 } Applied;
 
-/* The app and its store. A connection thread runs it itself, or, with
- * several connection threads and an app with states, one owner thread runs
- * it for all of them. */
+/* The app and its store. A connection thread runs it itself (an app of
+ * documents only), or one owner thread runs it for all connection threads.
+ * The owner publishes a snapshot of the states after each save, and the
+ * connection threads show views from it themselves: reads never wait for
+ * the owner, which may be applying events or waiting for a sync. */
 typedef struct {
     const PureModule *module;
     PureStore *store;
@@ -131,6 +133,12 @@ typedef struct {
     bool reads_first; /* the owner's: a round's reads before its writes */
     double next[PURE_MODULE_INPUTS]; /* when each timer ticks next (wall clock, ms) */
     uint64_t ticks;
+    /* The owner's: the last save's snapshot (NULL: the owner shows views),
+     * taken under the lock, and the app's changes it shows. */
+    bool publishes;
+    pthread_mutex_t published_lock;
+    PureSnapshot *published;
+    uint64_t published_changes, publications;
 } Executor;
 
 /* A request made ready: its effect, what it names, and the thread that answers it. */
@@ -156,6 +164,10 @@ struct Host {
     bool documents; /* the module serves /objects: it has show and edit */
     Executor local; /* the app, when this thread runs it */
     Owner *owner;   /* or the owner that runs it */
+    PureApp reader; /* shows the owner's snapshot here */
+    Applied *views; /* a round's views shown here, answered together */
+    size_t views_capacity;
+    uint64_t shown; /* views shown from snapshots */
     Route *routes;  /* by work slot */
     PureRuntime runtime;
     PureWork *work;
@@ -1055,6 +1067,21 @@ static void apply_effect(Executor *ex, const Job *job, Applied *out) {
                                    .release = release_copy};
 }
 
+/* After a save, before its answers go: from now on views show what it
+ * saved, so a read made after a write's answer sees the write. A failed save
+ * returns the app to the last save's states, which the snapshot still shows. */
+static void publish(Executor *ex) {
+    if (!ex->publishes || (ex->published && ex->published_changes == ex->app.changes)) return;
+    PureSnapshot *made = pure_app_snapshot(&ex->app), *old;
+    pthread_mutex_lock(&ex->published_lock);
+    old = ex->published;
+    ex->published = made;
+    pthread_mutex_unlock(&ex->published_lock);
+    pure_snapshot_release(old);
+    ex->published_changes = ex->app.changes;
+    ++ex->publications;
+}
+
 /* One save for a burst: its requests are durable with it or fail with it. */
 static void save_burst(Executor *ex, Applied *applied, size_t count) {
     if (!count) return;
@@ -1062,6 +1089,7 @@ static void save_burst(Executor *ex, Applied *applied, size_t count) {
         ex->wrote = ex->wrote || (applied[i].status == PURE_OK && applied[i].input == PURE_INPUT_WRITE);
     PureResult saved = pure_app_save(&ex->app);
     ++ex->bursts;
+    if (saved == PURE_OK) publish(ex);
     for (size_t i = 0; i < count; ++i)
         if (applied[i].status == PURE_OK) applied[i].status = saved;
 }
@@ -1130,7 +1158,7 @@ static long run_timers(Executor *ex) {
         }
         if (soonest < 0 || ex->next[i] - now < soonest) soonest = ex->next[i] - now;
     }
-    if (ticked) pure_app_save(&ex->app); /* a failed save undoes the ticks */
+    if (ticked && pure_app_save(&ex->app) == PURE_OK) publish(ex); /* a failed save undoes the ticks */
     return soonest < 0 ? -1 : (long)ceil(soonest);
 }
 
@@ -1194,8 +1222,23 @@ static void answer_handed(Host *host) {
     host->pending -= count;
 }
 
+/* The owner's newest snapshot, held, shown by this thread's reader; NULL
+ * when there is none. Taken for each round, after the round's answers from
+ * the owner: those were handed back after their saves' snapshots. */
+static PureSnapshot *read_published(Host *host) {
+    Executor *ex = &host->owner->executor;
+    pthread_mutex_lock(&ex->published_lock);
+    PureSnapshot *snapshot = ex->published;
+    if (snapshot) pure_snapshot_hold(snapshot);
+    pthread_mutex_unlock(&ex->published_lock);
+    if (snapshot) pure_app_read(&host->reader, snapshot);
+    return snapshot;
+}
+
 /* Every request made ready since the last round: run here, or handed to the
- * owner. Answering may make more ready; they form the next round. */
+ * owner. Views are shown here from the snapshot when there is one, after the
+ * rest went to the owner, which meanwhile applies and saves them. Answering
+ * may make more ready; they form the next round. */
 static void serve_bursts(Host *host) {
     for (;;) {
         size_t count = 0;
@@ -1207,15 +1250,35 @@ static void serve_bursts(Host *host) {
             execute(&host->local, host->jobs, count, answer_burst, NULL);
             continue;
         }
-        Owner *owner = host->owner;
-        pthread_mutex_lock(&owner->lock);
-        if (!grow(&owner->jobs, &owner->capacity, owner->count + count, sizeof(*owner->jobs))) abort();
-        memcpy(owner->jobs + owner->count, host->jobs, count * sizeof(*host->jobs));
-        owner->count += count;
-        pthread_cond_signal(&owner->waiting);
-        pthread_mutex_unlock(&owner->lock);
-        host->pending += count;
-        return;
+        PureSnapshot *snapshot = NULL;
+        size_t views = 0;
+        for (size_t i = 0; i < count; ++i) views += host->jobs[i].route.kind == ROUTE_VIEW;
+        if (views && !(snapshot = read_published(host))) views = 0; /* the owner shows them */
+        size_t handed = count - views;
+        if (handed) {
+            Owner *owner = host->owner;
+            pthread_mutex_lock(&owner->lock);
+            if (!grow(&owner->jobs, &owner->capacity, owner->count + handed, sizeof(*owner->jobs))) abort();
+            for (size_t i = 0; i < count; ++i)
+                if (!snapshot || host->jobs[i].route.kind != ROUTE_VIEW) owner->jobs[owner->count++] = host->jobs[i];
+            pthread_cond_signal(&owner->waiting);
+            pthread_mutex_unlock(&owner->lock);
+            host->pending += handed;
+        }
+        if (!views) return;
+        /* Shown first and answered after, as a burst is. */
+        if (!grow(&host->views, &host->views_capacity, views, sizeof(*host->views))) abort();
+        size_t shown = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const Job *job = &host->jobs[i];
+            if (job->route.kind != ROUTE_VIEW) continue;
+            Applied *a = &host->views[shown++];
+            *a = (Applied){.host = host, .ticket = job->effect.ticket, .input = job->effect.input, .route = ROUTE_VIEW};
+            a->status = show_view(&host->reader, &job->route, job->effect.available, a);
+        }
+        pure_snapshot_release(snapshot); /* what answers lend holds its own mapping */
+        for (size_t i = 0; i < shown; ++i) answer_applied(host, &host->views[i]);
+        host->shown += shown;
     }
 }
 
@@ -1382,6 +1445,7 @@ static bool start_executor(Executor *ex, const PureModule *module, uint32_t show
 }
 
 static void stop_executor(Executor *ex) {
+    pure_snapshot_release(ex->published);
     pure_app_stop(&ex->app);
     pure_store_close(ex->store);
     free(ex->applied);
@@ -1487,6 +1551,7 @@ static void *run_shard(void *context) {
 
 static void stop_shard(Host *host) {
     if (!host->owner) stop_executor(&host->local);
+    pure_app_stop(&host->reader);
     if (host->listener >= 0) close(host->listener);
     if (host->epoll >= 0) close(host->epoll);
     if (host->wake >= 0) close(host->wake);
@@ -1504,6 +1569,7 @@ static void stop_shard(Host *host) {
     free(host->routes);
     free(host->done);
     free(host->answering);
+    free(host->views);
 }
 
 int main(int argc, char **argv) {
@@ -1537,12 +1603,16 @@ int main(int argc, char **argv) {
     Host *hosts = calloc(threads, sizeof(*hosts));
     pthread_t *thread = calloc(threads, sizeof(*thread)), owner_thread;
     if (!hosts || !thread) return 1;
-    /* States have one owner: with several connection threads, it runs on its own. */
-    bool owned = threads > 1 && module.states;
+    /* States have one owner on a thread of its own, whose snapshots the
+     * connection threads read. */
+    bool owned = module.states;
     if (owned) {
         if (!start_executor(&owner.executor, &module, show, edit, store) || pthread_mutex_init(&owner.lock, NULL) ||
-            pthread_cond_init(&owner.waiting, NULL)) return 1;
+            pthread_cond_init(&owner.waiting, NULL) || pthread_mutex_init(&owner.executor.published_lock, NULL))
+            return 1;
         owner.executor.reads_first = true;
+        owner.executor.publishes = true;
+        publish(&owner.executor);
         owner.hosts = hosts;
         owner.host_count = threads;
     }
@@ -1569,8 +1639,9 @@ int main(int argc, char **argv) {
     }
     size_t active = 0, retained = 0;
     uint64_t accepted = 0, requests = 0, bursts = owner.executor.bursts, events = owner.executor.burst_events, expired = 0,
-             ticks = owner.executor.ticks;
+             ticks = owner.executor.ticks, shown = 0;
     for (unsigned i = 0; i < threads; ++i) {
+        shown += hosts[i].shown;
         active += hosts[i].active;
         retained += hosts[i].runtime.retained;
         accepted += hosts[i].accepted;
@@ -1589,9 +1660,10 @@ int main(int argc, char **argv) {
     pure_store_group_counts(&groups, &grouped);
     fprintf(stderr, "{\"active\":%zu,\"retained_payload_bytes\":%zu,\"accepted\":%" PRIu64 ",\"requests\":%" PRIu64
             ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"ticks\":%" PRIu64 ",\"expired\":%" PRIu64
-            ",\"threads\":%u,\"owner\":%s,\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
+            ",\"threads\":%u,\"owner\":%s,\"snapshots\":%" PRIu64 ",\"views_from_snapshots\":%" PRIu64
+            ",\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
-            groups, grouped);
+            owner.executor.publications, shown, groups, grouped);
     free(hosts);
     free(thread);
     return 0;
