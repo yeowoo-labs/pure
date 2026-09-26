@@ -356,8 +356,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             out->initial[i] = read_double(at + 8);
             if (!isfinite(out->initial[i])) REFUSE("non-finite initial value", i);
         } else {
-            if (read32(at + 12) || read32(at + 8) > UINT16_MAX) REFUSE("state reference", i);
+            uint32_t flags = read32(at + 12);
+            if ((flags && (out->state_type[i] != PURE_STATE_CURSOR || flags != PURE_CURSOR_STAYS)) ||
+                read32(at + 8) > UINT16_MAX) REFUSE("state reference", i);
             out->state_ref[i] = (uint16_t)read32(at + 8);
+            out->state_flags[i] = (uint8_t)flags;
         }
     }
     for (uint32_t i = 0; i < out->collections; ++i, at += COLLECTION_BYTES) {
@@ -648,7 +651,8 @@ static void move_cursors(const PureModule *m, double *values, uint32_t text, siz
         if (removed) {
             if (position >= at + removed) position -= (double)removed;
             else if (position > at) position = (double)at;
-        } else if (position >= at) position += (double)inserted;
+        } else if (position > at || (position == at && !(m->state_flags[c] & PURE_CURSOR_STAYS)))
+            position += (double)inserted;
         values[c] = position;
     }
 }

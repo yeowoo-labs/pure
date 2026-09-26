@@ -33,7 +33,7 @@ typedef struct { uint8_t op; uint32_t arg; double value; } O;
 /* Text (type 1, ref = constant), cursor (type 2, ref = text state), list
  * (type 3, ref = record) and index (type 4, ref = list state) states follow
  * the number states; text views follow the number views. */
-typedef struct { const char *name; uint32_t type, ref; } T;
+typedef struct { const char *name; uint32_t type, ref; } T; /* type: the state type, its flags from bit 8 */
 /* A record field: a number and its default, or text (text = 1) whose
  * default is the constant numbered initial. */
 typedef struct { const char *name; uint32_t text; double initial; } RF;
@@ -108,7 +108,12 @@ static size_t build(unsigned char *out, Spec spec) {
     p += 40;
     size_t n = 0;
     for (size_t i = 0; i < spec.ns; ++i) { p = put32(p, offset[n++]); p = put32(p, 0); p = put_double(p, spec.s[i].initial); }
-    for (size_t i = 0; i < spec.nt; ++i) { p = put32(p, offset[n++]); p = put32(p, spec.t[i].type); p = put32(p, spec.t[i].ref); p = put32(p, 0); }
+    for (size_t i = 0; i < spec.nt; ++i) {
+        p = put32(p, offset[n++]);
+        p = put32(p, spec.t[i].type & 0xFF);
+        p = put32(p, spec.t[i].ref);
+        p = put32(p, spec.t[i].type >> 8);
+    }
     for (size_t i = 0; i < spec.nc; ++i) { p = put32(p, offset[n++]); p = put32(p, 1); p = put32(p, 1); }
     uint32_t field_offsets[64], field_start = 0;
     size_t nf = 0;
@@ -1714,6 +1719,43 @@ static void deferred(void) {
     deferred_messages();
 }
 
+/* Text inserted at a cursor goes before it; at a mark (a cursor that stays),
+ * after it. Everywhere else, and when text is removed, both move alike. */
+static void marks(void) {
+    enum { MARK = 2 | PURE_CURSOR_STAYS << 8 };
+    static const T textual[] = {{"note", 1, 0}, {"at", 2, 0}, {"mark", MARK, 0}};
+    static const char *const constants[] = {"ab"};
+    static const I inputs[] = {{"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("keep", "KeyK"), KEY("back", "Backspace")};
+    static const O code[] = {
+        {CUL, 1, 0}, {TI, 0, 0}, {TINS, 0, 0},                                  /* 0 typed: at the cursor */
+        {CUL, 1, 0}, {CS, 2, 0},                                                /* 3 keep: mark = at */
+        {CUL, 1, 0}, {C, 0, -1}, {CM, 0, 0}, {CUL, 1, 0}, {TREM, 0, 0},          /* 5 back */
+    };
+    static const H handlers[] = {{1, 0, 3}, {3, 3, 2}, {5, 5, 5}};
+    Spec spec = {NULL, 0, inputs, LEN(inputs), NULL, 0, handlers, LEN(handlers), code, LEN(code),
+                 NULL, 0, textual, 3, constants, 1, NULL, 0, NULL, 0, NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    CHECK(module_a.state_flags[2] == PURE_CURSOR_STAYS && !module_a.state_flags[1]);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"x", 1}) == PURE_OK);
+    CHECK(!strcmp(state_text(&app, 0), "xab") && app.values[1] == 1 && app.values[2] == 0); /* the mark stayed */
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 1);
+    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"yz", 2}) == PURE_OK);
+    CHECK(!strcmp(state_text(&app, 0), "xyzab") && app.values[1] == 3 && app.values[2] == 1);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[1] == 2 && app.values[2] == 1);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[1] == 1 && app.values[2] == 1); /* gathered */
+    pure_app_stop(&app);
+    /* A flag only on a cursor, and only this one. */
+    static const T wrong_flag[] = {{"note", 1, 0}, {"at", 2 | 2 << 8, 0}, {"mark", MARK, 0}};
+    static const T flagged_text[] = {{"note", 1 | PURE_CURSOR_STAYS << 8, 0}, {"at", 2, 0}, {"mark", 2, 0}};
+    Spec bad = spec;
+    bad.t = wrong_flag;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "state reference"));
+    bad.t = flagged_text;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "state reference"));
+}
+
 /* A host points at an item: the index a view shows as its position moves
  * there, as an event with no handler, saved like a key event; deferred, it
  * joins the burst and a failed save undoes it with the rest. */
@@ -1751,6 +1793,7 @@ int main(void) {
     messages();
     message_mutations();
     texts();
+    marks();
     text_mutations();
     lists();
     pointing();
@@ -1760,6 +1803,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks\"}");
     return 0;
 }

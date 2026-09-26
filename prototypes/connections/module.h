@@ -46,6 +46,9 @@ typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2 } PureFieldType;
 typedef enum {
     PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4
 } PureStateType;
+/* A cursor that stays before text inserted at it (a mark); other cursors go
+ * after it (a caret). */
+enum { PURE_CURSOR_STAYS = 1 };
 /* A table view has one row per item of a list; its columns are number or
  * text views evaluated for one row at a time. */
 typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2 } PureViewType;
@@ -80,6 +83,7 @@ typedef struct {
     char input_keys[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
     uint8_t state_type[PURE_MODULE_STATES];
     uint16_t state_ref[PURE_MODULE_STATES]; /* text: constant; cursor: text; list: record; index: list */
+    uint8_t state_flags[PURE_MODULE_STATES]; /* cursor: PURE_CURSOR_STAYS */
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
     double initial[PURE_MODULE_STATES];
