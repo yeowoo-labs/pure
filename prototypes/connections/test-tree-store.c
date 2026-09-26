@@ -18,12 +18,17 @@
 static int fail_stage = -1;
 static int crash;
 static int slow_once; /* the next publication pauses before its data sync */
+static int held_sync;  /* 1: the next publication waits after its head write; 2: it is waiting */
 static void pause_ms(long ms) {
     struct timespec wait = {ms / 1000, (ms % 1000) * 1000000};
     nanosleep(&wait, NULL);
 }
 int pure_store_test_fault(PureStoreStage stage) {
     if (stage == PURE_BEFORE_FILE_SYNC && __atomic_exchange_n(&slow_once, 0, __ATOMIC_SEQ_CST)) pause_ms(100);
+    int one = 1;
+    if (stage == PURE_BEFORE_DIR_SYNC &&
+        __atomic_compare_exchange_n(&held_sync, &one, 2, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+        while (__atomic_load_n(&held_sync, __ATOMIC_SEQ_CST) == 2) pause_ms(1);
     if ((int)stage != fail_stage) return 0;
     if (crash) _exit(77);
     return 1;
@@ -33,8 +38,12 @@ bool pure_tree_test_shape(const char *path, const char *key, unsigned *height,
 
 void pure_draft_test_arena(const PureDraft *draft, size_t *nodes, size_t *bytes);
 unsigned long pure_tree_test_publications(void);
+unsigned long pure_tree_test_syncs(void);
+void pure_tree_test_forget(void);
 
-enum { KEYS = 4, CAPACITY = 1 << 20 };
+/* The file: head slots in blocks 0 and 1 (sequence at +8, end at +16,
+ * catalog at +24), commits from DATA_START. */
+enum { KEYS = 4, CAPACITY = 1 << 20, SLOT_BLOCK = 4096, DATA_START = 8192 };
 typedef struct { unsigned char *bytes; size_t size; int64_t revision; } Oracle;
 
 static uint32_t random_value(uint32_t *state) {
@@ -58,6 +67,22 @@ static uint64_t file_size(const char *path) {
     struct stat info;
     CHECK(stat(name, &info) == 0);
     return (uint64_t)info.st_size;
+}
+
+/* Where the newest commit ends. */
+static uint64_t published_end(const char *path, const char *key) {
+    unsigned height;
+    uint64_t leaves, small, end;
+    CHECK(pure_tree_test_shape(path, key, &height, &leaves, &small, &end));
+    return end;
+}
+
+static uint64_t slot_field(int fd, unsigned slot, unsigned offset) {
+    unsigned char bytes[8];
+    CHECK(pread(fd, bytes, 8, (off_t)(slot * SLOT_BLOCK + offset)) == 8);
+    uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i) value |= (uint64_t)bytes[i] << (8 * i);
+    return value;
 }
 
 static void fill(unsigned char *bytes, size_t size, uint32_t *state) {
@@ -148,7 +173,7 @@ static void amplification(const char *path) {
     const size_t edits[][3] = {{size / 2, 0, 1}, {size / 3, 1, 0}, {size - 1, 1, 1}, {0, 0, 1}};
     uint64_t worst = 0;
     for (size_t i = 0; i < sizeof(edits) / sizeof(*edits); ++i) {
-        uint64_t before = file_size(path);
+        uint64_t before = published_end(path, "large");
         size_t offset = edits[i][0], remove = edits[i][1], count = edits[i][2];
         CHECK(pure_store_splice(path, "large", o.revision, offset, remove, (PureSpan){&byte, count},
                                 PURE_OBJECT_LIMIT, &revision) == PURE_OK);
@@ -156,7 +181,7 @@ static void amplification(const char *path) {
         memcpy(bytes + offset, &byte, count);
         o.size = o.size - remove + count;
         o.revision = revision;
-        uint64_t after = file_size(path);
+        uint64_t after = published_end(path, "large");
         if (after > before && after - before > worst) worst = after - before;
         expect(path, "large", &o);
     }
@@ -176,12 +201,13 @@ static void faults(const char *path) {
     int64_t revision;
     CHECK(pure_store_put(path, "fault", 0, (PureSpan){text, 10}, &revision) == PURE_OK);
     Oracle o = {text, 10, revision};
-    uint64_t size = file_size(path);
+    uint64_t size = file_size(path), end = published_end(path, "fault");
     for (fail_stage = PURE_AFTER_HEADER; fail_stage <= PURE_BEFORE_RENAME; ++fail_stage) {
         CHECK(pure_store_splice(path, "fault", o.revision, 1, 3, (PureSpan){text, 5},
                                 PURE_OBJECT_LIMIT, &revision) == PURE_STORE_ERROR);
         expect(path, "fault", &o);
-        CHECK(file_size(path) == size);
+        /* The bytes stayed unpublished, in the written zeros after the end. */
+        CHECK(published_end(path, "fault") == end && file_size(path) == size);
     }
     fail_stage = PURE_BEFORE_DIR_SYNC;
     CHECK(pure_store_splice(path, "fault", o.revision, 10, 0, (PureSpan){text, 2},
@@ -194,16 +220,16 @@ static void faults(const char *path) {
 }
 
 /* A process that dies at each publication stage leaves either the previous
- * or the next complete version, and its unpublished bytes are discarded. */
+ * or the next complete version; the next commit overwrites its unpublished
+ * bytes. A head it wrote but did not sync is made durable before the next
+ * writer builds on it. */
 static void crashes(const char *path) {
     unsigned char text[] = "crash-base";
     int64_t revision;
     CHECK(pure_store_put(path, "crash", 0, (PureSpan){text, 10}, &revision) == PURE_OK);
     Oracle o = {text, 10, revision};
     for (int stage = PURE_AFTER_HEADER; stage <= PURE_BEFORE_DIR_SYNC; ++stage) {
-        unsigned height;
-        uint64_t leaves, small, before, end;
-        CHECK(pure_tree_test_shape(path, "crash", &height, &leaves, &small, &before));
+        uint64_t before = published_end(path, "crash");
         pid_t child = fork();
         CHECK(child >= 0);
         if (!child) {
@@ -217,19 +243,20 @@ static void crashes(const char *path) {
         CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 77);
         if (stage == PURE_BEFORE_DIR_SYNC) { text[0] = 'C'; ++o.revision; }
         expect(path, "crash", &o);
-        uint64_t garbage = file_size(path);
+        uint64_t published = published_end(path, "crash");
+        CHECK(stage == PURE_BEFORE_DIR_SYNC ? published > before : published == before);
+        unsigned long syncs = pure_tree_test_syncs();
         CHECK(pure_store_splice(path, "crash", o.revision, 10, 0, (PureSpan){(const unsigned char *)"", 0},
                                 PURE_OBJECT_LIMIT, &revision) == PURE_OK);
         o.revision = revision;
-        CHECK(pure_tree_test_shape(path, "crash", &height, &leaves, &small, &end));
-        CHECK(end == file_size(path));
-        /* Same-sized commit: equal growth only if the dead writer's tail was cut. */
-        if (stage != PURE_BEFORE_DIR_SYNC) CHECK(garbage > before && end - before == garbage - before);
+        expect(path, "crash", &o);
+        CHECK(pure_tree_test_syncs() - syncs == (stage == PURE_BEFORE_DIR_SYNC ? 2u : 1u));
+        CHECK(published_end(path, "crash") > published);
     }
 }
 
 /* A torn newest head slot exposes the previous commit, and the next writer
- * overwrites that slot and the unpublished tail. */
+ * overwrites that slot and the commit's bytes. */
 static void torn_head(const char *path) {
     unsigned char first[] = "first", second[] = "second";
     int64_t revision;
@@ -239,12 +266,11 @@ static void torn_head(const char *path) {
     char name[512];
     snprintf(name, sizeof(name), "%s/pure.tree", path);
     int fd = open(name, O_RDWR);
-    unsigned char slots[128];
-    CHECK(fd >= 0 && pread(fd, slots, 128, 0) == 128);
-    uint64_t a = 0, b = 0;
-    for (unsigned i = 0; i < 8; ++i) { a |= (uint64_t)slots[8 + i] << (8 * i); b |= (uint64_t)slots[72 + i] << (8 * i); }
-    off_t newest = a > b ? 0 : 64;
-    unsigned char torn = slots[newest + 20] ^ 0x5a;
+    CHECK(fd >= 0);
+    off_t newest = slot_field(fd, 0, 8) > slot_field(fd, 1, 8) ? 0 : SLOT_BLOCK;
+    unsigned char torn;
+    CHECK(pread(fd, &torn, 1, newest + 20) == 1);
+    torn ^= 0x5a;
     CHECK(pwrite(fd, &torn, 1, newest + 20) == 1 && close(fd) == 0);
     expect(path, "torn", &o);
     CHECK(pure_store_put(path, "torn", o.revision + 1, (PureSpan){first, 1}, &revision) == PURE_CONFLICT);
@@ -298,12 +324,12 @@ static void corruption(const char *path) {
     CHECK(pure_store_put(path, "damaged", 0, (PureSpan){bytes, 200000}, &revision) == PURE_OK);
     char name[512];
     snprintf(name, sizeof(name), "%s/pure.tree", path);
-    uint64_t size = file_size(path);
+    uint64_t end = published_end(path, "damaged");
     int fd = open(name, O_RDWR);
     CHECK(fd >= 0);
     unsigned errors = 0;
     for (unsigned i = 0; i < 3000; ++i) {
-        off_t at = (off_t)(128 + random_value(&state) % (size - 128));
+        off_t at = (off_t)(DATA_START + random_value(&state) % (end - DATA_START));
         unsigned char original, damaged;
         CHECK(pread(fd, &original, 1, at) == 1);
         damaged = original ^ (unsigned char)(1u << (random_value(&state) % 8));
@@ -345,17 +371,14 @@ static void revision_limit(const char *path) {
     char name[512];
     snprintf(name, sizeof(name), "%s/pure.tree", path);
     int fd = open(name, O_RDWR);
-    unsigned char slots[128];
-    CHECK(fd >= 0 && pread(fd, slots, 128, 0) == 128);
-    uint64_t seq[2] = {0, 0}, catalog = 0;
-    for (unsigned s = 0; s < 2; ++s)
-        for (unsigned i = 0; i < 8; ++i) seq[s] |= (uint64_t)slots[64 * s + 8 + i] << (8 * i);
-    unsigned newest = seq[0] > seq[1] ? 0 : 1;
-    for (unsigned i = 0; i < 8; ++i) catalog |= (uint64_t)slots[64 * newest + 24 + i] << (8 * i);
+    CHECK(fd >= 0);
+    uint64_t catalog = slot_field(fd, slot_field(fd, 0, 8) > slot_field(fd, 1, 8) ? 0 : 1, 24);
     CHECK(catalog >> 63);
     const unsigned char maximum[] = {255,255,255,255,255,255,255,127};
     off_t record = (off_t)(catalog & ((UINT64_C(1) << 62) - 1));
     CHECK(pwrite(fd, maximum, 8, record + 80) == 8 && close(fd) == 0);
+    /* The forged commit no longer matches its digest; this process wrote it
+     * and does not read it again, a new process would pass over it. */
     PureStoredView view;
     CHECK(pure_store_get(path, "work", 1, &view) == PURE_OK && view.revision == INT64_MAX);
     pure_store_release(&view);
@@ -483,15 +506,16 @@ static void typing(const char *path) {
     /* Reachable: 10,000 net typed bytes, the leaves they landed in and one
      * path. Unreachable copies are reclaimed past max(reachable, 32 KiB). */
     CHECK(peak < 2 * (10000 + 4 * 4096 + 2048) + 32768 + 8192);
-    uint64_t before = file_size(path);
+    uint64_t before = published_end(path, "typed");
     int64_t revision;
     CHECK(pure_draft_commit(draft, &revision) == PURE_OK);
     o.revision = revision;
-    CHECK(file_size(path) - before < 10000 + 16384);
+    uint64_t appended = published_end(path, "typed") - before;
+    CHECK(appended < 10000 + 16384);
     expect(path, "typed", &o);
     pure_draft_close(draft);
     printf("{\"typing_keystrokes\":30000,\"peak_arena_bytes\":%zu,\"commit_appended_bytes\":%llu}\n",
-           peak, (unsigned long long)(file_size(path) - before));
+           peak, (unsigned long long)appended);
     free(o.bytes);
     free(scratch);
 }
@@ -927,6 +951,84 @@ static void grouped(const char *path) {
     }
 }
 
+/* A crash during a commit's only sync can leave its head on the device
+ * without all of its bytes. A process that starts after it passes over that
+ * head to the previous commit, and the next writer overwrites both. */
+static void lost_commit(const char *path) {
+    unsigned char first[] = "first", second[] = "second";
+    int64_t revision;
+    CHECK(pure_store_put(path, "lost", 0, (PureSpan){first, 5}, &revision) == PURE_OK);
+    Oracle o = {first, 5, revision};
+    uint64_t start = published_end(path, "lost");
+    CHECK(pure_store_put(path, "lost", o.revision, (PureSpan){second, 6}, &revision) == PURE_OK);
+    uint64_t end = published_end(path, "lost");
+    char name[512];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    int fd = open(name, O_RDWR);
+    off_t at = (off_t)(start + (end - start) / 2);
+    unsigned char byte;
+    CHECK(fd >= 0 && pread(fd, &byte, 1, at) == 1);
+    byte ^= 0xff;
+    CHECK(pwrite(fd, &byte, 1, at) == 1 && close(fd) == 0);
+    pure_tree_test_forget();
+    expect(path, "lost", &o);
+    PureStore *store;
+    PureDraft *draft;
+    CHECK(pure_store_open(path, &store) == PURE_OK && pure_store_draft(store, "lost", &draft) == PURE_OK);
+    CHECK(pure_draft_revision(draft) == o.revision);
+    pure_draft_close(draft);
+    CHECK(pure_store_put(path, "lost", o.revision + 1, (PureSpan){first, 1}, &revision) == PURE_CONFLICT);
+    CHECK(pure_store_put(path, "lost", o.revision, (PureSpan){second, 3}, &revision) == PURE_OK);
+    o = (Oracle){second, 3, revision};
+    CHECK(published_end(path, "lost") < end); /* it started where the lost commit did */
+    CHECK(pure_store_draft(store, "lost", &draft) == PURE_OK && pure_draft_revision(draft) == o.revision);
+    pure_draft_close(draft);
+    pure_store_close(store);
+    pure_tree_test_forget();
+    expect(path, "lost", &o);
+}
+
+/* While a commit's sync is pending, this process keeps reading the previous
+ * version: a crash could still take the new one back. */
+static void *commit_held(void *context) {
+    int64_t revision;
+    CHECK(pure_store_put(context, "pending", 1, (PureSpan){(const unsigned char *)"new", 3}, &revision) == PURE_OK);
+    return NULL;
+}
+
+static void pending_head(const char *path) {
+    int64_t revision;
+    CHECK(pure_store_put(path, "pending", 0, (PureSpan){(const unsigned char *)"old", 3}, &revision) == PURE_OK);
+    PureStore *store;
+    PureDraft *draft;
+    CHECK(pure_store_open(path, &store) == PURE_OK);
+    __atomic_store_n(&held_sync, 1, __ATOMIC_SEQ_CST);
+    pthread_t writer;
+    CHECK(pthread_create(&writer, NULL, commit_held, (void *)path) == 0);
+    while (__atomic_load_n(&held_sync, __ATOMIC_SEQ_CST) != 2) pause_ms(1);
+    CHECK(pure_store_draft(store, "pending", &draft) == PURE_OK && pure_draft_revision(draft) == 1);
+    pure_draft_close(draft);
+    expect(path, "pending", &(Oracle){(unsigned char *)"old", 3, 1});
+    __atomic_store_n(&held_sync, 0, __ATOMIC_SEQ_CST);
+    CHECK(pthread_join(writer, NULL) == 0);
+    CHECK(pure_store_draft(store, "pending", &draft) == PURE_OK && pure_draft_revision(draft) == 2);
+    pure_draft_close(draft);
+    pure_store_close(store);
+    expect(path, "pending", &(Oracle){(unsigned char *)"new", 3, 2});
+}
+
+/* A commit costs one sync, and commits into the written zeros after the end
+ * leave the file size alone (no journal commit for a new size). */
+static void one_sync(const char *path) {
+    int64_t revision;
+    CHECK(pure_store_put(path, "sync", 0, (PureSpan){(const unsigned char *)"0", 1}, &revision) == PURE_OK);
+    uint64_t size = file_size(path);
+    unsigned long syncs = pure_tree_test_syncs();
+    for (unsigned i = 0; i < 20; ++i)
+        CHECK(pure_store_put(path, "sync", revision, (PureSpan){(const unsigned char *)"x", 1}, &revision) == PURE_OK);
+    CHECK(pure_tree_test_syncs() - syncs == 20 && file_size(path) == size);
+}
+
 static void clean(const char *path) {
     DIR *entries = opendir(path);
     CHECK(entries);
@@ -943,7 +1045,8 @@ int main(void) {
     void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
-                                      draft_versions, anonymous_draft, batch, store_handle, threads, grouped};
+                                      draft_versions, anonymous_draft, batch, store_handle, threads, grouped,
+                                      lost_commit, pending_head, one_sync};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -954,6 +1057,6 @@ int main(void) {
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
-         "atomic-batch-runtime-keys-store-handle-threads-group-commit\"}");
+         "atomic-batch-runtime-keys-store-handle-threads-group-commit-lost-commit-pending-head-one-sync\"}");
     return 0;
 }

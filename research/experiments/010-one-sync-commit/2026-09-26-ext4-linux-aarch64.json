@@ -1,0 +1,148 @@
+{
+ "rounds": [
+  {
+   "probe": [
+    {
+     "way": "append, fsync, head, fsync (two syncs)",
+     "p50_ms": 9.02,
+     "p90_ms": 11.11,
+     "max_ms": 64.61
+    },
+    {
+     "way": "append, head, fdatasync",
+     "p50_ms": 5.75,
+     "p90_ms": 8.26,
+     "max_ms": 60.96
+    },
+    {
+     "way": "append, head, fsync",
+     "p50_ms": 5.69,
+     "p90_ms": 8.39,
+     "max_ms": 13.53
+    },
+    {
+     "way": "overwrite written zeros, head, fdatasync",
+     "p50_ms": 2.44,
+     "p90_ms": 5.45,
+     "max_ms": 67.07
+    },
+    {
+     "way": "overwrite written zeros, head, fsync",
+     "p50_ms": 5.7,
+     "p90_ms": 8.33,
+     "max_ms": 88.51
+    }
+   ],
+   "commits": {
+    "two syncs": {
+     "commits_per_second": 103,
+     "p50_ms": 9.19,
+     "p90_ms": 11.15,
+     "p99_ms": 62.85
+    },
+    "one sync": {
+     "commits_per_second": 292,
+     "p50_ms": 2.48,
+     "p90_ms": 4.69,
+     "p99_ms": 56.77
+    }
+   }
+  },
+  {
+   "probe": [
+    {
+     "way": "append, fsync, head, fsync (two syncs)",
+     "p50_ms": 9.19,
+     "p90_ms": 10.95,
+     "max_ms": 62.65
+    },
+    {
+     "way": "append, head, fdatasync",
+     "p50_ms": 5.82,
+     "p90_ms": 8.55,
+     "max_ms": 58.98
+    },
+    {
+     "way": "append, head, fsync",
+     "p50_ms": 5.66,
+     "p90_ms": 8.67,
+     "max_ms": 59.21
+    },
+    {
+     "way": "overwrite written zeros, head, fdatasync",
+     "p50_ms": 2.53,
+     "p90_ms": 6.02,
+     "max_ms": 61.15
+    },
+    {
+     "way": "overwrite written zeros, head, fsync",
+     "p50_ms": 5.75,
+     "p90_ms": 8.68,
+     "max_ms": 8.87
+    }
+   ],
+   "commits": {
+    "one sync": {
+     "commits_per_second": 289,
+     "p50_ms": 2.44,
+     "p90_ms": 5.49,
+     "p99_ms": 53.59
+    },
+    "two syncs": {
+     "commits_per_second": 109,
+     "p50_ms": 8.82,
+     "p90_ms": 11.42,
+     "p99_ms": 61.67
+    }
+   }
+  },
+  {
+   "probe": [
+    {
+     "way": "append, fsync, head, fsync (two syncs)",
+     "p50_ms": 8.82,
+     "p90_ms": 11.09,
+     "max_ms": 63.3
+    },
+    {
+     "way": "append, head, fdatasync",
+     "p50_ms": 5.61,
+     "p90_ms": 9.51,
+     "max_ms": 78.07
+    },
+    {
+     "way": "append, head, fsync",
+     "p50_ms": 6.21,
+     "p90_ms": 8.28,
+     "max_ms": 8.43
+    },
+    {
+     "way": "overwrite written zeros, head, fdatasync",
+     "p50_ms": 2.41,
+     "p90_ms": 4.67,
+     "max_ms": 58.57
+    },
+    {
+     "way": "overwrite written zeros, head, fsync",
+     "p50_ms": 5.07,
+     "p90_ms": 7.71,
+     "max_ms": 14.71
+    }
+   ],
+   "commits": {
+    "two syncs": {
+     "commits_per_second": 94,
+     "p50_ms": 9.09,
+     "p90_ms": 12.2,
+     "p99_ms": 63.22
+    },
+    "one sync": {
+     "commits_per_second": 304,
+     "p50_ms": 2.46,
+     "p90_ms": 5.15,
+     "p99_ms": 19.8
+    }
+   }
+  }
+ ]
+}

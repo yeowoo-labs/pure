@@ -3,8 +3,9 @@
  * path it changes, so inserting or deleting in a large document costs O(log n)
  * nodes instead of a whole-document copy. Unchanged extents are shared by old
  * and new versions. The document catalog is the same structure holding fixed
- * records sorted by key. Two alternating head slots publish a commit only after
- * its nodes are durable; readers take no lock and map one immutable prefix. */
+ * records sorted by key. A commit appends its nodes and writes a head naming
+ * them and their digest into the older of two slots, then syncs once; readers
+ * take no lock and map one immutable prefix. */
 #define _POSIX_C_SOURCE 200809L
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE
@@ -23,9 +24,13 @@
 #include <unistd.h>
 
 enum { FREE = 0xffff };
-enum { SLOT = 64, DATA = 2 * SLOT, LEAF_MAX = 4096, LEAF_MIN = 1024,
+/* Each head slot has a block of its own: a torn write of one never touches
+ * the other. */
+enum { SLOT = 128, BLOCK = 4096, DATA = 2 * BLOCK, LEAF_MAX = 4096, LEAF_MIN = 1024,
        FAN_MAX = 32, FAN_MIN = 8, RECORD = 96, KEY = 64, HEIGHT_MAX = 12,
        BUFFER = 65536 };
+/* Written zeros kept after the published end (see prepare_tail). */
+enum { TAIL_MIN = 65536, TAIL_STEP = 262144 };
 #ifdef PURE_STORE_TEST
 enum { COMPACT_SLACK = 65536 };
 #else
@@ -34,7 +39,7 @@ enum { COMPACT_SLACK = 1048576 };
 #define LEAF_BIT (UINT64_C(1) << 63)
 #define MEMORY_BIT (UINT64_C(1) << 62)
 #define LOCATION (MEMORY_BIT - 1)
-static const unsigned char head_magic[8] = {'P','U','R','E','T','R','E','1'};
+static const unsigned char head_magic[8] = {'P','U','R','E','T','R','E','2'};
 static const unsigned char branch_magic[4] = {'P','T','B','1'};
 static const char tree_name[] = "pure.tree";
 /* Threads of one process take turns as the writer: the file lock arbitrates
@@ -64,12 +69,18 @@ typedef struct {
     size_t count, capacity, free_head, free_count; /* free_head is slot + 1 */
     size_t bytes; /* payload held by arena nodes, including unreachable ones */
 } Tree;
-typedef struct { uint64_t seq, end, catalog, catalog_bytes, live; } Head;
+/* A commit's bytes are start..end (none for a file synced whole before it was
+ * published); check is their digest. */
+typedef struct { uint64_t seq, end, catalog, catalog_bytes, live, start, check; } Head;
+/* The xxHash64 construction without a seed: four multiply-rotate lanes over
+ * 32-byte stripes, several GB/s. An all-zero Digest is an empty one. */
+typedef struct { uint64_t lane[4], length; unsigned char held[32]; size_t count; } Digest;
 typedef struct {
     int fd;
     uint64_t at; /* file offset of the next byte */
     size_t used;
     bool failed;
+    Digest digest; /* of every byte written */
     unsigned char buffer[BUFFER];
 } Writer;
 typedef struct { PureSpan part[3]; size_t index, offset; } Source;
@@ -111,17 +122,98 @@ static void encode64(unsigned char *bytes, uint64_t value) {
     for (unsigned i = 0; i < 8; ++i) bytes[i] = (unsigned char)(value >> (8 * i));
 }
 
-/* Detects a torn head slot; it is not a defence against a hostile file. */
-static uint64_t checksum(const unsigned char *bytes, size_t length) {
-    uint64_t hash = UINT64_C(14695981039346656037);
-    for (size_t i = 0; i < length; ++i) hash = (hash ^ bytes[i]) * UINT64_C(1099511628211);
-    return hash;
+static uint64_t load64(const unsigned char *bytes) {
+    uint64_t value;
+    memcpy(&value, bytes, 8);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    value = __builtin_bswap64(value);
+#endif
+    return value;
 }
+
+/* Digests find torn and missing writes; they are not a defence against a
+ * hostile file. */
+static const uint64_t P1 = UINT64_C(0x9E3779B185EBCA87), P2 = UINT64_C(0xC2B2AE3D27D4EB4F),
+                      P3 = UINT64_C(0x165667B19E3779F9), P4 = UINT64_C(0x85EBCA77C2B2AE63),
+                      P5 = UINT64_C(0x27D4EB2F165667C5);
+
+static uint64_t rotate(uint64_t value, unsigned bits) { return value << bits | value >> (64 - bits); }
+static uint64_t mix(uint64_t lane, uint64_t word) { return rotate(lane + word * P2, 31) * P1; }
+
+static void stripes(Digest *digest, const unsigned char *bytes, size_t count) {
+    uint64_t a = digest->lane[0], b = digest->lane[1], c = digest->lane[2], d = digest->lane[3];
+    for (; count; --count, bytes += 32) {
+        a = mix(a, load64(bytes));
+        b = mix(b, load64(bytes + 8));
+        c = mix(c, load64(bytes + 16));
+        d = mix(d, load64(bytes + 24));
+    }
+    digest->lane[0] = a, digest->lane[1] = b, digest->lane[2] = c, digest->lane[3] = d;
+}
+
+static void digest_add(Digest *digest, const unsigned char *bytes, size_t length) {
+    digest->length += length;
+    if (digest->count) {
+        size_t take = 32 - digest->count < length ? 32 - digest->count : length;
+        memcpy(digest->held + digest->count, bytes, take);
+        digest->count += take;
+        bytes += take;
+        length -= take;
+        if (digest->count < 32) return;
+        stripes(digest, digest->held, 1);
+        digest->count = 0;
+    }
+    stripes(digest, bytes, length / 32);
+    digest->count = length % 32;
+    if (digest->count) memcpy(digest->held, bytes + length - digest->count, digest->count);
+}
+
+static uint64_t digest_end(const Digest *digest) {
+    const uint64_t *lane = digest->lane;
+    uint64_t hash = rotate(lane[0], 1) + rotate(lane[1], 7) + rotate(lane[2], 12) + rotate(lane[3], 18);
+    for (unsigned i = 0; i < 4; ++i) hash = (hash ^ mix(0, lane[i])) * P1 + P4;
+    hash += digest->length;
+    size_t i = 0;
+    for (; i + 8 <= digest->count; i += 8) hash = rotate(hash ^ mix(0, load64(digest->held + i)), 27) * P1 + P4;
+    for (; i < digest->count; ++i) hash = rotate(hash ^ digest->held[i] * P5, 11) * P1;
+    hash ^= hash >> 33;
+    hash *= P2;
+    hash ^= hash >> 29;
+    hash *= P3;
+    return hash ^ hash >> 32;
+}
+
+static uint64_t digest_of(const unsigned char *bytes, size_t length) {
+    Digest digest = {0};
+    digest_add(&digest, bytes, length);
+    return digest_end(&digest);
+}
+
+#ifdef PURE_STORE_TEST
+static unsigned long syncs;
+unsigned long pure_tree_test_syncs(void) { return __atomic_load_n(&syncs, __ATOMIC_RELAXED); }
+#define COUNT_SYNC() __atomic_add_fetch(&syncs, 1, __ATOMIC_RELAXED)
+#else
+#define COUNT_SYNC() ((void)0)
+#endif
 
 static bool sync_fd(int fd) {
     int rc;
+    COUNT_SYNC();
     do { rc = fsync(fd); } while (rc && errno == EINTR);
     return rc == 0;
+}
+
+/* Data and the size needed to read it back, without timestamps. */
+static bool sync_data(int fd) {
+#ifdef __APPLE__
+    return sync_fd(fd);
+#else
+    int rc;
+    COUNT_SYNC();
+    do { rc = fdatasync(fd); } while (rc && errno == EINTR);
+    return rc == 0;
+#endif
 }
 
 static bool write_at(int fd, const unsigned char *bytes, size_t length, uint64_t offset) {
@@ -156,35 +248,130 @@ static void encode_head(unsigned char out[SLOT], const Head *head) {
     encode64(out + 24, head->catalog);
     encode64(out + 32, head->catalog_bytes);
     encode64(out + 40, head->live);
-    encode64(out + 56, checksum(out, 56));
+    encode64(out + 48, head->start);
+    encode64(out + 56, head->check);
+    encode64(out + SLOT - 8, digest_of(out, SLOT - 8));
 }
 
 static bool decode_head(const unsigned char in[SLOT], Head *head) {
-    if (memcmp(in, head_magic, sizeof(head_magic)) || decode64(in + 56) != checksum(in, 56))
+    if (memcmp(in, head_magic, sizeof(head_magic)) || decode64(in + SLOT - 8) != digest_of(in, SLOT - 8))
         return false;
-    *head = (Head){decode64(in + 8), decode64(in + 16), decode64(in + 24),
-                   decode64(in + 32), decode64(in + 40)};
-    return head->seq && head->end >= DATA && head->end <= (uint64_t)INT64_MAX &&
-           head->end <= SIZE_MAX && head->catalog_bytes % RECORD == 0 &&
+    *head = (Head){decode64(in + 8), decode64(in + 16), decode64(in + 24), decode64(in + 32),
+                   decode64(in + 40), decode64(in + 48), decode64(in + 56)};
+    return head->seq && head->end <= (uint64_t)INT64_MAX && head->end <= SIZE_MAX &&
+           head->start >= DATA && head->start <= head->end && head->catalog_bytes % RECORD == 0 &&
            !head->catalog == !head->catalog_bytes;
 }
 
-/* The newer valid slot wins; a torn newer slot leaves the previous commit. */
-static bool read_head(int fd, Head *out) {
-    unsigned char slots[2 * SLOT];
-    Head a, b;
-    if (!read_at(fd, slots, sizeof(slots), 0)) return false;
-    bool first = decode_head(slots, &a), second = decode_head(slots + SLOT, &b);
-    if (!first && !second) return false;
-    *out = first && (!second || a.seq > b.seq) ? a : b;
-    return true;
+/* ---- Trusted heads --------------------------------------------------------
+ * One sync makes a commit's bytes and its head durable together, so a crash
+ * during it can leave the head on the device without all of the bytes: a
+ * head counts only once its digest matches them. The older slot needs no
+ * such luck. A writer builds only on a durable head, so the newer head was
+ * written after the older one's commit was complete on the device.
+ * The process remembers the heads it published or checked, so it reads a
+ * commit's bytes at most once, and which of them it made durable. */
+enum { UNKNOWN, BROKEN, CHECKED, DURABLE, PUBLISHING };
+enum { KNOWN = 32 };
+typedef struct { dev_t device; ino_t inode; uint64_t seq, check; int state; } Known;
+static struct {
+    pthread_mutex_t lock;
+    Known heads[KNOWN];
+    unsigned next;
+    Known publishing; /* written here, not durable yet */
+} known = {.lock = PTHREAD_MUTEX_INITIALIZER};
+
+static bool names(const Known *known_head, const struct stat *file, const Head *head) {
+    return known_head->state && known_head->device == file->st_dev && known_head->inode == file->st_ino &&
+           known_head->seq == head->seq && known_head->check == head->check;
 }
 
-static bool map_tree(int fd, const Head *head, Tree *tree) {
-    struct stat info;
+static int recall(const struct stat *file, const Head *head) {
+    int state = UNKNOWN;
+    pthread_mutex_lock(&known.lock);
+    if (names(&known.publishing, file, head)) state = PUBLISHING;
+    for (unsigned i = 0; i < KNOWN && state == UNKNOWN; ++i)
+        if (names(&known.heads[i], file, head)) state = known.heads[i].state;
+    pthread_mutex_unlock(&known.lock);
+    return state;
+}
+
+/* PUBLISHING marks the one head being made durable; any other state ends
+ * that mark (UNKNOWN only ends it). */
+static void remember(const struct stat *file, const Head *head, int state) {
+    Known entry = {file->st_dev, file->st_ino, head->seq, head->check, state};
+    pthread_mutex_lock(&known.lock);
+    if (state == PUBLISHING) known.publishing = entry;
+    else if (names(&known.publishing, file, head)) known.publishing.state = UNKNOWN;
+    if (state != PUBLISHING && state != UNKNOWN) {
+        Known *at = NULL;
+        for (unsigned i = 0; i < KNOWN && !at; ++i)
+            if (names(&known.heads[i], file, head)) at = &known.heads[i];
+        if (!at) known.heads[known.next++ % KNOWN] = entry;
+        else if (at->state != DURABLE) *at = entry; /* a durable head stays durable */
+    }
+    pthread_mutex_unlock(&known.lock);
+}
+
+#ifdef PURE_STORE_TEST
+/* Test-only: forget every head, as a new process after a crash would. */
+void pure_tree_test_forget(void) {
+    pthread_mutex_lock(&known.lock);
+    memset(known.heads, 0, sizeof(known.heads));
+    known.publishing.state = UNKNOWN;
+    pthread_mutex_unlock(&known.lock);
+}
+#endif
+
+/* Whether a head's commit has all of its bytes. */
+static bool whole(int fd, const Head *head) {
+    unsigned char buffer[16384];
+    Digest digest = {0};
+    for (uint64_t at = head->start; at < head->end;) {
+        size_t n = head->end - at < sizeof(buffer) ? (size_t)(head->end - at) : sizeof(buffer);
+        if (!read_at(fd, buffer, n, at)) return false;
+        digest_add(&digest, buffer, n);
+        at += n;
+    }
+    return digest_end(&digest) == head->check;
+}
+
+/* The newest head that counts. A reader passes over the head this process is
+ * still making durable, so the process never answers with a commit that a
+ * crash could take back; a writer never meets one (it is the only writer). */
+static bool pick(int fd, const struct stat *file, const unsigned char *slots[2], bool writer, Head *out) {
+    Head heads[2];
+    bool valid[2];
+    for (unsigned i = 0; i < 2; ++i)
+        valid[i] = decode_head(slots[i], &heads[i]) && heads[i].end <= (uint64_t)file->st_size;
+    unsigned newest = valid[1] && (!valid[0] || heads[1].seq > heads[0].seq);
+    for (unsigned turn = 0; turn < 2; ++turn) {
+        unsigned slot = turn ? !newest : newest;
+        const Head *head = &heads[slot];
+        if (!valid[slot]) continue;
+        int state = recall(file, head);
+        if (state == BROKEN || (state == PUBLISHING && !writer)) continue;
+        if (state == UNKNOWN) {
+            bool counts = whole(fd, head);
+            remember(file, head, counts ? CHECKED : BROKEN);
+            if (!counts) continue;
+        }
+        *out = *head;
+        return true;
+    }
+    return false;
+}
+
+static bool read_head(int fd, struct stat *file, bool writer, Head *out) {
+    unsigned char slots[BLOCK + SLOT];
+    return !fstat(fd, file) && S_ISREG(file->st_mode) && file->st_size >= 0 &&
+           read_at(fd, slots, sizeof(slots), 0) &&
+           pick(fd, file, (const unsigned char *[2]){slots, slots + BLOCK}, writer, out);
+}
+
+static bool map_tree(int fd, const struct stat *file, const Head *head, Tree *tree) {
     *tree = (Tree){0};
-    if (fstat(fd, &info) || !S_ISREG(info.st_mode) || info.st_size < 0 ||
-        (uint64_t)info.st_size < head->end) return false;
+    if ((uint64_t)file->st_size < head->end) return false;
     void *map = mmap(NULL, (size_t)head->end, PROT_READ, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) return false;
     *tree = (Tree){.map = map, .end = head->end};
@@ -534,11 +721,27 @@ static bool rebuild(Tree *tree, Entry root, uint64_t offset, uint64_t remove,
 }
 
 static bool flush(Writer *writer) {
-    if (writer->used && !writer->failed &&
-        !write_at(writer->fd, writer->buffer, writer->used, writer->at - writer->used))
-        writer->failed = true;
+    if (writer->used && !writer->failed) {
+        digest_add(&writer->digest, writer->buffer, writer->used);
+        if (!write_at(writer->fd, writer->buffer, writer->used, writer->at - writer->used)) writer->failed = true;
+    }
     writer->used = 0;
     return !writer->failed;
+}
+
+/* Zeros from..to; a failure only costs speed. */
+static void zero_fill(int fd, uint64_t from, uint64_t to) {
+    static const unsigned char zeros[BUFFER];
+    while (from < to) {
+        size_t n = to - from < BUFFER ? (size_t)(to - from) : BUFFER;
+        if (!write_at(fd, zeros, n, from)) return;
+        from += n;
+    }
+}
+
+/* Where the written zeros after a published end should reach. */
+static uint64_t tail_end(uint64_t end) {
+    return end + ((end - DATA) / 8 > TAIL_STEP ? (end - DATA) / 8 : TAIL_STEP);
 }
 
 static void put_bytes(Writer *writer, const unsigned char *bytes, size_t length) {
@@ -647,23 +850,29 @@ static int create_temporary(int directory, char name[96]) {
     return -1;
 }
 
-/* Publish a fresh file with both slots pointing at head. */
-static bool install(int directory, char temporary[96], int fd, const Head *head) {
-    unsigned char slots[2 * SLOT];
-    encode_head(slots, head);
-    memcpy(slots + SLOT, slots, SLOT);
-    bool ok = write_at(fd, slots, sizeof(slots), 0) && sync_fd(fd);
+/* Publish a fresh file with both slots pointing at head. It is synced whole
+ * before it is renamed into place, so its head names no commit bytes. */
+static bool install(int directory, char temporary[96], int fd, Head *head) {
+    unsigned char slot[SLOT];
+    struct stat file;
+    head->start = head->end;
+    head->check = digest_end(&(Digest){0});
+    encode_head(slot, head);
+    zero_fill(fd, head->end, tail_end(head->end));
+    bool ok = write_at(fd, slot, SLOT, 0) && write_at(fd, slot, SLOT, BLOCK) && sync_fd(fd) && !fstat(fd, &file);
     if (close(fd)) ok = false;
     ok = ok && !renameat(directory, temporary, directory, tree_name);
     if (ok) temporary[0] = 0;
-    return ok && sync_fd(directory);
+    ok = ok && sync_fd(directory);
+    if (ok) remember(&file, head, DURABLE);
+    return ok;
 }
 
 /* Rewrite only reachable nodes. Open readers keep their mapping of the
  * previous file. A failure leaves the published file untouched. */
-static void compact(int directory, int source, const Head *head) {
+static void compact(int directory, int source, const struct stat *file, const Head *head) {
     Tree tree;
-    if (!map_tree(source, head, &tree)) return;
+    if (!map_tree(source, file, head, &tree)) return;
     char temporary[96];
     int fd = create_temporary(directory, temporary);
     Writer *writer = fd >= 0 ? malloc(sizeof(*writer)) : NULL;
@@ -686,7 +895,7 @@ static void compact(int directory, int source, const Head *head) {
     ok = ok && rebuild(&tree, (Entry){0}, 0, 0, (PureSpan){records, (size_t)(count * RECORD)}, &fresh) &&
          write_root(&tree, writer, &fresh, false) && flush(writer);
     if (ok) {
-        Head compacted = {head->seq + 1, writer->at, fresh.ref, fresh.bytes, writer->at - DATA};
+        Head compacted = {head->seq + 1, writer->at, fresh.ref, fresh.bytes, writer->at - DATA, 0, 0};
         ok = install(directory, temporary, fd, &compacted);
         fd = -1;
     }
@@ -716,9 +925,10 @@ PureResult pure_store_init(const char *path) {
     bool ok = lock >= 0 && fstat(lock, &info) == 0 && S_ISREG(info.st_mode) && lock_writer(lock, true);
     if (ok) {
         Head head;
+        struct stat file;
         int fd = openat(directory, tree_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (fd >= 0) {
-            ok = read_head(fd, &head); /* An unreadable file is never replaced. */
+            ok = read_head(fd, &file, true, &head); /* An unreadable file is never replaced. */
             close(fd);
         } else if (errno != ENOENT) ok = false;
         else {
@@ -767,13 +977,14 @@ PureResult pure_store_select(const char *path, const char *key, size_t offset,
     if (fd < 0) return PURE_STORE_ERROR;
     Tree tree = {0};
     Head head;
+    struct stat file;
     Entry document;
     uint64_t index;
     int64_t revision;
     bool found;
     unsigned height;
     PureResult result = PURE_STORE_ERROR;
-    if (!read_head(fd, &head) || !map_tree(fd, &head, &tree) ||
+    if (!read_head(fd, &file, false, &head) || !map_tree(fd, &file, &head, &tree) ||
         !find(&tree, (Entry){head.catalog, head.catalog_bytes}, key, &index, &found,
               &document, &revision)) goto finish;
     if (!found) { result = PURE_NOT_FOUND; goto finish; }
@@ -838,6 +1049,16 @@ typedef struct {
     bool turn; /* holds this process's writer turn */
 } Session;
 
+/* Keep written zeros after the published end, where commits and their
+ * unpublished leftovers go. A sync of blocks the file already has writes
+ * only them; a new size or new blocks add a journal commit (on an SD card
+ * 2.4 ms against 6 ms per commit). The zeros become durable with the next
+ * commit's sync. */
+static void prepare_tail(Session *session) {
+    uint64_t size = (uint64_t)session->file.st_size, end = session->head.end;
+    if (size < end + TAIL_MIN) zero_fill(session->fd, size > end ? size : end, tail_end(end));
+}
+
 static void close_session(Session *session) {
     release_tree(&session->tree);
     if (session->fd >= 0) close(session->fd);
@@ -859,19 +1080,22 @@ static PureResult open_session(const char *path, Session *session) {
     if (!lock_writer(session->lock, false))
         return errno == EACCES || errno == EAGAIN ? PURE_BUSY : PURE_STORE_ERROR;
     session->fd = openat(session->directory, tree_name, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
-    if (session->fd < 0 || !read_head(session->fd, &session->head) ||
-        !map_tree(session->fd, &session->head, &session->tree) || fstat(session->fd, &session->file))
+    if (session->fd < 0 || !read_head(session->fd, &session->file, true, &session->head))
         return PURE_STORE_ERROR;
-    /* Bytes after the published head belong to a commit nobody acknowledged. */
-    if ((uint64_t)session->file.st_size > session->head.end &&
-        ftruncate(session->fd, (off_t)session->head.end)) return PURE_STORE_ERROR;
-    return PURE_OK;
+    /* A head this process did not make durable may be the last write of a
+     * writer that died before its sync: make it durable before building on it. */
+    if (recall(&session->file, &session->head) != DURABLE) {
+        if (!sync_data(session->fd)) return PURE_STORE_ERROR;
+        remember(&session->file, &session->head, DURABLE);
+    }
+    prepare_tail(session);
+    return map_tree(session->fd, &session->file, &session->head, &session->tree) ? PURE_OK : PURE_STORE_ERROR;
 }
 
-/* The documents' new nodes are already appended at writer. Record each in
- * the catalog (revisions come in as the base and leave as the new one),
- * then make the commit durable before its head becomes visible: every
- * document becomes visible at once, or none does. */
+/* The documents' new nodes are already written at writer. Record each in
+ * the catalog (revisions come in as the base and leave as the new one), then
+ * write the head and sync once: every document becomes visible at once, or
+ * none does. Readers of this process see the head only once it is durable. */
 #ifdef PURE_STORE_TEST
 static unsigned long publications;
 unsigned long pure_tree_test_publications(void) { return publications; }
@@ -900,19 +1124,21 @@ static PureResult publish(Session *session, Writer *writer, size_t count, const 
         catalog = updated;
     }
     written = written && write_root(&session->tree, writer, &catalog, false) && flush(writer);
-    if (!written || fault(PURE_AFTER_HEADER) || fault(PURE_BEFORE_FILE_SYNC) ||
-        !sync_fd(session->fd) || fault(PURE_BEFORE_RENAME)) {
-        if (ftruncate(session->fd, (off_t)session->head.end) == 0) sync_fd(session->fd);
+    /* Unpublished bytes stay in the tail; the next commit overwrites them. */
+    if (!written || fault(PURE_AFTER_HEADER) || fault(PURE_BEFORE_FILE_SYNC) || fault(PURE_BEFORE_RENAME))
         return PURE_STORE_ERROR;
-    }
-    Head published = {session->head.seq + 1, writer->at, catalog.ref, catalog.bytes, session->head.live};
+    Head published = {session->head.seq + 1, writer->at, catalog.ref, catalog.bytes, session->head.live,
+                      session->head.end, digest_end(&writer->digest)};
     unsigned char slot[SLOT];
     encode_head(slot, &published);
     for (size_t i = 0; i < count; ++i) ++revisions[i]; /* Past this point the head may already be visible. */
-    if (!write_at(session->fd, slot, SLOT, (published.seq % 2) * SLOT) ||
-        fault(PURE_BEFORE_DIR_SYNC) || !sync_fd(session->fd)) return PURE_UNCERTAIN;
-    if (published.end - DATA > 4 * published.live + COMPACT_SLACK)
-        compact(session->directory, session->fd, &published);
+    remember(&session->file, &published, PUBLISHING);
+    bool durable = write_at(session->fd, slot, SLOT, (published.seq % 2) * BLOCK) &&
+                   !fault(PURE_BEFORE_DIR_SYNC) && sync_data(session->fd);
+    remember(&session->file, &published, durable ? DURABLE : CHECKED);
+    if (!durable) return PURE_UNCERTAIN;
+    if (published.end - DATA > 4 * published.live + COMPACT_SLACK && !fstat(session->fd, &session->file))
+        compact(session->directory, session->fd, &session->file, &published);
     return PURE_OK;
 }
 
@@ -942,10 +1168,7 @@ static PureResult mutate(const char *path, const char *key, int64_t expected,
     if (!writer || !rebuild(&session.tree, splice ? document : (Entry){0}, splice ? offset : 0,
                             splice ? remove : 0, body, &next)) goto finish;
     *writer = (Writer){.fd = session.fd, .at = session.head.end};
-    if (!write_root(&session.tree, writer, &next, false)) {
-        if (ftruncate(session.fd, (off_t)session.head.end) == 0) sync_fd(session.fd);
-        goto finish;
-    }
+    if (!write_root(&session.tree, writer, &next, false)) goto finish;
     result = publish(&session, writer, 1, &key, &next, revision);
 finish:
     free(writer);
@@ -964,8 +1187,9 @@ PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *k
     if (fd < 0) return PURE_STORE_ERROR;
     Tree tree = {0};
     Head head;
+    struct stat file;
     PureResult result = PURE_STORE_ERROR;
-    if (read_head(fd, &head) && map_tree(fd, &head, &tree)) {
+    if (read_head(fd, &file, false, &head) && map_tree(fd, &file, &head, &tree)) {
         Entry catalog = {head.catalog, head.catalog_bytes}, document;
         unsigned char record[RECORD];
         char key[KEY + 1] = {0};
@@ -1023,7 +1247,7 @@ static PureResult load_draft(PureDraft *draft) {
     uint64_t index;
     int64_t revision;
     bool found;
-    bool ok = !fstat(fd, &info) && read_head(fd, &head) && map_tree(fd, &head, &tree) &&
+    bool ok = read_head(fd, &info, false, &head) && map_tree(fd, &info, &head, &tree) &&
               find(&tree, (Entry){head.catalog, head.catalog_bytes}, draft->key, &index, &found,
                    &document, &revision);
     close(fd);
@@ -1069,8 +1293,9 @@ void pure_draft_close(PureDraft *draft) {
     free(draft);
 }
 
-/* Bring the handle to the newest published version: the same file and head
- * cost two system calls; a new commit maps again, a compaction reopens. */
+/* Bring the handle to the newest published version: an unchanged store costs
+ * one system call (the mapping shows the head slots); a new commit maps
+ * again, a compaction reopens. */
 static PureResult refresh(PureStore *store) {
     struct stat info;
     if (fstatat(store->directory, tree_name, &info, AT_SYMLINK_NOFOLLOW) || !S_ISREG(info.st_mode))
@@ -1084,13 +1309,23 @@ static PureResult refresh(PureStore *store) {
         store->inode = info.st_ino;
         store->head = (Head){0};
     }
+    unsigned char slots[BLOCK + SLOT];
+    if (store->head.seq) {
+        /* A newer head lands in the other slot first; a torn or older one there
+         * cannot be newer. */
+        const unsigned char *map = store->mapping->map;
+        if (decode64(map + (store->head.seq + 1) % 2 * BLOCK + 8) <= store->head.seq) return PURE_OK;
+        memcpy(slots, map, SLOT);
+        memcpy(slots + BLOCK, map + BLOCK, SLOT);
+    } else if (!read_at(store->fd, slots, sizeof(slots), 0)) return PURE_STORE_ERROR;
     Head head;
-    if (!read_head(store->fd, &head)) return PURE_STORE_ERROR;
-    if (store->mapping && head.seq == store->head.seq && head.end == store->head.end) return PURE_OK;
+    if (!pick(store->fd, &info, (const unsigned char *[2]){slots, slots + BLOCK}, false, &head))
+        return PURE_STORE_ERROR;
+    if (store->mapping && head.seq == store->head.seq && head.check == store->head.check) return PURE_OK;
     Tree tree;
     Mapping *mapping = malloc(sizeof(*mapping));
     if (!mapping) return PURE_ALLOCATION;
-    if (!map_tree(store->fd, &head, &tree)) { free(mapping); return PURE_STORE_ERROR; }
+    if (!map_tree(store->fd, &info, &head, &tree)) { free(mapping); return PURE_STORE_ERROR; }
     *mapping = (Mapping){tree.map, tree.end, 1};
     release_mapping(store->mapping);
     store->mapping = mapping;
@@ -1358,11 +1593,7 @@ static void commit_group(const char *path, Waiter *first) {
                     bool relocate = session.file.st_dev != drafts[i]->device || session.file.st_ino != drafts[i]->inode;
                     written = write_root(&drafts[i]->tree, writer, &roots[i], relocate);
                 }
-                if (written) result = publish(&session, writer, count, keys, roots, revisions);
-                else {
-                    if (ftruncate(session.fd, (off_t)session.head.end) == 0) sync_fd(session.fd);
-                    result = PURE_STORE_ERROR;
-                }
+                result = written ? publish(&session, writer, count, keys, roots, revisions) : PURE_STORE_ERROR;
             }
         }
         /* Rebase while still holding the writer lock; the arenas are no longer
@@ -1507,12 +1738,13 @@ bool pure_tree_test_shape(const char *path, const char *key, unsigned *height,
     if (directory >= 0) close(directory);
     Tree tree = {0};
     Head head;
+    struct stat file;
     Entry document;
     uint64_t index;
     int64_t revision;
     bool found = false;
     *leaves = *small = 0;
-    bool ok = fd >= 0 && read_head(fd, &head) && map_tree(fd, &head, &tree) &&
+    bool ok = fd >= 0 && read_head(fd, &file, false, &head) && map_tree(fd, &file, &head, &tree) &&
               find(&tree, (Entry){head.catalog, head.catalog_bytes}, key, &index, &found,
                    &document, &revision) && found && root_height(&tree, document, height) &&
               (!document.bytes || shape(&tree, document, *height, true, leaves, small));
