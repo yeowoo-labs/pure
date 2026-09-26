@@ -378,8 +378,10 @@ static bool map_tree(int fd, const struct stat *file, const Head *head, Tree *tr
     return true;
 }
 
+/* A lent mapping may be released on another thread (a host that answers on
+ * its connection threads): its count is atomic. */
 static void release_mapping(Mapping *mapping) {
-    if (!mapping || --mapping->refs) return;
+    if (!mapping || __atomic_sub_fetch(&mapping->refs, 1, __ATOMIC_ACQ_REL)) return;
     munmap((void *)mapping->map, (size_t)mapping->end);
     free(mapping);
 }
@@ -1345,7 +1347,7 @@ static PureResult rebase(PureDraft *draft) {
     bool found;
     if (!find(&tree, (Entry){store->head.catalog, store->head.catalog_bytes}, draft->key, &index, &found, &document,
               &revision)) return PURE_STORE_ERROR;
-    ++mapping->refs;
+    __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
     release_tree(&draft->tree);
     draft->tree = tree;
     draft->device = store->device;
@@ -1379,7 +1381,7 @@ void pure_store_close(PureStore *store) {
 
 PureMapping *pure_draft_mapping(const PureDraft *draft) {
     Mapping *mapping = draft->tree.shared;
-    if (mapping) ++mapping->refs;
+    if (mapping) __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
     return mapping;
 }
 
