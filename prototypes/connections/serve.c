@@ -360,6 +360,7 @@ static void drive(Connection *c) {
             if (n < 0 && errno == EAGAIN) { c->writable = false; return; }
             if (n < 0 && errno == EINTR) continue;
             if (n < 0) { close_connection(c); return; }
+            c->deadline = now_ms() + c->host->timeout_ms; /* a slow reader is fine while it reads */
             for (size_t sent = (size_t)n; c->out_at < c->out_count;) {
                 struct iovec *v = &c->out[c->out_at];
                 if (sent < v->iov_len) {
