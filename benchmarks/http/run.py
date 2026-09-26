@@ -75,8 +75,13 @@ def put(port, key, body, expected):
 
 
 def post_score(port, name):
-    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
-    connection.request('POST', '/inputs/score?points=1', name.encode(), {'Content-Length': str(len(name))})
+    for attempt in range(50):  # a server may print its port a moment before it listens
+        try:
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
+            connection.request('POST', '/inputs/score?points=1', name.encode(), {'Content-Length': str(len(name))})
+            break
+        except ConnectionRefusedError:
+            time.sleep(0.05)
     response = connection.getresponse()
     response.read()
     connection.close()
@@ -130,6 +135,8 @@ def main():
                                  '--budget', str(args.budget)],
         'pure-serve-3': lambda d: [PURE / 'build/pure-serve', '--module', args.module, '--store', d, '--port', '0',
                                    '--budget', str(args.budget), '--threads', '3'],
+        'pure-serve-2': lambda d: [PURE / 'build/pure-serve', '--module', args.module, '--store', d, '--port', '0',
+                                   '--budget', str(args.budget), '--threads', '2'],
         'axum-memory': lambda d: [axum, '--port', '0'],
         'axum-durable': lambda d: [axum, '--port', '0', '--durable', d],
         'axum-atomic': lambda d: [axum, '--port', '0', '--atomic', d],
@@ -153,8 +160,8 @@ def main():
             ('total, 64 conn, keep-alive', dict(connections=64, method='total', keys=64, mode='keep-alive')),
             ('page 20 rows, 64 conn, keep-alive', dict(connections=64, method='page', keys=64, mode='keep-alive')),
         ]
-        for name in ('pure-program', 'pure-serve-3', 'axum-atomic', 'drogon-atomic'):
-            del servers[name]  # one owner of the board's states; atomic is durable for a log
+        for name in ('pure-program', 'axum-atomic', 'drogon-atomic'):
+            del servers[name]  # atomic is durable for a log already
     if args.workloads:
         workloads = [w for w in workloads if re.search(args.workloads, w[0])]
     chosen = [name for name in servers if not args.only or name in args.only.split(',')]

@@ -22,3 +22,12 @@ python3 run.py --module editor.pmod --directory /var/tmp   # 저장소를 둘 �
 python3 run.py --module editor.pmod --workloads put --rounds 5 --seconds 3 \
     --only pure-serve,pure-serve-3,axum-durable,axum-atomic
 ```
+
+앱 벤치마크([077](../../docs/research/077-apps-as-http-services.md))는 aup로 쓴 점수판(`scores.aup`)을 pure-serve가 보기와
+입력으로 내놓는 것과, 같은 점수판을 axum·drogon으로 손수 쓴 것을 비교한다.
+
+```sh
+aup build scores.aup -o scores.pmod
+python3 run.py --module scores.pmod --suite app --rounds 3 --seconds 4 \
+    --only pure-serve,pure-serve-2,axum-memory,axum-durable,drogon-memory,drogon-durable
+```
