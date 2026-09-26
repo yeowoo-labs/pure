@@ -106,6 +106,9 @@ int pure_module_state(const PureModule *, const char *name);
 int pure_module_input(const PureModule *, const char *name);
 int pure_module_view(const PureModule *, const char *name);
 int pure_module_column(const PureModule *, uint32_t table, const char *name);
+/* The index state a number view shows as its position (a view that is just
+ * `at.position`), or -1: what a host moves with pure_app_point. */
+int pure_module_position(const PureModule *, uint32_t view);
 
 /* Keyed collections live in a data host (for example the tree store). One
  * event opens at most one document, the message's key, at its current
@@ -189,6 +192,10 @@ bool pure_app_defer(PureApp *, bool deferred);
 void pure_app_stop(PureApp *);
 PureResult pure_app_frame(PureApp *);
 PureResult pure_app_input(PureApp *, uint32_t input, PureEdge);
+/* Point an index state at the item at position (0 first), as a user pointing
+ * at a row: an event with no handler, saved like a key event. NOT_FOUND past
+ * the last item, INVALID for a state that is not an index. */
+PureResult pure_app_point(PureApp *, uint32_t state, size_t position);
 /* Deliver committed text (for example from an input method). Not UTF-8: invalid. */
 PureResult pure_app_text(PureApp *, uint32_t input, PureSpan text);
 /* Deliver a message. base is the revision the sender edited, or -1 for none;

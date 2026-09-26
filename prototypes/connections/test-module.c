@@ -1714,6 +1714,35 @@ static void deferred(void) {
     deferred_messages();
 }
 
+/* A host points at an item: the index a view shows as its position moves
+ * there, as an event with no handler, saved like a key event; deferred, it
+ * joins the burst and a failed save undoes it with the rest. */
+static void pointing(void) {
+    CHECK(load(list_spec, &module_a) == PURE_OK);
+    CHECK(pure_module_position(&module_a, 1) == 2); /* position = at.position */
+    CHECK(pure_module_position(&module_a, 0) == -1 && pure_module_position(&module_a, 2) == -1 &&
+          pure_module_position(&module_a, 3) == -1 && pure_module_position(&module_a, 99) == -1);
+    char path[] = "/tmp/pure-point-XXXXXX";
+    CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_app_point(&app, 2, 0) == PURE_NOT_FOUND); /* nothing to point at */
+    for (int i = 0; i < 3; ++i) CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
+    uint64_t events = app.events;
+    CHECK(app.values[2] == 2 && pure_app_point(&app, 2, 0) == PURE_OK && app.values[2] == 0 && app.events == events + 1);
+    CHECK(pure_app_point(&app, 2, 3) == PURE_NOT_FOUND && app.values[2] == 0);
+    CHECK(pure_app_point(&app, 0, 1) == PURE_INVALID && pure_app_point(&app, 1, 1) == PURE_INVALID); /* a number, a list */
+    CHECK(pure_app_point(&app, 2, 1) == PURE_OK);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[2] == 1);
+    CHECK(pure_app_defer(&app, true) && pure_app_point(&app, 2, 2) == PURE_OK && app.open && app.values[2] == 2);
+    CHECK(pure_app_save(&app) == PURE_OK);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[2] == 2);
+    pure_app_stop(&app);
+    remove_store(path);
+}
+
 int main(void) {
     behaviour();
     faults();
@@ -1724,12 +1753,13 @@ int main(void) {
     texts();
     text_mutations();
     lists();
+    pointing();
     list_mutations();
     tables();
     table_mutations();
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing\"}");
     return 0;
 }

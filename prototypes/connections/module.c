@@ -522,6 +522,13 @@ int pure_module_view(const PureModule *m, const char *name) {
     return -1;
 }
 
+int pure_module_position(const PureModule *m, uint32_t view) {
+    if (view >= m->views || m->view_type[view] != PURE_VIEW_NUM || m->view_table[view]) return -1;
+    const PureBlock *block = &m->view_code[view];
+    const PureOp *code = &m->code[block->start];
+    return block->length == 2 && code[0].op == PURE_OP_INDEX_LOAD && code[1].op == PURE_OP_INDEX_NUM ? (int)code[0].arg : -1;
+}
+
 int pure_module_column(const PureModule *m, uint32_t table, const char *name) {
     for (uint32_t i = 0; i < m->views; ++i)
         if (m->view_table[i] == table + 1 && !strcmp(m->view_names[i], name)) return (int)i;
@@ -1119,6 +1126,19 @@ PureResult pure_app_input(PureApp *app, uint32_t input, PureEdge edge) {
     pure_app_finish(app);
     Event ev = {.app = app, .arena = &app->arena};
     return dispatch(app, 1 + 2 * input + (edge == PURE_EDGE_UP), &ev);
+}
+
+PureResult pure_app_point(PureApp *app, uint32_t state, size_t position) {
+    const PureModule *m = app->module;
+    pure_app_finish(app);
+    if (state >= m->states || m->state_type[state] != PURE_STATE_INDEX) return PURE_INVALID;
+    if (position >= pure_list_count(app->lists[m->state_ref[state]])) return PURE_NOT_FOUND;
+    open_burst(app); /* what a failed save returns to */
+    app->fault = PURE_FAULT_NONE;
+    app->fault_pc = UINT32_MAX;
+    app->values[state] = (double)position;
+    ++app->events;
+    return app->deferred ? PURE_OK : pure_app_save(app);
 }
 
 PureResult pure_app_text(PureApp *app, uint32_t input, PureSpan text) {
