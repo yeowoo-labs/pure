@@ -155,7 +155,8 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.nw; ++i) {
         const W *w = &spec.w[i];
         p = put32(p, offset[n++]);
-        *p++ = (unsigned char)w->type; *p++ = 0; *p++ = (unsigned char)w->table; *p++ = (unsigned char)(w->table >> 8);
+        *p++ = (unsigned char)w->type; *p++ = (unsigned char)(w->type >> 8); /* a filtered table: its list + 1 */
+        *p++ = (unsigned char)w->table; *p++ = (unsigned char)(w->table >> 8);
         p = put32(p, w->start);
         p = put32(p, w->length);
     }
@@ -1834,11 +1835,84 @@ static void folds(void) {
     }
 }
 
-/* Damaged fold modules: whatever loads runs safely. */
+/* A filtered table: one row per item its filter keeps; its columns read the
+ * item (ROW is the item, not the row), and hosts turn rows into items and
+ * back. The rows follow every change. */
+static const O filter_code[] = {
+    {TI, 0, 0}, {C, 0, 0}, {TI, 0, 0}, {CHR, 0, 0}, {LA, 0, 0}, {XE, 0, 0}, {XS, 1, 0},     /* 0 typed */
+    {XL, 1, 0}, {XL, 1, 0}, {IG, F_DONE, 0}, {NOT, 0, 0}, {IS, F_DONE, 0},                 /* 7 toggle */
+    {ROW, 0, 0}, {IG, F_DONE, 0}, {NOT, 0, 0},                                            /* 12 filter: open */
+    {ROW, 0, 0}, {IG, F_TITLE, 0},                                                        /* 15 title */
+    {ROW, 0, 0}, {XN, 0, 0},                                                              /* 17 pos */
+};
+enum { FILTERED = 2 | 1 << 8 }; /* a table over state 0, filtered */
+static const W filter_views[] = {{"open", FILTERED, 0, 12, 3}, {"title", 1, 1, 15, 2}, {"pos", 0, 1, 17, 2}};
+
+static Spec filter_spec(const O *code, size_t count, const W *views, size_t nviews) {
+    return (Spec){NULL, 0, fold_inputs, LEN(fold_inputs), NULL, 0, fold_handlers, 2, code, count, NULL, 0,
+                  fold_states, 2, fold_constants, 1, NULL, 0, fold_records, 1, views, nviews};
+}
+
+static const char *cell_title(PureApp *app, uint32_t column, size_t row) {
+    static Text text;
+    text = (Text){{0}, 0};
+    CHECK(pure_app_cell_text(app, column, row, text_span, &text) == PURE_OK && text.size < sizeof(text.text));
+    text.text[text.size] = 0;
+    return text.text;
+}
+
+static void filters(void) {
+    CHECK(load(filter_spec(filter_code, LEN(filter_code), filter_views, 3), &module_a) == PURE_OK);
+    PureApp app;
+    double value;
+    size_t at;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && pure_app_rows(&app, 0) == 0);
+    for (const char *word = "abc"; *word; ++word)
+        CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK);
+    CHECK(pure_app_rows(&app, 0) == 3 && !strcmp(cell_title(&app, 1, 2), "c") && pure_app_cell(&app, 2, 2, &value) && value == 2);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);   /* c is done: it leaves */
+    CHECK(pure_app_rows(&app, 0) == 2 && !pure_app_cell(&app, 2, 2, &value) && !pure_app_item_row(&app, 0, 2, &at));
+    CHECK(pure_app_point(&app, 1, 0) == PURE_OK && pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK); /* a too */
+    CHECK(pure_app_rows(&app, 0) == 1 && !strcmp(cell_title(&app, 1, 0), "b"));
+    CHECK(pure_app_cell(&app, 2, 0, &value) && value == 1);      /* the item's position, not the row's */
+    CHECK(pure_app_row_item(&app, 0, 0, &at) && at == 1 && !pure_app_row_item(&app, 0, 1, &at));
+    CHECK(pure_app_item_row(&app, 0, 1, &at) && at == 0 && !pure_app_item_row(&app, 0, 0, &at));
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);   /* a comes back, before b */
+    CHECK(pure_app_rows(&app, 0) == 2 && !strcmp(cell_title(&app, 1, 0), "a") && pure_app_item_row(&app, 0, 1, &at) && at == 1);
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && pure_app_rows(&app, 0) == 2);
+    pure_app_stop(&app);
+
+    /* What a filter may not be. */
+    static const O effect[] = {{ROW, 0, 0}, {XS, 1, 0}, {C, 0, 1}};
+    static const O text_filter[] = {{ROW, 0, 0}, {IG, F_TITLE, 0}};
+    static const O folded[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}};
+    static const W filtered_by[] = {{"open", FILTERED, 0, 0, 0}}, open3[] = {{"open", FILTERED, 0, 0, 3}},
+                   open2[] = {{"open", FILTERED, 0, 0, 2}};
+    static const W not_a_list[] = {{"open", 2 | 2 << 8, 0, 0, 3}};
+    static const W flagged_column[] = {{"open", FILTERED, 0, 0, 3}, {"c", 0 | 1 << 8, 1, 0, 3}};
+    static const struct { const O *code; size_t count; const W *views; size_t nviews; const char *reason; } refused[] = {
+        {effect, LEN(effect), open3, 1, "filter with an effect"},
+        {text_filter, LEN(text_filter), open2, 1, "filter must leave one number"},
+        {folded, LEN(folded), open2, 1, "fold inside a filter"},
+        {effect, LEN(effect), filtered_by, 1, "table list"},       /* a filtered table needs its block */
+        {effect, LEN(effect), not_a_list, 1, "table list"},        /* state 1 is an index */
+        {effect, LEN(effect), flagged_column, 2, "view type"},     /* only a table has a list byte */
+    };
+    for (size_t i = 0; i < LEN(refused); ++i)
+        if (load(filter_spec(refused[i].code, refused[i].count, refused[i].views, refused[i].nviews), &module_b) != PURE_INVALID ||
+            !strstr(error, refused[i].reason)) {
+            fprintf(stderr, "filter case %zu: expected '%s', got '%s'\n", i, refused[i].reason, error);
+            abort();
+        }
+}
+
+/* Damaged fold and filter modules: whatever loads runs safely. */
 static void fold_mutations(void) {
     static unsigned char valid[65536], bytes[65536];
     size_t size = build(valid, fold_spec(fold_code, LEN(fold_code), fold_views, LEN(fold_views), fold_handlers, 2));
-    uint32_t state = 0x27d4eb2fu;
+    for (unsigned kind = 0; kind < 2; ++kind) {
+    if (kind) size = build(valid, filter_spec(filter_code, LEN(filter_code), filter_views, 3));
+    uint32_t state = kind ? 0x165667b1u : 0x27d4eb2fu;
     unsigned accepted = 0;
     for (unsigned round = 0; round < 20000; ++round) {
         memcpy(bytes, valid, size);
@@ -1854,13 +1928,22 @@ static void fold_mutations(void) {
             else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
             for (uint32_t v = 0; v < module_b.views; ++v) {
                 double value;
-                if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_view_text(&app, v, ignore_span, NULL);
+                size_t item;
+                if (module_b.view_type[v] == PURE_VIEW_TABLE) {
+                    size_t rows = pure_app_rows(&app, v);
+                    for (size_t row = 0; row < rows + 1; ++row) pure_app_row_item(&app, v, row, &item);
+                } else if (module_b.view_table[v]) {
+                    for (size_t row = 0; row < 4; ++row)
+                        if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_cell_text(&app, v, row, ignore_span, NULL);
+                        else pure_app_cell(&app, v, row, &value);
+                } else if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_view_text(&app, v, ignore_span, NULL);
                 else pure_app_view(&app, v, &value);
             }
         }
         pure_app_stop(&app);
     }
-    printf("{\"fold_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
+    printf("{\"%s_module_mutations\":20000,\"accepted_after_damage\":%u}\n", kind ? "filter" : "fold", accepted);
+    }
 }
 
 /* A host points at an item: the index a view shows as its position moves
@@ -1904,6 +1987,7 @@ int main(void) {
     text_mutations();
     lists();
     folds();
+    filters();
     fold_mutations();
     pointing();
     list_mutations();
@@ -1912,6 +1996,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters\"}");
     return 0;
 }

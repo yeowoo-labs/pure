@@ -22,8 +22,9 @@ enum { READ = IN_VIEW | IN_HANDLER };
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_INDEX + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
        A_ROW, A_TARGET, A_DEPTH, A_FOLD };
 /* A fold's block is verified as a column that leaves one number (count) or
- * two (a value and whether to include it): these stand for a view type. */
-enum { FOLD_ONE = 100, FOLD_TWO };
+ * two (a value and whether to include it), a table's filter as a column that
+ * leaves one: these stand for a view type. */
+enum { FOLD_ONE = 100, FOLD_TWO, FILTER };
 /* The text or list an opcode works on: its cursor and index operands belong
  * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_OPERAND:
  * it pushes a position in its operand's text or list. O_ARG: the argument.
@@ -237,6 +238,7 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
         unsigned allowed = signature[op->op].where, kind = signature[op->op].arg, of = signature[op->op].of;
         if (!(allowed & where)) {
             if (allowed & IN_ROW) REFUSE("row outside a column");
+            if (view == FILTER) REFUSE("filter with an effect");
             if (view >= FOLD_ONE) REFUSE("fold with an effect");
             if (view >= 0) REFUSE("view with an effect");
             if (allowed & IN_KEYED) REFUSE("document operation outside a keyed message handler");
@@ -262,7 +264,7 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
         if (kind == A_FOLD) {
             uint32_t inner = pc;
             skip = arg >> 16;
-            if (view >= FOLD_ONE) REFUSE("fold inside a fold");
+            if (view >= FOLD_ONE) REFUSE(view == FILTER ? "fold inside a filter" : "fold inside a fold");
             if (skip > block.length - i - 1) REFUSE("fold block outside its block");
             const char *why = verify_block(m, (PureBlock){pc + 1, skip}, (arg & 0xFF) == PURE_FOLD_COUNT ? FOLD_ONE : FOLD_TWO,
                                            (int)(arg >> 8 & 0xFF), 0, &inner);
@@ -322,6 +324,7 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
         i += skip;
     }
     if (!reachable) return "block end is unreachable";
+    if (view == FILTER) return height != 1 || types[0] != T_NUM ? "filter must leave one number" : NULL;
     if (view >= FOLD_ONE) {
         int want = view - FOLD_ONE + 1;
         return height != want || types[0] != T_NUM || types[want - 1] != T_NUM ? "fold block must leave its numbers" : NULL;
@@ -484,13 +487,15 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         out->view_table[i] = (uint16_t)read16(at + 6);
         out->view_code[i] = (PureBlock){read32(at + 8), read32(at + 12)};
         uint32_t table = out->view_table[i];
-        if (at[4] > PURE_VIEW_TABLE || at[5] || (table && (table > i || out->view_type[table - 1] != PURE_VIEW_TABLE ||
-                                                           at[4] == PURE_VIEW_TABLE)))
+        if (at[4] > PURE_VIEW_TABLE || (at[5] && at[4] != PURE_VIEW_TABLE) ||
+            (table && (table > i || out->view_type[table - 1] != PURE_VIEW_TABLE || at[4] == PURE_VIEW_TABLE)))
             REFUSE("view type", i);
+        /* A table names its list in start, or, filtered, in the byte after its
+         * type (list + 1) with its filter's block in start and length. */
         if (at[4] == PURE_VIEW_TABLE) {
-            if (!state_of(out, out->view_code[i].start, PURE_STATE_LIST) || out->view_code[i].length)
-                REFUSE("table list", i);
-            out->view_list[i] = (uint16_t)out->view_code[i].start;
+            uint32_t list = at[5] ? at[5] - 1u : out->view_code[i].start;
+            if (!state_of(out, list, PURE_STATE_LIST) || !at[5] != !out->view_code[i].length) REFUSE("table list", i);
+            out->view_list[i] = (uint16_t)list;
         } else if (table) out->view_list[i] = out->view_list[table - 1];
     }
     for (uint32_t i = 0; i < out->handlers; ++i, at += HANDLER_BYTES) {
@@ -523,9 +528,10 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                 !strcmp(out->view_names[i], out->view_names[k])) REFUSE("duplicate column", i);
     for (uint32_t i = 0; i < out->views; ++i) {
         bad = i;
-        if (out->view_type[i] != PURE_VIEW_TABLE &&
-            (why = verify_block(out, out->view_code[i], out->view_type[i], out->view_table[i] ? out->view_list[i] : -1, 0,
-                                &bad))) goto refused;
+        bool table = out->view_type[i] == PURE_VIEW_TABLE;
+        if ((!table || out->view_code[i].length) &&
+            (why = verify_block(out, out->view_code[i], table ? FILTER : out->view_type[i],
+                                table || out->view_table[i] ? out->view_list[i] : -1, 0, &bad))) goto refused;
     }
     for (uint32_t i = 0; i < out->handlers; ++i) {
         bad = i;
@@ -1073,6 +1079,7 @@ static void close_burst(PureApp *app, bool keep) {
         memcpy(app->values, app->durable_values, sizeof(app->values));
         app->ticks = app->durable_ticks;
         app->events = app->durable_events;
+        ++app->changes;
     }
     app->open = false;
 }
@@ -1105,6 +1112,8 @@ void pure_app_stop(PureApp *app) {
     pure_draft_close(app->stored_values);
     free(app->pending);
     pure_undo_free(&app->undo);
+    for (unsigned i = 0; i < app->row_tables; ++i) free(app->rows[i].items);
+    free(app->rows);
     free(app->arena.bytes);
     free(app->view_arena.bytes);
     memset(app, 0, sizeof(*app));
@@ -1162,6 +1171,7 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     }
     memcpy(app->values, pending, sizeof(pending));
     ++app->events;
+    ++app->changes;
     if (!event) ++app->ticks;
     if (app->document) {
         app->pending[app->pending_count].document = app->document;
@@ -1196,6 +1206,7 @@ PureResult pure_app_point(PureApp *app, uint32_t state, size_t position) {
     app->fault_pc = UINT32_MAX;
     app->values[state] = (double)position;
     ++app->events;
+    ++app->changes;
     return app->deferred ? PURE_OK : pure_app_save(app);
 }
 
@@ -1280,11 +1291,76 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     return result;
 }
 
+/* A filtered table's items, as fresh as the app's states: the filter runs
+ * once per item after each change (an item it fails on is left out), not
+ * once per cell. NULL for a table without a filter, or without room. */
+static struct PureRows *filtered(PureApp *app, uint32_t table) {
+    const PureModule *m = app->module;
+    if (!m->view_code[table].length) return NULL;
+    struct PureRows *rows = NULL;
+    for (unsigned i = 0; i < app->row_tables && !rows; ++i) if (app->rows[i].table == table) rows = &app->rows[i];
+    if (!rows) {
+        struct PureRows *grown = realloc(app->rows, (app->row_tables + 1) * sizeof(*grown));
+        if (!grown) return NULL;
+        app->rows = grown;
+        rows = &app->rows[app->row_tables++];
+        *rows = (struct PureRows){.table = table, .changes = UINT64_MAX};
+    }
+    if (rows->changes == app->changes) return rows;
+    rows->count = 0;
+    for (size_t item = 0, items = pure_list_count(app->lists[m->view_list[table]]); item < items; ++item) {
+        Slot keep;
+        if (evaluate(app, table, item, &keep) != PURE_OK || keep.num == 0) continue;
+        if (rows->count == rows->capacity) {
+            size_t capacity = rows->capacity ? 2 * rows->capacity : 16;
+            size_t *grown = realloc(rows->items, capacity * sizeof(*grown));
+            if (!grown) return NULL;
+            rows->items = grown;
+            rows->capacity = capacity;
+        }
+        rows->items[rows->count++] = item;
+    }
+    rows->changes = app->changes;
+    return rows;
+}
+
+bool pure_app_row_item(PureApp *app, uint32_t table, size_t row, size_t *item) {
+    const PureModule *m = app->module;
+    if (table >= m->views || m->view_type[table] != PURE_VIEW_TABLE) return false;
+    if (!m->view_code[table].length) {
+        *item = row;
+        return row < pure_list_count(app->lists[m->view_list[table]]);
+    }
+    struct PureRows *rows = filtered(app, table);
+    if (!rows || row >= rows->count) return false;
+    *item = rows->items[row];
+    return true;
+}
+
+bool pure_app_item_row(PureApp *app, uint32_t table, size_t item, size_t *row) {
+    const PureModule *m = app->module;
+    if (table >= m->views || m->view_type[table] != PURE_VIEW_TABLE) return false;
+    if (!m->view_code[table].length) {
+        *row = item;
+        return item < pure_list_count(app->lists[m->view_list[table]]);
+    }
+    struct PureRows *rows = filtered(app, table);
+    size_t low = 0, high = rows ? rows->count : 0; /* the items are in order */
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (rows->items[middle] < item) low = middle + 1;
+        else high = middle;
+    }
+    if (low == (rows ? rows->count : 0) || rows->items[low] != item) return false;
+    *row = low;
+    return true;
+}
+
 /* A view outside a table (column false), or a column and a row of its table. */
 static PureResult view_of(PureApp *app, uint32_t view, bool column, size_t row, uint8_t type, Slot *slot) {
     const PureModule *m = app->module;
     if (view >= m->views || m->view_type[view] != type || (m->view_table[view] != 0) != column) return PURE_INVALID;
-    if (column && row >= pure_list_count(app->lists[m->view_list[view]])) return PURE_NOT_FOUND;
+    if (column && !pure_app_row_item(app, m->view_table[view] - 1u, row, &row)) return PURE_NOT_FOUND;
     return evaluate(app, view, row, slot);
 }
 
@@ -1301,10 +1377,11 @@ PureResult pure_app_view_text(PureApp *app, uint32_t view, bool (*visit)(void *,
     return result == PURE_OK ? visit_value(app, &app->view_arena, slot.bytes, visit, context) : result;
 }
 
-size_t pure_app_rows(const PureApp *app, uint32_t table) {
+size_t pure_app_rows(PureApp *app, uint32_t table) {
     const PureModule *m = app->module;
     if (table >= m->views || m->view_type[table] != PURE_VIEW_TABLE) return 0;
-    return pure_list_count(app->lists[m->view_list[table]]);
+    struct PureRows *rows = filtered(app, table);
+    return rows ? rows->count : m->view_code[table].length ? 0 : pure_list_count(app->lists[m->view_list[table]]);
 }
 
 bool pure_app_cell(PureApp *app, uint32_t column, size_t row, double *out) {
@@ -1456,6 +1533,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     memcpy(app->list_drafts, list_drafts, sizeof(list_drafts));
     memcpy(app->saved, saved, sizeof(saved));
     app->module = module;
+    ++app->changes;
     return PURE_OK;
 }
 

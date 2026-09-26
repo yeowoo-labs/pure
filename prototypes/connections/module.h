@@ -54,8 +54,9 @@ typedef enum {
 /* A cursor that stays before text inserted at it (a mark); other cursors go
  * after it (a caret). */
 enum { PURE_CURSOR_STAYS = 1 };
-/* A table view has one row per item of a list; its columns are number or
- * text views evaluated for one row at a time. */
+/* A table view has one row per item of a list, or per item its filter
+ * keeps; its columns are number or text views evaluated for one row at a
+ * time. */
 typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2 } PureViewType;
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
@@ -181,6 +182,9 @@ typedef struct {
     PureFault fault;
     uint32_t fault_pc;
     uint64_t ticks, events;
+    uint64_t changes; /* counts every change of states, never back: what a filter's rows are fresh for */
+    struct PureRows { uint32_t table; uint64_t changes; size_t *items, count, capacity; } *rows; /* a filtered table's items */
+    unsigned row_tables;
     /* Current message or text event, kept until pure_app_finish. */
     void *document;
     PureSpan payload;
@@ -220,9 +224,13 @@ void pure_app_finish(PureApp *);
 bool pure_app_view(PureApp *, uint32_t view, double *out);
 /* A text view, lent in order until the next view evaluation. */
 PureResult pure_app_view_text(PureApp *, uint32_t view, bool (*visit)(void *, PureSpan), void *context);
-/* The rows of a table view (its list's items), or 0 for another view. A
- * host evaluates only the cells it shows. */
-size_t pure_app_rows(const PureApp *, uint32_t table);
+/* The rows of a table view (its list's items, or those its filter keeps),
+ * or 0 for another view. A host evaluates only the cells it shows. */
+size_t pure_app_rows(PureApp *, uint32_t table);
+/* The item a row of a table shows, and the row that shows an item (false:
+ * its filter leaves the item out). Without a filter both are the identity. */
+bool pure_app_row_item(PureApp *, uint32_t table, size_t row, size_t *item);
+bool pure_app_item_row(PureApp *, uint32_t table, size_t item, size_t *row);
 bool pure_app_cell(PureApp *, uint32_t column, size_t row, double *out);
 PureResult pure_app_cell_text(PureApp *, uint32_t column, size_t row, bool (*visit)(void *, PureSpan), void *context);
 /* Switch to another verified module. States keep their value by name (text
