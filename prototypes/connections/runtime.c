@@ -231,7 +231,7 @@ bool pure_runtime_step(PureRuntime *r) {
             r->budget - r->retained, &w->resource, &outcome.revision);
         if (outcome.status == PURE_OK) {
             if (w->resource.body.size > r->budget - r->retained) outcome.status = PURE_BUDGET;
-            else if (w->resource.body.size && (!w->resource.body.data || !w->resource.release))
+            else if (w->resource.body.size && !w->resource.release)
                 outcome.status = PURE_STORE_ERROR;
             else {
                 w->charged = w->resource.body.size;
@@ -300,7 +300,7 @@ bool pure_runtime_complete(PureTicket ticket, PureResult status,
         if (outcome.status == PURE_OK) {
             if (acquired.body.size > r->budget - r->retained)
                 outcome.status = PURE_BUDGET;
-            else if (acquired.body.size && (!acquired.body.data || !acquired.release))
+            else if (acquired.body.size && !acquired.release)
                 outcome.status = PURE_STORE_ERROR;
             else {
                 w->resource = acquired;
@@ -343,7 +343,8 @@ PureResult pure_runtime_forward(PureTicket source, PureRuntime *r,
                                 const char *key, int64_t expected, PureTicket *out) {
     PureWork *parent = lookup(source, true);
     if (!out || !parent || source.runtime->running || parent->state != DONE ||
-        parent->outcome.status != PURE_OK) return PURE_INVALID;
+        parent->outcome.status != PURE_OK || (parent->outcome.body.size && !parent->outcome.body.data))
+        return PURE_INVALID;
     PureResult status = admission(r, PURE_INPUT_WRITE, key, expected, parent->outcome.body.size);
     if (status != PURE_OK) return status;
     if (parent->pins == SIZE_MAX) return PURE_LIMIT;

@@ -237,6 +237,40 @@ static void rejection_and_budget(const char *directory) {
     CHECK(runtime.active == 0 && runtime.retained == 0);
 }
 
+/* A resource sent in pieces is charged like any other and released with its
+ * ticket (or at once when it does not fit); it cannot be forwarded. */
+static int loans_released;
+static void release_loan(void *allocation, size_t size) {
+    (void)allocation;
+    (void)size;
+    ++loans_released;
+}
+
+static void vectored_loan(const char *directory) {
+    static int mapping;
+    PureRuntime runtime, other;
+    PureWork slots[2], other_slots[1];
+    CHECK(pure_runtime_init(&runtime, slots, 2, &identity, async_host(directory), 6));
+    CHECK(pure_runtime_init(&other, other_slots, 1, &identity, async_host(directory), 64));
+    CHECK(pure_runtime_enable_async(&runtime) && pure_runtime_enable_async(&other));
+    PureTicket first, second;
+    CHECK(pure_runtime_accept(&runtime, PURE_INPUT_READ, "lent", 0, 0, &first) == PURE_OK);
+    CHECK(pure_runtime_accept(&runtime, PURE_INPUT_READ, "lent", 0, 0, &second) == PURE_OK);
+    PureEffect one, two;
+    CHECK(pure_runtime_take(&runtime, &one) == PURE_TAKE_EFFECT && pure_runtime_take(&runtime, &two) == PURE_TAKE_EFFECT);
+    PureResource a = {.body = {NULL, 4}, .allocation = &mapping, .allocation_size = 4, .release = release_loan}, b = a;
+    CHECK(pure_runtime_complete(one.ticket, PURE_OK, &a, (PureSpan){0}, 1) && !a.release);
+    PureOutcome result;
+    CHECK(pure_runtime_result(first, &result) && result.status == PURE_OK && !result.body.data && result.body.size == 4);
+    CHECK(runtime.retained == 4 && loans_released == 0);
+    CHECK(pure_runtime_complete(two.ticket, PURE_OK, &b, (PureSpan){0}, 1));
+    CHECK(pure_runtime_result(second, &result) && result.status == PURE_BUDGET && loans_released == 1);
+    PureTicket forwarded;
+    CHECK(pure_runtime_forward(first, &other, "copy", 0, &forwarded) == PURE_INVALID);
+    CHECK(pure_runtime_release(first) && loans_released == 2 && runtime.retained == 0);
+    CHECK(pure_runtime_release(second) && runtime.active == 0 && other.active == 0);
+}
+
 static void authored_document(const char *directory) {
     PureProgram program;
     char error[160];
@@ -317,6 +351,7 @@ int main(void) {
     CHECK(directory && pure_store_init(directory) == PURE_OK);
     worker_and_forward(directory);
     rejection_and_budget(directory);
+    vectored_loan(directory);
     authored_document(directory);
     DIR *opened = opendir(directory);
     CHECK(opened);
@@ -326,5 +361,5 @@ int main(void) {
         CHECK(unlinkat(dirfd(opened), entry->d_name, 0) == 0);
     }
     CHECK(!closedir(opened) && !rmdir(directory));
-    puts("{\"async_effects\":\"authored-document-worker-overlap-release-forward-budget-recovery\"}");
+    puts("{\"async_effects\":\"authored-document-worker-overlap-release-forward-budget-recovery-vectored-loan\"}");
 }

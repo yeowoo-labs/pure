@@ -20,7 +20,10 @@ typedef enum { PURE_INPUT_READ, PURE_INPUT_WRITE } PureInput;
 
 /* The host owns this resource until it successfully returns it to the core.
  * release must end all access and free/unmap allocation exactly once. It runs
- * while that domain is busy; calls back into the same domain are rejected. */
+ * while that domain is busy; calls back into the same domain are rejected.
+ * A resource the host sends in pieces (such as extents of a mapping) has no
+ * contiguous body: body.data is NULL and body.size is still what it holds and
+ * is charged. Its outcome has no body to read and cannot be forwarded. */
 typedef struct {
     PureSpan body;
     void *allocation;

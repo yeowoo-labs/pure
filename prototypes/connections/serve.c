@@ -61,13 +61,13 @@ typedef struct Connection {
     PureTicket ticket;
     struct iovec *out, small[4]; /* the answer: its head, then its body's extents */
     size_t out_count, out_at;
-    PureMapping *mapping;        /* keeps store extents the answer borrows mapped */
     char head[320];
     char in[HEADER_LIMIT]; /* the header being read, then pipelined bytes */
 } Connection;
 
 /* One request applied in the current burst. A read answered from the store
- * lends its extents: extents point into mapping, which the answer keeps. */
+ * lends its extents: they point into a store mapping, which the resource holds
+ * and the runtime charges and releases with the ticket. */
 typedef struct {
     Connection *connection;
     PureTicket ticket;
@@ -77,8 +77,7 @@ typedef struct {
     PureResource resource;
     PureSpan reply;
     struct iovec *extents;
-    size_t extent_count, extent_size;
-    PureMapping *mapping;
+    size_t extent_count;
     char key[65];
 } Applied;
 
@@ -130,12 +129,10 @@ static void release_ticket(void *owner) {
     c->body = NULL;
 }
 
-/* Everything an answer borrowed goes back: the request's payload and ticket,
- * the store extents. */
+/* Everything an answer borrowed goes back with its ticket: the request's
+ * payload, a copied reply or the lent store extents. */
 static void finish_output(Connection *c) {
     release_ticket(c);
-    pure_mapping_release(c->mapping);
-    c->mapping = NULL;
     if (c->out != c->small) free(c->out);
     c->out = NULL;
     c->out_count = c->out_at = 0;
@@ -154,17 +151,16 @@ static void close_connection(Connection *c) {
     --host->active;
 }
 
-/* Answer with a body of `count` extents (`size` bytes in all). The answer
- * takes the mapping reference; one writev sends as much as the socket takes. */
+/* Answer with a body of `count` extents (`size` bytes in all); the ticket
+ * keeps them alive. One writev sends as much as the socket takes. */
 static void respond_extents(Connection *c, int status, const char *reason, const char *error, int64_t revision,
-                            const struct iovec *extents, size_t count, size_t size, PureMapping *mapping) {
+                            const struct iovec *extents, size_t count, size_t size) {
     char tag[48] = "";
     if (revision > 0) snprintf(tag, sizeof(tag), "ETag: \"%" PRId64 "\"\r\n", revision);
     int length = snprintf(c->head, sizeof(c->head),
         "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\n%sContent-Type: application/octet-stream\r\n"
         "Cache-Control: no-store\r\nX-Pure-Error: %s\r\n%s\r\n",
         status, reason, size, c->keep_alive ? "" : "Connection: close\r\n", error, tag);
-    c->mapping = mapping;
     c->out = count < sizeof(c->small) / sizeof(*c->small) ? c->small : malloc((count + 1) * sizeof(*c->out));
     c->phase = WRITING;
     if (!c->out) { c->keep_alive = false; c->out = c->small; count = 0; } /* cannot send it: the close tells */
@@ -177,7 +173,7 @@ static void respond_extents(Connection *c, int status, const char *reason, const
 static void respond(Connection *c, int status, const char *reason, const char *error, int64_t revision,
                     PureSpan body) {
     struct iovec extent = {(void *)body.data, body.size};
-    respond_extents(c, status, reason, error, revision, &extent, body.size ? 1 : 0, body.size, NULL);
+    respond_extents(c, status, reason, error, revision, &extent, body.size ? 1 : 0, body.size);
 }
 
 /* A request the host cannot read further: answer and close. */
@@ -390,6 +386,11 @@ static void release_copy(void *allocation, size_t size) {
     free(allocation);
 }
 
+static void release_loan(void *allocation, size_t size) {
+    (void)size;
+    pure_mapping_release(allocation);
+}
+
 static bool allocate_ingress(void *context, size_t size, PureResource *out) {
     (void)context;
     void *bytes = malloc(size);
@@ -453,8 +454,8 @@ static void apply_effect(Host *host, const PureEffect *effect, Applied *out) {
         if (gather.extents && pure_app_reply(app, gather_extents, &gather) == PURE_OK && gather.held) {
             out->extents = gather.extents;
             out->extent_count = gather.count;
-            out->extent_size = reply.size;
-            out->mapping = mapping;
+            out->resource = (PureResource){.body = {NULL, reply.size}, .allocation = mapping,
+                                           .allocation_size = reply.size, .release = release_loan};
             return;
         }
         free(gather.extents);
@@ -478,20 +479,16 @@ static void finish_burst(Host *host, size_t count) {
         if (!pure_runtime_complete(a->ticket, status, a->input == PURE_INPUT_READ ? &a->resource : NULL,
                                    status == PURE_OK ? a->reply : (PureSpan){0}, a->revision)) abort();
         Connection *c = a->connection;
-        bool waiting = c && c->phase == WAITING && c->ticket.generation == a->ticket.generation;
-        if (waiting && status == PURE_OK && a->mapping) {
-            respond_extents(c, 200, "OK", "none", a->revision, a->extents, a->extent_count, a->extent_size, a->mapping);
-            a->mapping = NULL;
-        }
-        pure_mapping_release(a->mapping);
-        free(a->extents);
-        if (!waiting) continue;
-        if (c->phase == WAITING) {
+        if (c && c->phase == WAITING && c->ticket.generation == a->ticket.generation) {
             PureOutcome result;
             if (!pure_runtime_result(a->ticket, &result)) abort();
-            answer(c, result);
+            /* A lent answer's body is its extents (the runtime charged them). */
+            if (result.status == PURE_OK && a->extents)
+                respond_extents(c, 200, "OK", "none", result.revision, a->extents, a->extent_count, result.body.size);
+            else answer(c, result);
+            drive(c); /* most answers fit the socket buffer at once */
         }
-        drive(c); /* most answers fit the socket buffer at once */
+        free(a->extents);
     }
 }
 
@@ -581,7 +578,6 @@ static void accept_all(Host *host) {
         c->ticket = (PureTicket){0};
         c->out = NULL;
         c->out_count = c->out_at = 0;
-        c->mapping = NULL;
         c->body = NULL;
         c->in_used = 0;
         struct epoll_event event = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.ptr = c};
