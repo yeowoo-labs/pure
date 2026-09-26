@@ -99,10 +99,12 @@ static unsigned char *encode_cell(const PureList *list, unsigned field, PureCell
     return out;
 }
 
-/* Replace [offset, offset + remove) of the draft; nothing to do without one. */
-static PureResult mirror(PureList *list, size_t offset, size_t remove, const unsigned char *bytes, size_t size) {
+/* Replace remove bytes of the draft, within bytes into the item at `at` (or
+ * after the last item), with bytes; nothing to do without a draft. */
+static PureResult mirror(PureList *list, size_t at, size_t within, size_t remove, const unsigned char *bytes,
+                         size_t size) {
     if (!list->draft) return PURE_OK;
-    return pure_draft_splice(list->draft, offset, remove, (PureSpan){bytes, size});
+    return pure_draft_splice(list->draft, item_offset(list, at) + within, remove, (PureSpan){bytes, size});
 }
 
 void pure_list_mirror(PureList *list, PureDraft *draft, size_t header) {
@@ -117,7 +119,7 @@ PURE_COLD PureResult pure_list_write(PureList *list) {
     if (size && !bytes) return PURE_ALLOCATION;
     for (size_t i = 0; i < list->count; ++i)
         for (unsigned f = 0; f < list->fields; ++f) at = encode_cell(list, f, list->items[i][f], at);
-    PureResult result = mirror(list, list->header, 0, bytes, size);
+    PureResult result = mirror(list, 0, 0, 0, bytes, size);
     free(bytes);
     return result;
 }
@@ -183,7 +185,7 @@ PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, Pu
         free_item(list, item);
         return PURE_ALLOCATION;
     }
-    PureResult result = mirror(list, item_offset(list, at), 0, bytes, size);
+    PureResult result = mirror(list, at, 0, 0, bytes, size);
     free(bytes);
     if (result != PURE_OK) {
         if (undo) --undo->count;
@@ -198,7 +200,7 @@ PureResult pure_list_remove(PureList *list, size_t at, PureUndo *undo) {
     if (at >= list->count) return PURE_NOT_FOUND;
     if (!log_change(undo, (Entry){.change = REMOVED, .list = list, .at = at, .item = list->items[at]}))
         return PURE_ALLOCATION;
-    PureResult result = mirror(list, item_offset(list, at), item_bytes(list, list->items[at]), NULL, 0);
+    PureResult result = mirror(list, at, 0, item_bytes(list, list->items[at]), NULL, 0);
     if (result != PURE_OK) { --undo->count; return result; }
     take(list, at);
     return PURE_OK;
@@ -217,9 +219,9 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
         free(copy.text);
         return PURE_ALLOCATION;
     }
-    size_t offset = list->draft ? item_offset(list, at) : 0;
-    for (unsigned f = 0; list->draft && f < field; ++f) offset += cell_bytes(list, f, item[f]);
-    PureResult result = mirror(list, offset, cell_bytes(list, field, item[field]), bytes, size);
+    size_t within = 0;
+    for (unsigned f = 0; f < field; ++f) within += cell_bytes(list, f, item[f]);
+    PureResult result = mirror(list, at, within, cell_bytes(list, field, item[field]), bytes, size);
     free(bytes);
     if (result != PURE_OK) {
         --undo->count;
