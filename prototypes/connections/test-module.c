@@ -1756,6 +1756,113 @@ static void marks(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "state reference"));
 }
 
+/* Folds: a block run once per item of a list, as a column of it, gives a
+ * count, a sum, a maximum or a minimum; an empty maximum has no value. */
+enum { FOLD = PURE_OP_FOLD };
+#define FOLDING(kind, list, length) ((uint32_t)(kind) | (uint32_t)(list) << 8 | (uint32_t)(length) << 16)
+static const RF fold_fields[] = {{"title", 1, 0}, {"done", 0, 0}, {"points", 0, 0}};
+static const R fold_records[] = {{"task", fold_fields, 3}};
+static const T fold_states[] = {{"tasks", 3, 0}, {"at", 4, 0}};
+static const char *const fold_constants[] = {""};
+static const I fold_inputs[] = {{"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("toggle", "KeyT")};
+enum { F_TITLE = 0, F_DONE = 1u << 16, F_POINTS = 2u << 16 };
+static const O fold_code[] = {
+    {TI, 0, 0}, {C, 0, 0}, {TI, 0, 0}, {CHR, 0, 0}, {LA, 0, 0}, {XE, 0, 0}, {XS, 1, 0},     /* 0 typed */
+    {XL, 1, 0}, {XL, 1, 0}, {IG, F_DONE, 0}, {NOT, 0, 0}, {IS, F_DONE, 0},                 /* 7 toggle */
+    {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 3), 0}, {ROW, 0, 0}, {IG, F_DONE, 0}, {NOT, 0, 0},   /* 12 open */
+    {FOLD, FOLDING(PURE_FOLD_SUM, 0, 3), 0}, {ROW, 0, 0}, {IG, F_POINTS, 0}, {C, 0, 1},     /* 16 points */
+    {FOLD, FOLDING(PURE_FOLD_MAX, 0, 4), 0}, {ROW, 0, 0}, {IG, F_TITLE, 0}, {CHR, 0, 0},    /* 20 longest */
+    {C, 0, 1},
+    {FOLD, FOLDING(PURE_FOLD_SUM, 0, 4), 0}, {ROW, 0, 0}, {IG, F_POINTS, 0}, {ROW, 0, 0},   /* 25 done_points */
+    {IG, F_DONE, 0},
+    {FOLD, FOLDING(PURE_FOLD_MIN, 0, 5), 0}, {ROW, 0, 0}, {IG, F_POINTS, 0}, {ROW, 0, 0},   /* 30 fewest_open */
+    {IG, F_DONE, 0}, {NOT, 0, 0},
+    {C, 0, 10}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}, {ADD, 0, 0},         /* 36 count_plus */
+};
+static const H fold_handlers[] = {{1, 0, 7}, {3, 7, 5}};
+static const V fold_views[] = {{"open", 12, 4}, {"points", 16, 4}, {"longest", 20, 5}, {"done_points", 25, 5},
+                               {"fewest_open", 30, 6}, {"count_plus", 36, 4}};
+static Spec fold_spec(const O *code, size_t count, const V *views, size_t nviews, const H *handlers, size_t nhandlers) {
+    return (Spec){NULL, 0, fold_inputs, LEN(fold_inputs), views, nviews, handlers, nhandlers, code, count, NULL, 0,
+                  fold_states, 2, fold_constants, 1, NULL, 0, fold_records, 1, NULL, 0};
+}
+
+static void folds(void) {
+    CHECK(load(fold_spec(fold_code, LEN(fold_code), fold_views, LEN(fold_views), fold_handlers, 2), &module_a) == PURE_OK);
+    PureApp app;
+    double value;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    CHECK(number_view(&app, 0) == 0 && number_view(&app, 1) == 0 && !pure_app_view(&app, 2, &value));
+    CHECK(number_view(&app, 3) == 0 && !pure_app_view(&app, 4, &value) && number_view(&app, 5) == 10);
+    const char *const words[] = {"a", "bbb", "\xea\xb0\x80\xea\xb0\x80"}; /* one, three and two characters */
+    for (size_t i = 0; i < 3; ++i)
+        CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)words[i], strlen(words[i])}) == PURE_OK);
+    CHECK(number_view(&app, 0) == 3 && number_view(&app, 1) == 6 && number_view(&app, 2) == 3);
+    CHECK(number_view(&app, 3) == 0 && number_view(&app, 4) == 1 && number_view(&app, 5) == 13);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);   /* the last task is done */
+    CHECK(number_view(&app, 0) == 2 && number_view(&app, 3) == 2 && number_view(&app, 4) == 1);
+    CHECK(pure_app_point(&app, 1, 0) == PURE_OK && pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(pure_app_point(&app, 1, 1) == PURE_OK && pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(number_view(&app, 0) == 0 && number_view(&app, 3) == 6 && !pure_app_view(&app, 4, &value)); /* none open */
+    pure_app_stop(&app);
+
+    /* What a fold may not be. */
+    static const O nested[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 2), 0}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}};
+    static const O into[] = {{C, 0, 1}, {JZ, 3, 0}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}};
+    static const O effect[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 3), 0}, {ROW, 0, 0}, {XS, 1, 0}, {C, 0, 1},
+                               {PURE_OP_REQUIRE, 0, 0}};
+    static const O short_sum[] = {{FOLD, FOLDING(PURE_FOLD_SUM, 0, 1), 0}, {C, 0, 1}};
+    static const O outside[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 5), 0}, {C, 0, 1}};
+    static const O not_list[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 1, 1), 0}, {C, 0, 1}};
+    static const struct { const O *code; size_t count, length; bool handler; const char *reason; } refused[] = {
+        {nested, LEN(nested), 3, false, "fold inside a fold"},
+        {into, LEN(into), 4, false, "branch into a fold"},
+        {effect, LEN(effect), 5, true, "fold with an effect"},
+        {short_sum, LEN(short_sum), 2, false, "fold block must leave its numbers"},
+        {outside, LEN(outside), 2, false, "fold block outside its block"},
+        {not_list, LEN(not_list), 2, false, "no such state"},
+    };
+    for (size_t i = 0; i < LEN(refused); ++i) {
+        V view = {"v", 0, (uint32_t)refused[i].length};
+        H handler = {3, 0, (uint32_t)refused[i].length};
+        Spec spec = refused[i].handler ? fold_spec(refused[i].code, refused[i].count, NULL, 0, &handler, 1)
+                                       : fold_spec(refused[i].code, refused[i].count, &view, 1, NULL, 0);
+        if (load(spec, &module_b) != PURE_INVALID || !strstr(error, refused[i].reason)) {
+            fprintf(stderr, "fold case %zu: expected '%s', got '%s'\n", i, refused[i].reason, error);
+            abort();
+        }
+    }
+}
+
+/* Damaged fold modules: whatever loads runs safely. */
+static void fold_mutations(void) {
+    static unsigned char valid[65536], bytes[65536];
+    size_t size = build(valid, fold_spec(fold_code, LEN(fold_code), fold_views, LEN(fold_views), fold_handlers, 2));
+    uint32_t state = 0x27d4eb2fu;
+    unsigned accepted = 0;
+    for (unsigned round = 0; round < 20000; ++round) {
+        memcpy(bytes, valid, size);
+        for (unsigned f = 0, flips = 1 + next_random(&state) % 3; f < flips; ++f)
+            bytes[next_random(&state) % size] ^= (unsigned char)(1u << (next_random(&state) % 8));
+        if (pure_module_load(bytes, size, &module_b, error, sizeof(error)) != PURE_OK) continue;
+        ++accepted;
+        PureApp app;
+        if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
+        for (unsigned e = 0; e < 16; ++e) {
+            uint32_t input = next_random(&state) % 2;
+            if (module_b.input[input].kind == PURE_KIND_TEXT) pure_app_text(&app, input, (PureSpan){(const unsigned char *)"ab", 2});
+            else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
+            for (uint32_t v = 0; v < module_b.views; ++v) {
+                double value;
+                if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_view_text(&app, v, ignore_span, NULL);
+                else pure_app_view(&app, v, &value);
+            }
+        }
+        pure_app_stop(&app);
+    }
+    printf("{\"fold_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
+}
+
 /* A host points at an item: the index a view shows as its position moves
  * there, as an event with no handler, saved like a key event; deferred, it
  * joins the burst and a failed save undoes it with the rest. */
@@ -1796,6 +1903,8 @@ int main(void) {
     marks();
     text_mutations();
     lists();
+    folds();
+    fold_mutations();
     pointing();
     list_mutations();
     tables();
@@ -1803,6 +1912,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds\"}");
     return 0;
 }

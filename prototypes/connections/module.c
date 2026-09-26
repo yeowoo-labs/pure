@@ -20,7 +20,10 @@ enum { READ = IN_VIEW | IN_HANDLER };
  * collection, a constant, a unit, the column's row, a branch target or a
  * stack depth. */
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_INDEX + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
-       A_ROW, A_TARGET, A_DEPTH };
+       A_ROW, A_TARGET, A_DEPTH, A_FOLD };
+/* A fold's block is verified as a column that leaves one number (count) or
+ * two (a value and whether to include it): these stand for a view type. */
+enum { FOLD_ONE = 100, FOLD_TWO };
 /* The text or list an opcode works on: its cursor and index operands belong
  * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_OPERAND:
  * it pushes a position in its operand's text or list. O_ARG: the argument.
@@ -88,6 +91,7 @@ static const struct { unsigned char pops, in[3], out, where, arg, of; } signatur
     /* Stack copies: their types come from the values they move. */
     [PURE_OP_PICK] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
     [PURE_OP_SLIDE] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
+    [PURE_OP_FOLD] = {0, {0}, T_NUM, READ, A_FOLD, O_ANY},
 };
 #undef NUMS
 #undef STATE
@@ -168,6 +172,7 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_CONSTANT: return arg < m->constants;
     case A_UNIT: return arg <= PURE_UNIT_LINE;
     case A_ROW: return (int)arg == row;
+    case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_MIN && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
     case A_NONE: case A_TARGET: case A_DEPTH: return true;
     default: return state_of(m, arg, (uint8_t)(kind - A_STATE));
     }
@@ -188,8 +193,10 @@ static bool same_stack(const Join *join, int height, const unsigned char *types,
  * join, as in a conditional expression; at most 8 joins with a non-empty
  * stack are ahead at once. Handlers end empty, views with one value of their
  * type. A column (row is its list) may read the row it is evaluated for.
- * Returns why the block is refused, with at moved to the instruction when
- * one is at fault, or NULL. */
+ * A fold's block is verified as a column of its list (reads only, no fold
+ * in it); the block around treats it as one instruction and may not branch
+ * into it. Returns why the block is refused, with at moved to the
+ * instruction when one is at fault, or NULL. */
 PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, int view, int row, uint32_t event,
                                 uint32_t *at) {
 #define REFUSE(why) do { *at = pc; return why; } while (0)
@@ -230,6 +237,7 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
         unsigned allowed = signature[op->op].where, kind = signature[op->op].arg, of = signature[op->op].of;
         if (!(allowed & where)) {
             if (allowed & IN_ROW) REFUSE("row outside a column");
+            if (view >= FOLD_ONE) REFUSE("fold with an effect");
             if (view >= 0) REFUSE("view with an effect");
             if (allowed & IN_KEYED) REFUSE("document operation outside a keyed message handler");
             if (allowed & IN_TEXT) REFUSE("text input outside a text handler");
@@ -249,6 +257,20 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
             owners[to] = pick ? owners[from] : owners[height - 1];
             if (!pick) height = from + 1;
             continue;
+        }
+        uint32_t skip = 0;
+        if (kind == A_FOLD) {
+            uint32_t inner = pc;
+            skip = arg >> 16;
+            if (view >= FOLD_ONE) REFUSE("fold inside a fold");
+            if (skip > block.length - i - 1) REFUSE("fold block outside its block");
+            const char *why = verify_block(m, (PureBlock){pc + 1, skip}, (arg & 0xFF) == PURE_FOLD_COUNT ? FOLD_ONE : FOLD_TWO,
+                                           (int)(arg >> 8 & 0xFF), 0, &inner);
+            if (why) { *at = inner; return why; }
+            for (uint32_t k = i + 1; k <= i + skip; ++k) {
+                if (target[k]) REFUSE("branch into a fold");
+                for (unsigned j = 0; j < open; ++j) if (joins[j].target == block.start + k) REFUSE("branch into a fold");
+            }
         }
         /* Operand types, bottom to top; record operations take their fields. */
         unsigned char need[PURE_RECORD_FIELDS + 2];
@@ -297,8 +319,13 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
             }
             if (op->op == PURE_OP_JMP) reachable = false;
         }
+        i += skip;
     }
     if (!reachable) return "block end is unreachable";
+    if (view >= FOLD_ONE) {
+        int want = view - FOLD_ONE + 1;
+        return height != want || types[0] != T_NUM || types[want - 1] != T_NUM ? "fold block must leave its numbers" : NULL;
+    }
     unsigned char result = view == PURE_VIEW_TEXT ? T_TEXT : T_NUM;
     if (view >= 0 ? height != 1 || types[0] != result : height != 0)
         return view >= 0 ? "view must leave one value of its type" : "handler must leave no value";
@@ -909,6 +936,33 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             values[arg] = position;
             continue;
         }
+        case PURE_OP_FOLD: {
+            /* The block that follows runs once per item, as a column of the list. */
+            unsigned how = arg & 0xFF;
+            PureBlock inner = {pc, arg >> 16};
+            PureList *list = app->lists[arg >> 8 & 0xFF];
+            pc += inner.length;
+            double total = 0;
+            bool any = false;
+            Event per = *ev;
+            for (size_t row = 0, items = pure_list_count(list); row < items; ++row) {
+                Slot out[2];
+                size_t mark = arena->used;
+                per.row = row;
+                status = run(m, values, inner, &per, out);
+                arena->used = mark;
+                if (status != PURE_OK) return status;
+                double value = out[0].num;
+                if (how == PURE_FOLD_COUNT ? value == 0 : out[1].num == 0) continue;
+                total = how == PURE_FOLD_COUNT ? total + 1 : how == PURE_FOLD_SUM ? total + value :
+                        !any ? value : how == PURE_FOLD_MAX ? maximum(total, value) : minimum(total, value);
+                any = true;
+            }
+            if (!any && how >= PURE_FOLD_MAX) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
+            if (!isfinite(total)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
+            stack[sp++].num = total;
+            continue;
+        }
         case PURE_OP_PICK: stack[sp] = stack[sp - 1 - arg]; ++sp; continue;
         case PURE_OP_SLIDE: stack[sp - 1 - arg] = stack[sp - 1]; sp -= arg; continue;
         default: break;
@@ -936,7 +990,7 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         if (!isfinite(value)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
         stack[sp - 1].num = value;
     }
-    if (result) *result = stack[0];
+    if (result) memcpy(result, stack, sp * sizeof(*stack)); /* a view's value, or a fold block's numbers */
     return PURE_OK;
 refused:
     kind = status == PURE_LIMIT ? PURE_FAULT_LIMIT : status == PURE_NOT_FOUND ? PURE_FAULT_NOT_FOUND : PURE_FAULT_NONE;

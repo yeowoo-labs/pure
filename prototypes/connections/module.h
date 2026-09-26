@@ -37,9 +37,14 @@ typedef enum {
     PURE_OP_LIST_COUNT, PURE_OP_LIST_APPEND, PURE_OP_LIST_INSERT, PURE_OP_LIST_REMOVE,
     PURE_OP_ITEM_GET, PURE_OP_ITEM_SET, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE,
     PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_ROW,
-    PURE_OP_PICK, PURE_OP_SLIDE,
+    PURE_OP_PICK, PURE_OP_SLIDE, PURE_OP_FOLD,
     PURE_OP_COUNT
 } PureOpcode;
+/* FOLD's argument: the kind (bits 0-7), the list state (8-15) and the length
+ * of the block that follows (16-31), run once per item as a column of that
+ * list. count counts the items whose block leaves a non-zero number; sum,
+ * max and min take a value and an include flag from their block. */
+typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN } PureFold;
 
 typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3 } PureInputKind;
 typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2 } PureFieldType;
