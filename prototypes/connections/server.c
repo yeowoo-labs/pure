@@ -2,6 +2,9 @@
 #include "store.h"
 #include "program.h"
 #include "store-port.h"
+#ifdef PURE_MODULE_SERVER
+#include "module-store.h"
+#endif
 #ifdef PURE_EMBEDDED_PROGRAM
 #include "embedded-plan.h"
 #endif
@@ -26,6 +29,14 @@
 
 #if defined(PURE_HTTP_ASYNC) && !defined(PURE_ASYNC_EFFECTS)
 #error PURE_HTTP_ASYNC requires PURE_ASYNC_EFFECTS
+#endif
+/* A module server runs an aup module instead of a document program: GET is
+ * its show message, PUT its edit message. Effects are taken on the owner
+ * thread, applied with deferred saving, saved once per burst and only then
+ * completed, so concurrent requests share one commit. */
+#if defined(PURE_MODULE_SERVER) && (!defined(PURE_ASYNC_EFFECTS) || defined(PURE_HTTP_ASYNC) || \
+                                     defined(PURE_EMBEDDED_PROGRAM))
+#error PURE_MODULE_SERVER takes effects on the owner thread and has no program
 #endif
 
 enum { SLOTS = 8, HEADER_LIMIT = 4096, CHUNK = 65536 };
@@ -58,7 +69,12 @@ typedef struct {
 } Connection;
 struct Server {
     const char *path;
-#ifndef PURE_EMBEDDED_PROGRAM
+#ifdef PURE_MODULE_SERVER
+    PureModule module;
+    PureApp app;
+    uint32_t show, edit;
+    uint64_t saves, burst_events; /* saves is the number of bursts */
+#elif !defined(PURE_EMBEDDED_PROGRAM)
     PureProgram program;
 #endif
     PureRuntime runtime;
@@ -252,8 +268,136 @@ static void finish_effects(Server *server) {
 }
 #endif
 
+#ifdef PURE_MODULE_SERVER
+static void release_copy(void *allocation, size_t size) {
+    (void)size;
+    free(allocation);
+}
+
+static bool allocate_ingress(void *context, size_t size, PureResource *out) {
+    (void)context;
+    void *bytes = malloc(size);
+    if (!bytes) return false;
+    *out = (PureResource){.body = {bytes, size}, .allocation = bytes, .allocation_size = size, .release = release_copy};
+    return true;
+}
+
+typedef struct { unsigned char *bytes; size_t size; const unsigned char *first; size_t spans; } Reply;
+
+static bool measure_reply(void *context, PureSpan span) {
+    Reply *r = context;
+    if (!r->spans++) r->first = span.data;
+    r->size += span.size;
+    return true;
+}
+
+static bool copy_reply(void *context, PureSpan span) {
+    Reply *r = context;
+    if (span.size) memcpy(r->bytes + r->size, span.data, span.size);
+    r->size += span.size;
+    return true;
+}
+
+/* One burst of requests: applied in order, saved with one commit, then
+ * completed. If the save fails every request of the burst fails, reads too:
+ * they saw changes that were never stored. */
+typedef struct {
+    PureTicket ticket;
+    PureInput input;
+    PureResult status;
+    int64_t revision;
+    PureResource resource;
+    PureSpan reply;
+    char key[65];
+} Applied;
+
+static void apply_effect(Server *server, const PureEffect *effect, Applied *out) {
+    PureApp *app = &server->app;
+    *out = (Applied){.ticket = effect->ticket, .input = effect->input};
+    memcpy(out->key, effect->key, strlen(effect->key) + 1);
+    bool read = effect->input == PURE_INPUT_READ;
+    out->status = pure_app_message(app, read ? server->show : server->edit, effect->key,
+                                   read ? -1 : effect->expected, read ? (PureSpan){0} : effect->value);
+    out->revision = app->revision;
+    if (out->status != PURE_OK) return;
+    ++server->burst_events;
+    Reply reply = {0};
+    pure_app_reply(app, measure_reply, &reply);
+    if (!read) {
+        /* The module was checked at start: an edit replies part of its request. */
+        out->reply = (PureSpan){reply.size ? reply.first : NULL, reply.size};
+        return;
+    }
+    if (reply.size > effect->available) { out->status = PURE_BUDGET; return; }
+    if (!reply.size) return;
+    unsigned char *copy = malloc(reply.size);
+    if (!copy) { out->status = PURE_ALLOCATION; return; }
+    reply = (Reply){.bytes = copy};
+    pure_app_reply(app, copy_reply, &reply);
+    out->resource = (PureResource){.body = {copy, reply.size}, .allocation = copy,
+                                   .allocation_size = reply.size, .release = release_copy};
+}
+
+static void finish_burst(Server *server, Applied *applied, size_t count) {
+    if (!count) return;
+    PureResult saved = pure_app_save(&server->app);
+    ++server->saves;
+    for (size_t i = 0; i < count; ++i) {
+        Applied *a = &applied[i];
+        PureResult status = a->status == PURE_OK ? saved : a->status;
+        if (!pure_runtime_complete(a->ticket, status, a->input == PURE_INPUT_READ ? &a->resource : NULL,
+                                   status == PURE_OK ? a->reply : (PureSpan){0}, a->revision)) abort();
+        for (size_t j = 0; j < SLOTS; ++j) {
+            Connection *c = &server->connections[j];
+            if (c->fd < 0 || c->phase != WAITING_EFFECT ||
+                c->ticket.slot != a->ticket.slot || c->ticket.generation != a->ticket.generation) continue;
+            PureOutcome result;
+            if (!pure_runtime_result(a->ticket, &result)) abort();
+            c->body = NULL;
+            answer(c, result);
+            break;
+        }
+    }
+}
+
+/* Every request that became ready since the last burst; a key seen again
+ * ends the burst first, so a document's revision moves once per save. */
+static void serve_bursts(Server *server) {
+    Applied applied[SLOTS];
+    size_t count = 0;
+    PureEffect effect;
+    while (pure_runtime_take(&server->runtime, &effect) == PURE_TAKE_EFFECT) {
+        bool repeated = false;
+        for (size_t i = 0; i < count && !repeated; ++i) repeated = !strcmp(applied[i].key, effect.key);
+        if (repeated) {
+            finish_burst(server, applied, count);
+            count = 0;
+        }
+        apply_effect(server, &effect, &applied[count++]);
+    }
+    finish_burst(server, applied, count);
+}
+
+/* PUT replies must be borrowed from the request, so an edit handler may
+ * reply only a field of its message. */
+static bool edit_replies_borrow(const PureModule *m, uint32_t edit) {
+    for (uint32_t h = 0; h < m->handlers; ++h) {
+        if (m->handler[h].event != 1 + 2 * edit) continue;
+        const PureBlock *code = &m->handler[h].code;
+        for (uint32_t pc = code->start; pc < code->start + code->length; ++pc)
+            if (m->code[pc].op == PURE_OP_REPLY && (pc == code->start || m->code[pc - 1].op != PURE_OP_FIELD))
+                return false;
+    }
+    return true;
+}
+#endif
+
 static void run_request(Connection *c) {
     if (c->put && !pure_runtime_ready(c->ticket)) abort();
+#ifdef PURE_MODULE_SERVER
+    c->phase = WAITING_EFFECT; /* the burst after this poll round serves it */
+    return;
+#endif
 #ifdef PURE_HTTP_ASYNC
     Server *server = c->server;
     PureEffect effect;
@@ -411,7 +555,10 @@ static bool close_on_exec(int fd) {
 int main(int argc, char **argv) {
     Server server = {.budget = 4u * 1024u * 1024u, .timeout_ms = 10000};
     unsigned port = 8767;
-#ifndef PURE_EMBEDDED_PROGRAM
+#ifdef PURE_MODULE_SERVER
+    const char *module_path = NULL;
+    bool explain = false;
+#elif !defined(PURE_EMBEDDED_PROGRAM)
     const char *program_path = NULL;
     bool explain = argc == 3 && !strcmp(argv[1], "--check-program");
     char program_error[160];
@@ -423,7 +570,9 @@ int main(int argc, char **argv) {
         if (i + 1 == argc) goto usage;
         uint64_t value;
         if (!strcmp(argv[i], "--store")) server.path = argv[i + 1];
-#ifndef PURE_EMBEDDED_PROGRAM
+#ifdef PURE_MODULE_SERVER
+        else if (!strcmp(argv[i], "--module")) module_path = argv[i + 1];
+#elif !defined(PURE_EMBEDDED_PROGRAM)
         else if (!strcmp(argv[i], "--program")) program_path = argv[i + 1];
 #endif
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
@@ -433,7 +582,30 @@ int main(int argc, char **argv) {
         else goto usage;
     }
     if (!server.path && !explain) goto usage;
-#ifndef PURE_EMBEDDED_PROGRAM
+#ifdef PURE_MODULE_SERVER
+    if (!module_path) goto usage;
+    {
+        static unsigned char bytes[1 << 17];
+        char error[128];
+        FILE *file = fopen(module_path, "rb");
+        size_t size = file ? fread(bytes, 1, sizeof(bytes), file) : 0;
+        bool read_ok = file && !ferror(file) && size < sizeof(bytes);
+        if (file) fclose(file);
+        if (!read_ok || pure_module_load(bytes, size, &server.module, error, sizeof(error)) != PURE_OK) {
+            fprintf(stderr, "Module: %s\n", read_ok ? error : "cannot read"); return 2;
+        }
+        int show = pure_module_input(&server.module, "show"), edit = pure_module_input(&server.module, "edit");
+        if (show < 0 || edit < 0 || server.module.input[show].kind != PURE_KIND_MESSAGE || !server.module.input[show].keyed ||
+            server.module.input[edit].kind != PURE_KIND_MESSAGE || !server.module.input[edit].keyed) {
+            fputs("Module: needs keyed messages named show and edit\n", stderr); return 2;
+        }
+        if (!edit_replies_borrow(&server.module, (uint32_t)edit)) {
+            fputs("Module: edit may reply only a field of its message\n", stderr); return 2;
+        }
+        server.show = (uint32_t)show;
+        server.edit = (uint32_t)edit;
+    }
+#elif !defined(PURE_EMBEDDED_PROGRAM)
     if (!program_path) goto usage;
     if (!pure_program_load(program_path, &server.program, program_error, sizeof(program_error))) {
         fprintf(stderr, "Program: %s\n", program_error); return 2;
@@ -464,6 +636,13 @@ int main(int argc, char **argv) {
         return 0;
     }
 #endif
+#ifdef PURE_MODULE_SERVER
+    const void *program = &server.app;
+    if (pure_store_init(server.path) != PURE_OK) { fputs("Cannot initialize byte store directory\n", stderr); return 1; }
+    if (pure_app_start(&server.app, &server.module, pure_tree_data(server.path)) != PURE_OK ||
+        !pure_app_defer(&server.app, true)) { fputs("Cannot start the module on the store\n", stderr); return 1; }
+    PureHost host = {.allocate = allocate_ingress};
+#else
     const PureProgram *program =
 #ifdef PURE_EMBEDDED_PROGRAM
         &pure_embedded_program;
@@ -472,6 +651,7 @@ int main(int argc, char **argv) {
 #endif
     if (pure_store_init(server.path) != PURE_OK) { fputs("Cannot initialize byte store directory\n", stderr); return 1; }
     PureHost host = pure_store_host(server.path);
+#endif
 #ifdef PURE_HTTP_ASYNC
     server.effect_host = host;
     host.read = NULL;
@@ -479,7 +659,7 @@ int main(int argc, char **argv) {
 #endif
     if (!pure_runtime_init(&server.runtime, server.work, SLOTS, program,
                            host, server.budget)) return 1;
-#ifdef PURE_HTTP_ASYNC
+#if defined(PURE_HTTP_ASYNC) || defined(PURE_MODULE_SERVER)
     if (!pure_runtime_enable_async(&server.runtime)) abort();
 #endif
     signal(SIGPIPE, SIG_IGN);
@@ -589,8 +769,19 @@ int main(int argc, char **argv) {
                 if (c->phase == WRITING) write_connection(c); else read_connection(c);
             }
         }
+#ifdef PURE_MODULE_SERVER
+        serve_bursts(&server);
+#endif
+        /* A module server takes every waiting connection at once, so their
+         * requests can share the next burst. */
+#ifdef PURE_MODULE_SERVER
+        for (bool more = true; more && !stopping && (polls[0].revents & POLLIN) && server.active < SLOTS;) {
+#else
         if (!stopping && (polls[0].revents & POLLIN)) {
+            bool more;
+#endif
             int fd = accept(listener, NULL, NULL);
+            more = fd >= 0;
             if (fd < 0) continue;
             if (!nonblocking(fd)) { close(fd); continue; }
             if (server.send_buffer) setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &server.send_buffer, sizeof(server.send_buffer));
@@ -601,6 +792,7 @@ int main(int argc, char **argv) {
                 if (server.active > server.peak_active) server.peak_active = server.active;
                 break;
             }
+            (void)more;
         }
     }
     close(listener);
@@ -611,6 +803,10 @@ int main(int argc, char **argv) {
 #endif
     pure_runtime_stop(&server.runtime);
     for (size_t i = 0; i < SLOTS; ++i) close_connection(&server.connections[i]);
+#ifdef PURE_MODULE_SERVER
+    fprintf(stderr, "{\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 "}\n", server.saves, server.burst_events);
+    pure_app_stop(&server.app);
+#endif
 #ifdef PURE_HTTP_ASYNC
     pthread_mutex_lock(&server.job_mutex);
     server.worker_stop = true;
@@ -635,7 +831,10 @@ int main(int argc, char **argv) {
         server.expired, server.runtime.releases, server.prefix_copy_bytes, server.runtime.borrowed_output_bytes, sizeof(server));
     return 0;
 usage:
-#ifdef PURE_EMBEDDED_PROGRAM
+#ifdef PURE_MODULE_SERVER
+    fputs("pure-connections-module --module FILE.pmod --store DIRECTORY [--port 8767] [--budget BYTES] "
+          "[--timeout-ms 10000] [--send-buffer BYTES]\n", stderr);
+#elif defined(PURE_EMBEDDED_PROGRAM)
     fputs("pure-connections-fixed --store DIRECTORY [--port 8767] [--budget BYTES] [--timeout-ms 10000] [--send-buffer BYTES]\n", stderr);
 #else
     fputs("pure-connections --program FILE --store DIRECTORY [--port 8767] [--budget BYTES] [--timeout-ms 10000] [--send-buffer BYTES]\n"

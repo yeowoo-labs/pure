@@ -40,6 +40,10 @@ $(BUILD)/pure-connections-async: server.c $(HOST) flow.c program.c $(CORE) $(HEA
 $(BUILD)/pure-connections-async-gated: server.c $(HOST) flow.c program.c $(CORE) test-async-server-gate.c $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_ASYNC_EFFECTS -DPURE_HTTP_ASYNC -DPURE_STORE_TEST server.c $(HOST) flow.c program.c $(CORE) test-async-server-gate.c $(LDFLAGS) -pthread $(LDLIBS) -o $@
 
+# The same HTTP host running an aup module (show and edit) with group commits.
+$(BUILD)/pure-connections-module: server.c flow.c module-store.c $(MODULE) $(CORE) module-store.h $(MODULE_HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_ASYNC_EFFECTS -DPURE_MODULE_SERVER server.c flow.c module-store.c $(MODULE) $(CORE) $(LDFLAGS) -lm $(LDLIBS) -o $@
+
 $(BUILD)/pure-connections-fixed: server.c $(HOST) flow.c $(CORE) $(HEADERS) $(BUILD)/embedded-plan.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_EMBEDDED_PROGRAM -I$(BUILD) server.c $(HOST) flow.c $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
 
@@ -130,7 +134,7 @@ $(BUILD)/pure-run: pure-run.c module-store.c $(MODULE) module-store.h $(MODULE_H
 $(BUILD)/pure-edit-module: edit-module.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) edit-module.c module-store.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
 
-check-module: $(BUILD)/test-module $(BUILD)/pure-run $(BUILD)/pure-edit-module
+check-module: $(BUILD)/test-module $(BUILD)/pure-run $(BUILD)/pure-edit-module $(BUILD)/pure-connections-module
 	$(BUILD)/test-module
 
 $(BUILD)/test-tree-store: test-tree-store.c store-tree.c $(HEADERS) | $(BUILD)
