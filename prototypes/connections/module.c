@@ -15,78 +15,82 @@ enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_AR
 /* Where an opcode may appear. */
 enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32 };
 enum { READ = IN_VIEW | IN_HANDLER };
+/* What an argument names: nothing (it is 0), a state of one type (A_STATE +
+ * the type), a list and one of its record's fields, a message field, the
+ * collection, a constant, a unit, the column's row, a branch target or a
+ * stack depth. */
+enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_INDEX + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
+       A_ROW, A_TARGET, A_DEPTH };
+/* The text or list an opcode works on: its cursor and index operands belong
+ * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_OPERAND:
+ * it pushes a position in its operand's text or list. O_ARG: the argument.
+ * O_REF: the text or list of the argument's cursor or index state. O_LIST:
+ * the list of an item argument. */
+enum { O_ANY, O_OPERAND, O_ARG, O_REF, O_LIST };
 static const unsigned char magic[8] = {'P','U','R','E','M','O','D','5'};
 
-/* Operand types popped (bottom to top), the type pushed, and where allowed. */
-static const struct { unsigned char pops, in[3], out, where; } signature[PURE_OP_COUNT] = {
-    [PURE_OP_CONST] = {0, {0}, T_NUM, READ},
-    [PURE_OP_LOAD] = {0, {0}, T_NUM, READ},
-    [PURE_OP_DT] = {0, {0}, T_NUM, IN_HANDLER},
-    [PURE_OP_ADD] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_SUB] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_MUL] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_DIV] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_NEG] = {1, {T_NUM}, T_NUM, READ},
-    [PURE_OP_LT] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_LE] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_GT] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_GE] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_EQ] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_NE] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_AND] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_OR] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_NOT] = {1, {T_NUM}, T_NUM, READ},
-    [PURE_OP_MIN] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_MAX] = {2, {T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_CLAMP] = {3, {T_NUM, T_NUM, T_NUM}, T_NUM, READ},
-    [PURE_OP_STORE] = {1, {T_NUM}, 0, IN_HANDLER},
-    [PURE_OP_JZ] = {1, {T_NUM}, 0, READ},
-    [PURE_OP_JMP] = {0, {0}, 0, READ},
-    [PURE_OP_FIELD] = {0, {0}, T_FIELD, IN_MESSAGE},
-    [PURE_OP_DOC] = {0, {0}, T_BYTES, IN_KEYED},
-    [PURE_OP_DOC_SIZE] = {0, {0}, T_NUM, IN_KEYED},
-    [PURE_OP_LEN] = {1, {T_BYTES}, T_NUM, IN_HANDLER},
-    [PURE_OP_REPLACE] = {3, {T_NUM, T_NUM, T_BYTES}, 0, IN_KEYED},
-    [PURE_OP_REPLY] = {1, {T_BYTES}, 0, IN_MESSAGE},
-    [PURE_OP_REQUIRE] = {1, {T_NUM}, 0, IN_HANDLER},
-    [PURE_OP_TEXT_CONST] = {0, {0}, T_TEXT, READ},
-    [PURE_OP_TEXT_LOAD] = {0, {0}, T_TEXT, READ},
-    [PURE_OP_TEXT_INPUT] = {0, {0}, T_TEXT, IN_TEXT},
-    [PURE_OP_NUM_TEXT] = {1, {T_NUM}, T_TEXT, READ},
-    [PURE_OP_CONCAT] = {2, {T_TEXT, T_TEXT}, T_TEXT, READ},
-    [PURE_OP_CHARS] = {1, {T_TEXT}, T_NUM, READ},
-    [PURE_OP_LINES] = {1, {T_TEXT}, T_NUM, READ},
-    [PURE_OP_TEXT_BYTES] = {1, {T_TEXT}, T_NUM, READ},
-    [PURE_OP_CUR_LOAD] = {0, {0}, T_CURSOR, READ},
-    [PURE_OP_CUR_START] = {0, {0}, T_CURSOR, READ},
-    [PURE_OP_CUR_END] = {0, {0}, T_CURSOR, READ},
-    [PURE_OP_CUR_MOVE] = {2, {T_CURSOR, T_NUM}, T_CURSOR, READ},
-    [PURE_OP_CUR_STORE] = {1, {T_CURSOR}, 0, IN_HANDLER},
-    [PURE_OP_TEXT_INSERT] = {2, {T_CURSOR, T_TEXT}, 0, IN_HANDLER},
-    [PURE_OP_TEXT_REMOVE] = {2, {T_CURSOR, T_CURSOR}, 0, IN_HANDLER},
-    [PURE_OP_TEXT_LINE] = {1, {T_CURSOR}, T_TEXT, READ},
-    [PURE_OP_TEXT_SET] = {1, {T_TEXT}, 0, IN_HANDLER},
-    [PURE_OP_TEXT_FROM] = {1, {T_BYTES}, T_TEXT, READ},
-    [PURE_OP_BYTES_FROM] = {1, {T_TEXT}, T_BYTES, READ},
-    [PURE_OP_CUR_COUNT] = {1, {T_CURSOR}, T_NUM, READ},
-    /* Record fields pop as many values as the list's record has fields. */
-    [PURE_OP_LIST_COUNT] = {0, {0}, T_NUM, READ},
-    [PURE_OP_LIST_APPEND] = {0, {0}, 0, IN_HANDLER},
-    [PURE_OP_LIST_INSERT] = {1, {T_INDEX}, 0, IN_HANDLER},
-    [PURE_OP_LIST_REMOVE] = {1, {T_INDEX}, 0, IN_HANDLER},
-    [PURE_OP_ITEM_GET] = {1, {T_INDEX}, T_ITEM, READ},
-    [PURE_OP_ITEM_SET] = {1, {T_INDEX}, 0, IN_HANDLER},
-    [PURE_OP_INDEX_LOAD] = {0, {0}, T_INDEX, READ},
-    [PURE_OP_INDEX_STORE] = {1, {T_INDEX}, 0, IN_HANDLER},
-    [PURE_OP_INDEX_MOVE] = {2, {T_INDEX, T_NUM}, T_INDEX, READ},
-    [PURE_OP_INDEX_FIRST] = {0, {0}, T_INDEX, READ},
-    [PURE_OP_INDEX_LAST] = {0, {0}, T_INDEX, READ},
-    [PURE_OP_INDEX_NUM] = {1, {T_INDEX}, T_NUM, READ},
-    [PURE_OP_ROW] = {0, {0}, T_INDEX, IN_ROW},
+/* Operand types popped (bottom to top), the type pushed, where allowed, what
+ * the argument names and the text or list worked on. */
+#define NUMS(pops) {pops, {T_NUM, T_NUM, T_NUM}, T_NUM, READ, A_NONE, O_ANY}
+#define STATE(type) A_STATE + PURE_STATE_##type
+static const struct { unsigned char pops, in[3], out, where, arg, of; } signature[PURE_OP_COUNT] = {
+    [PURE_OP_CONST] = NUMS(0), [PURE_OP_ADD] = NUMS(2), [PURE_OP_SUB] = NUMS(2), [PURE_OP_MUL] = NUMS(2),
+    [PURE_OP_DIV] = NUMS(2), [PURE_OP_NEG] = NUMS(1), [PURE_OP_LT] = NUMS(2), [PURE_OP_LE] = NUMS(2),
+    [PURE_OP_GT] = NUMS(2), [PURE_OP_GE] = NUMS(2), [PURE_OP_EQ] = NUMS(2), [PURE_OP_NE] = NUMS(2),
+    [PURE_OP_AND] = NUMS(2), [PURE_OP_OR] = NUMS(2), [PURE_OP_NOT] = NUMS(1), [PURE_OP_MIN] = NUMS(2),
+    [PURE_OP_MAX] = NUMS(2), [PURE_OP_CLAMP] = NUMS(3),
+    [PURE_OP_LOAD] = {0, {0}, T_NUM, READ, STATE(NUM), O_ANY},
+    [PURE_OP_DT] = {0, {0}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
+    [PURE_OP_STORE] = {1, {T_NUM}, 0, IN_HANDLER, STATE(NUM), O_ANY},
+    [PURE_OP_JZ] = {1, {T_NUM}, 0, READ, A_TARGET, O_ANY},
+    [PURE_OP_JMP] = {0, {0}, 0, READ, A_TARGET, O_ANY},
+    [PURE_OP_FIELD] = {0, {0}, T_FIELD, IN_MESSAGE, A_FIELD, O_ANY},
+    [PURE_OP_DOC] = {0, {0}, T_BYTES, IN_KEYED, A_COLLECTION, O_ANY},
+    [PURE_OP_DOC_SIZE] = {0, {0}, T_NUM, IN_KEYED, A_COLLECTION, O_ANY},
+    [PURE_OP_LEN] = {1, {T_BYTES}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
+    [PURE_OP_REPLACE] = {3, {T_NUM, T_NUM, T_BYTES}, 0, IN_KEYED, A_COLLECTION, O_ANY},
+    [PURE_OP_REPLY] = {1, {T_BYTES}, 0, IN_MESSAGE, A_NONE, O_ANY},
+    [PURE_OP_REQUIRE] = {1, {T_NUM}, 0, IN_HANDLER, A_NONE, O_ANY},
+    [PURE_OP_TEXT_CONST] = {0, {0}, T_TEXT, READ, A_CONSTANT, O_ANY},
+    [PURE_OP_TEXT_LOAD] = {0, {0}, T_TEXT, READ, STATE(TEXT), O_ANY},
+    [PURE_OP_TEXT_INPUT] = {0, {0}, T_TEXT, IN_TEXT, A_NONE, O_ANY},
+    [PURE_OP_NUM_TEXT] = {1, {T_NUM}, T_TEXT, READ, A_NONE, O_ANY},
+    [PURE_OP_CONCAT] = {2, {T_TEXT, T_TEXT}, T_TEXT, READ, A_NONE, O_ANY},
+    [PURE_OP_CHARS] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
+    [PURE_OP_LINES] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
+    [PURE_OP_TEXT_BYTES] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
+    [PURE_OP_CUR_LOAD] = {0, {0}, T_CURSOR, READ, STATE(CURSOR), O_REF},
+    [PURE_OP_CUR_START] = {0, {0}, T_CURSOR, READ, STATE(TEXT), O_ARG},
+    [PURE_OP_CUR_END] = {0, {0}, T_CURSOR, READ, STATE(TEXT), O_ARG},
+    [PURE_OP_CUR_MOVE] = {2, {T_CURSOR, T_NUM}, T_CURSOR, READ, A_UNIT, O_OPERAND},
+    [PURE_OP_CUR_STORE] = {1, {T_CURSOR}, 0, IN_HANDLER, STATE(CURSOR), O_REF},
+    [PURE_OP_TEXT_INSERT] = {2, {T_CURSOR, T_TEXT}, 0, IN_HANDLER, STATE(TEXT), O_ARG},
+    [PURE_OP_TEXT_REMOVE] = {2, {T_CURSOR, T_CURSOR}, 0, IN_HANDLER, STATE(TEXT), O_ARG},
+    [PURE_OP_TEXT_LINE] = {1, {T_CURSOR}, T_TEXT, READ, STATE(TEXT), O_ARG},
+    [PURE_OP_TEXT_SET] = {1, {T_TEXT}, 0, IN_HANDLER, STATE(TEXT), O_ANY},
+    [PURE_OP_TEXT_FROM] = {1, {T_BYTES}, T_TEXT, READ, A_NONE, O_ANY},
+    [PURE_OP_BYTES_FROM] = {1, {T_TEXT}, T_BYTES, READ, A_NONE, O_ANY},
+    [PURE_OP_CUR_COUNT] = {1, {T_CURSOR}, T_NUM, READ, A_UNIT, O_ANY},
+    /* Record operations also take as many values as the list's record has fields. */
+    [PURE_OP_LIST_COUNT] = {0, {0}, T_NUM, READ, STATE(LIST), O_ANY},
+    [PURE_OP_LIST_APPEND] = {0, {0}, 0, IN_HANDLER, STATE(LIST), O_ANY},
+    [PURE_OP_LIST_INSERT] = {1, {T_INDEX}, 0, IN_HANDLER, STATE(LIST), O_ARG},
+    [PURE_OP_LIST_REMOVE] = {1, {T_INDEX}, 0, IN_HANDLER, STATE(LIST), O_ARG},
+    [PURE_OP_ITEM_GET] = {1, {T_INDEX}, T_ITEM, READ, A_ITEM, O_LIST},
+    [PURE_OP_ITEM_SET] = {1, {T_INDEX}, 0, IN_HANDLER, A_ITEM, O_LIST},
+    [PURE_OP_INDEX_LOAD] = {0, {0}, T_INDEX, READ, STATE(INDEX), O_REF},
+    [PURE_OP_INDEX_STORE] = {1, {T_INDEX}, 0, IN_HANDLER, STATE(INDEX), O_REF},
+    [PURE_OP_INDEX_MOVE] = {2, {T_INDEX, T_NUM}, T_INDEX, READ, A_NONE, O_OPERAND},
+    [PURE_OP_INDEX_FIRST] = {0, {0}, T_INDEX, READ, STATE(LIST), O_ARG},
+    [PURE_OP_INDEX_LAST] = {0, {0}, T_INDEX, READ, STATE(LIST), O_ARG},
+    [PURE_OP_INDEX_NUM] = {1, {T_INDEX}, T_NUM, READ, A_NONE, O_ANY},
+    [PURE_OP_ROW] = {0, {0}, T_INDEX, IN_ROW, A_ROW, O_ARG},
     /* Stack copies: their types come from the values they move. */
-    [PURE_OP_PICK] = {0, {0}, 0, READ},
-    [PURE_OP_SLIDE] = {0, {0}, 0, READ},
+    [PURE_OP_PICK] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
+    [PURE_OP_SLIDE] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
 };
+#undef NUMS
+#undef STATE
 
 static uint32_t read16(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
 
@@ -101,12 +105,7 @@ static double read_double(const unsigned char *p) {
     return value;
 }
 
-static bool reject(char *error, size_t size, const char *message, unsigned index) {
-    if (size) snprintf(error, size, "%s (%u)", message, index);
-    return false;
-}
-
-static bool key_name(const char *key) {
+PURE_COLD static bool key_name(const char *key) {
     static const char *const named[] = {"Space", "Enter", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
                                         "Backspace", "Delete", "Home", "End", "Tab", "Escape", "PageUp", "PageDown"};
     for (size_t i = 0; i < sizeof(named) / sizeof(*named); ++i)
@@ -129,7 +128,7 @@ static bool document_key(const char *key) {
 }
 
 /* Strings are [u8 length][bytes]; a name is an ASCII identifier of 1..31 bytes. */
-static bool name_at(const unsigned char *strings, uint32_t size, uint32_t offset,
+PURE_COLD static bool name_at(const unsigned char *strings, uint32_t size, uint32_t offset,
                     bool identifier, char out[PURE_MODULE_NAME]) {
     if (offset >= size) return false;
     uint32_t length = strings[offset];
@@ -147,21 +146,6 @@ static bool name_at(const unsigned char *strings, uint32_t size, uint32_t offset
 /* The input whose handler this is, or -1 for frame. */
 static int event_input(uint32_t event) { return event ? (int)((event - 1) / 2) : -1; }
 
-static bool uses_arg(uint8_t op) {
-    switch (op) {
-    case PURE_OP_LOAD: case PURE_OP_STORE: case PURE_OP_JZ: case PURE_OP_JMP: case PURE_OP_FIELD:
-    case PURE_OP_DOC: case PURE_OP_DOC_SIZE: case PURE_OP_REPLACE: case PURE_OP_TEXT_CONST:
-    case PURE_OP_TEXT_LOAD: case PURE_OP_CUR_LOAD: case PURE_OP_CUR_START: case PURE_OP_CUR_END:
-    case PURE_OP_CUR_MOVE: case PURE_OP_CUR_STORE: case PURE_OP_TEXT_INSERT: case PURE_OP_TEXT_REMOVE:
-    case PURE_OP_TEXT_LINE: case PURE_OP_TEXT_SET: case PURE_OP_CUR_COUNT: case PURE_OP_LIST_COUNT:
-    case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: case PURE_OP_ITEM_GET:
-    case PURE_OP_ITEM_SET: case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: case PURE_OP_INDEX_FIRST:
-    case PURE_OP_INDEX_LAST: case PURE_OP_ROW: case PURE_OP_PICK: case PURE_OP_SLIDE:
-        return true;
-    default: return false;
-    }
-}
-
 /* The state an argument names must have this type. */
 static bool state_of(const PureModule *m, uint32_t state, uint8_t type) {
     return state < m->states && m->state_type[state] == type;
@@ -175,6 +159,20 @@ static unsigned char field_type(const PureModule *m, uint32_t list, uint32_t fie
     return m->record_field_text[m->record[m->state_ref[list]].first + field] ? T_TEXT : T_NUM;
 }
 
+PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg, const PureInputShape *shape, int row) {
+    switch (kind) {
+    case A_ITEM:
+        return state_of(m, list_of(arg), PURE_STATE_LIST) && item_field(arg) < m->record[m->state_ref[list_of(arg)]].count;
+    case A_FIELD: return arg < shape->field_count;
+    case A_COLLECTION: return arg < m->collections;
+    case A_CONSTANT: return arg < m->constants;
+    case A_UNIT: return arg <= PURE_UNIT_LINE;
+    case A_ROW: return (int)arg == row;
+    case A_NONE: case A_TARGET: case A_DEPTH: return true;
+    default: return state_of(m, arg, (uint8_t)(kind - A_STATE));
+    }
+}
+
 /* The stack a branch brings to its target, while the target is ahead. */
 typedef struct { uint32_t target; int height; unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK]; } Join;
 
@@ -184,17 +182,19 @@ static bool same_stack(const Join *join, int height, const unsigned char *types,
 }
 
 /* Types and heights are checked per instruction; a cursor's type records
- * which text it belongs to and an index's type which list. Branches go
- * forward within the block. Every path into a join brings the same stack
- * (types and owners), so a value may cross a join, as in a conditional
- * expression; at most 8 joins with a non-empty stack are ahead at once.
- * Handlers end empty, views with one value of their type. A column (row
- * is its list) may read the row it is evaluated for. */
-static bool verify_block(const PureModule *m, PureBlock block, int view, int row, uint32_t event,
-                         char *error, size_t size, unsigned index) {
-    if (block.start > m->code_count || block.length > m->code_count - block.start)
-        return reject(error, size, "code range outside module", index);
-    if (view >= 0 && !block.length) return reject(error, size, "empty view", index);
+ * which text it belongs to and an index's type which list (other values
+ * belong to nothing). Branches go forward within the block. Every path into
+ * a join brings the same stack (types and owners), so a value may cross a
+ * join, as in a conditional expression; at most 8 joins with a non-empty
+ * stack are ahead at once. Handlers end empty, views with one value of their
+ * type. A column (row is its list) may read the row it is evaluated for.
+ * Returns why the block is refused, with at moved to the instruction when
+ * one is at fault, or NULL. */
+PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, int view, int row, uint32_t event,
+                                uint32_t *at) {
+#define REFUSE(why) do { *at = pc; return why; } while (0)
+    if (block.start > m->code_count || block.length > m->code_count - block.start) return "code range outside module";
+    if (view >= 0 && !block.length) return "empty view";
     int input = view >= 0 ? -1 : event_input(event);
     const PureInputShape *shape = input >= 0 ? &m->input[input] : NULL;
     unsigned where = view >= 0 ? IN_VIEW | (row >= 0 ? IN_ROW : 0) : IN_HANDLER;
@@ -212,64 +212,38 @@ static bool verify_block(const PureModule *m, PureBlock block, int view, int row
         for (unsigned k = 0; k < open; ++k) if (joins[k].target == pc) join = k;
         if (join < open) {
             if (target[i] || (reachable && !same_stack(&joins[join], height, types, owners)))
-                return reject(error, size, "join with different stacks", pc);
+                REFUSE("join with different stacks");
             height = joins[join].height;
             memcpy(types, joins[join].types, (size_t)height);
             memcpy(owners, joins[join].owners, (size_t)height);
             joins[join] = joins[--open];
             reachable = true;
         } else if (target[i]) {
-            if (reachable && height) return reject(error, size, "join with different stacks", pc);
+            if (reachable && height) REFUSE("join with different stacks");
             height = 0;
             reachable = true;
         }
         if (i == block.length) break;
-        if (!reachable) return reject(error, size, "unreachable instruction", pc);
+        if (!reachable) REFUSE("unreachable instruction");
         const PureOp *op = &m->code[pc];
-        if (op->op >= PURE_OP_COUNT) return reject(error, size, "unknown opcode", pc);
-        unsigned allowed = signature[op->op].where;
+        if (op->op >= PURE_OP_COUNT) REFUSE("unknown opcode");
+        unsigned allowed = signature[op->op].where, kind = signature[op->op].arg, of = signature[op->op].of;
         if (!(allowed & where)) {
-            if (allowed & IN_ROW) return reject(error, size, "row outside a column", pc);
-            if (view >= 0) return reject(error, size, "view with an effect", pc);
-            if (allowed & IN_KEYED) return reject(error, size, "document operation outside a keyed message handler", pc);
-            if (allowed & IN_TEXT) return reject(error, size, "text input outside a text handler", pc);
-            return reject(error, size, "message operation outside a message handler", pc);
+            if (allowed & IN_ROW) REFUSE("row outside a column");
+            if (view >= 0) REFUSE("view with an effect");
+            if (allowed & IN_KEYED) REFUSE("document operation outside a keyed message handler");
+            if (allowed & IN_TEXT) REFUSE("text input outside a text handler");
+            REFUSE("message operation outside a message handler");
         }
-        if ((!uses_arg(op->op) && op->arg) || (op->op != PURE_OP_CONST && op->value != 0) ||
-            (op->op == PURE_OP_CONST && !isfinite(op->value)))
-            return reject(error, size, "non-canonical operand", pc);
         uint32_t arg = op->arg;
-        bool known = true;
-        switch (op->op) {
-        case PURE_OP_LOAD: case PURE_OP_STORE: known = state_of(m, arg, PURE_STATE_NUM); break;
-        case PURE_OP_FIELD: known = arg < shape->field_count; break;
-        case PURE_OP_DOC: case PURE_OP_DOC_SIZE: case PURE_OP_REPLACE: known = arg < m->collections; break;
-        case PURE_OP_TEXT_CONST: known = arg < m->constants; break;
-        case PURE_OP_TEXT_LOAD: case PURE_OP_TEXT_SET: case PURE_OP_CUR_START: case PURE_OP_CUR_END:
-        case PURE_OP_TEXT_INSERT: case PURE_OP_TEXT_REMOVE: case PURE_OP_TEXT_LINE:
-            known = state_of(m, arg, PURE_STATE_TEXT);
-            break;
-        case PURE_OP_CUR_LOAD: case PURE_OP_CUR_STORE: known = state_of(m, arg, PURE_STATE_CURSOR); break;
-        case PURE_OP_CUR_MOVE: case PURE_OP_CUR_COUNT: known = arg <= PURE_UNIT_LINE; break;
-        case PURE_OP_LIST_COUNT: case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE:
-        case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
-            known = state_of(m, arg, PURE_STATE_LIST);
-            break;
-        case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET:
-            known = state_of(m, list_of(arg), PURE_STATE_LIST) &&
-                    item_field(arg) < m->record[m->state_ref[list_of(arg)]].count;
-            break;
-        case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: known = state_of(m, arg, PURE_STATE_INDEX); break;
-        case PURE_OP_ROW: known = (int)arg == row; break;
-        default: break;
-        }
-        if (!known) return reject(error, size, "operand names no such state, field, constant or unit", pc);
+        if ((kind == A_NONE && arg) || (op->op == PURE_OP_CONST ? !isfinite(op->value) : op->value != 0))
+            REFUSE("non-canonical operand");
+        if (!names_arg(m, kind, arg, shape, row)) REFUSE("operand names no such state, field, constant or unit");
         /* PICK copies the value arg below the top; SLIDE drops arg values under the top. */
-        if (op->op == PURE_OP_PICK || op->op == PURE_OP_SLIDE) {
+        if (kind == A_DEPTH) {
             bool pick = op->op == PURE_OP_PICK;
-            if (pick ? arg >= (uint32_t)height : !arg || arg >= (uint32_t)height)
-                return reject(error, size, "stack underflow", pc);
-            if (pick && height == PURE_MODULE_STACK) return reject(error, size, "stack overflow", pc);
+            if (pick ? arg >= (uint32_t)height : !arg || arg >= (uint32_t)height) REFUSE("stack underflow");
+            if (pick && height == PURE_MODULE_STACK) REFUSE("stack overflow");
             int from = height - 1 - (int)arg, to = pick ? height++ : from;
             types[to] = pick ? types[from] : types[height - 1];
             owners[to] = pick ? owners[from] : owners[height - 1];
@@ -287,57 +261,36 @@ static bool verify_block(const PureModule *m, PureBlock block, int view, int row
         } else if (op->op == PURE_OP_ITEM_SET) {
             need[pops++] = field_type(m, list_of(arg), item_field(arg));
         }
-        if (height < (int)pops) return reject(error, size, "stack underflow", pc);
-        for (unsigned k = 0; k < pops; ++k)
-            if (types[height - (int)pops + (int)k] != need[k])
-                return reject(error, size, "operand type", pc);
-        /* The text a cursor operand belongs to. */
-        int owner = pops && types[height - 1] == T_CURSOR ? owners[height - 1] :
-                    pops > 1 && types[height - 2] == T_CURSOR ? owners[height - 2] : -1;
-        bool same_text = true;
-        switch (op->op) {
-        case PURE_OP_CUR_STORE: same_text = owner == m->state_ref[arg]; break;
-        case PURE_OP_TEXT_INSERT: case PURE_OP_TEXT_LINE: same_text = owner == (int)arg; break;
-        case PURE_OP_TEXT_REMOVE: same_text = owners[height - 1] == arg && owners[height - 2] == arg; break;
-        default: break;
-        }
-        if (!same_text) return reject(error, size, "cursor of another text", pc);
-        /* The list an index operand belongs to; the index is the first operand. */
-        unsigned index_owner = need[0] == T_INDEX ? owners[height - (int)pops] : 0;
-        bool same_list = true;
-        switch (op->op) {
-        case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: same_list = index_owner == arg; break;
-        case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: same_list = index_owner == list_of(arg); break;
-        case PURE_OP_INDEX_STORE: same_list = index_owner == m->state_ref[arg]; break;
-        default: break;
-        }
-        if (!same_list) return reject(error, size, "index of another list", pc);
+        if (height < (int)pops) REFUSE("stack underflow");
         height -= (int)pops;
+        for (unsigned k = 0; k < pops; ++k)
+            if (types[height + (int)k] != need[k]) REFUSE("operand type");
+        unsigned owner = of == O_ARG ? arg : of == O_REF ? m->state_ref[arg] : of == O_LIST ? list_of(arg) : 0;
+        for (unsigned k = 0; of >= O_ARG && k < pops; ++k) {
+            unsigned char type = types[height + (int)k];
+            if ((type == T_CURSOR || type == T_INDEX) && owners[height + (int)k] != owner)
+                REFUSE(type == T_CURSOR ? "cursor of another text" : "index of another list");
+        }
         unsigned char out = signature[op->op].out;
         if (out == T_FIELD) out = m->field[shape->field_start + arg].type == PURE_FIELD_U32 ? T_NUM : T_BYTES;
         if (out == T_ITEM) out = field_type(m, list_of(arg), item_field(arg));
         if (out) {
-            if (height == PURE_MODULE_STACK) return reject(error, size, "stack overflow", pc);
-            owners[height] = (unsigned char)(op->op == PURE_OP_CUR_LOAD || op->op == PURE_OP_INDEX_LOAD ? m->state_ref[arg] :
-                              op->op == PURE_OP_CUR_START || op->op == PURE_OP_CUR_END ||
-                              op->op == PURE_OP_INDEX_FIRST || op->op == PURE_OP_INDEX_LAST || op->op == PURE_OP_ROW ? arg :
-                              op->op == PURE_OP_INDEX_MOVE ? index_owner :
-                              owner >= 0 ? (unsigned)owner : 0);
+            if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
+            owners[height] = (unsigned char)(out != T_CURSOR && out != T_INDEX ? 0 : of == O_OPERAND ? owners[height] : owner);
             types[height++] = out;
         }
-        if (op->op == PURE_OP_JZ || op->op == PURE_OP_JMP) {
-            if (arg <= pc || arg > block.start + block.length)
-                return reject(error, size, "branch not forward within its block", pc);
-            unsigned join = open;
+        if (kind == A_TARGET) {
+            if (arg <= pc || arg > block.start + block.length) REFUSE("branch not forward within its block");
+            join = open;
             for (unsigned k = 0; k < open; ++k) if (joins[k].target == arg) join = k;
             if (!height) {
-                if (join < open) return reject(error, size, "join with different stacks", pc);
+                if (join < open) REFUSE("join with different stacks");
                 target[arg - block.start] = 1;
             } else if (join < open) {
-                if (!same_stack(&joins[join], height, types, owners)) return reject(error, size, "join with different stacks", pc);
+                if (!same_stack(&joins[join], height, types, owners)) REFUSE("join with different stacks");
             } else {
-                if (target[arg - block.start]) return reject(error, size, "join with different stacks", pc);
-                if (open == PURE_MODULE_JOINS) return reject(error, size, "more than 8 joins ahead", pc);
+                if (target[arg - block.start]) REFUSE("join with different stacks");
+                if (open == PURE_MODULE_JOINS) REFUSE("more than 8 joins ahead");
                 joins[open] = (Join){.target = arg, .height = height};
                 memcpy(joins[open].types, types, (size_t)height);
                 memcpy(joins[open++].owners, owners, (size_t)height);
@@ -345,20 +298,24 @@ static bool verify_block(const PureModule *m, PureBlock block, int view, int row
             if (op->op == PURE_OP_JMP) reachable = false;
         }
     }
-    if (!reachable) return reject(error, size, "block end is unreachable", index);
+    if (!reachable) return "block end is unreachable";
     unsigned char result = view == PURE_VIEW_TEXT ? T_TEXT : T_NUM;
     if (view >= 0 ? height != 1 || types[0] != result : height != 0)
-        return reject(error, size, view >= 0 ? "view must leave one value of its type" : "handler must leave no value", index);
-    return true;
+        return view >= 0 ? "view must leave one value of its type" : "handler must leave no value";
+    return NULL;
+#undef REFUSE
 }
 
-PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
+PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
                             char *error, size_t error_size) {
     const unsigned char *p = bytes;
+    const char *why;
+    uint32_t bad = 0;
+    PureResult result = PURE_INVALID;
+#define REFUSE(message, index) do { why = message; bad = (uint32_t)(index); goto refused; } while (0)
     if (error_size) error[0] = 0;
     memset(out, 0, sizeof(*out));
-    if (!p || size < PURE_MODULE_HEADER || memcmp(p, magic, sizeof(magic)))
-        return reject(error, error_size, "not a Pure module v4", 0), PURE_INVALID;
+    if (!p || size < PURE_MODULE_HEADER || memcmp(p, magic, sizeof(magic))) REFUSE("not a Pure module v5", 0);
     out->states = (uint16_t)read16(p + 8);
     out->inputs = (uint16_t)read16(p + 10);
     out->views = (uint16_t)read16(p + 12);
@@ -371,43 +328,41 @@ PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
     out->records = (uint16_t)read16(p + 30);
     uint32_t constant_bytes = read32(p + 32);
     out->record_fields = (uint16_t)read16(p + 36);
-    if (read16(p + 38)) return reject(error, error_size, "reserved header bytes", 38), PURE_INVALID;
+    if (read16(p + 38)) REFUSE("reserved header bytes", 38);
     if (out->states > PURE_MODULE_STATES || out->inputs > PURE_MODULE_INPUTS ||
         out->views > PURE_MODULE_VIEWS || out->handlers > PURE_MODULE_HANDLERS ||
         out->code_count > PURE_MODULE_CODE || strings > PURE_MODULE_STRINGS ||
         out->fields > PURE_MODULE_FIELDS || out->collections > PURE_MODULE_COLLECTIONS ||
         out->constants > PURE_MODULE_CONSTANTS || constant_bytes > PURE_MODULE_CONSTANT_BYTES ||
-        out->records > PURE_MODULE_RECORDS || out->record_fields > PURE_MODULE_RECORD_FIELDS)
-        return reject(error, error_size, "module exceeds a limit", 8), PURE_LIMIT;
+        out->records > PURE_MODULE_RECORDS || out->record_fields > PURE_MODULE_RECORD_FIELDS) {
+        result = PURE_LIMIT;
+        REFUSE("module exceeds a limit", 8);
+    }
     size_t expected = PURE_MODULE_HEADER + (size_t)out->states * STATE_BYTES +
         (size_t)out->collections * COLLECTION_BYTES + (size_t)out->inputs * INPUT_BYTES +
         (size_t)out->fields * FIELD_BYTES + (size_t)out->constants * CONSTANT_BYTES +
         (size_t)out->records * RECORD_BYTES + (size_t)out->record_fields * RECORD_FIELD_BYTES +
         (size_t)out->views * VIEW_BYTES + (size_t)out->handlers * HANDLER_BYTES +
         (size_t)out->code_count * OP_BYTES + strings + constant_bytes;
-    if (size != expected) return reject(error, error_size, "module size", (unsigned)expected), PURE_INVALID;
+    if (size != expected) REFUSE("module size", expected);
     const unsigned char *at = p + PURE_MODULE_HEADER;
     const unsigned char *text = p + size - constant_bytes - strings;
     memcpy(out->constant_data, p + size - constant_bytes, constant_bytes);
     for (uint32_t i = 0; i < out->states; ++i, at += STATE_BYTES) {
         out->state_type[i] = (uint8_t)read32(at + 4);
-        if (!name_at(text, strings, read32(at), true, out->state_names[i]))
-            return reject(error, error_size, "state name", i), PURE_INVALID;
-        if (read32(at + 4) > PURE_STATE_INDEX) return reject(error, error_size, "state type", i), PURE_INVALID;
+        if (!name_at(text, strings, read32(at), true, out->state_names[i])) REFUSE("state name", i);
+        if (read32(at + 4) > PURE_STATE_INDEX) REFUSE("state type", i);
         if (out->state_type[i] == PURE_STATE_NUM) {
             out->initial[i] = read_double(at + 8);
-            if (!isfinite(out->initial[i])) return reject(error, error_size, "non-finite initial value", i), PURE_INVALID;
+            if (!isfinite(out->initial[i])) REFUSE("non-finite initial value", i);
         } else {
-            if (read32(at + 12) || read32(at + 8) > UINT16_MAX)
-                return reject(error, error_size, "state reference", i), PURE_INVALID;
+            if (read32(at + 12) || read32(at + 8) > UINT16_MAX) REFUSE("state reference", i);
             out->state_ref[i] = (uint16_t)read32(at + 8);
         }
     }
     for (uint32_t i = 0; i < out->collections; ++i, at += COLLECTION_BYTES) {
-        if (!name_at(text, strings, read32(at), true, out->collection_names[i]))
-            return reject(error, error_size, "collection name", i), PURE_INVALID;
-        if (read32(at + 4) != 1 || read32(at + 8) != 1)
-            return reject(error, error_size, "collection must hold bytes by key", i), PURE_INVALID;
+        if (!name_at(text, strings, read32(at), true, out->collection_names[i])) REFUSE("collection name", i);
+        if (read32(at + 4) != 1 || read32(at + 8) != 1) REFUSE("collection must hold bytes by key", i);
     }
     uint32_t next_field = 0;
     const unsigned char *fields = at + (size_t)out->inputs * INPUT_BYTES;
@@ -417,26 +372,24 @@ PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
         shape->keyed = at[5];
         shape->field_start = (uint16_t)read16(at + 12);
         shape->field_count = (uint16_t)read16(at + 14);
-        if (!name_at(text, strings, read32(at), true, out->input_names[i]))
-            return reject(error, error_size, "input name", i), PURE_INVALID;
-        if (read16(at + 6) || at[5] > 1) return reject(error, error_size, "input flags", i), PURE_INVALID;
+        if (!name_at(text, strings, read32(at), true, out->input_names[i])) REFUSE("input name", i);
+        if (read16(at + 6) || at[5] > 1) REFUSE("input flags", i);
         if (shape->kind == PURE_KIND_KEY) {
             if (shape->keyed || shape->field_start || shape->field_count ||
                 !name_at(text, strings, read32(at + 8), false, out->input_keys[i]) ||
-                !key_name(out->input_keys[i])) return reject(error, error_size, "input key", i), PURE_INVALID;
+                !key_name(out->input_keys[i])) REFUSE("input key", i);
             for (uint32_t k = 0; k < i; ++k)
                 if (out->input[k].kind == PURE_KIND_KEY && !strcmp(out->input_keys[k], out->input_keys[i]))
-                    return reject(error, error_size, "duplicate key", i), PURE_INVALID;
+                    REFUSE("duplicate key", i);
             continue;
         }
         if (shape->kind == PURE_KIND_TEXT) {
             if (shape->keyed || shape->field_start || shape->field_count || read32(at + 8))
-                return reject(error, error_size, "text input shape", i), PURE_INVALID;
+                REFUSE("text input shape", i);
             continue;
         }
         if (shape->kind != PURE_KIND_MESSAGE || read32(at + 8) || shape->field_start != next_field ||
-            shape->field_count > out->fields - next_field)
-            return reject(error, error_size, "message shape", i), PURE_INVALID;
+            shape->field_count > out->fields - next_field) REFUSE("message shape", i);
         /* Fixed u32le fields in order, then at most one bytes tail. */
         for (uint32_t f = 0; f < shape->field_count; ++f) {
             const unsigned char *entry = fields + (size_t)(next_field + f) * FIELD_BYTES;
@@ -445,23 +398,22 @@ PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
             if (!name_at(text, strings, read32(entry), true, field->name) ||
                 (field->type != PURE_FIELD_U32 && field->type != PURE_FIELD_BYTES) || read32(entry + 4) > 2 ||
                 (field->type == PURE_FIELD_BYTES && f + 1 != shape->field_count))
-                return reject(error, error_size, "message field", next_field + f), PURE_INVALID;
+                REFUSE("message field", next_field + f);
             for (uint32_t k = 0; k < f; ++k)
-                if (!strcmp(out->field[next_field + k].name, field->name))
-                    return reject(error, error_size, "duplicate field", next_field + f), PURE_INVALID;
+                if (!strcmp(out->field[next_field + k].name, field->name)) REFUSE("duplicate field", next_field + f);
             field->offset = shape->prefix;
             if (field->type == PURE_FIELD_U32) shape->prefix += 4;
         }
         next_field += shape->field_count;
     }
-    if (next_field != out->fields) return reject(error, error_size, "unused message fields", next_field), PURE_INVALID;
+    if (next_field != out->fields) REFUSE("unused message fields", next_field);
     at = fields + (size_t)out->fields * FIELD_BYTES;
     for (uint32_t i = 0; i < out->constants; ++i, at += CONSTANT_BYTES) {
         out->constant_offset[i] = read32(at);
         out->constant_length[i] = read32(at + 4);
         if (out->constant_offset[i] > constant_bytes || out->constant_length[i] > constant_bytes - out->constant_offset[i] ||
             !pure_utf8_valid((PureSpan){out->constant_data + out->constant_offset[i], out->constant_length[i]}))
-            return reject(error, error_size, "text constant", i), PURE_INVALID;
+            REFUSE("text constant", i);
     }
     /* Records: fields in order, numbered from first; a text default is a constant. */
     const unsigned char *fields_at = at + (size_t)out->records * RECORD_BYTES;
@@ -472,51 +424,42 @@ PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
         record->count = (uint16_t)read16(at + 6);
         if (!name_at(text, strings, read32(at), true, out->record_names[i]) || record->first != next_record_field ||
             !record->count || record->count > PURE_RECORD_FIELDS || record->count > out->record_fields - next_record_field)
-            return reject(error, error_size, "record", i), PURE_INVALID;
+            REFUSE("record", i);
         for (uint32_t f = record->first; f < record->first + record->count; ++f) {
             const unsigned char *entry = fields_at + (size_t)f * RECORD_FIELD_BYTES;
             uint32_t type = read32(entry + 4);
             out->record_field_text[f] = type == 1;
             if (!name_at(text, strings, read32(entry), true, out->record_field_names[f]) || type > 1)
-                return reject(error, error_size, "record field", f), PURE_INVALID;
+                REFUSE("record field", f);
             for (uint32_t k = record->first; k < f; ++k)
-                if (!strcmp(out->record_field_names[k], out->record_field_names[f]))
-                    return reject(error, error_size, "duplicate record field", f), PURE_INVALID;
-            if (type == 1) {
-                if (read32(entry + 12) || read32(entry + 8) >= out->constants)
-                    return reject(error, error_size, "record field default", f), PURE_INVALID;
-                out->record_field_default[f] = read32(entry + 8);
-            } else {
-                out->record_field_default[f] = read_double(entry + 8);
-                if (!isfinite(out->record_field_default[f]))
-                    return reject(error, error_size, "record field default", f), PURE_INVALID;
-            }
+                if (!strcmp(out->record_field_names[k], out->record_field_names[f])) REFUSE("duplicate record field", f);
+            out->record_field_default[f] = type ? read32(entry + 8) : read_double(entry + 8);
+            if (type ? read32(entry + 12) || read32(entry + 8) >= out->constants : !isfinite(out->record_field_default[f]))
+                REFUSE("record field default", f);
         }
         next_record_field += record->count;
     }
-    if (next_record_field != out->record_fields)
-        return reject(error, error_size, "unused record fields", next_record_field), PURE_INVALID;
+    if (next_record_field != out->record_fields) REFUSE("unused record fields", next_record_field);
     at = fields_at + (size_t)out->record_fields * RECORD_FIELD_BYTES;
     for (uint32_t i = 0; i < out->states; ++i)
         if ((out->state_type[i] == PURE_STATE_TEXT && out->state_ref[i] >= out->constants) ||
             (out->state_type[i] == PURE_STATE_CURSOR && !state_of(out, out->state_ref[i], PURE_STATE_TEXT)) ||
             (out->state_type[i] == PURE_STATE_LIST && out->state_ref[i] >= out->records) ||
             (out->state_type[i] == PURE_STATE_INDEX && !state_of(out, out->state_ref[i], PURE_STATE_LIST)))
-            return reject(error, error_size, "state reference", i), PURE_INVALID;
+            REFUSE("state reference", i);
     /* A table names its list in place of code; its columns follow it. */
     for (uint32_t i = 0; i < out->views; ++i, at += VIEW_BYTES) {
-        if (!name_at(text, strings, read32(at), true, out->view_names[i]))
-            return reject(error, error_size, "view name", i), PURE_INVALID;
+        if (!name_at(text, strings, read32(at), true, out->view_names[i])) REFUSE("view name", i);
         out->view_type[i] = at[4];
         out->view_table[i] = (uint16_t)read16(at + 6);
         out->view_code[i] = (PureBlock){read32(at + 8), read32(at + 12)};
         uint32_t table = out->view_table[i];
         if (at[4] > PURE_VIEW_TABLE || at[5] || (table && (table > i || out->view_type[table - 1] != PURE_VIEW_TABLE ||
                                                            at[4] == PURE_VIEW_TABLE)))
-            return reject(error, error_size, "view type", i), PURE_INVALID;
+            REFUSE("view type", i);
         if (at[4] == PURE_VIEW_TABLE) {
             if (!state_of(out, out->view_code[i].start, PURE_STATE_LIST) || out->view_code[i].length)
-                return reject(error, error_size, "table list", i), PURE_INVALID;
+                REFUSE("table list", i);
             out->view_list[i] = (uint16_t)out->view_code[i].start;
         } else if (table) out->view_list[i] = out->view_list[table - 1];
     }
@@ -525,10 +468,10 @@ PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
         out->handler[i] = (PureHandler){event, {read32(at + 4), read32(at + 8)}};
         int input = event_input(event);
         if (event > 2u * out->inputs || (input >= 0 && out->input[input].kind != PURE_KIND_KEY && !(event & 1)))
-            return reject(error, error_size, "handler event", i), PURE_INVALID;
+            REFUSE("handler event", i);
     }
     for (uint32_t i = 0; i < out->code_count; ++i, at += OP_BYTES) {
-        if (at[1] || at[2] || at[3]) return reject(error, error_size, "instruction padding", i), PURE_INVALID;
+        if (at[1] || at[2] || at[3]) REFUSE("instruction padding", i);
         out->code[i] = (PureOp){.op = at[0], .arg = read32(at + 4), .value = read_double(at + 8)};
     }
     /* States, records, collections, inputs and views share one namespace. */
@@ -542,21 +485,27 @@ PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
     for (uint32_t i = 0; i < out->views; ++i) if (!out->view_table[i]) names[count++] = out->view_names[i];
     for (size_t i = 0; i < count; ++i)
         for (size_t k = 0; k < i; ++k)
-            if (!strcmp(names[i], names[k])) return reject(error, error_size, "duplicate name", (unsigned)i), PURE_INVALID;
+            if (!strcmp(names[i], names[k])) REFUSE("duplicate name", i);
     /* Column names are unique within their table. */
     for (uint32_t i = 0; i < out->views; ++i)
         for (uint32_t k = 0; k < i; ++k)
             if (out->view_table[i] && out->view_table[k] == out->view_table[i] &&
-                !strcmp(out->view_names[i], out->view_names[k]))
-                return reject(error, error_size, "duplicate column", i), PURE_INVALID;
-    for (uint32_t i = 0; i < out->views; ++i)
+                !strcmp(out->view_names[i], out->view_names[k])) REFUSE("duplicate column", i);
+    for (uint32_t i = 0; i < out->views; ++i) {
+        bad = i;
         if (out->view_type[i] != PURE_VIEW_TABLE &&
-            !verify_block(out, out->view_code[i], out->view_type[i], out->view_table[i] ? out->view_list[i] : -1, 0,
-                          error, error_size, i)) return PURE_INVALID;
-    for (uint32_t i = 0; i < out->handlers; ++i)
-        if (!verify_block(out, out->handler[i].code, -1, -1, out->handler[i].event, error, error_size, i))
-            return PURE_INVALID;
+            (why = verify_block(out, out->view_code[i], out->view_type[i], out->view_table[i] ? out->view_list[i] : -1, 0,
+                                &bad))) goto refused;
+    }
+    for (uint32_t i = 0; i < out->handlers; ++i) {
+        bad = i;
+        if ((why = verify_block(out, out->handler[i].code, -1, -1, out->handler[i].event, &bad))) goto refused;
+    }
     return PURE_OK;
+refused:
+    if (error_size) snprintf(error, error_size, "%s (%u)", why, bad);
+    return result;
+#undef REFUSE
 }
 
 static int find(const char (*names)[PURE_MODULE_NAME], unsigned count, const char *name) {
@@ -589,6 +538,8 @@ typedef struct { double num; PureBytes bytes; } Slot;
 typedef struct {
     PureApp *app;
     const PureInputShape *shape; /* message, or NULL */
+    const char *key;             /* a keyed message's key */
+    int64_t base;                /* the revision a message's edit was made against, or -1 */
     PureArena *arena;
     double dt;
     size_t row; /* the row a column is evaluated for */
@@ -715,311 +666,249 @@ static bool text_field(const PureModule *m, uint32_t list, uint32_t field) {
     return m->record_field_text[m->record[m->state_ref[list]].first + field];
 }
 
-/* Run a verified block. Types and stack bounds were proven at load. */
+/* Append bytes to the arena as a value of it. */
+static PureResult keep_bytes(PureArena *arena, const void *bytes, size_t length, PureBytes *out) {
+    if (!reserve(arena, length)) return PURE_ALLOCATION;
+    if (length) memcpy(arena->bytes + arena->used, bytes, length);
+    *out = (PureBytes){FROM_ARENA, 0, {0, 0}, arena->used, length};
+    arena->used += length;
+    return PURE_OK;
+}
+
+/* Run a verified block. Types and stack bounds were proven at load. A change
+ * the data refuses (a size limit, a missing item) fails the event with its
+ * fault; other failures pass through. */
 static PureResult run(const PureModule *m, double *values, PureBlock block, Event *ev, Slot *result) {
     Slot stack[PURE_MODULE_STACK];
     size_t sp = 0;
     PureApp *app = ev->app;
-    uint32_t pc = block.start, end = block.start + block.length;
-    while (pc < end) {
-        const PureOp *op = &m->code[pc];
-        double a, b, value;
-        PureResult status;
+    PureArena *arena = ev->arena;
+    PureResult status;
+    PureFault kind;
+    const PureOp *op = NULL;
+    for (uint32_t pc = block.start, end = block.start + block.length; pc < end;) {
+        op = &m->code[pc++];
+        uint32_t arg = op->arg;
+        Slot *top = sp ? &stack[sp - 1] : stack;
         switch (op->op) {
-        case PURE_OP_CONST: stack[sp++].num = op->value; ++pc; continue;
-        case PURE_OP_LOAD: stack[sp++].num = values[op->arg]; ++pc; continue;
-        case PURE_OP_DT: stack[sp++].num = ev->dt; ++pc; continue;
-        case PURE_OP_STORE: values[op->arg] = stack[--sp].num; ++pc; continue;
-        case PURE_OP_JZ: pc = stack[--sp].num == 0 ? op->arg : pc + 1; continue;
-        case PURE_OP_JMP: pc = op->arg; continue;
-        case PURE_OP_NEG: stack[sp - 1].num = -stack[sp - 1].num; ++pc; continue;
-        case PURE_OP_NOT: stack[sp - 1].num = stack[sp - 1].num == 0; ++pc; continue;
+        case PURE_OP_CONST: stack[sp++].num = op->value; continue;
+        case PURE_OP_LOAD: stack[sp++].num = values[arg]; continue;
+        case PURE_OP_DT: stack[sp++].num = ev->dt; continue;
+        case PURE_OP_STORE: case PURE_OP_CUR_STORE: values[arg] = stack[--sp].num; continue;
+        case PURE_OP_JZ: if (stack[--sp].num == 0) pc = arg; continue;
+        case PURE_OP_JMP: pc = arg; continue;
+        case PURE_OP_NEG: top->num = -top->num; continue;
+        case PURE_OP_NOT: top->num = top->num == 0; continue;
         case PURE_OP_CLAMP: {
             double high = stack[--sp].num, low = stack[--sp].num;
-            if (low > high) return fault(app, PURE_FAULT_CLAMP, pc);
+            if (low > high) { kind = PURE_FAULT_CLAMP; goto failed; }
             stack[sp - 1].num = maximum(low, minimum(stack[sp - 1].num, high));
-            ++pc;
             continue;
         }
         case PURE_OP_FIELD: {
-            const PureField *field = &m->field[ev->shape->field_start + op->arg];
-            if (field->type == PURE_FIELD_U32) stack[sp++].num = (double)(
-                (uint32_t)app->payload.data[field->offset] | (uint32_t)app->payload.data[field->offset + 1] << 8 |
-                (uint32_t)app->payload.data[field->offset + 2] << 16 | (uint32_t)app->payload.data[field->offset + 3] << 24);
-            else stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, field->offset,
-                                                 app->payload.size - field->offset};
-            ++pc;
+            const PureField *field = &m->field[ev->shape->field_start + arg];
+            if (field->type == PURE_FIELD_U32) stack[sp++].num = read32(app->payload.data + field->offset);
+            else stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, field->offset, app->payload.size - field->offset};
             continue;
         }
-        case PURE_OP_DOC: {
-            if (!ev->exists) return fault(app, PURE_FAULT_NOT_FOUND, pc);
+        case PURE_OP_DOC: case PURE_OP_DOC_SIZE: {
+            if (op->op == PURE_OP_DOC && !ev->exists) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
             PureVersion version = app->data.version(app->data.context, app->document);
-            stack[sp++].bytes = (PureBytes){FROM_DOCUMENT, 0, version, 0, version.bytes};
-            ++pc;
+            if (op->op == PURE_OP_DOC) stack[sp++].bytes = (PureBytes){FROM_DOCUMENT, 0, version, 0, version.bytes};
+            else stack[sp++].num = (double)version.bytes;
             continue;
         }
-        case PURE_OP_DOC_SIZE:
-            stack[sp++].num = (double)app->data.version(app->data.context, app->document).bytes;
-            ++pc;
-            continue;
-        case PURE_OP_LEN: case PURE_OP_TEXT_BYTES:
-            stack[sp - 1].num = (double)stack[sp - 1].bytes.length;
-            ++pc;
-            continue;
+        case PURE_OP_LEN: case PURE_OP_TEXT_BYTES: top->num = (double)top->bytes.length; continue;
         case PURE_OP_REPLACE: {
             PureBytes insert = stack[--sp].bytes;
             double last = stack[--sp].num, first = stack[--sp].num;
             double size = (double)app->data.version(app->data.context, app->document).bytes;
-            if (first != floor(first) || last != floor(last) || first < 0 || last < first || last > size)
-                return fault(app, PURE_FAULT_LIMIT, pc);
+            if (first != floor(first) || last != floor(last) || first < 0 || last < first || last > size) {
+                kind = PURE_FAULT_LIMIT;
+                goto failed;
+            }
             PureSpan span;
-            size_t mark = ev->arena->used;
-            if ((status = contiguous(app, ev->arena, insert, &span)) != PURE_OK) return status;
-            status = app->data.splice(app->data.context, app->document, (size_t)first, (size_t)(last - first), span);
-            ev->arena->used = mark;
-            if (status == PURE_LIMIT) return fault(app, PURE_FAULT_LIMIT, pc);
-            if (status != PURE_OK) return status;
+            size_t mark = arena->used;
+            if ((status = contiguous(app, arena, insert, &span)) == PURE_OK)
+                status = app->data.splice(app->data.context, app->document, (size_t)first, (size_t)(last - first), span);
+            arena->used = mark;
+            if (status != PURE_OK) goto refused;
             ev->modified = ev->exists = true;
-            ++pc;
             continue;
         }
-        case PURE_OP_REPLY: {
-            /* A reply outlives the arena mark of later statements: keep it by value. */
-            app->reply = stack[--sp].bytes;
-            app->has_reply = true;
-            ++pc;
-            continue;
-        }
-        case PURE_OP_REQUIRE:
-            if (stack[--sp].num == 0) return fault(app, PURE_FAULT_LIMIT, pc);
-            ++pc;
-            continue;
+        /* A reply outlives the arena mark of later statements: keep it by value. */
+        case PURE_OP_REPLY: app->reply = stack[--sp].bytes; app->has_reply = true; continue;
+        case PURE_OP_REQUIRE: if (stack[--sp].num == 0) { kind = PURE_FAULT_LIMIT; goto failed; } continue;
         case PURE_OP_TEXT_CONST:
-            stack[sp++].bytes = (PureBytes){FROM_CONSTANT, 0, {0, 0}, m->constant_offset[op->arg],
-                                            m->constant_length[op->arg]};
-            ++pc;
+            stack[sp++].bytes = (PureBytes){FROM_CONSTANT, 0, {0, 0}, m->constant_offset[arg], m->constant_length[arg]};
             continue;
-        case PURE_OP_TEXT_LOAD: stack[sp++].bytes = text_of(app, op->arg); ++pc; continue;
-        case PURE_OP_TEXT_INPUT:
-            stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, 0, app->payload.size};
-            ++pc;
-            continue;
+        case PURE_OP_TEXT_LOAD: stack[sp++].bytes = text_of(app, arg); continue;
+        case PURE_OP_TEXT_INPUT: stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, 0, app->payload.size}; continue;
         case PURE_OP_NUM_TEXT: {
             char digits[32];
-            size_t length = pure_format_number(stack[sp - 1].num, digits);
-            if (!reserve(ev->arena, length)) return PURE_ALLOCATION;
-            memcpy(ev->arena->bytes + ev->arena->used, digits, length);
-            stack[sp - 1].bytes = (PureBytes){FROM_ARENA, 0, {0, 0}, ev->arena->used, length};
-            ev->arena->used += length;
-            ++pc;
+            if ((status = keep_bytes(arena, digits, pure_format_number(top->num, digits), &top->bytes)) != PURE_OK)
+                return status;
             continue;
         }
         case PURE_OP_CONCAT: {
             PureBytes right = stack[--sp].bytes, left = stack[sp - 1].bytes;
-            size_t start = ev->arena->used;
-            if ((status = append_value(app, ev->arena, left)) != PURE_OK ||
-                (status = append_value(app, ev->arena, right)) != PURE_OK) return status;
+            size_t start = arena->used;
+            if ((status = append_value(app, arena, left)) != PURE_OK ||
+                (status = append_value(app, arena, right)) != PURE_OK) return status;
             stack[sp - 1].bytes = (PureBytes){FROM_ARENA, 0, {0, 0}, start, left.length + right.length};
-            ++pc;
             continue;
         }
-        case PURE_OP_CHARS: case PURE_OP_LINES: {
-            Measure count = {0, op->op == PURE_OP_LINES, 0, true};
-            if ((status = visit_value(app, ev->arena, stack[sp - 1].bytes, measure, &count)) != PURE_OK) return status;
-            stack[sp - 1].num = (double)(count.count + (op->op == PURE_OP_LINES));
-            ++pc;
+        case PURE_OP_CHARS: case PURE_OP_LINES: case PURE_OP_TEXT_FROM: {
+            Measure count = {0, op->op == PURE_OP_LINES ? 1 : op->op == PURE_OP_TEXT_FROM ? 2 : 0, 0, true};
+            if ((status = visit_value(app, arena, top->bytes, measure, &count)) != PURE_OK) return status;
+            if (op->op != PURE_OP_TEXT_FROM) top->num = (double)(count.count + (op->op == PURE_OP_LINES));
+            else if (!count.valid || !pure_utf8_complete(count.utf8)) { kind = PURE_FAULT_ENCODING; goto failed; }
             continue;
         }
-        case PURE_OP_CUR_LOAD:
-            stack[sp].num = values[op->arg];
-            stack[sp++].bytes.owner = m->state_ref[op->arg];
-            ++pc;
+        /* Positions: a cursor or an index, with the text or list it is in. */
+        case PURE_OP_CUR_LOAD: case PURE_OP_INDEX_LOAD:
+            stack[sp].num = values[arg];
+            stack[sp++].bytes.owner = m->state_ref[arg];
             continue;
-        case PURE_OP_CUR_START: case PURE_OP_CUR_END:
-            stack[sp].num = op->op == PURE_OP_CUR_START ? 0 : (double)pure_draft_size(app->texts[op->arg]);
-            stack[sp++].bytes.owner = (uint16_t)op->arg;
-            ++pc;
+        case PURE_OP_CUR_START: case PURE_OP_CUR_END: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
+        case PURE_OP_ROW: {
+            size_t last = op->op == PURE_OP_CUR_END ? pure_draft_size(app->texts[arg]) :
+                          op->op == PURE_OP_INDEX_LAST ? pure_list_count(app->lists[arg]) : 0;
+            stack[sp].num = op->op == PURE_OP_ROW ? (double)ev->row :
+                            op->op == PURE_OP_INDEX_LAST && last ? (double)(last - 1) : (double)last;
+            stack[sp++].bytes.owner = (uint16_t)arg;
             continue;
-        case PURE_OP_CUR_MOVE: {
+        }
+        case PURE_OP_CUR_MOVE: case PURE_OP_INDEX_MOVE: {
             double count = stack[--sp].num;
-            if (count != floor(count)) return fault(app, PURE_FAULT_LIMIT, pc);
-            PureDraft *text = app->texts[stack[sp - 1].bytes.owner];
+            Slot *at = &stack[sp - 1];
+            if (count != floor(count)) { kind = PURE_FAULT_LIMIT; goto failed; }
+            if (op->op == PURE_OP_INDEX_MOVE) {
+                size_t items = pure_list_count(app->lists[at->bytes.owner]);
+                at->num = maximum(0, minimum(at->num + count, items ? (double)(items - 1) : 0));
+                continue;
+            }
+            PureDraft *text = app->texts[at->bytes.owner];
             PureVersion version = pure_draft_version(text);
-            size_t position = (size_t)stack[sp - 1].num;
-            stack[sp - 1].num = (double)(op->arg == PURE_UNIT_CHAR ? pure_text_step(text, version, position, count)
-                                                                   : pure_text_line_step(text, version, position, count));
-            ++pc;
+            at->num = (double)(arg == PURE_UNIT_CHAR ? pure_text_step(text, version, (size_t)at->num, count)
+                                                     : pure_text_line_step(text, version, (size_t)at->num, count));
             continue;
         }
-        case PURE_OP_CUR_STORE: values[op->arg] = stack[--sp].num; ++pc; continue;
         case PURE_OP_CUR_COUNT: {
-            PureDraft *text = app->texts[stack[sp - 1].bytes.owner];
-            stack[sp - 1].num = (double)pure_text_count(text, pure_draft_version(text),
-                                                        (size_t)stack[sp - 1].num, op->arg);
-            ++pc;
+            PureDraft *text = app->texts[top->bytes.owner];
+            top->num = (double)pure_text_count(text, pure_draft_version(text), (size_t)top->num, arg);
             continue;
         }
         case PURE_OP_TEXT_INSERT: case PURE_OP_TEXT_SET: {
             PureBytes insert = stack[--sp].bytes;
             size_t at = op->op == PURE_OP_TEXT_INSERT ? (size_t)stack[--sp].num : 0;
-            size_t removed = op->op == PURE_OP_TEXT_SET ? pure_draft_size(app->texts[op->arg]) : 0;
+            size_t removed = op->op == PURE_OP_TEXT_SET ? pure_draft_size(app->texts[arg]) : 0;
             PureSpan span;
-            size_t mark = ev->arena->used;
-            if ((status = contiguous(app, ev->arena, insert, &span)) != PURE_OK) return status;
-            status = pure_draft_splice(app->texts[op->arg], at, removed, span);
-            ev->arena->used = mark;
-            if (status == PURE_LIMIT) return fault(app, PURE_FAULT_LIMIT, pc);
-            if (status != PURE_OK) return status;
+            size_t mark = arena->used;
+            if ((status = contiguous(app, arena, insert, &span)) == PURE_OK)
+                status = pure_draft_splice(app->texts[arg], at, removed, span);
+            arena->used = mark;
+            if (status != PURE_OK) goto refused;
             if (op->op == PURE_OP_TEXT_SET) {
                 for (uint32_t c = 0; c < m->states; ++c)
-                    if (m->state_type[c] == PURE_STATE_CURSOR && m->state_ref[c] == op->arg) values[c] = 0;
-            } else move_cursors(m, values, op->arg, at, 0, span.size);
-            ++pc;
+                    if (m->state_type[c] == PURE_STATE_CURSOR && m->state_ref[c] == arg) values[c] = 0;
+            } else move_cursors(m, values, arg, at, 0, span.size);
             continue;
         }
         case PURE_OP_TEXT_REMOVE: {
             double y = stack[--sp].num, x = stack[--sp].num;
             size_t first = (size_t)minimum(x, y), last = (size_t)maximum(x, y);
-            if ((status = pure_draft_splice(app->texts[op->arg], first, last - first, (PureSpan){0})) != PURE_OK)
-                return status;
-            if (last > first) move_cursors(m, values, op->arg, first, last - first, 0);
-            ++pc;
+            if ((status = pure_draft_splice(app->texts[arg], first, last - first, (PureSpan){0})) != PURE_OK) goto refused;
+            if (last > first) move_cursors(m, values, arg, first, last - first, 0);
             continue;
         }
         case PURE_OP_TEXT_LINE: {
-            PureDraft *text = app->texts[op->arg];
+            PureDraft *text = app->texts[arg];
             PureVersion version = pure_draft_version(text);
-            size_t position = (size_t)stack[sp - 1].num;
-            size_t first = pure_text_line_start(text, version, position);
-            size_t last = pure_text_line_end(text, version, position);
-            stack[sp - 1].bytes = (PureBytes){FROM_TEXT, (uint16_t)op->arg, version, first, last - first};
-            ++pc;
+            size_t first = pure_text_line_start(text, version, (size_t)top->num);
+            size_t last = pure_text_line_end(text, version, (size_t)top->num);
+            top->bytes = (PureBytes){FROM_TEXT, (uint16_t)arg, version, first, last - first};
             continue;
         }
-        case PURE_OP_TEXT_FROM: {
-            Measure check = {0, 2, 0, true};
-            if ((status = visit_value(app, ev->arena, stack[sp - 1].bytes, measure, &check)) != PURE_OK) return status;
-            if (!check.valid || !pure_utf8_complete(check.utf8)) return fault(app, PURE_FAULT_ENCODING, pc);
-            ++pc;
-            continue;
-        }
-        case PURE_OP_BYTES_FROM: ++pc; continue; /* same bytes, now untyped */
-        case PURE_OP_LIST_COUNT: stack[sp++].num = (double)pure_list_count(app->lists[op->arg]); ++pc; continue;
+        case PURE_OP_BYTES_FROM: case PURE_OP_INDEX_NUM: continue; /* the same bytes or position, retyped */
+        case PURE_OP_LIST_COUNT: stack[sp++].num = (double)pure_list_count(app->lists[arg]); continue;
         case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: {
-            PureList *list = app->lists[op->arg];
-            const PureRecord *record = &m->record[m->state_ref[op->arg]];
+            PureList *list = app->lists[arg];
+            const PureRecord *record = &m->record[m->state_ref[arg]];
             size_t base = sp - record->count, count = pure_list_count(list), at = count;
             sp = base;
-            if (op->op == PURE_OP_LIST_INSERT && (at = (size_t)stack[--sp].num) > count)
-                return fault(app, PURE_FAULT_NOT_FOUND, pc);
+            if (op->op == PURE_OP_LIST_INSERT && (at = (size_t)stack[--sp].num) > count) {
+                kind = PURE_FAULT_NOT_FOUND;
+                goto failed;
+            }
             /* Room for every text first, so no span moves while the next is copied. */
-            size_t mark = ev->arena->used, total = 0;
+            size_t mark = arena->used, total = 0;
             for (unsigned f = 0; f < record->count; ++f)
-                if (text_field(m, op->arg, f)) total += (size_t)stack[base + f].bytes.length;
-            if (!reserve(ev->arena, total)) return PURE_ALLOCATION;
+                if (text_field(m, arg, f)) total += (size_t)stack[base + f].bytes.length;
+            if (!reserve(arena, total)) return PURE_ALLOCATION;
             PureCell cells[PURE_RECORD_FIELDS];
             for (unsigned f = 0; f < record->count; ++f) {
                 PureSpan span = {0};
-                if (text_field(m, op->arg, f) &&
-                    (status = contiguous(app, ev->arena, stack[base + f].bytes, &span)) != PURE_OK) return status;
+                if (text_field(m, arg, f) && (status = contiguous(app, arena, stack[base + f].bytes, &span)) != PURE_OK)
+                    return status;
                 cells[f] = (PureCell){stack[base + f].num, (unsigned char *)span.data, span.size};
             }
             status = pure_list_insert(list, at, cells, &app->undo);
-            ev->arena->used = mark;
-            if (status == PURE_LIMIT) return fault(app, PURE_FAULT_LIMIT, pc);
-            if (status != PURE_OK) return status;
-            move_indices(m, values, op->arg, pure_list_count(list), at, true);
-            ++pc;
+            arena->used = mark;
+            if (status != PURE_OK) goto refused;
+            move_indices(m, values, arg, pure_list_count(list), at, true);
             continue;
         }
         case PURE_OP_LIST_REMOVE: {
             size_t at = (size_t)stack[--sp].num;
-            status = pure_list_remove(app->lists[op->arg], at, &app->undo);
-            if (status == PURE_NOT_FOUND) return fault(app, PURE_FAULT_NOT_FOUND, pc);
-            if (status != PURE_OK) return status;
-            move_indices(m, values, op->arg, pure_list_count(app->lists[op->arg]), at, false);
-            ++pc;
+            if ((status = pure_list_remove(app->lists[arg], at, &app->undo)) != PURE_OK) goto refused;
+            move_indices(m, values, arg, pure_list_count(app->lists[arg]), at, false);
             continue;
         }
         case PURE_OP_ITEM_GET: {
-            uint32_t list = list_of(op->arg), field = item_field(op->arg);
-            size_t at = (size_t)stack[sp - 1].num;
-            if (at >= pure_list_count(app->lists[list])) return fault(app, PURE_FAULT_NOT_FOUND, pc);
+            uint32_t list = list_of(arg), field = item_field(arg);
+            size_t at = (size_t)top->num;
+            if (at >= pure_list_count(app->lists[list])) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
             PureCell cell = pure_list_get(app->lists[list], at, field);
-            if (!text_field(m, list, field)) stack[sp - 1].num = cell.num;
-            else {
-                /* A copy: the item may change or go before the value is used. */
-                if (!reserve(ev->arena, cell.size)) return PURE_ALLOCATION;
-                if (cell.size) memcpy(ev->arena->bytes + ev->arena->used, cell.text, cell.size);
-                stack[sp - 1].bytes = (PureBytes){FROM_ARENA, 0, {0, 0}, ev->arena->used, cell.size};
-                ev->arena->used += cell.size;
-            }
-            ++pc;
+            /* A text is copied: the item may change or go before the value is used. */
+            if (!text_field(m, list, field)) top->num = cell.num;
+            else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) return status;
             continue;
         }
         case PURE_OP_ITEM_SET: {
-            uint32_t list = list_of(op->arg), field = item_field(op->arg);
+            uint32_t list = list_of(arg), field = item_field(arg);
             Slot value = stack[--sp];
-            size_t at = (size_t)stack[--sp].num, mark = ev->arena->used;
+            size_t at = (size_t)stack[--sp].num, mark = arena->used;
             PureSpan span = {0};
-            if (text_field(m, list, field) && (status = contiguous(app, ev->arena, value.bytes, &span)) != PURE_OK)
-                return status;
-            status = pure_list_set(app->lists[list], at, field,
-                                   (PureCell){value.num, (unsigned char *)span.data, span.size}, &app->undo);
-            ev->arena->used = mark;
-            if (status == PURE_NOT_FOUND) return fault(app, PURE_FAULT_NOT_FOUND, pc);
-            if (status != PURE_OK) return status;
-            ++pc;
+            status = text_field(m, list, field) ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
+            if (status == PURE_OK)
+                status = pure_list_set(app->lists[list], at, field,
+                                       (PureCell){value.num, (unsigned char *)span.data, span.size}, &app->undo);
+            arena->used = mark;
+            if (status != PURE_OK) goto refused;
             continue;
         }
-        case PURE_OP_INDEX_LOAD:
-            stack[sp].num = values[op->arg];
-            stack[sp++].bytes.owner = m->state_ref[op->arg];
-            ++pc;
-            continue;
         case PURE_OP_INDEX_STORE: {
             /* An index from before a remove may be past the end. */
             double position = stack[--sp].num;
-            if (position && position >= (double)pure_list_count(app->lists[m->state_ref[op->arg]]))
-                return fault(app, PURE_FAULT_NOT_FOUND, pc);
-            values[op->arg] = position;
-            ++pc;
+            if (position && position >= (double)pure_list_count(app->lists[m->state_ref[arg]])) {
+                kind = PURE_FAULT_NOT_FOUND;
+                goto failed;
+            }
+            values[arg] = position;
             continue;
         }
-        case PURE_OP_INDEX_MOVE: {
-            double count = stack[--sp].num;
-            if (count != floor(count)) return fault(app, PURE_FAULT_LIMIT, pc);
-            size_t items = pure_list_count(app->lists[stack[sp - 1].bytes.owner]);
-            double last = items ? (double)(items - 1) : 0;
-            stack[sp - 1].num = maximum(0, minimum(stack[sp - 1].num + count, last));
-            ++pc;
-            continue;
-        }
-        case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: {
-            size_t items = pure_list_count(app->lists[op->arg]);
-            stack[sp].num = op->op == PURE_OP_INDEX_LAST && items ? (double)(items - 1) : 0;
-            stack[sp++].bytes.owner = (uint16_t)op->arg;
-            ++pc;
-            continue;
-        }
-        case PURE_OP_INDEX_NUM: ++pc; continue; /* the position itself */
-        case PURE_OP_ROW:
-            stack[sp].num = (double)ev->row;
-            stack[sp++].bytes.owner = (uint16_t)op->arg;
-            ++pc;
-            continue;
-        case PURE_OP_PICK: stack[sp] = stack[sp - 1 - op->arg]; ++sp; ++pc; continue;
-        case PURE_OP_SLIDE: stack[sp - 1 - op->arg] = stack[sp - 1]; sp -= op->arg; ++pc; continue;
+        case PURE_OP_PICK: stack[sp] = stack[sp - 1 - arg]; ++sp; continue;
+        case PURE_OP_SLIDE: stack[sp - 1 - arg] = stack[sp - 1]; sp -= arg; continue;
         default: break;
         }
-        b = stack[--sp].num;
-        a = stack[sp - 1].num;
+        double b = stack[--sp].num, a = stack[sp - 1].num, value;
         switch (op->op) {
         case PURE_OP_ADD: value = a + b; break;
         case PURE_OP_SUB: value = a - b; break;
         case PURE_OP_MUL: value = a * b; break;
         case PURE_OP_DIV:
-            if (b == 0) return fault(app, PURE_FAULT_DIVIDE, pc);
+            if (b == 0) { kind = PURE_FAULT_DIVIDE; goto failed; }
             value = a / b;
             break;
         case PURE_OP_LT: value = a < b; break;
@@ -1033,15 +922,19 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         case PURE_OP_MIN: value = minimum(a, b); break;
         default: value = maximum(a, b); break;
         }
-        if (!isfinite(value)) return fault(app, PURE_FAULT_NON_FINITE, pc);
+        if (!isfinite(value)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
         stack[sp - 1].num = value;
-        ++pc;
     }
     if (result) *result = stack[0];
     return PURE_OK;
+refused:
+    kind = status == PURE_LIMIT ? PURE_FAULT_LIMIT : status == PURE_NOT_FOUND ? PURE_FAULT_NOT_FOUND : PURE_FAULT_NONE;
+    if (kind == PURE_FAULT_NONE) return status;
+failed:
+    return fault(app, kind, (uint32_t)(op - m->code));
 }
 
-static PureResult new_text(PureDraft **out, const PureModule *m, uint32_t constant) {
+PURE_COLD static PureResult new_text(PureDraft **out, const PureModule *m, uint32_t constant) {
     *out = pure_draft_new();
     if (!*out) return PURE_ALLOCATION;
     PureSpan initial = {m->constant_data + m->constant_offset[constant], m->constant_length[constant]};
@@ -1050,29 +943,8 @@ static PureResult new_text(PureDraft **out, const PureModule *m, uint32_t consta
     return result;
 }
 
-static PureList *new_list(const PureModule *m, uint32_t record) {
+PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record) {
     return pure_list_new(m->record[record].count, m->record_field_text + m->record[record].first);
-}
-
-PureResult pure_app_start(PureApp *app, const PureModule *module, PureData data) {
-    *app = (PureApp){.module = module, .data = data, .fault_pc = UINT32_MAX};
-    memcpy(app->values, module->initial, sizeof(double) * module->states);
-    bool kept = pure_save_enabled(app);
-    PureResult result = PURE_OK;
-    for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i) {
-        if (module->state_type[i] == PURE_STATE_TEXT)
-            result = kept ? pure_save_open_text(app, module, i, &app->texts[i], &app->saved[i]) :
-                     new_text(&app->texts[i], module, module->state_ref[i]);
-        if (module->state_type[i] == PURE_STATE_LIST) {
-            if (kept) result = pure_save_open_list(app, module, i, &app->lists[i], &app->list_drafts[i], &app->saved[i]);
-            else if (!(app->lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
-        }
-    }
-    /* Stored numbers, cursors and indices apply once their texts and lists are in. */
-    if (result == PURE_OK && kept) result = pure_save_open_values(app, module, app->values, true);
-    if (result == PURE_OK) result = pure_app_save(app);
-    if (result != PURE_OK) pure_app_stop(app);
-    return result;
 }
 
 static bool pending(const PureApp *app, const void *document) {
@@ -1194,31 +1066,43 @@ static void undo_event(PureApp *app, const Mark *mark) {
     if (mark->opened) close_burst(app, true); /* nothing happened: release the holds */
 }
 
-/* All handlers of one event run in module order against pending states. */
-static PureResult run_handlers(PureApp *app, uint32_t event, Event *ev, double *pending) {
-    const PureModule *m = app->module;
-    memcpy(pending, app->values, sizeof(app->values));
-    app->fault = PURE_FAULT_NONE;
-    app->fault_pc = UINT32_MAX;
-    for (uint32_t i = 0; i < m->handlers; ++i) {
-        if (m->handler[i].event != event) continue;
-        PureResult result = run(m, pending, m->handler[i].code, ev, NULL);
-        if (result != PURE_OK) return result;
-    }
-    return PURE_OK;
-}
+static PureResult keep_reply(PureApp *app);
 
-/* A key or text event saves before it returns unless saving is deferred; a
- * frame leaves that to the next event (frames come 60 times a second). */
+/* One event: every handler for it runs in module order against pending
+ * states, all or nothing. A key, text or message event saves before it
+ * returns unless saving is deferred; a frame leaves that to the next event
+ * (frames come 60 times a second). A message's document joins the burst. */
 static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
+    const PureModule *m = app->module;
     double pending[PURE_MODULE_STATES];
     Mark mark;
     mark_event(app, &mark);
-    PureResult result = run_handlers(app, event, ev, pending);
-    if (result != PURE_OK) { undo_event(app, &mark); return result; }
+    memcpy(pending, app->values, sizeof(app->values));
+    app->fault = PURE_FAULT_NONE;
+    app->fault_pc = UINT32_MAX;
+    PureResult result = PURE_OK;
+    for (uint32_t i = 0; i < m->handlers && result == PURE_OK; ++i)
+        if (m->handler[i].event == event) result = run(m, pending, m->handler[i].code, ev, NULL);
+    /* An edit needs the revision it was made against. A save rebases an
+     * edited document and releasing texts may reclaim earlier text versions:
+     * keep such a reply by copying it first. */
+    if (result == PURE_OK && ev->modified && ev->base < 0) result = PURE_INVALID;
+    if (result == PURE_OK && app->has_reply &&
+        ((app->reply.source == FROM_DOCUMENT && ev->modified) || app->reply.source == FROM_TEXT))
+        result = keep_reply(app);
+    if (result != PURE_OK) {
+        undo_event(app, &mark);
+        return result;
+    }
     memcpy(app->values, pending, sizeof(pending));
     ++app->events;
     if (!event) ++app->ticks;
+    if (app->document) {
+        app->pending[app->pending_count].document = app->document;
+        app->pending[app->pending_count].edited = ev->modified;
+        memcpy(app->pending[app->pending_count++].key, ev->key, strlen(ev->key) + 1);
+        app->revision += ev->modified; /* a save moves an edited document one revision */
+    }
     return event && !app->deferred ? pure_app_save(app) : PURE_OK;
 }
 
@@ -1285,32 +1169,8 @@ PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64
         if (base >= 0 && base != app->revision) { pure_app_finish(app); return PURE_CONFLICT; }
     }
     app->payload = payload;
-    Event ev = {.app = app, .shape = shape, .arena = &app->arena, .exists = app->revision > 0};
-    double pending_values[PURE_MODULE_STATES];
-    Mark mark;
-    mark_event(app, &mark);
-    PureResult result = run_handlers(app, 1 + 2 * input, &ev, pending_values);
-    if (result == PURE_OK && ev.modified && base < 0) result = PURE_INVALID;
-    /* A save rebases an edited document and releasing texts may reclaim
-     * earlier text versions: keep such a reply by copying it first. */
-    if (result == PURE_OK && app->has_reply &&
-        ((app->reply.source == FROM_DOCUMENT && ev.modified) || app->reply.source == FROM_TEXT))
-        result = keep_reply(app);
-    if (result != PURE_OK) {
-        undo_event(app, &mark);
-        pure_app_finish(app);
-        return result;
-    }
-    memcpy(app->values, pending_values, sizeof(pending_values));
-    ++app->events;
-    if (app->document) {
-        app->pending[app->pending_count].document = app->document;
-        app->pending[app->pending_count].edited = ev.modified;
-        memcpy(app->pending[app->pending_count++].key, key, strlen(key) + 1);
-        app->revision += ev.modified; /* a save moves an edited document one revision */
-    }
-    if (app->deferred) return PURE_OK;
-    result = pure_app_save(app);
+    Event ev = {.app = app, .shape = shape, .key = key, .base = base, .arena = &app->arena, .exists = app->revision > 0};
+    PureResult result = dispatch(app, 1 + 2 * input, &ev);
     if (result != PURE_OK) pure_app_finish(app);
     return result;
 }
@@ -1376,7 +1236,7 @@ PureResult pure_app_cell_text(PureApp *app, uint32_t column, size_t row, bool (*
 
 /* A list with record's fields: each takes the field of `from` with the same
  * name and kind, or its default. */
-PureResult pure_list_migrate(PureList **out, const PureList *from, const char *const *names,
+PURE_COLD PureResult pure_list_migrate(PureList **out, const PureList *from, const char *const *names,
                              const uint8_t *text, unsigned count, const PureModule *m, uint32_t record) {
     const PureRecord *r = &m->record[record];
     int source[PURE_RECORD_FIELDS];
@@ -1405,7 +1265,7 @@ PureResult pure_list_migrate(PureList **out, const PureList *from, const char *c
 }
 
 /* A kept list keeps its items; with the same record it is the same list. */
-static PureResult keep_list(PureList **out, PureList *from, const PureModule *old, uint32_t old_record,
+PURE_COLD static PureResult keep_list(PureList **out, PureList *from, const PureModule *old, uint32_t old_record,
                             const PureModule *m, uint32_t record) {
     const PureRecord *r = &m->record[record], *o = &old->record[old_record];
     const char *names[PURE_RECORD_FIELDS];
@@ -1419,16 +1279,14 @@ static PureResult keep_list(PureList **out, PureList *from, const PureModule *ol
     return pure_list_migrate(out, from, names, old->record_field_text + o->first, o->count, m, record);
 }
 
-/* States keep their values by name and kind. With stored states, a state new
- * to this app starts from its stored value, a list whose record changed is
- * stored again, and the next event or save publishes the new module's states;
- * a state the new module drops stays stored as it was. */
-PureResult pure_app_replace(PureApp *app, const PureModule *module) {
-    pure_app_finish(app);
-    if (app->open || app->pending_count) {
-        PureResult saved = pure_app_save(app); /* the burst belongs to the module that made it */
-        if (saved != PURE_OK) return saved;
-    }
+/* Open a module in an app. States keep their values by name and kind (texts
+ * their content, cursors their position in it, lists their items, moved by
+ * field name when the record changed); every other state starts from its
+ * stored value, or its initial one. A list whose record changed is stored
+ * again, and the next event or save publishes the module's states; a state
+ * the module drops stays stored as it was. Starting an app opens its module
+ * over none. */
+PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) {
     const PureModule *old = app->module;
     bool stored = pure_save_enabled(app);
     double values[PURE_MODULE_STATES] = {0};
@@ -1439,7 +1297,7 @@ PureResult pure_app_replace(PureApp *app, const PureModule *module) {
     bool rewrite[PURE_MODULE_STATES] = {false};
     PureResult result = PURE_OK;
     for (uint32_t i = 0; i < module->states; ++i) {
-        int previous = pure_module_state(old, module->state_names[i]);
+        int previous = old ? pure_module_state(old, module->state_names[i]) : -1;
         kept[i] = previous >= 0 && old->state_type[previous] == module->state_type[i] ? previous : -1;
         if (kept[i] >= 0) saved[i] = app->saved[kept[i]];
         if (module->state_type[i] == PURE_STATE_TEXT) {
@@ -1467,7 +1325,7 @@ PureResult pure_app_replace(PureApp *app, const PureModule *module) {
         bool same = kept[i] >= 0 && kept[owner] >= 0 && old->state_ref[kept[i]] == (unsigned)kept[owner];
         values[i] = same ? app->values[kept[i]] : 0;
     }
-    if (result == PURE_OK && stored) result = pure_save_open_values(app, module, values, false);
+    if (result == PURE_OK && stored) result = pure_save_open_values(app, module, values, kept, texts, lists);
     /* Store the lists whose record changed last, so that a failure can put
      * every draft back as it was. */
     for (uint32_t i = 0; i < module->states; ++i)
@@ -1494,7 +1352,7 @@ PureResult pure_app_replace(PureApp *app, const PureModule *module) {
         }
         return result;
     }
-    for (uint32_t i = 0; i < old->states; ++i) {
+    for (uint32_t i = 0; old && i < old->states; ++i) {
         bool reused = false, draft_reused = false;
         for (uint32_t k = 0; k < module->states; ++k) {
             reused = reused || (texts[k] && texts[k] == app->texts[i]) || (lists[k] && lists[k] == app->lists[i]);
@@ -1513,4 +1371,21 @@ PureResult pure_app_replace(PureApp *app, const PureModule *module) {
     memcpy(app->saved, saved, sizeof(saved));
     app->module = module;
     return PURE_OK;
+}
+
+PURE_COLD PureResult pure_app_start(PureApp *app, const PureModule *module, PureData data) {
+    *app = (PureApp){.data = data, .fault_pc = UINT32_MAX};
+    PureResult result = open_module(app, module);
+    if (result == PURE_OK) result = pure_app_save(app);
+    if (result != PURE_OK) pure_app_stop(app);
+    return result;
+}
+
+PURE_COLD PureResult pure_app_replace(PureApp *app, const PureModule *module) {
+    pure_app_finish(app);
+    if (app->open || app->pending_count) {
+        PureResult saved = pure_app_save(app); /* the burst belongs to the module that made it */
+        if (saved != PURE_OK) return saved;
+    }
+    return open_module(app, module);
 }

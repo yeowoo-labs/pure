@@ -40,17 +40,26 @@ static PureResult read_whole(const PureDraft *draft, unsigned char **out, size_t
     return PURE_OK;
 }
 
-static bool name_ok(const unsigned char *name, size_t length) {
-    if (!length || length >= PURE_MODULE_NAME) return false;
+/* One named entry of a stored form: u8 kind, u8 name length, the name (an
+ * identifier), then width more bytes. */
+PURE_COLD static bool named(const unsigned char *bytes, size_t size, size_t *at, size_t width, uint8_t *kind,
+                  char name[PURE_MODULE_NAME]) {
+    if (size - *at < 2) return false;
+    size_t length = bytes[*at + 1];
+    if (size - *at - 2 < length + width || !length || length >= PURE_MODULE_NAME) return false;
     for (size_t i = 0; i < length; ++i) {
-        unsigned char c = name[i];
+        unsigned char c = bytes[*at + 2 + i];
         bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
         if (!letter && !(i && c >= '0' && c <= '9')) return false;
     }
+    *kind = bytes[*at];
+    memcpy(name, bytes + *at + 2, length);
+    name[length] = 0;
+    *at += 2 + length;
     return true;
 }
 
-PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint32_t state, PureDraft **out,
+PURE_COLD PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint32_t state, PureDraft **out,
                                PureVersion *saved) {
     PureResult result = open_state(app, "text-", m->state_names[state], out);
     if (result != PURE_OK) return result;
@@ -89,7 +98,7 @@ static size_t list_header(const PureModule *m, uint32_t record, unsigned char *o
     return at;
 }
 
-PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, PureList *list, PureDraft *draft) {
+PURE_COLD PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, PureList *list, PureDraft *draft) {
     unsigned char header[5 + PURE_RECORD_FIELDS * (2 + PURE_MODULE_NAME)];
     size_t length = list_header(m, m->state_ref[state], header);
     PureVersion before = pure_draft_version(draft);
@@ -105,7 +114,7 @@ PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, PureList 
     return result;
 }
 
-PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint32_t state, PureList **out, PureDraft **draft,
+PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint32_t state, PureList **out, PureDraft **draft,
                                PureVersion *saved) {
     uint32_t record = m->state_ref[state];
     const PureRecord *r = &m->record[record];
@@ -126,12 +135,8 @@ PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint32_t state
         count = ok ? bytes[4] : 0;
         at = 5;
         for (unsigned f = 0; ok && f < count; ++f) {
-            ok = size - at >= 2 && bytes[at] <= 1 && size - at - 2 >= bytes[at + 1] && name_ok(bytes + at + 2, bytes[at + 1]);
-            if (!ok) break;
-            text[f] = bytes[at];
-            memcpy(names[f], bytes + at + 2, bytes[at + 1]);
+            ok = named(bytes, size, &at, 0, &text[f], names[f]) && text[f] <= 1;
             for (unsigned k = 0; k < f; ++k) ok = ok && strcmp(names[k], names[f]);
-            at += 2 + bytes[at + 1];
         }
         if (!ok) result = PURE_STORE_ERROR;
     }
@@ -176,15 +181,15 @@ static bool scalar(uint8_t type) {
 
 /* A stored value still fits its state: a cursor on a character boundary of
  * its text, an index on an item of its list (or 0), a finite number. */
-static bool fits(const PureApp *app, const PureModule *m, uint32_t state, double value) {
+PURE_COLD static bool fits(const PureModule *m, PureDraft *const *texts, PureList *const *lists, uint32_t state, double value) {
     if (!isfinite(value)) return false;
     if (m->state_type[state] == PURE_STATE_NUM) return true;
     if (value < 0 || value != floor(value)) return false;
     if (m->state_type[state] == PURE_STATE_INDEX) {
-        size_t count = pure_list_count(app->lists[m->state_ref[state]]);
+        size_t count = pure_list_count(lists[m->state_ref[state]]);
         return value <= (count ? (double)(count - 1) : 0);
     }
-    const PureDraft *text = app->texts[m->state_ref[state]];
+    const PureDraft *text = texts[m->state_ref[state]];
     size_t size = pure_draft_size(text), at = (size_t)value;
     if (value > (double)size) return false;
     if (at == size) return true;
@@ -212,30 +217,33 @@ static size_t encode_values(const PureModule *m, const double *values, unsigned 
 
 enum { VALUES_BYTES = 4 + PURE_MODULE_STATES * (2 + PURE_MODULE_NAME + 8) };
 
-PureResult pure_save_open_values(PureApp *app, const PureModule *m, double *values, bool load) {
-    bool any = false;
-    for (uint32_t i = 0; i < m->states; ++i) any = any || scalar(m->state_type[i]);
-    if (!any || app->stored_values) return PURE_OK;
-    PureResult result = open_state(app, "", "values", &app->stored_values);
-    if (result != PURE_OK || !load || !pure_draft_revision(app->stored_values)) return result;
+PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, double *values, const int *kept,
+                                 PureDraft *const *texts, PureList *const *lists) {
+    bool scalars = false, fresh = false;
+    for (uint32_t i = 0; i < m->states; ++i)
+        if (scalar(m->state_type[i])) {
+            scalars = true;
+            fresh = fresh || kept[i] < 0;
+        }
+    if (!scalars) return PURE_OK;
+    PureResult result = app->stored_values ? PURE_OK : open_state(app, "", "values", &app->stored_values);
+    if (result != PURE_OK || !fresh || !pure_draft_revision(app->stored_values)) return result;
     unsigned char *bytes;
     size_t size;
     if ((result = read_whole(app->stored_values, &bytes, &size)) != PURE_OK) return result;
     bool ok = size >= 4 && !memcmp(bytes, values_magic, 4);
     for (size_t at = 4; ok && at < size;) {
-        ok = size - at >= 2 && size - at - 2 >= (size_t)bytes[at + 1] + 8 && name_ok(bytes + at + 2, bytes[at + 1]);
-        if (!ok) break;
-        char name[PURE_MODULE_NAME] = {0};
-        memcpy(name, bytes + at + 2, bytes[at + 1]);
-        uint8_t type = bytes[at];
-        at += 2 + bytes[at + 1];
+        char name[PURE_MODULE_NAME];
+        uint8_t type;
+        if (!(ok = named(bytes, size, &at, 8, &type, name))) break;
         uint64_t bits = 0;
         for (unsigned b = 0; b < 8; ++b) bits |= (uint64_t)bytes[at + b] << (8 * b);
         at += 8;
         double value;
         memcpy(&value, &bits, sizeof(value));
         int state = pure_module_state(m, name);
-        if (state >= 0 && m->state_type[state] == type && scalar(type) && fits(app, m, (uint32_t)state, value))
+        if (state >= 0 && kept[state] < 0 && m->state_type[state] == type && scalar(type) &&
+            fits(m, texts, lists, (uint32_t)state, value))
             values[state] = value;
     }
     free(bytes);

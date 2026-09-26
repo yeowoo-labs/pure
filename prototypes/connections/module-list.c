@@ -110,7 +110,7 @@ void pure_list_mirror(PureList *list, PureDraft *draft, size_t header) {
     list->header = header;
 }
 
-PureResult pure_list_write(PureList *list) {
+PURE_COLD PureResult pure_list_write(PureList *list) {
     size_t size = 0;
     for (size_t i = 0; i < list->count; ++i) size += item_bytes(list, list->items[i]);
     unsigned char *bytes = size ? malloc(size) : NULL, *at = bytes;
@@ -122,7 +122,7 @@ PureResult pure_list_write(PureList *list) {
     return result;
 }
 
-PureResult pure_list_read(PureList *list, const unsigned char *bytes, size_t size) {
+PURE_COLD PureResult pure_list_read(PureList *list, const unsigned char *bytes, size_t size) {
     PureCell cells[16];
     for (size_t at = 0; at < size;) {
         for (unsigned f = 0; f < list->fields; ++f) {

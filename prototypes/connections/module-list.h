@@ -6,6 +6,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Executor paths that run once per module or app (loading, verifying,
+ * starting, replacing, reading stored states) are built for size; events
+ * stay built for speed. */
+#if defined(__GNUC__) || defined(__clang__)
+#define PURE_COLD __attribute__((cold))
+#else
+#define PURE_COLD
+#endif
+
 /* Runtime-owned lists of records for the module executor. An item is one
  * cell per field: a number, or text bytes the list owns. Every change made
  * during an event is logged; a failed event undoes the log in reverse and a

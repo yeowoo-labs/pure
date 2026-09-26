@@ -14,9 +14,11 @@ PureResult pure_save_open_text(PureApp *, const PureModule *m, uint32_t state, P
  * record differs from m's. */
 PureResult pure_save_open_list(PureApp *, const PureModule *m, uint32_t state, PureList **out, PureDraft **draft,
                                PureVersion *saved);
-/* Open the stored numbers, cursors and indices of m and, with load, put each
- * stored one of the same name and kind that still fits into values. */
-PureResult pure_save_open_values(PureApp *, const PureModule *m, double *values, bool load);
+/* Open the stored numbers, cursors and indices, and put each stored one of the
+ * same name and kind that still fits into values, for the states of m that
+ * kept marks as new (-1); texts and lists are m's. */
+PureResult pure_save_open_values(PureApp *, const PureModule *m, double *values, const int *kept,
+                                 PureDraft *const *texts, PureList *const *lists);
 /* Store a list whose record changed in its draft, header and items anew. */
 PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, PureList *list, PureDraft *draft);
 /* Publish the documents and every state changed since the last save
