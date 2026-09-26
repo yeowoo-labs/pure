@@ -1,0 +1,184 @@
+{
+ "rounds": [
+  {
+   "probe": [
+    {
+     "way": "bytes, head in a slot at the start, fdatasync",
+     "bytes": 2048,
+     "p50_ms": 2.4,
+     "p90_ms": 3.11,
+     "max_ms": 62.79
+    },
+    {
+     "way": "head just before the bytes, fdatasync",
+     "bytes": 2048,
+     "p50_ms": 1.23,
+     "p90_ms": 3.85,
+     "max_ms": 12.27
+    },
+    {
+     "way": "bytes only, fdatasync",
+     "bytes": 2048,
+     "p50_ms": 1.23,
+     "p90_ms": 3.86,
+     "max_ms": 12.2
+    },
+    {
+     "way": "bytes, head in a slot at the start, fdatasync",
+     "bytes": 8192,
+     "p50_ms": 2.41,
+     "p90_ms": 4.51,
+     "max_ms": 24.86
+    },
+    {
+     "way": "head just before the bytes, fdatasync",
+     "bytes": 8192,
+     "p50_ms": 1.57,
+     "p90_ms": 4.36,
+     "max_ms": 56.75
+    },
+    {
+     "way": "bytes only, fdatasync",
+     "bytes": 8192,
+     "p50_ms": 1.18,
+     "p90_ms": 1.58,
+     "max_ms": 1.7
+    }
+   ],
+   "commits": {
+    "heads in slots": {
+     "commits_per_second": 220,
+     "p50_ms": 2.48,
+     "p90_ms": 5.99,
+     "p99_ms": 59.68
+    },
+    "heads as records": {
+     "commits_per_second": 371,
+     "p50_ms": 1.29,
+     "p90_ms": 3.93,
+     "p99_ms": 52.98
+    }
+   }
+  },
+  {
+   "probe": [
+    {
+     "way": "bytes, head in a slot at the start, fdatasync",
+     "bytes": 2048,
+     "p50_ms": 2.44,
+     "p90_ms": 5.4,
+     "max_ms": 13.3
+    },
+    {
+     "way": "head just before the bytes, fdatasync",
+     "bytes": 2048,
+     "p50_ms": 1.19,
+     "p90_ms": 1.76,
+     "max_ms": 12.16
+    },
+    {
+     "way": "bytes only, fdatasync",
+     "bytes": 2048,
+     "p50_ms": 1.2,
+     "p90_ms": 1.56,
+     "max_ms": 15.32
+    },
+    {
+     "way": "bytes, head in a slot at the start, fdatasync",
+     "bytes": 8192,
+     "p50_ms": 2.71,
+     "p90_ms": 8.51,
+     "max_ms": 23.39
+    },
+    {
+     "way": "head just before the bytes, fdatasync",
+     "bytes": 8192,
+     "p50_ms": 1.18,
+     "p90_ms": 1.6,
+     "max_ms": 32.89
+    },
+    {
+     "way": "bytes only, fdatasync",
+     "bytes": 8192,
+     "p50_ms": 1.21,
+     "p90_ms": 3.9,
+     "max_ms": 74.29
+    }
+   ],
+   "commits": {
+    "heads as records": {
+     "commits_per_second": 372,
+     "p50_ms": 1.29,
+     "p90_ms": 4.04,
+     "p99_ms": 30.55
+    },
+    "heads in slots": {
+     "commits_per_second": 229,
+     "p50_ms": 2.52,
+     "p90_ms": 5.54,
+     "p99_ms": 61.86
+    }
+   }
+  },
+  {
+   "probe": [
+    {
+     "way": "bytes, head in a slot at the start, fdatasync",
+     "bytes": 2048,
+     "p50_ms": 2.44,
+     "p90_ms": 3.94,
+     "max_ms": 53.75
+    },
+    {
+     "way": "head just before the bytes, fdatasync",
+     "bytes": 2048,
+     "p50_ms": 1.21,
+     "p90_ms": 1.85,
+     "max_ms": 4.43
+    },
+    {
+     "way": "bytes only, fdatasync",
+     "bytes": 2048,
+     "p50_ms": 1.21,
+     "p90_ms": 1.57,
+     "max_ms": 4.0
+    },
+    {
+     "way": "bytes, head in a slot at the start, fdatasync",
+     "bytes": 8192,
+     "p50_ms": 2.4,
+     "p90_ms": 3.15,
+     "max_ms": 36.75
+    },
+    {
+     "way": "head just before the bytes, fdatasync",
+     "bytes": 8192,
+     "p50_ms": 1.21,
+     "p90_ms": 4.48,
+     "max_ms": 33.15
+    },
+    {
+     "way": "bytes only, fdatasync",
+     "bytes": 8192,
+     "p50_ms": 1.12,
+     "p90_ms": 1.56,
+     "max_ms": 32.79
+    }
+   ],
+   "commits": {
+    "heads in slots": {
+     "commits_per_second": 233,
+     "p50_ms": 2.55,
+     "p90_ms": 6.04,
+     "p99_ms": 34.19
+    },
+    "heads as records": {
+     "commits_per_second": 396,
+     "p50_ms": 1.26,
+     "p90_ms": 3.9,
+     "p99_ms": 28.43
+    }
+   }
+  }
+ ]
+}

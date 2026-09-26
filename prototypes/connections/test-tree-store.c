@@ -42,8 +42,9 @@ unsigned long pure_tree_test_syncs(void);
 void pure_tree_test_forget(void);
 
 /* The file: head slots in blocks 0 and 1 (sequence at +8, end at +16,
- * catalog at +24), commits from DATA_START. */
-enum { KEYS = 4, CAPACITY = 1 << 20, SLOT_BLOCK = 4096, DATA_START = 8192 };
+ * catalog at +24), commits from DATA_START, each a 128-byte record (its head)
+ * and then its bytes. */
+enum { KEYS = 4, CAPACITY = 1 << 20, SLOT_BLOCK = 4096, DATA_START = 8192, RECORD_SIZE = 128 };
 typedef struct { unsigned char *bytes; size_t size; int64_t revision; } Oracle;
 
 static uint32_t random_value(uint32_t *state) {
@@ -77,12 +78,26 @@ static uint64_t published_end(const char *path, const char *key) {
     return end;
 }
 
-static uint64_t slot_field(int fd, unsigned slot, unsigned offset) {
+static uint64_t field_at(int fd, uint64_t at) {
     unsigned char bytes[8];
-    CHECK(pread(fd, bytes, 8, (off_t)(slot * SLOT_BLOCK + offset)) == 8);
+    CHECK(pread(fd, bytes, 8, (off_t)at) == 8);
     uint64_t value = 0;
     for (unsigned i = 0; i < 8; ++i) value |= (uint64_t)bytes[i] << (8 * i);
     return value;
+}
+
+static uint64_t slot_field(int fd, unsigned slot, unsigned offset) { return field_at(fd, slot * SLOT_BLOCK + offset); }
+
+/* Where the newest head is: the newer slot's, or the last record after it. */
+static uint64_t newest_head(int fd) {
+    uint64_t at = slot_field(fd, 0, 8) > slot_field(fd, 1, 8) ? 0 : SLOT_BLOCK;
+    for (;;) {
+        uint64_t end = field_at(fd, at + 16);
+        unsigned char magic[8];
+        if (pread(fd, magic, 8, (off_t)end) != 8 || memcmp(magic, "PUREREC1", 8) ||
+            field_at(fd, end + 8) != field_at(fd, at + 8) + 1) return at;
+        at = end;
+    }
 }
 
 static void fill(unsigned char *bytes, size_t size, uint32_t *state) {
@@ -255,28 +270,82 @@ static void crashes(const char *path) {
     }
 }
 
-/* A torn newest head slot exposes the previous commit, and the next writer
- * overwrites that slot and the commit's bytes. */
+static void tear(const char *path, uint64_t at) {
+    char name[512];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    int fd = open(name, O_RDWR);
+    unsigned char torn;
+    CHECK(fd >= 0 && pread(fd, &torn, 1, (off_t)at) == 1);
+    torn ^= 0x5a;
+    CHECK(pwrite(fd, &torn, 1, (off_t)at) == 1 && close(fd) == 0);
+}
+
+/* A torn newest record exposes the previous commit to a new process, and the
+ * next writer overwrites that record and the commit's bytes. A torn slot
+ * costs only a longer walk: the other slot's head leads along the records. */
 static void torn_head(const char *path) {
     unsigned char first[] = "first", second[] = "second";
     int64_t revision;
     CHECK(pure_store_put(path, "torn", 0, (PureSpan){first, 5}, &revision) == PURE_OK);
     Oracle o = {first, 5, revision};
+    uint64_t record = published_end(path, "torn"); /* where the next commit's record goes */
     CHECK(pure_store_put(path, "torn", o.revision, (PureSpan){second, 6}, &revision) == PURE_OK);
-    char name[512];
-    snprintf(name, sizeof(name), "%s/pure.tree", path);
-    int fd = open(name, O_RDWR);
-    CHECK(fd >= 0);
-    off_t newest = slot_field(fd, 0, 8) > slot_field(fd, 1, 8) ? 0 : SLOT_BLOCK;
-    unsigned char torn;
-    CHECK(pread(fd, &torn, 1, newest + 20) == 1);
-    torn ^= 0x5a;
-    CHECK(pwrite(fd, &torn, 1, newest + 20) == 1 && close(fd) == 0);
+    tear(path, SLOT_BLOCK + 20);
+    pure_tree_test_forget();
+    expect(path, "torn", &(Oracle){second, 6, revision});
+    tear(path, record + 20);
+    pure_tree_test_forget();
     expect(path, "torn", &o);
     CHECK(pure_store_put(path, "torn", o.revision + 1, (PureSpan){first, 1}, &revision) == PURE_CONFLICT);
     CHECK(pure_store_put(path, "torn", o.revision, (PureSpan){second, 3}, &revision) == PURE_OK);
     o = (Oracle){second, 3, revision};
+    CHECK(published_end(path, "torn") < record + RECORD_SIZE + 4096); /* it went where the torn one was */
+    pure_tree_test_forget();
     expect(path, "torn", &o);
+}
+
+/* Commits are found along their records: from a slot's head, which every
+ * CHECKPOINT commits moves on, by a new process too; a damaged record ends
+ * the walk at the commit before it, which the next writer builds on. */
+static void records(const char *path) {
+    int64_t revision;
+    uint64_t ends[41];
+    char text[16];
+    CHECK(pure_store_put(path, "walk", 0, (PureSpan){(const unsigned char *)"0", 1}, &revision) == PURE_OK);
+    for (unsigned i = 1; i <= 40; ++i) {
+        ends[i] = published_end(path, "walk");
+        snprintf(text, sizeof(text), "%u", i);
+        CHECK(pure_store_put(path, "walk", revision, (PureSpan){(const unsigned char *)text, strlen(text)},
+                             &revision) == PURE_OK);
+    }
+    char name[512];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    int fd = open(name, O_RDONLY);
+    CHECK(fd >= 0);
+    uint64_t newest_slot = slot_field(fd, 0, 8) > slot_field(fd, 1, 8) ? slot_field(fd, 0, 8) : slot_field(fd, 1, 8);
+    CHECK(close(fd) == 0);
+    /* 42 commits (the empty file's first): heads in slots at 17 and 33. */
+    CHECK(newest_slot == 33);
+    pure_tree_test_forget();
+    expect(path, "walk", &(Oracle){(unsigned char *)"40", 2, 41});
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (!child) {
+        pure_tree_test_forget(); /* a process that never saw them */
+        PureStoredView view;
+        _exit(pure_store_get(path, "walk", 16, &view) == PURE_OK && view.body.size == 2 &&
+              !memcmp(view.body.data, "40", 2) && view.revision == 41 ? 0 : 1);
+    }
+    int status;
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    /* Commit 37 ("37", revision 38) has a damaged record: the walk ends at 36. */
+    tear(path, ends[37] + 30);
+    pure_tree_test_forget();
+    expect(path, "walk", &(Oracle){(unsigned char *)"36", 2, 37});
+    CHECK(pure_store_put(path, "walk", 37, (PureSpan){(const unsigned char *)"x", 1}, &revision) == PURE_OK);
+    CHECK(revision == 38 && published_end(path, "walk") < ends[38]);
+    pure_tree_test_forget();
+    expect(path, "walk", &(Oracle){(unsigned char *)"x", 1, 38});
 }
 
 /* A reader's view stays byte-identical while another process commits and
@@ -372,7 +441,7 @@ static void revision_limit(const char *path) {
     snprintf(name, sizeof(name), "%s/pure.tree", path);
     int fd = open(name, O_RDWR);
     CHECK(fd >= 0);
-    uint64_t catalog = slot_field(fd, slot_field(fd, 0, 8) > slot_field(fd, 1, 8) ? 0 : 1, 24);
+    uint64_t catalog = field_at(fd, newest_head(fd) + 24);
     CHECK(catalog >> 63);
     const unsigned char maximum[] = {255,255,255,255,255,255,255,127};
     off_t record = (off_t)(catalog & ((UINT64_C(1) << 62) - 1));
@@ -1046,7 +1115,7 @@ int main(void) {
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, threads, grouped,
-                                      lost_commit, pending_head, one_sync};
+                                      lost_commit, pending_head, one_sync, records};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -1057,6 +1126,6 @@ int main(void) {
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
-         "atomic-batch-runtime-keys-store-handle-threads-group-commit-lost-commit-pending-head-one-sync\"}");
+         "atomic-batch-runtime-keys-store-handle-threads-group-commit-lost-commit-pending-head-one-sync-records\"}");
     return 0;
 }
