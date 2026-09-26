@@ -825,15 +825,32 @@ static bool measure_reply(void *context, PureSpan span) {
     return true;
 }
 
-/* The reply's extents, if the store mapping holds every one. */
-typedef struct { struct iovec *extents; size_t count; const PureMapping *mapping; bool held; } Gather;
+/* A value's extents, if the store mapping holds every one. */
+typedef struct { struct iovec *extents; size_t count, capacity; const PureMapping *mapping; bool held; } Gather;
 
 static bool gather_extents(void *context, PureSpan span) {
     Gather *g = context;
     if (!span.size) return true;
-    g->held = g->held && pure_mapping_holds(g->mapping, span);
+    g->held = g->held && pure_mapping_holds(g->mapping, span) &&
+              grow(&g->extents, &g->capacity, g->count + 1, sizeof(*g->extents));
     if (g->held) g->extents[g->count++] = (struct iovec){(void *)span.data, span.size};
     return g->held;
+}
+
+/* A gathered value goes out as the mapping's extents, not copied: the answer
+ * holds the mapping (charged to the budget) until it is sent and its ticket
+ * released. false (and nothing held) when some extent was not stored. */
+static bool lend(Applied *out, PureMapping *mapping, Gather *gather, bool read, size_t size) {
+    if (!read || !gather->held) {
+        free(gather->extents);
+        pure_mapping_release(mapping);
+        return false;
+    }
+    out->extents = gather->extents;
+    out->extent_count = gather->count;
+    out->resource = (PureResource){.body = {NULL, size}, .allocation = mapping, .allocation_size = size,
+                                   .release = release_loan};
+    return true;
 }
 
 static bool copy_reply(void *context, PureSpan span) {
@@ -894,9 +911,11 @@ static void put_number(Output *o, double value) {
 /* A view's value: a number in Pure's shortest form or a text, as text; a
  * table as {"rows":N,"from":F,"items":[{column: value}...]} for the rows
  * asked, each cell computed only for them (a cell without a value is null). */
-static PureResult show_view(PureApp *app, const Route *route, size_t available, PureResource *out, const char **type) {
+static PureResult show_view(PureApp *app, const Route *route, size_t available, Applied *answer) {
     const PureModule *m = app->module;
     uint32_t view = route->target;
+    PureResource *out = &answer->resource;
+    const char **type = &answer->type;
     /* Room for a page of short rows at once. */
     Output o = {0};
     PureResult status = PURE_OK;
@@ -908,6 +927,17 @@ static PureResult show_view(PureApp *app, const Route *route, size_t available, 
         else status = PURE_NOT_FOUND;
     } else if (m->view_type[view] == PURE_VIEW_TEXT) {
         *type = "text/plain; charset=utf-8";
+        /* A text state shown as it is goes out as its stored extents. */
+        int state = pure_module_text_state(m, view);
+        PureDraft *text = state >= 0 ? app->texts[state] : NULL;
+        PureVersion version = text ? pure_draft_version(text) : (PureVersion){0, 0};
+        if (version.bytes > available) return PURE_BUDGET;
+        PureMapping *mapping = version.bytes ? pure_draft_mapping(text) : NULL;
+        if (mapping) {
+            Gather gather = {NULL, 0, 0, mapping, true};
+            bool read = pure_draft_read_version(text, version, 0, (size_t)version.bytes, gather_extents, &gather) == PURE_OK;
+            if (lend(answer, mapping, &gather, read, (size_t)version.bytes)) return PURE_OK;
+        }
         status = pure_app_view_text(app, view, put_span, &o);
     } else {
         *type = "application/json";
@@ -986,7 +1016,7 @@ static void apply_effect(Executor *ex, const Job *job, Applied *out) {
     *out = (Applied){.host = job->host, .ticket = effect->ticket, .input = effect->input, .route = job->route.kind};
     memcpy(out->key, effect->key, strlen(effect->key) + 1);
     if (job->route.kind == ROUTE_VIEW) {
-        out->status = show_view(app, &job->route, effect->available, &out->resource, &out->type);
+        out->status = show_view(app, &job->route, effect->available, out);
         return;
     }
     if (job->route.kind == ROUTE_INPUT) {
@@ -1012,16 +1042,9 @@ static void apply_effect(Executor *ex, const Job *job, Applied *out) {
     /* A stored document is lent, extent by extent, not copied. */
     PureMapping *mapping = app->document ? pure_draft_mapping(app->document) : NULL;
     if (mapping) {
-        Gather gather = {malloc(reply.spans * sizeof(struct iovec)), 0, mapping, true};
-        if (gather.extents && pure_app_reply(app, gather_extents, &gather) == PURE_OK && gather.held) {
-            out->extents = gather.extents;
-            out->extent_count = gather.count;
-            out->resource = (PureResource){.body = {NULL, reply.size}, .allocation = mapping,
-                                           .allocation_size = reply.size, .release = release_loan};
-            return;
-        }
-        free(gather.extents);
-        pure_mapping_release(mapping);
+        Gather gather = {NULL, 0, 0, mapping, true};
+        bool read = pure_app_reply(app, gather_extents, &gather) == PURE_OK;
+        if (lend(out, mapping, &gather, read, reply.size)) return;
     }
     unsigned char *copy = malloc(reply.size);
     if (!copy) { out->status = PURE_ALLOCATION; return; }
@@ -1107,7 +1130,8 @@ static void answer_applied(Host *host, Applied *a) {
         if (!pure_runtime_result(a->ticket, &result)) abort();
         /* A lent answer's body is its extents (the runtime charged them). */
         if (result.status == PURE_OK && a->extents)
-            respond_extents(c, 200, "OK", "none", result.revision, a->extents, a->extent_count, result.body.size);
+            respond_typed(c, 200, "OK", "none", result.revision, a->type ? a->type : "application/octet-stream",
+                          a->extents, a->extent_count, result.body.size);
         else if (a->route != ROUTE_OBJECT) answer_app(c, result, a->route == ROUTE_VIEW, a->fault, a->type);
         else answer(c, result);
         drive(c); /* most answers fit the socket buffer at once */

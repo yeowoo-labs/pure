@@ -148,6 +148,9 @@ int pure_module_column(const PureModule *, uint32_t table, const char *name);
 /* The index state a number view shows as its position (a view that is just
  * `at.position`), or -1: what a host moves with pure_app_point. */
 int pure_module_position(const PureModule *, uint32_t view);
+/* The text state a text view shows as it is (a view that is just the
+ * state), or -1: a host may lend its stored extents instead of copying. */
+int pure_module_text_state(const PureModule *, uint32_t view);
 
 /* Keyed collections live in a data host (for example the tree store). One
  * event opens at most one document, the message's key, at its current

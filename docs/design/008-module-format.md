@@ -252,7 +252,7 @@ text·리스트가 남을 때만 위치를 유지한다.
 
 | 요청 | 뜻 |
 |---|---|
-| `GET /views/이름` | 보기의 값. 수는 가장 짧은 왕복 10진수, text는 UTF-8 그대로(`text/plain`) |
+| `GET /views/이름` | 보기의 값. 수는 가장 짧은 왕복 10진수, text는 UTF-8 그대로(`text/plain`). text 상태를 그대로 보이는 보기(`view page = note`)는 저장된 익스텐트를 빌려준다([079](../research/079-lent-views.md)) |
 | `GET /views/표?from=N&count=M` | 표의 행: `{"rows":전체,"from":N,"items":[{열: 값}…]}`(`application/json`). 요청한 행의 칸만 계산한다. 값이 없는 칸은 `null` |
 | `POST /inputs/이름` | 이벤트. text 입력은 본문이 text, 키 입력은 누름(down 뒤 up). 메시지는 고정 필드(u32, 수)를 쿼리(`?points=3`)로, 가변 필드 하나를 본문으로 받거나, `Content-Type: application/json` 본문의 객체로 필드를 받는다(문자열은 바이트·text, 수는 u32·수). 응답 본문은 핸들러의 `reply`(메시지 필드) |
 | `GET`·`PUT /objects/키` | 모듈에 키별 메시지 `show`·`edit`가 있으면 기존 문서 서버(`server.c`)와 같은 계약. `GET`은 `show`, `PUT`(`If-Match`/`If-None-Match`)은 `edit` |

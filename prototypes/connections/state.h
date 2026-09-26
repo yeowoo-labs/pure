@@ -34,8 +34,8 @@ PureResult pure_store_state(PureStore *, const char *name, PureDraft **out);
  * reference to the mapping a draft opened through a handle reads its stored
  * nodes from (NULL for other drafts). Spans that mapping holds stay readable
  * until the reference is released, after the draft closes and after the
- * store moves on. Spans of a draft's unsaved edits are not in it. Use it on
- * the handle's owner thread. */
+ * store moves on. Spans of a draft's unsaved edits are not in it. Take it on
+ * the handle's owner thread; the reference may be released on any thread. */
 typedef struct PureMapping PureMapping;
 PureMapping *pure_draft_mapping(const PureDraft *);
 bool pure_mapping_holds(const PureMapping *, PureSpan);

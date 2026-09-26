@@ -662,6 +662,12 @@ int pure_module_position(const PureModule *m, uint32_t view) {
     return block->length == 2 && code[0].op == PURE_OP_INDEX_LOAD && code[1].op == PURE_OP_INDEX_NUM ? (int)code[0].arg : -1;
 }
 
+int pure_module_text_state(const PureModule *m, uint32_t view) {
+    if (view >= m->views || m->view_type[view] != PURE_VIEW_TEXT || m->view_table[view]) return -1;
+    const PureBlock *block = &m->view_code[view];
+    return block->length == 1 && m->code[block->start].op == PURE_OP_TEXT_LOAD ? (int)m->code[block->start].arg : -1;
+}
+
 int pure_module_column(const PureModule *m, uint32_t table, const char *name) {
     for (uint32_t i = 0; i < m->views; ++i)
         if (m->view_table[i] == table + 1 && !strcmp(m->view_names[i], name)) return (int)i;
