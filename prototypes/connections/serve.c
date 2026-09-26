@@ -128,6 +128,8 @@ typedef struct {
     Applied *applied; /* a round's requests, grown to fit */
     size_t applied_capacity;
     bool wrote; /* the last round saved an event or an edit */
+    double next[PURE_MODULE_INPUTS]; /* when each timer ticks next (wall clock, ms) */
+    uint64_t ticks;
 } Executor;
 
 /* A request made ready: its effect, what it names, and the thread that answers it. */
@@ -191,6 +193,13 @@ static uint64_t now_ms(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+}
+
+/* The time events see: the wall clock, in milliseconds since 1970 (UTC). */
+static double wall_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return floor((double)t.tv_sec * 1000 + (double)t.tv_nsec / 1e6);
 }
 
 static bool number(const char *text, uint64_t maximum, uint64_t *value) {
@@ -973,6 +982,7 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
 static void apply_effect(Executor *ex, const Job *job, Applied *out) {
     PureApp *app = &ex->app;
     const PureEffect *effect = &job->effect;
+    app->now = wall_ms();
     *out = (Applied){.host = job->host, .ticket = effect->ticket, .input = effect->input, .route = job->route.kind};
     memcpy(out->key, effect->key, strlen(effect->key) + 1);
     if (job->route.kind == ROUTE_VIEW) {
@@ -1063,6 +1073,29 @@ static void execute(Executor *ex, const Job *jobs, size_t count, void (*finish)(
     if (pinned) pure_store_pin(ex->store, false);
 }
 
+/* Tick every timer that is due, with one save for them (an app with states
+ * only: a timer can change nothing else). The milliseconds until the next
+ * is due, or -1 without timers. Missed ticks are not made up. */
+static long run_timers(Executor *ex) {
+    const PureModule *m = ex->module;
+    if (!m->states) return -1;
+    double now = wall_ms(), soonest = -1;
+    bool ticked = false;
+    for (uint32_t i = 0; i < m->inputs; ++i) {
+        if (m->input[i].kind != PURE_KIND_TIMER) continue;
+        if (!ex->next[i]) ex->next[i] = now + m->input[i].period; /* the first period starts now */
+        if (ex->next[i] <= now) {
+            ex->app.now = now;
+            if (pure_app_tick(&ex->app, i) == PURE_OK) ++ex->ticks;
+            ticked = true;
+            ex->next[i] = now + m->input[i].period;
+        }
+        if (soonest < 0 || ex->next[i] - now < soonest) soonest = ex->next[i] - now;
+    }
+    if (ticked) pure_app_save(&ex->app); /* a failed save undoes the ticks */
+    return soonest < 0 ? -1 : (long)ceil(soonest);
+}
+
 /* On the request's connection thread: complete its ticket and answer it if
  * its connection still waits for it. */
 static void answer_applied(Host *host, Applied *a) {
@@ -1150,8 +1183,9 @@ static void serve_bursts(Host *host) {
 /* The owner's thread: take every waiting request of every connection thread
  * as one round, until they have all stopped. */
 static struct timespec later(struct timespec t, long nanoseconds) {
-    t.tv_nsec += nanoseconds;
-    while (t.tv_nsec >= 1000000000) { ++t.tv_sec; t.tv_nsec -= 1000000000; }
+    t.tv_sec += nanoseconds / 1000000000;
+    t.tv_nsec += nanoseconds % 1000000000;
+    if (t.tv_nsec >= 1000000000) { ++t.tv_sec; t.tv_nsec -= 1000000000; }
     return t;
 }
 
@@ -1166,7 +1200,21 @@ static void *run_owner(void *context) {
     bool gather = false;
     for (;;) {
         pthread_mutex_lock(&owner->lock);
-        while (!owner->count && !owner->stopping) pthread_cond_wait(&owner->waiting, &owner->lock);
+        /* Wait for requests, or until the next timer is due. */
+        for (;;) {
+            pthread_mutex_unlock(&owner->lock);
+            long due = run_timers(&owner->executor);
+            pthread_mutex_lock(&owner->lock);
+            if (owner->count || owner->stopping) break;
+            if (due < 0) {
+                pthread_cond_wait(&owner->waiting, &owner->lock);
+                continue;
+            }
+            struct timespec wake;
+            clock_gettime(CLOCK_REALTIME, &wake);
+            wake = later(wake, due * 1000000L);
+            pthread_cond_timedwait(&owner->waiting, &owner->lock, &wake);
+        }
         /* After a round that saved, its answers bring requests back from the
          * connection threads: gather them until none has come for 100 µs (a
          * millisecond at most), so they share one save as they would on a
@@ -1362,7 +1410,9 @@ static void *run_shard(void *context) {
     struct epoll_event events[EVENTS];
     uint64_t next_sweep = now_ms() + 1000;
     while (!atomic_load(&stopping)) {
-        int ready = epoll_wait(host->epoll, events, EVENTS, 1000);
+        /* A thread that runs the app ticks its timers on time. */
+        long due = host->owner ? -1 : run_timers(&host->local);
+        int ready = epoll_wait(host->epoll, events, EVENTS, due >= 0 && due < 1000 ? (int)due : 1000);
         for (int e = 0; e < ready; ++e) {
             Connection *c = events[e].data.ptr;
             if (!c) { accept_all(host); continue; }
@@ -1483,7 +1533,8 @@ int main(int argc, char **argv) {
         pthread_join(owner_thread, NULL);
     }
     size_t active = 0, retained = 0;
-    uint64_t accepted = 0, requests = 0, bursts = owner.executor.bursts, events = owner.executor.burst_events, expired = 0;
+    uint64_t accepted = 0, requests = 0, bursts = owner.executor.bursts, events = owner.executor.burst_events, expired = 0,
+             ticks = owner.executor.ticks;
     for (unsigned i = 0; i < threads; ++i) {
         active += hosts[i].active;
         retained += hosts[i].runtime.retained;
@@ -1491,6 +1542,7 @@ int main(int argc, char **argv) {
         requests += hosts[i].requests;
         bursts += hosts[i].local.bursts;
         events += hosts[i].local.burst_events;
+        ticks += hosts[i].local.ticks;
         expired += hosts[i].expired;
         stop_shard(&hosts[i]);
     }
@@ -1501,10 +1553,10 @@ int main(int argc, char **argv) {
     unsigned long groups, grouped;
     pure_store_group_counts(&groups, &grouped);
     fprintf(stderr, "{\"active\":%zu,\"retained_payload_bytes\":%zu,\"accepted\":%" PRIu64 ",\"requests\":%" PRIu64
-            ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"expired\":%" PRIu64 ",\"threads\":%u"
-            ",\"owner\":%s,\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
-            active, retained, accepted, requests, bursts, events, expired, threads, owned ? "true" : "false", groups,
-            grouped);
+            ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"ticks\":%" PRIu64 ",\"expired\":%" PRIu64
+            ",\"threads\":%u,\"owner\":%s,\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
+            active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
+            groups, grouped);
     free(hosts);
     free(thread);
     return 0;
