@@ -4,6 +4,23 @@
 작은 코어, 새 문법, 단일 버퍼 실험만으로 완료하지 않는다. 사용자가 직접 작성·변경할 수 있는
 앱과 재현 가능한 실행·비용·실패 검증을 함께 공개할 수 있어야 한다.
 
+## 현재 앱 모델과 근거 (2026-09-26)
+
+아래 표의 문서 앱·scalar 앱 기록 뒤로, 앱 모델은 하나가 됐다. 앱은 [aup](/srv/git/aup.git)로 쓰고 Pure가 검증해
+실행하는 모듈([008 모듈 형식 v5](docs/design/008-module-format.md))이며, 인터페이스는 [Vega](/srv/git/vega.git)가 같은
+명세에서 만든다. 이 절은 그 뒤에 확인한 것만 적는다.
+
+| 영역 | 확인한 것 | 근거 |
+|---|---|---|
+| 앱 표현 | 상태(수, text와 커서·마크, 레코드의 리스트와 키 있는 리스트, 인덱스), 입력(키, text, 필드 있는 메시지, 타이머), 원자적 이벤트 핸들러, 순수 보기(조건식, 표와 걸러진 표, count·sum·max·min·first), `fn`·`use` 라이브러리, text 비교, 시간(`now`, `every`, `floor`, `%`). 로드할 때 타입·스택·합류·커서와 인덱스의 소속을 모두 검증하고 이벤트의 실행량에 상한이 있다 | 008, aup `docs/design/002-dsl-direction.md`, aup `make check`(파이썬 참조 모델 대조, 진단 132건) |
+| 영속 | 선언한 상태가 곧 영속 상태다. 트리 저장소에 커밋당 동기화 한 번, 이벤트 묶음마다 저장 한 번. `kill -9` 뒤 확인 응답한 이벤트가 모두 남는다. 레코드·키가 바뀐 모듈로 바꿔도 데이터가 이름으로 옮겨진다 | [076](docs/research/076-one-sync-commit.md), 008 상태 영속·교체 |
+| 인터페이스 | 한 명세가 TUI(셀 단위 갱신), CLI, 문장(NUI), 웹 GUI가 된다. 저장하면 실행 중인 앱이 상태를 이어 새 모듈로 바뀐다(`aup watch`, `vega … --watch`) | Vega `docs/design/001-first-component.md`, Vega `make check`(가상 터미널, 헤드리스 Chromium 포함) |
+| HTTP 서비스 | 보기가 GET, 입력이 POST다(JSON 본문, 라우터 코드 없음). 답은 저장 뒤에 나가고, 상태를 가진 앱은 연결 스레드 여럿과 소유자 하나로 돈다 | 008 HTTP 호스트, [077](docs/research/077-apps-as-http-services.md) |
+| 성능(Pi 5) | 문서 서버: 작은 GET 151.6k/s, 1 MiB GET 2,794/s(axum 1,372, drogon 708), 충돌 안전 PUT은 axum-atomic의 5.1–5.8배. 앱 서비스(aup 22줄 대 손으로 쓴 서비스): 내구성 있는 쓰기 약 76배, 20행 JSON GET 145k/s(axum 95k, drogon 144k), 최대 RSS 3.4 MiB(axum 6.4, drogon 11.6) | [075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md) |
+
+남은 것: macOS 검증, `bool`·`i64`, 소유자 밖에서의 읽기와 저장·적용의 겹치기(077 다음 결정), 앱 라우트의 인증·TLS(문서
+피어의 TLS는 있다), aup·Vega의 배포 묶음.
+
 ## 공개할 작업물과 완료 증거
 
 기존 작업물 편집·저장 흐름을 발전시킨 **네이티브 작업물 편집기**를 하나의 검증 앱으로 삼는다.
@@ -28,7 +45,7 @@
 
 현재 검증하지 못한 성능·격리·자동 최적화 능력을 소개 문구로 대신하지 않는다.
 문서 앱과 scalar 앱은 수명·예산 코어를 공유하지만 아직 하나의 작성 가능한
-앱 모델이 아니다. [069](docs/research/069-atomic-authored-size-policy.md)의 숫자
+앱 모델이 아니다(이 기록 뒤 모듈 형식 v5와 aup가 하나의 앱 모델이 됐다: 위의 "현재 앱 모델과 근거"). [069](docs/research/069-atomic-authored-size-policy.md)의 숫자
 상한은 실제 문서 효과를 제어하는 첫 좁은 정책이지 범용 산술 엔진은 아니다. 저장 전용 해석은 [068](docs/research/068-opaque-app-core.md)에서 선택형 어댑터로
 옮겼다. 실제 문서 수정 정책으로 scalar 규칙을 통합할 합격 조건은
 [066 경계 조사](docs/research/066-application-boundary.md)에 기록했다.
