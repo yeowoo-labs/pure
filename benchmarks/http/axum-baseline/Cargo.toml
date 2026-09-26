@@ -1,0 +1,17 @@
+[package]
+name = "axum-baseline"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A reference service for Pure's HTTP benchmarks: the same document contract
+# as Pure's document server, written the way an axum service usually is.
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "sync", "signal"] }
+bytes = "1"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

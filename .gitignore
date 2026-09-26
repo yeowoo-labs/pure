@@ -5,3 +5,5 @@ __pycache__/
 /dist/
 /prototypes/*/build/
 /prototypes/*/node_modules/
+/benchmarks/http/axum-baseline/target/
+/benchmarks/http/load
