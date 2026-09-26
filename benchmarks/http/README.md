@@ -10,3 +10,13 @@ make -C ../../prototypes/connections BUILD=build/tree STORE=store-tree.c build/t
 aup build ../../../aup/examples/editor.aup -o editor.pmod
 python3 run.py --module editor.pmod --directory /var/tmp   # 저장소를 둘 장치에서
 ```
+
+저장 보장 쓰기는 장치 상태가 같을 때만 비교된다. SD 카드는 동기 쓰기가 이어지면 느려지므로 실행 순서만으로
+결과가 몇 배 달라진다. 쓰기를 비교할 때는 라운드를 여러 번 돌린다. 라운드마다 서버 순서를 회전하고, 서버마다
+새 저장소를 쓰며, 쓰기 작업 직전에 장치의 fdatasync 지연(제자리 4 KiB)을 재서 결과 옆에 적는다. 표는 라운드의
+중앙값이다.
+
+```sh
+python3 run.py --module editor.pmod --workloads put --rounds 5 --seconds 3 \
+    --only pure-serve,pure-serve-3,axum-durable,axum-atomic
+```
