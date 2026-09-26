@@ -12,20 +12,23 @@
  * A module with keyed messages named show and edit also serves the document
  * contract of server.c (GET and PUT /objects/KEY, If-Match or If-None-Match:
  * *, ETag = revision, X-Pure-Error): GET is its show message and PUT its edit
- * message. HTTP/1.1 connections persist
- * and may pipeline; one epoll owner thread accepts, reads and writes without
- * blocking. Requests go through the runtime core (a work slot per
- * connection, the payload budget, ingress owned by the core, PUT replies
- * borrowed from the request). After each round of events every ready
- * request is applied to the module with deferred saving, one save stores
- * the burst, and only then are its requests answered: an answer is durable,
- * and a failed save fails the whole burst, reads included.
+ * message. HTTP/1.1 connections persist and may pipeline; an epoll thread
+ * accepts, reads and writes without blocking. Requests go through the
+ * runtime core (a work slot per connection, the payload budget, ingress
+ * owned by the core, write replies borrowed from the request). After each
+ * round of events every ready request is applied to the module with
+ * deferred saving, one save stores the burst, and only then are its
+ * requests answered: an answer is durable, and a failed save fails the
+ * whole burst, reads included.
  *
- * With --threads N each thread is a shard with its own listener on the same
- * port (SO_REUSEPORT), epoll set, runtime domain, app and store handle; the
- * kernel spreads connections over them. Shards share nothing but the store,
- * whose commits take turns and whose revisions settle concurrent edits of a
- * key. A module with states (not only keyed documents) runs on one thread. */
+ * With --threads N each thread has its own listener on the same port
+ * (SO_REUSEPORT), epoll set and runtime domain; the kernel spreads
+ * connections over them. A module of keyed documents alone runs one app per
+ * thread: they share nothing but the store, whose commits take turns and
+ * whose revisions settle concurrent edits of a key. States have one owner:
+ * for a module with them, one more thread owns the app, and the connection
+ * threads hand it their ready requests and answer what it hands back. Its
+ * bursts take the requests of every thread, one save each. */
 #include "module-store.h"
 #include "module-text.h"
 #include "runtime.h"
@@ -44,7 +47,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <poll.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <time.h>
@@ -84,11 +89,12 @@ typedef struct Connection {
     char in[HEADER_LIMIT]; /* the header being read, then pipelined bytes */
 } Connection;
 
-/* One request applied in the current burst. A read answered from the store
- * lends its extents: they point into a store mapping, which the resource holds
- * and the runtime charges and releases with the ticket. */
+/* One request applied in a burst, for the connection thread that answers
+ * it. A read answered from the store lends its extents: they point into a
+ * store mapping, which the resource holds and the runtime charges and
+ * releases with the ticket. */
 typedef struct {
-    Connection *connection;
+    Host *host;
     PureTicket ticket;
     PureInput input;
     PureResult status;
@@ -103,24 +109,73 @@ typedef struct {
     const char *type; /* a view's content type */
 } Applied;
 
-struct Host {
+/* The app and its store. A connection thread runs it itself, or, with
+ * several connection threads and an app with states, one owner thread runs
+ * it for all of them. */
+typedef struct {
     const PureModule *module;
     PureStore *store;
     PureApp app;
     uint32_t show, edit;
+    uint64_t bursts, burst_events;
+    Applied *applied; /* a round's requests, grown to fit */
+    size_t applied_capacity;
+    bool wrote; /* the last round saved an event or an edit */
+} Executor;
+
+/* A request made ready: its effect, what it names, and the thread that answers it. */
+typedef struct { Host *host; PureEffect effect; Route route; } Job;
+
+/* The owner of an app with states served by several connection threads:
+ * their requests wait here, and it runs them in bursts, one save each
+ * however many threads they came from, handing each thread back its
+ * applied requests to answer. */
+typedef struct {
+    Executor executor;
+    pthread_mutex_t lock;
+    pthread_cond_t waiting;
+    Job *jobs;
+    size_t count, capacity;
+    bool stopping;
+    Host *hosts;
+    unsigned host_count;
+} Owner;
+
+struct Host {
+    const PureModule *module;
     bool documents; /* the module serves /objects: it has show and edit */
+    Executor local; /* the app, when this thread runs it */
+    Owner *owner;   /* or the owner that runs it */
     Route *routes;  /* by work slot */
     PureRuntime runtime;
     PureWork *work;
     Connection **table;   /* open connections by index */
     Connection **by_slot; /* the connection waiting on a work slot */
     Connection *spare, *closed;
-    Applied *applied;
+    Job *jobs; /* a round's requests: at most one per work slot */
     size_t capacity, active;
     int epoll, listener;
     uint64_t timeout_ms;
-    uint64_t accepted, requests, bursts, burst_events, expired;
+    uint64_t accepted, requests, expired;
+    /* What the owner hands back to answer (swapped for answering), and the
+     * eventfd that says so; pending counts requests at the owner. */
+    pthread_mutex_t lock;
+    Applied *done, *answering;
+    size_t done_count, done_capacity, answering_capacity, pending;
+    int wake;
 };
+
+/* Grow an array to hold `need` items; false when memory runs out. */
+static bool grow(void *array, size_t *capacity, size_t need, size_t size) {
+    if (need <= *capacity) return true;
+    size_t next = *capacity ? *capacity : 64;
+    while (next < need) next *= 2;
+    void *grown = realloc(*(void **)array, next * size);
+    if (!grown) return false;
+    *(void **)array = grown;
+    *capacity = next;
+    return true;
+}
 
 static atomic_bool stopping; /* lock-free, so a signal handler may set it */
 static void stop(int signal_number) { (void)signal_number; atomic_store(&stopping, true); }
@@ -702,29 +757,26 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
     return status;
 }
 
-static void apply_effect(Host *host, const PureEffect *effect, Applied *out) {
-    PureApp *app = &host->app;
-    *out = (Applied){.ticket = effect->ticket, .input = effect->input};
+static void apply_effect(Executor *ex, const Job *job, Applied *out) {
+    PureApp *app = &ex->app;
+    const PureEffect *effect = &job->effect;
+    *out = (Applied){.host = job->host, .ticket = effect->ticket, .input = effect->input, .route = job->route.kind};
     memcpy(out->key, effect->key, strlen(effect->key) + 1);
-    Connection *c = host->by_slot[effect->ticket.slot];
-    if (c && c->phase == WAITING && c->ticket.generation == effect->ticket.generation) out->connection = c;
-    const Route *route = &host->routes[effect->ticket.slot];
-    out->route = route->kind;
-    if (route->kind == ROUTE_VIEW) {
-        out->status = show_view(app, route, effect->available, &out->resource, &out->type);
+    if (job->route.kind == ROUTE_VIEW) {
+        out->status = show_view(app, &job->route, effect->available, &out->resource, &out->type);
         return;
     }
-    if (route->kind == ROUTE_INPUT) {
-        out->status = apply_input(app, route, effect, out);
-        if (out->status == PURE_OK) ++host->burst_events;
+    if (job->route.kind == ROUTE_INPUT) {
+        out->status = apply_input(app, &job->route, effect, out);
+        if (out->status == PURE_OK) ++ex->burst_events;
         return;
     }
     bool read = effect->input == PURE_INPUT_READ;
-    out->status = pure_app_message(app, read ? host->show : host->edit, effect->key,
+    out->status = pure_app_message(app, read ? ex->show : ex->edit, effect->key,
                                    read ? -1 : effect->expected, read ? (PureSpan){0} : effect->value);
     out->revision = app->revision;
     if (out->status != PURE_OK) return;
-    ++host->burst_events;
+    ++ex->burst_events;
     Reply reply = {0};
     pure_app_reply(app, measure_reply, &reply);
     if (!read) {
@@ -756,54 +808,184 @@ static void apply_effect(Host *host, const PureEffect *effect, Applied *out) {
                                    .release = release_copy};
 }
 
-static void finish_burst(Host *host, size_t count) {
+/* One save for a burst: its requests are durable with it or fail with it. */
+static void save_burst(Executor *ex, Applied *applied, size_t count) {
     if (!count) return;
-    PureResult saved = pure_app_save(&host->app);
-    ++host->bursts;
+    for (size_t i = 0; i < count; ++i)
+        ex->wrote = ex->wrote || (applied[i].status == PURE_OK && applied[i].input == PURE_INPUT_WRITE);
+    PureResult saved = pure_app_save(&ex->app);
+    ++ex->bursts;
+    for (size_t i = 0; i < count; ++i)
+        if (applied[i].status == PURE_OK) applied[i].status = saved;
+}
+
+/* Run a round's requests in bursts. A burst ends before a document's key
+ * repeats or before its documents would outgrow one save, so every request
+ * is stored by its burst's save or fails with it; views and events of the
+ * app's states join any burst. Each saved burst goes to finish. */
+static void execute(Executor *ex, const Job *jobs, size_t count, void (*finish)(void *, Applied *, size_t),
+                    void *context) {
+    if (!count) return;
+    if (!grow(&ex->applied, &ex->applied_capacity, count, sizeof(*ex->applied))) abort();
+    Applied *applied = ex->applied;
+    /* One look at the store per round: a request made after another shard's
+     * answer was sent is read after that answer's commit. */
+    bool pinned = pure_store_pin(ex->store, true) == PURE_OK;
+    size_t start = 0, keys = 0;
     for (size_t i = 0; i < count; ++i) {
-        Applied *a = &host->applied[i];
-        PureResult status = a->status == PURE_OK ? saved : a->status;
-        if (!pure_runtime_complete(a->ticket, status, a->input == PURE_INPUT_READ ? &a->resource : NULL,
-                                   status == PURE_OK ? a->reply : (PureSpan){0}, a->revision)) abort();
-        Connection *c = a->connection;
-        if (c && c->phase == WAITING && c->ticket.generation == a->ticket.generation) {
-            PureOutcome result;
-            if (!pure_runtime_result(a->ticket, &result)) abort();
-            /* A lent answer's body is its extents (the runtime charged them). */
-            if (result.status == PURE_OK && a->extents)
-                respond_extents(c, 200, "OK", "none", result.revision, a->extents, a->extent_count, result.body.size);
-            else if (a->route != ROUTE_OBJECT) answer_app(c, result, a->route == ROUTE_VIEW, a->fault, a->type);
-            else answer(c, result);
-            drive(c); /* most answers fit the socket buffer at once */
+        bool document = jobs[i].route.kind == ROUTE_OBJECT, repeated = false;
+        for (size_t k = start; k < i && document && !repeated; ++k)
+            repeated = applied[k].route == ROUTE_OBJECT && !strcmp(applied[k].key, jobs[i].effect.key);
+        if (repeated || (document && keys == PURE_APP_PENDING)) {
+            save_burst(ex, applied + start, i - start);
+            finish(context, applied + start, i - start);
+            start = i;
+            keys = 0;
         }
-        free(a->extents);
+        apply_effect(ex, &jobs[i], &applied[i]);
+        keys += document;
+    }
+    save_burst(ex, applied + start, count - start);
+    finish(context, applied + start, count - start);
+    if (pinned) pure_store_pin(ex->store, false);
+}
+
+/* On the request's connection thread: complete its ticket and answer it if
+ * its connection still waits for it. */
+static void answer_applied(Host *host, Applied *a) {
+    if (!pure_runtime_complete(a->ticket, a->status, a->input == PURE_INPUT_READ ? &a->resource : NULL,
+                               a->status == PURE_OK ? a->reply : (PureSpan){0}, a->revision)) abort();
+    Connection *c = host->by_slot[a->ticket.slot];
+    if (c && c->phase == WAITING && c->ticket.generation == a->ticket.generation) {
+        PureOutcome result;
+        if (!pure_runtime_result(a->ticket, &result)) abort();
+        /* A lent answer's body is its extents (the runtime charged them). */
+        if (result.status == PURE_OK && a->extents)
+            respond_extents(c, 200, "OK", "none", result.revision, a->extents, a->extent_count, result.body.size);
+        else if (a->route != ROUTE_OBJECT) answer_app(c, result, a->route == ROUTE_VIEW, a->fault, a->type);
+        else answer(c, result);
+        drive(c); /* most answers fit the socket buffer at once */
+    }
+    free(a->extents);
+}
+
+static void answer_burst(void *context, Applied *applied, size_t count) {
+    (void)context;
+    for (size_t i = 0; i < count; ++i) answer_applied(applied[i].host, &applied[i]);
+}
+
+/* On the owner: give each connection thread its applied requests, and wake it. */
+static void hand_back(void *context, Applied *applied, size_t count) {
+    Owner *owner = context;
+    for (unsigned h = 0; h < owner->host_count; ++h) {
+        Host *host = &owner->hosts[h];
+        size_t mine = 0;
+        for (size_t i = 0; i < count; ++i) mine += applied[i].host == host;
+        if (!mine) continue;
+        pthread_mutex_lock(&host->lock);
+        if (!grow(&host->done, &host->done_capacity, host->done_count + mine, sizeof(*host->done))) abort();
+        for (size_t i = 0; i < count; ++i)
+            if (applied[i].host == host) host->done[host->done_count++] = applied[i];
+        pthread_mutex_unlock(&host->lock);
+        uint64_t one = 1;
+        if (write(host->wake, &one, sizeof(one)) != sizeof(one)) abort();
     }
 }
 
-/* Every request made ready since the last burst. A burst ends before a
- * document's key repeats or before its documents would outgrow one save, so
- * every request in it is stored by its own save or fails with it. Views and
- * events of the app's states join any burst. */
+/* On a connection thread: answer what the owner handed back. */
+static void answer_handed(Host *host) {
+    uint64_t signals;
+    if (read(host->wake, &signals, sizeof(signals)) < 0 && errno != EAGAIN) abort();
+    pthread_mutex_lock(&host->lock);
+    Applied *done = host->done;
+    size_t count = host->done_count, capacity = host->done_capacity;
+    host->done = host->answering;
+    host->done_capacity = host->answering_capacity;
+    host->done_count = 0;
+    pthread_mutex_unlock(&host->lock);
+    host->answering = done;
+    host->answering_capacity = capacity;
+    for (size_t i = 0; i < count; ++i) answer_applied(host, &done[i]);
+    host->pending -= count;
+}
+
+/* Every request made ready since the last round: run here, or handed to the
+ * owner. Answering may make more ready; they form the next round. */
 static void serve_bursts(Host *host) {
-    size_t count = 0, keys = 0;
-    PureEffect effect;
-    /* One look at the store per burst: a request made after another shard's
-     * answer was sent is read after that answer's commit. */
-    bool pinned = false;
-    while (pure_runtime_take(&host->runtime, &effect) == PURE_TAKE_EFFECT) {
-        if (!pinned) pinned = pure_store_pin(host->store, true) == PURE_OK;
-        bool document = host->routes[effect.ticket.slot].kind == ROUTE_OBJECT, repeated = false;
-        for (size_t i = 0; i < count && document && !repeated; ++i)
-            repeated = host->applied[i].route == ROUTE_OBJECT && !strcmp(host->applied[i].key, effect.key);
-        if (repeated || (document && keys == PURE_APP_PENDING)) {
-            finish_burst(host, count);
-            count = keys = 0;
+    for (;;) {
+        size_t count = 0;
+        PureEffect effect;
+        while (pure_runtime_take(&host->runtime, &effect) == PURE_TAKE_EFFECT)
+            host->jobs[count++] = (Job){host, effect, host->routes[effect.ticket.slot]};
+        if (!count) return;
+        if (!host->owner) {
+            execute(&host->local, host->jobs, count, answer_burst, NULL);
+            continue;
         }
-        apply_effect(host, &effect, &host->applied[count++]);
-        keys += document;
+        Owner *owner = host->owner;
+        pthread_mutex_lock(&owner->lock);
+        if (!grow(&owner->jobs, &owner->capacity, owner->count + count, sizeof(*owner->jobs))) abort();
+        memcpy(owner->jobs + owner->count, host->jobs, count * sizeof(*host->jobs));
+        owner->count += count;
+        pthread_cond_signal(&owner->waiting);
+        pthread_mutex_unlock(&owner->lock);
+        host->pending += count;
+        return;
     }
-    finish_burst(host, count);
-    if (pinned) pure_store_pin(host->store, false);
+}
+
+/* The owner's thread: take every waiting request of every connection thread
+ * as one round, until they have all stopped. */
+static struct timespec later(struct timespec t, long nanoseconds) {
+    t.tv_nsec += nanoseconds;
+    while (t.tv_nsec >= 1000000000) { ++t.tv_sec; t.tv_nsec -= 1000000000; }
+    return t;
+}
+
+static bool before(struct timespec a, struct timespec b) {
+    return a.tv_sec < b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec < b.tv_nsec);
+}
+
+static void *run_owner(void *context) {
+    Owner *owner = context;
+    Job *spare = NULL;
+    size_t spare_capacity = 0;
+    bool gather = false;
+    for (;;) {
+        pthread_mutex_lock(&owner->lock);
+        while (!owner->count && !owner->stopping) pthread_cond_wait(&owner->waiting, &owner->lock);
+        /* After a round that saved, its answers bring requests back from the
+         * connection threads: gather them until none has come for 100 µs (a
+         * millisecond at most), so they share one save as they would on a
+         * single thread, where answering takes that long anyway. */
+        struct timespec now, end;
+        clock_gettime(CLOCK_REALTIME, &now);
+        end = later(now, 1000000);
+        while (gather && owner->count && !owner->stopping && before(now, end)) {
+            size_t seen = owner->count;
+            struct timespec quiet = later(now, 100000);
+            pthread_cond_timedwait(&owner->waiting, &owner->lock, before(quiet, end) ? &quiet : &end);
+            if (owner->count == seen) break;
+            clock_gettime(CLOCK_REALTIME, &now);
+        }
+        if (!owner->count) {
+            pthread_mutex_unlock(&owner->lock);
+            break;
+        }
+        Job *jobs = owner->jobs;
+        size_t count = owner->count, capacity = owner->capacity;
+        owner->jobs = spare;
+        owner->capacity = spare_capacity;
+        owner->count = 0;
+        pthread_mutex_unlock(&owner->lock);
+        owner->executor.wrote = false;
+        execute(&owner->executor, jobs, count, hand_back, owner);
+        gather = owner->executor.wrote;
+        spare = jobs;
+        spare_capacity = capacity;
+    }
+    free(spare);
+    return NULL;
 }
 
 /* A write's reply is borrowed from its request, so the handler of an input
@@ -889,30 +1071,44 @@ static void accept_all(Host *host) {
     }
 }
 
-/* One shard: its own listener on the shared port, epoll set, runtime domain,
- * app and store handle. */
+static bool start_executor(Executor *ex, const PureModule *module, uint32_t show, uint32_t edit, const char *store) {
+    ex->module = module;
+    ex->show = show;
+    ex->edit = edit;
+    if (pure_store_open(store, &ex->store) != PURE_OK) { fputs("Cannot open the store\n", stderr); return false; }
+    if (pure_app_start(&ex->app, module, pure_store_data(ex->store)) != PURE_OK || !pure_app_defer(&ex->app, true)) {
+        fputs("Cannot start the module on the store\n", stderr);
+        return false;
+    }
+    return true;
+}
+
+static void stop_executor(Executor *ex) {
+    pure_app_stop(&ex->app);
+    pure_store_close(ex->store);
+    free(ex->applied);
+}
+
+/* One connection thread: its own listener on the shared port, epoll set,
+ * runtime domain and, unless an owner runs the app for all of them, app and
+ * store handle. */
 static bool start_shard(Host *host, const PureModule *module, bool documents, uint32_t show, uint32_t edit,
                         const char *store, size_t budget, unsigned *port) {
     host->module = module;
     host->documents = documents;
-    host->show = show;
-    host->edit = edit;
-    if (pure_store_open(store, &host->store) != PURE_OK) { fputs("Cannot open the store\n", stderr); return false; }
-    if (pure_app_start(&host->app, module, pure_store_data(host->store)) != PURE_OK || !pure_app_defer(&host->app, true)) {
-        fputs("Cannot start the module on the store\n", stderr);
-        return false;
-    }
+    host->wake = -1;
+    if (!host->owner && !start_executor(&host->local, module, show, edit, store)) return false;
     host->work = calloc(host->capacity, sizeof(*host->work));
     host->table = calloc(host->capacity, sizeof(*host->table));
     host->by_slot = calloc(host->capacity, sizeof(*host->by_slot));
-    host->applied = calloc(host->capacity, sizeof(*host->applied));
+    host->jobs = calloc(host->capacity, sizeof(*host->jobs));
     host->routes = calloc(host->capacity, sizeof(*host->routes));
-    if (!host->work || !host->table || !host->by_slot || !host->applied || !host->routes) {
+    if (!host->work || !host->table || !host->by_slot || !host->jobs || !host->routes) {
         fputs("Cannot allocate connections\n", stderr);
         return false;
     }
-    if (!pure_runtime_init(&host->runtime, host->work, host->capacity, &host->app,
-                           (PureHost){.allocate = allocate_ingress}, budget) ||
+    if (!pure_runtime_init(&host->runtime, host->work, host->capacity, host, (PureHost){.allocate = allocate_ingress},
+                           budget) ||
         !pure_runtime_enable_async(&host->runtime)) return false;
     host->listener = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     int one = 1;
@@ -933,6 +1129,15 @@ static bool start_shard(Host *host, const PureModule *module, bool documents, ui
         perror("epoll");
         return false;
     }
+    /* The owner says it handed requests back through an eventfd. */
+    if (host->owner) {
+        struct epoll_event wake_event = {.events = EPOLLIN, .data.ptr = &host->wake};
+        if (pthread_mutex_init(&host->lock, NULL) || (host->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) < 0 ||
+            epoll_ctl(host->epoll, EPOLL_CTL_ADD, host->wake, &wake_event)) {
+            perror("eventfd");
+            return false;
+        }
+    }
     return true;
 }
 
@@ -945,6 +1150,7 @@ static void *run_shard(void *context) {
         for (int e = 0; e < ready; ++e) {
             Connection *c = events[e].data.ptr;
             if (!c) { accept_all(host); continue; }
+            if (events[e].data.ptr == &host->wake) { answer_handed(host); continue; }
             if (c->phase == CLOSED) continue;
             if (events[e].events & EPOLLERR) { close_connection(c); continue; }
             if (events[e].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) c->readable = true;
@@ -970,15 +1176,20 @@ static void *run_shard(void *context) {
     }
     pure_runtime_stop(&host->runtime);
     serve_bursts(host);
+    /* What the owner still runs is answered before the connections close. */
+    while (host->pending) {
+        struct pollfd wake = {host->wake, POLLIN, 0};
+        if (poll(&wake, 1, -1) > 0) answer_handed(host);
+    }
     for (size_t i = 0; i < host->capacity; ++i) if (host->table[i]) close_connection(host->table[i]);
     return NULL;
 }
 
 static void stop_shard(Host *host) {
-    pure_app_stop(&host->app);
-    pure_store_close(host->store);
+    if (!host->owner) stop_executor(&host->local);
     if (host->listener >= 0) close(host->listener);
     if (host->epoll >= 0) close(host->epoll);
+    if (host->wake >= 0) close(host->wake);
     while (host->closed) {
         Connection *c = host->closed;
         host->closed = c->next;
@@ -989,12 +1200,15 @@ static void stop_shard(Host *host) {
     free(host->work);
     free(host->table);
     free(host->by_slot);
-    free(host->applied);
+    free(host->jobs);
     free(host->routes);
+    free(host->done);
+    free(host->answering);
 }
 
 int main(int argc, char **argv) {
     static PureModule module;
+    static Owner owner;
     const char *module_path = NULL, *store = NULL;
     unsigned port = 8767, threads = 1;
     size_t budget = 64u << 20, capacity = 1024;
@@ -1014,10 +1228,6 @@ int main(int argc, char **argv) {
     uint32_t show, edit;
     bool documents;
     if (!module_path || !store || !load_module(&module, module_path, &documents, &show, &edit)) goto usage;
-    if (threads > 1 && module.states) {
-        fputs("Module: its states have one owner, so it runs with --threads 1\n", stderr);
-        return 2;
-    }
     if (pure_store_init(store) != PURE_OK) { fputs("Cannot initialize the store directory\n", stderr); return 1; }
     signal(SIGPIPE, SIG_IGN);
     struct sigaction stop_action = {.sa_handler = stop};
@@ -1025,38 +1235,60 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &stop_action, NULL);
     sigaction(SIGTERM, &stop_action, NULL);
     Host *hosts = calloc(threads, sizeof(*hosts));
-    pthread_t *thread = calloc(threads, sizeof(*thread));
+    pthread_t *thread = calloc(threads, sizeof(*thread)), owner_thread;
     if (!hosts || !thread) return 1;
+    /* States have one owner: with several connection threads, it runs on its own. */
+    bool owned = threads > 1 && module.states;
+    if (owned) {
+        if (!start_executor(&owner.executor, &module, show, edit, store) || pthread_mutex_init(&owner.lock, NULL) ||
+            pthread_cond_init(&owner.waiting, NULL)) return 1;
+        owner.hosts = hosts;
+        owner.host_count = threads;
+    }
     for (unsigned i = 0; i < threads; ++i) {
         hosts[i].capacity = capacity;
         hosts[i].timeout_ms = timeout_ms;
         hosts[i].listener = hosts[i].epoll = -1;
+        hosts[i].owner = owned ? &owner : NULL;
         if (!start_shard(&hosts[i], &module, documents, show, edit, store, budget, &port)) return 1;
     }
+    if (owned && pthread_create(&owner_thread, NULL, run_owner, &owner)) { fputs("Cannot start the owner\n", stderr); return 1; }
     printf("{\"port\":%u,\"threads\":%u}\n", port, threads);
     fflush(stdout);
     for (unsigned i = 1; i < threads; ++i)
         if (pthread_create(&thread[i], NULL, run_shard, &hosts[i])) { fputs("Cannot start a thread\n", stderr); return 1; }
     run_shard(&hosts[0]);
     for (unsigned i = 1; i < threads; ++i) pthread_join(thread[i], NULL);
+    if (owned) {
+        pthread_mutex_lock(&owner.lock);
+        owner.stopping = true;
+        pthread_cond_signal(&owner.waiting);
+        pthread_mutex_unlock(&owner.lock);
+        pthread_join(owner_thread, NULL);
+    }
     size_t active = 0, retained = 0;
-    uint64_t accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0;
+    uint64_t accepted = 0, requests = 0, bursts = owner.executor.bursts, events = owner.executor.burst_events, expired = 0;
     for (unsigned i = 0; i < threads; ++i) {
         active += hosts[i].active;
         retained += hosts[i].runtime.retained;
         accepted += hosts[i].accepted;
         requests += hosts[i].requests;
-        bursts += hosts[i].bursts;
-        events += hosts[i].burst_events;
+        bursts += hosts[i].local.bursts;
+        events += hosts[i].local.burst_events;
         expired += hosts[i].expired;
         stop_shard(&hosts[i]);
+    }
+    if (owned) {
+        stop_executor(&owner.executor);
+        free(owner.jobs);
     }
     unsigned long groups, grouped;
     pure_store_group_counts(&groups, &grouped);
     fprintf(stderr, "{\"active\":%zu,\"retained_payload_bytes\":%zu,\"accepted\":%" PRIu64 ",\"requests\":%" PRIu64
             ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"expired\":%" PRIu64 ",\"threads\":%u"
-            ",\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
-            active, retained, accepted, requests, bursts, events, expired, threads, groups, grouped);
+            ",\"owner\":%s,\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
+            active, retained, accepted, requests, bursts, events, expired, threads, owned ? "true" : "false", groups,
+            grouped);
     free(hosts);
     free(thread);
     return 0;
