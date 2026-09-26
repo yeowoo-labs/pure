@@ -19,7 +19,7 @@ enum {
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 40,
     PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 64,
     PURE_MODULE_CONSTANT_BYTES = 8192, PURE_MODULE_RECORDS = 8, PURE_MODULE_RECORD_FIELDS = 64,
-    PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8, PURE_APP_PENDING = 16
+    PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8, PURE_APP_PENDING = 256
 };
 
 typedef enum {
@@ -147,7 +147,7 @@ typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
  * before it returns (a frame waits for the next one). Deferred, events apply
  * at once and a host saves a burst with one commit: an event is durable once
  * a later save succeeds, and each key's document joins a burst once (a second
- * message for it saves the burst first). */
+ * message for it, or one past PURE_APP_PENDING keys, saves the burst first). */
 typedef struct {
     const PureModule *module;
     PureData data;
@@ -164,8 +164,8 @@ typedef struct {
     double durable_values[PURE_MODULE_STATES];
     PureVersion durable_texts[PURE_MODULE_STATES], durable_lists[PURE_MODULE_STATES];
     uint64_t durable_ticks, durable_events;
-    struct { void *document; char key[65]; bool edited; } pending[PURE_APP_PENDING];
-    unsigned pending_count;
+    struct PurePending { void *document; char key[65]; bool edited; } *pending; /* grows to PURE_APP_PENDING */
+    unsigned pending_count, pending_capacity;
     PureFault fault;
     uint32_t fault_pc;
     uint64_t ticks, events;

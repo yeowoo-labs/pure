@@ -1697,8 +1697,10 @@ static void deferred_messages(void) {
     pure_app_stop(&app);           /* the last edit was never saved */
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 4 + PURE_APP_PENDING);
     CHECK(pure_app_message(&app, 0, "k0", -1, (PureSpan){0}) == PURE_OK && app.revision == 2 && replied(&app, "abc"));
-    CHECK(pure_app_message(&app, 0, "m16", -1, (PureSpan){0}) == PURE_NOT_FOUND);
-    CHECK(pure_app_message(&app, 0, "m15", -1, (PureSpan){0}) == PURE_OK && replied(&app, "y"));
+    snprintf(key, sizeof(key), "m%d", PURE_APP_PENDING);
+    CHECK(pure_app_message(&app, 0, key, -1, (PureSpan){0}) == PURE_NOT_FOUND);
+    snprintf(key, sizeof(key), "m%d", PURE_APP_PENDING - 1);
+    CHECK(pure_app_message(&app, 0, key, -1, (PureSpan){0}) == PURE_OK && replied(&app, "y"));
     pure_app_stop(&app);
     remove_store(path);
 }

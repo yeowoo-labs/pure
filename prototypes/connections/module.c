@@ -1038,6 +1038,7 @@ void pure_app_stop(PureApp *app) {
         pure_draft_close(app->list_drafts[i]);
     }
     pure_draft_close(app->stored_values);
+    free(app->pending);
     pure_undo_free(&app->undo);
     free(app->arena.bytes);
     free(app->view_arena.bytes);
@@ -1163,6 +1164,13 @@ PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64
         if (seen) {
             PureResult saved = pure_app_save(app);
             if (saved != PURE_OK) return saved;
+        }
+        if (app->pending_count == app->pending_capacity) {
+            unsigned capacity = app->pending_capacity ? 2 * app->pending_capacity : 16;
+            struct PurePending *grown = realloc(app->pending, capacity * sizeof(*grown));
+            if (!grown) return PURE_ALLOCATION;
+            app->pending = grown;
+            app->pending_capacity = capacity;
         }
         PureResult opened = app->data.open(app->data.context, 0, key, &app->document, &app->revision);
         if (opened != PURE_OK) { app->document = NULL; return opened; }
