@@ -10,13 +10,20 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); abort(); } } while (0)
 
 static int fail_stage = -1;
 static int crash;
+static int slow_once; /* the next publication pauses before its data sync */
+static void pause_ms(long ms) {
+    struct timespec wait = {ms / 1000, (ms % 1000) * 1000000};
+    nanosleep(&wait, NULL);
+}
 int pure_store_test_fault(PureStoreStage stage) {
+    if (stage == PURE_BEFORE_FILE_SYNC && __atomic_exchange_n(&slow_once, 0, __ATOMIC_SEQ_CST)) pause_ms(100);
     if ((int)stage != fail_stage) return 0;
     if (crash) _exit(77);
     return 1;
@@ -25,6 +32,7 @@ bool pure_tree_test_shape(const char *path, const char *key, unsigned *height,
                           uint64_t *leaves, uint64_t *small, uint64_t *file_end);
 
 void pure_draft_test_arena(const PureDraft *draft, size_t *nodes, size_t *bytes);
+unsigned long pure_tree_test_publications(void);
 
 enum { KEYS = 4, CAPACITY = 1 << 20 };
 typedef struct { unsigned char *bytes; size_t size; int64_t revision; } Oracle;
@@ -880,6 +888,45 @@ static void threads(const char *path) {
     pure_store_release(&view);
 }
 
+/* Commits that arrive while another is being published share the next
+ * publication: one head for all of them. */
+typedef struct { const char *path; unsigned number; PureResult result; } Single;
+
+static void *commit_one(void *context) {
+    Single *s = context;
+    PureStore *store;
+    PureDraft *draft;
+    char key[16];
+    int64_t revision;
+    snprintf(key, sizeof(key), "g%u", s->number);
+    CHECK(pure_store_open(s->path, &store) == PURE_OK && pure_store_draft(store, key, &draft) == PURE_OK);
+    CHECK(pure_draft_splice(draft, 0, 0, (PureSpan){(const unsigned char *)key, strlen(key)}) == PURE_OK);
+    s->result = pure_draft_commit(draft, &revision);
+    CHECK(s->result != PURE_OK || revision == 1);
+    pure_draft_close(draft);
+    pure_store_close(store);
+    return NULL;
+}
+
+static void grouped(const char *path) {
+    pthread_t thread[5];
+    Single single[5];
+    unsigned long before = pure_tree_test_publications();
+    __atomic_store_n(&slow_once, 1, __ATOMIC_SEQ_CST);
+    for (unsigned i = 0; i < 5; ++i) {
+        single[i] = (Single){path, i, PURE_INVALID};
+        CHECK(pthread_create(&thread[i], NULL, commit_one, &single[i]) == 0);
+        if (!i) pause_ms(20); /* the first is now publishing, slowly */
+    }
+    for (unsigned i = 0; i < 5; ++i) CHECK(pthread_join(thread[i], NULL) == 0 && single[i].result == PURE_OK);
+    CHECK(pure_tree_test_publications() - before == 2);
+    char key[16];
+    for (unsigned i = 0; i < 5; ++i) {
+        snprintf(key, sizeof(key), "g%u", i);
+        expect(path, key, &(Oracle){(unsigned char *)key, strlen(key), 1});
+    }
+}
+
 static void clean(const char *path) {
     DIR *entries = opendir(path);
     CHECK(entries);
@@ -896,7 +943,7 @@ int main(void) {
     void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
-                                      draft_versions, anonymous_draft, batch, store_handle, threads};
+                                      draft_versions, anonymous_draft, batch, store_handle, threads, grouped};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -907,6 +954,6 @@ int main(void) {
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
-         "atomic-batch-runtime-keys-store-handle-threads\"}");
+         "atomic-batch-runtime-keys-store-handle-threads-group-commit\"}");
     return 0;
 }

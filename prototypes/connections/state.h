@@ -61,5 +61,7 @@ PureResult pure_draft_commit(PureDraft *, int64_t *revision);
  * draft's base revision (a conflict names the stored revision in revisions),
  * and either every draft is published or none is. Keys must differ. */
 PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t *revisions);
+/* Commits made so far in this process: groups formed, and requests in them. */
+void pure_store_group_counts(unsigned long *groups, unsigned long *requests);
 void pure_draft_close(PureDraft *);
 #endif

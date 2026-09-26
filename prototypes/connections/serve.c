@@ -687,9 +687,12 @@ int main(int argc, char **argv) {
         expired += hosts[i].expired;
         stop_shard(&hosts[i]);
     }
+    unsigned long groups, grouped;
+    pure_store_group_counts(&groups, &grouped);
     fprintf(stderr, "{\"active\":%zu,\"retained_payload_bytes\":%zu,\"accepted\":%" PRIu64 ",\"requests\":%" PRIu64
-            ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"expired\":%" PRIu64 ",\"threads\":%u}\n",
-            active, retained, accepted, requests, bursts, events, expired, threads);
+            ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"expired\":%" PRIu64 ",\"threads\":%u"
+            ",\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
+            active, retained, accepted, requests, bursts, events, expired, threads, groups, grouped);
     free(hosts);
     free(thread);
     return 0;

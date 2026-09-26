@@ -871,8 +871,16 @@ static PureResult open_session(const char *path, Session *session) {
  * the catalog (revisions come in as the base and leave as the new one),
  * then make the commit durable before its head becomes visible: every
  * document becomes visible at once, or none does. */
+#ifdef PURE_STORE_TEST
+static unsigned long publications;
+unsigned long pure_tree_test_publications(void) { return publications; }
+#endif
+
 static PureResult publish(Session *session, Writer *writer, size_t count, const char *const *keys,
                           const Entry *documents, int64_t *revisions) {
+#ifdef PURE_STORE_TEST
+    ++publications;
+#endif
     Entry catalog = {session->head.catalog, session->head.catalog_bytes};
     bool written = true;
     for (size_t i = 0; written && i < count; ++i) {
@@ -1248,6 +1256,140 @@ void pure_draft_hold(PureDraft *draft, bool held) {
     if (!held) collect(draft);
 }
 
+/* ---- Group commits ------------------------------------------------------
+ * Threads that commit at the same time share one commit: they queue, the
+ * first becomes the leader and publishes every queued request of the same
+ * store with one head (one pair of syncs); the others wait for its result.
+ * Each request stays all or nothing on its own: a request with a stale draft
+ * is left out, and so is one whose key an earlier request of the same group
+ * already changes. The leader touches the waiters' drafts and handles only
+ * while they wait. */
+typedef struct Waiter {
+    PureDraft *const *drafts;
+    size_t count;
+    int64_t *revisions;
+    PureResult result;
+    bool accepted, done;
+    struct Waiter *next;
+} Waiter;
+
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t finished, joined;
+    Waiter *head, *tail;
+    size_t queued, expected; /* expected: how many requests groups have held lately */
+    bool leading;
+    unsigned long groups, requests;
+} group = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, NULL, 0, 1, false, 0, 0};
+
+void pure_store_group_counts(unsigned long *groups, unsigned long *requests) {
+    pthread_mutex_lock(&group.lock);
+    *groups = group.groups;
+    *requests = group.requests;
+    pthread_mutex_unlock(&group.lock);
+}
+
+enum { GATHER_NS = 2000000 };
+
+/* Publish the queued requests of the store at path in one session. */
+static void commit_group(const char *path, Waiter *first) {
+    size_t total = 0;
+    for (Waiter *w = first; w; w = w->next)
+        if (!strcmp(w->drafts[0]->path, path)) { total += w->count; w->accepted = false; }
+    Session session;
+    Writer *writer = NULL;
+    Entry *roots = malloc(total * sizeof(*roots));
+    const char **keys = malloc(total * sizeof(*keys));
+    int64_t *revisions = malloc(total * sizeof(*revisions));
+    PureDraft **drafts = malloc(total * sizeof(*drafts));
+    bool allocated = roots && keys && revisions && drafts, checked = false;
+    PureResult result = allocated ? open_session(path, &session) : PURE_ALLOCATION;
+    size_t count = 0;
+    if (result == PURE_OK) {
+        /* A request holds when each of its keys is at its draft's base
+         * revision and no earlier request of this group changes it. */
+        for (Waiter *w = first; w; w = w->next) {
+            if (strcmp(w->drafts[0]->path, path)) continue;
+            w->result = PURE_OK;
+            for (size_t i = 0; i < w->count && w->result == PURE_OK; ++i) {
+                PureDraft *d = w->drafts[i];
+                Entry current;
+                uint64_t index;
+                int64_t stored;
+                bool found;
+                if (!find(&session.tree, (Entry){session.head.catalog, session.head.catalog_bytes}, d->key, &index,
+                          &found, &current, &stored)) { w->result = PURE_STORE_ERROR; break; }
+                for (size_t k = 0; k < count; ++k)
+                    if (!strcmp(keys[k], d->key)) { ++stored; break; } /* it moves with the earlier request */
+                if (stored != d->revision) { w->revisions[i] = stored; w->result = PURE_CONFLICT; }
+                else if (stored == INT64_MAX) w->result = PURE_LIMIT;
+            }
+            if (w->result != PURE_OK) continue;
+            w->accepted = true;
+            for (size_t i = 0; i < w->count; ++i) {
+                drafts[count] = w->drafts[i];
+                roots[count] = w->drafts[i]->root;
+                keys[count] = w->drafts[i]->key;
+                revisions[count++] = w->drafts[i]->revision;
+            }
+        }
+        checked = true;
+        if (count) {
+            result = PURE_ALLOCATION;
+            if ((writer = malloc(sizeof(*writer)))) {
+                *writer = (Writer){.fd = session.fd, .at = session.head.end};
+                bool written = true;
+                for (size_t i = 0; i < count && written; ++i) {
+                    /* After compaction a draft's stored references name the old file. */
+                    bool relocate = session.file.st_dev != drafts[i]->device || session.file.st_ino != drafts[i]->inode;
+                    written = write_root(&drafts[i]->tree, writer, &roots[i], relocate);
+                }
+                if (written) result = publish(&session, writer, count, keys, roots, revisions);
+                else {
+                    if (ftruncate(session.fd, (off_t)session.head.end) == 0) sync_fd(session.fd);
+                    result = PURE_STORE_ERROR;
+                }
+            }
+        }
+        /* Rebase while still holding the writer lock; the arenas are no longer
+         * needed. Drafts of a store handle share one new mapping. If remapping
+         * fails a draft keeps equal content at its new revision. */
+        PureStore *refreshed[8] = {NULL};
+        size_t fresh = 0;
+        for (size_t i = 0; result == PURE_OK && i < count; ++i) {
+            PureStore *store = drafts[i]->store;
+            bool rebased;
+            if (store) {
+                bool seen = false;
+                for (size_t k = 0; k < fresh && !seen; ++k) seen = refreshed[k] == store;
+                if (!seen && refresh(store) == PURE_OK) {
+                    seen = true;
+                    if (fresh < 8) refreshed[fresh++] = store;
+                }
+                rebased = seen && rebase(drafts[i]) == PURE_OK;
+            } else rebased = load_draft(drafts[i]) == PURE_OK;
+            if (!rebased) drafts[i]->revision = revisions[i];
+        }
+    }
+    /* Before the checks every request shares the failure; after them an
+     * accepted request takes the publication's result and new revisions, and
+     * a refused one keeps its own result. */
+    size_t at = 0;
+    for (Waiter *w = first; w; w = w->next) {
+        if (strcmp(w->drafts[0]->path, path)) continue;
+        if (!checked) { w->result = result; continue; }
+        if (!w->accepted) continue;
+        for (size_t i = 0; i < w->count; ++i) w->revisions[i] = revisions[at++];
+        w->result = result;
+    }
+    free(writer);
+    free(roots);
+    free((void *)keys);
+    free(revisions);
+    free(drafts);
+    if (allocated) close_session(&session);
+}
+
 PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t *revisions) {
     for (size_t i = 0; i < count; ++i) {
         revisions[i] = drafts[i]->revision;
@@ -1255,62 +1397,49 @@ PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t
         for (size_t k = 0; k < i; ++k) if (!strcmp(drafts[k]->key, drafts[i]->key)) return PURE_INVALID;
     }
     if (!count) return PURE_OK;
-    Session session;
-    Writer *writer = NULL;
-    Entry *roots = malloc(count * sizeof(*roots));
-    const char **keys = malloc(count * sizeof(*keys));
-    PureResult result = roots && keys ? open_session(drafts[0]->path, &session) : PURE_ALLOCATION;
-    if (result != PURE_OK) {
-        if (roots && keys) close_session(&session);
-        free(roots);
-        free((void *)keys);
-        return result;
-    }
-    result = PURE_STORE_ERROR;
-    /* Every key must still be at its draft's base revision. */
-    for (size_t i = 0; i < count; ++i) {
-        Entry current;
-        uint64_t index;
-        int64_t stored;
-        bool found;
-        if (!find(&session.tree, (Entry){session.head.catalog, session.head.catalog_bytes}, drafts[i]->key,
-                  &index, &found, &current, &stored)) goto finish;
-        if (stored != drafts[i]->revision) { revisions[i] = stored; result = PURE_CONFLICT; goto finish; }
-        if (stored == INT64_MAX) { result = PURE_LIMIT; goto finish; }
-        roots[i] = drafts[i]->root;
-        keys[i] = drafts[i]->key;
-    }
-    writer = malloc(sizeof(*writer));
-    if (!writer) goto finish;
-    *writer = (Writer){.fd = session.fd, .at = session.head.end};
-    for (size_t i = 0; i < count; ++i) {
-        /* After compaction a draft's stored references name the old file. */
-        bool relocate = session.file.st_dev != drafts[i]->device || session.file.st_ino != drafts[i]->inode;
-        if (!write_root(&drafts[i]->tree, writer, &roots[i], relocate)) {
-            if (ftruncate(session.fd, (off_t)session.head.end) == 0) sync_fd(session.fd);
-            goto finish;
+    Waiter me = {.drafts = drafts, .count = count, .revisions = revisions};
+    pthread_mutex_lock(&group.lock);
+    if (group.tail) group.tail->next = &me; else group.head = &me;
+    group.tail = &me;
+    ++group.queued;
+    pthread_cond_signal(&group.joined);
+    while (!me.done) {
+        if (group.leading) { pthread_cond_wait(&group.finished, &group.lock); continue; }
+        group.leading = true;
+        /* When several threads have been committing together, give the others
+         * a moment (at most 2 ms) to join, or they would miss this group and
+         * wait for the next one: a sync costs far more. One thread never waits. */
+        if (group.expected > 1 && group.queued < group.expected) {
+            struct timespec deadline;
+            clock_gettime(CLOCK_REALTIME, &deadline);
+            deadline.tv_nsec += GATHER_NS;
+            if (deadline.tv_nsec >= 1000000000) { ++deadline.tv_sec; deadline.tv_nsec -= 1000000000; }
+            while (group.queued < group.expected &&
+                   pthread_cond_timedwait(&group.joined, &group.lock, &deadline) == 0) {}
         }
+        Waiter *batch = group.head;
+        size_t size = group.queued;
+        group.head = group.tail = NULL;
+        group.queued = 0;
+        ++group.groups;
+        group.requests += size;
+        /* Remember the largest recent group, forgetting one member per group. */
+        group.expected = size > group.expected - 1 ? size : group.expected - 1;
+        if (!group.expected) group.expected = 1;
+        pthread_mutex_unlock(&group.lock);
+        /* One session per store among the queued requests. */
+        for (Waiter *w = batch; w; w = w->next) {
+            bool earlier = false;
+            for (Waiter *v = batch; v != w && !earlier; v = v->next) earlier = !strcmp(v->drafts[0]->path, w->drafts[0]->path);
+            if (!earlier) commit_group(w->drafts[0]->path, batch);
+        }
+        pthread_mutex_lock(&group.lock);
+        for (Waiter *w = batch, *next; w; w = next) { next = w->next; w->done = true; }
+        group.leading = false;
+        pthread_cond_broadcast(&group.finished);
     }
-    result = publish(&session, writer, count, keys, roots, revisions);
-    /* Rebase while still holding the writer lock; the arenas are no longer
-     * needed. Drafts of a store handle share one new mapping. If remapping
-     * fails a draft keeps equal content at its new revision. */
-    PureStore *refreshed = NULL;
-    for (size_t i = 0; result == PURE_OK && i < count; ++i) {
-        PureStore *store = drafts[i]->store;
-        bool rebased;
-        if (store) {
-            if (store != refreshed && refresh(store) == PURE_OK) refreshed = store;
-            rebased = store == refreshed && rebase(drafts[i]) == PURE_OK;
-        } else rebased = load_draft(drafts[i]) == PURE_OK;
-        if (!rebased) drafts[i]->revision = revisions[i];
-    }
-finish:
-    free(writer);
-    free(roots);
-    free((void *)keys);
-    close_session(&session);
-    return result;
+    pthread_mutex_unlock(&group.lock);
+    return me.result;
 }
 
 PureResult pure_draft_commit(PureDraft *draft, int64_t *revision) {
