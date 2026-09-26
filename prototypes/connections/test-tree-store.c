@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <pthread.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -824,6 +825,61 @@ static void store_handle(const char *path) {
     pure_store_close(store);
 }
 
+/* Threads of one process commit through their own handles at once: none is
+ * refused as busy, every commit lands, and edits of one shared key conflict
+ * instead of overwriting each other. */
+typedef struct { const char *path; unsigned number, conflicts; } Committer;
+
+static void *commit_many(void *context) {
+    Committer *c = context;
+    PureStore *store;
+    CHECK(pure_store_open(c->path, &store) == PURE_OK);
+    char key[16];
+    snprintf(key, sizeof(key), "t%u", c->number);
+    for (unsigned i = 0; i < 40; ++i) {
+        PureDraft *own, *shared;
+        int64_t revisions[2];
+        CHECK(pure_store_draft(store, key, &own) == PURE_OK && pure_store_draft(store, "shared", &shared) == PURE_OK);
+        CHECK(pure_draft_splice(own, pure_draft_size(own), 0, (PureSpan){(const unsigned char *)"x", 1}) == PURE_OK);
+        CHECK(pure_draft_splice(shared, pure_draft_size(shared), 0, (PureSpan){(const unsigned char *)"y", 1}) == PURE_OK);
+        PureDraft *batch[2] = {own, shared};
+        PureResult result = pure_draft_commit_all(batch, 2, revisions);
+        CHECK(result == PURE_OK || result == PURE_CONFLICT);
+        if (result == PURE_CONFLICT) {
+            ++c->conflicts;
+            CHECK(pure_draft_commit(own, &revisions[0]) == PURE_OK);
+        }
+        pure_draft_close(own);
+        pure_draft_close(shared);
+    }
+    pure_store_close(store);
+    return NULL;
+}
+
+static void threads(const char *path) {
+    pthread_t thread[4];
+    Committer committer[4];
+    for (unsigned i = 0; i < 4; ++i) {
+        committer[i] = (Committer){path, i, 0};
+        CHECK(pthread_create(&thread[i], NULL, commit_many, &committer[i]) == 0);
+    }
+    unsigned conflicts = 0;
+    for (unsigned i = 0; i < 4; ++i) {
+        CHECK(pthread_join(thread[i], NULL) == 0);
+        conflicts += committer[i].conflicts;
+    }
+    PureStoredView view;
+    char key[16];
+    for (unsigned i = 0; i < 4; ++i) {
+        snprintf(key, sizeof(key), "t%u", i);
+        CHECK(pure_store_get(path, key, PURE_OBJECT_LIMIT, &view) == PURE_OK && view.body.size == 40 && view.revision == 40);
+        pure_store_release(&view);
+    }
+    CHECK(pure_store_get(path, "shared", PURE_OBJECT_LIMIT, &view) == PURE_OK);
+    CHECK(view.body.size == 160 - conflicts && view.revision == (int64_t)(160 - conflicts));
+    pure_store_release(&view);
+}
+
 static void clean(const char *path) {
     DIR *entries = opendir(path);
     CHECK(entries);
@@ -840,7 +896,7 @@ int main(void) {
     void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
-                                      draft_versions, anonymous_draft, batch, store_handle};
+                                      draft_versions, anonymous_draft, batch, store_handle, threads};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -851,6 +907,6 @@ int main(void) {
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
-         "atomic-batch-runtime-keys-store-handle\"}");
+         "atomic-batch-runtime-keys-store-handle-threads\"}");
     return 0;
 }

@@ -10,7 +10,13 @@
  * borrowed from the request). After each round of events every ready
  * request is applied to the module with deferred saving, one save stores
  * the burst, and only then are its requests answered: an answer is durable,
- * and a failed save fails the whole burst, reads included. */
+ * and a failed save fails the whole burst, reads included.
+ *
+ * With --threads N each thread is a shard with its own listener on the same
+ * port (SO_REUSEPORT), epoll set, runtime domain, app and store handle; the
+ * kernel spreads connections over them. Shards share nothing but the store,
+ * whose commits take turns and whose revisions settle concurrent edits of a
+ * key. A module with states (not only keyed documents) runs on one thread. */
 #include "module-store.h"
 #include "runtime.h"
 #include "store.h"
@@ -20,7 +26,9 @@
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,7 +76,8 @@ typedef struct {
 } Applied;
 
 struct Host {
-    PureModule module;
+    const PureModule *module;
+    PureStore *store;
     PureApp app;
     uint32_t show, edit;
     PureRuntime runtime;
@@ -83,8 +92,8 @@ struct Host {
     uint64_t accepted, requests, bursts, burst_events, expired;
 };
 
-static volatile sig_atomic_t stopping;
-static void stop(int signal_number) { (void)signal_number; stopping = 1; }
+static atomic_bool stopping; /* lock-free, so a signal handler may set it */
+static void stop(int signal_number) { (void)signal_number; atomic_store(&stopping, true); }
 
 static uint64_t now_ms(void) {
     struct timespec t;
@@ -428,7 +437,11 @@ static void finish_burst(Host *host, size_t count) {
 static void serve_bursts(Host *host) {
     size_t count = 0, keys = 0;
     PureEffect effect;
+    /* One look at the store per burst: a request made after another shard's
+     * answer was sent is read after that answer's commit. */
+    bool pinned = false;
     while (pure_runtime_take(&host->runtime, &effect) == PURE_TAKE_EFFECT) {
+        if (!pinned) pinned = pure_store_pin(host->store, true) == PURE_OK;
         bool repeated = false;
         for (size_t i = 0; i < count && !repeated; ++i) repeated = !strcmp(host->applied[i].key, effect.key);
         if (repeated || keys == PURE_APP_PENDING) {
@@ -439,6 +452,7 @@ static void serve_bursts(Host *host) {
         ++keys;
     }
     finish_burst(host, count);
+    if (pinned) pure_store_pin(host->store, false);
 }
 
 /* PUT replies are borrowed from the request, so an edit handler may reply
@@ -456,18 +470,17 @@ static bool edit_replies_borrow(const PureModule *m, uint32_t edit) {
 
 /* ---- Main ------------------------------------------------------------- */
 
-static bool load_module(Host *host, const char *path) {
+static bool load_module(PureModule *m, const char *path, uint32_t *show_out, uint32_t *edit_out) {
     static unsigned char bytes[1 << 17];
     char error[128];
     FILE *file = fopen(path, "rb");
     size_t size = file ? fread(bytes, 1, sizeof(bytes), file) : 0;
     bool read_ok = file && !ferror(file) && size < sizeof(bytes);
     if (file) fclose(file);
-    if (!read_ok || pure_module_load(bytes, size, &host->module, error, sizeof(error)) != PURE_OK) {
+    if (!read_ok || pure_module_load(bytes, size, m, error, sizeof(error)) != PURE_OK) {
         fprintf(stderr, "Module: %s\n", read_ok ? error : "cannot read");
         return false;
     }
-    const PureModule *m = &host->module;
     int show = pure_module_input(m, "show"), edit = pure_module_input(m, "edit");
     if (show < 0 || edit < 0 || m->input[show].kind != PURE_KIND_MESSAGE || !m->input[show].keyed ||
         m->input[edit].kind != PURE_KIND_MESSAGE || !m->input[edit].keyed) {
@@ -478,8 +491,8 @@ static bool load_module(Host *host, const char *path) {
         fputs("Module: edit may reply only a field of its message\n", stderr);
         return false;
     }
-    host->show = (uint32_t)show;
-    host->edit = (uint32_t)edit;
+    *show_out = (uint32_t)show;
+    *edit_out = (uint32_t)edit;
     return true;
 }
 
@@ -519,13 +532,110 @@ static void accept_all(Host *host) {
     }
 }
 
+/* One shard: its own listener on the shared port, epoll set, runtime domain,
+ * app and store handle. */
+static bool start_shard(Host *host, const PureModule *module, uint32_t show, uint32_t edit, const char *store,
+                        size_t budget, unsigned *port) {
+    host->module = module;
+    host->show = show;
+    host->edit = edit;
+    if (pure_store_open(store, &host->store) != PURE_OK) { fputs("Cannot open the store\n", stderr); return false; }
+    if (pure_app_start(&host->app, module, pure_store_data(host->store)) != PURE_OK || !pure_app_defer(&host->app, true)) {
+        fputs("Cannot start the module on the store\n", stderr);
+        return false;
+    }
+    host->work = calloc(host->capacity, sizeof(*host->work));
+    host->table = calloc(host->capacity, sizeof(*host->table));
+    host->by_slot = calloc(host->capacity, sizeof(*host->by_slot));
+    host->applied = calloc(host->capacity, sizeof(*host->applied));
+    if (!host->work || !host->table || !host->by_slot || !host->applied) { fputs("Cannot allocate connections\n", stderr); return false; }
+    if (!pure_runtime_init(&host->runtime, host->work, host->capacity, &host->app,
+                           (PureHost){.allocate = allocate_ingress}, budget) ||
+        !pure_runtime_enable_async(&host->runtime)) return false;
+    host->listener = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    int one = 1;
+    setsockopt(host->listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(host->listener, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons((uint16_t)*port),
+                                  .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t address_size = sizeof(address);
+    if (host->listener < 0 || bind(host->listener, (struct sockaddr *)&address, sizeof(address)) ||
+        listen(host->listener, 4096) || getsockname(host->listener, (struct sockaddr *)&address, &address_size)) {
+        perror("listen");
+        return false;
+    }
+    *port = ntohs(address.sin_port); /* the first shard picks it, the others join it */
+    host->epoll = epoll_create1(EPOLL_CLOEXEC);
+    struct epoll_event listen_event = {.events = EPOLLIN, .data.ptr = NULL};
+    if (host->epoll < 0 || epoll_ctl(host->epoll, EPOLL_CTL_ADD, host->listener, &listen_event)) {
+        perror("epoll");
+        return false;
+    }
+    return true;
+}
+
+static void *run_shard(void *context) {
+    Host *host = context;
+    struct epoll_event events[EVENTS];
+    uint64_t next_sweep = now_ms() + 1000;
+    while (!atomic_load(&stopping)) {
+        int ready = epoll_wait(host->epoll, events, EVENTS, 1000);
+        for (int e = 0; e < ready; ++e) {
+            Connection *c = events[e].data.ptr;
+            if (!c) { accept_all(host); continue; }
+            if (c->phase == CLOSED) continue;
+            if (events[e].events & EPOLLERR) { close_connection(c); continue; }
+            if (events[e].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) c->readable = true;
+            if (events[e].events & EPOLLOUT) c->writable = true;
+            drive(c);
+        }
+        serve_bursts(host);
+        uint64_t now = now_ms();
+        if (now >= next_sweep) {
+            next_sweep = now + 1000;
+            for (size_t i = 0; i < host->capacity; ++i) {
+                Connection *c = host->table[i];
+                if (c && c->phase != WAITING && now >= c->deadline) { ++host->expired; close_connection(c); }
+            }
+        }
+        /* The round is over: closed connections can be reused. */
+        while (host->closed) {
+            Connection *c = host->closed;
+            host->closed = c->next;
+            c->next = host->spare;
+            host->spare = c;
+        }
+    }
+    pure_runtime_stop(&host->runtime);
+    serve_bursts(host);
+    for (size_t i = 0; i < host->capacity; ++i) if (host->table[i]) close_connection(host->table[i]);
+    return NULL;
+}
+
+static void stop_shard(Host *host) {
+    pure_app_stop(&host->app);
+    pure_store_close(host->store);
+    if (host->listener >= 0) close(host->listener);
+    if (host->epoll >= 0) close(host->epoll);
+    while (host->closed) {
+        Connection *c = host->closed;
+        host->closed = c->next;
+        c->next = host->spare;
+        host->spare = c;
+    }
+    for (Connection *c = host->spare, *next; c; c = next) { next = c->next; free(c); }
+    free(host->work);
+    free(host->table);
+    free(host->by_slot);
+    free(host->applied);
+}
+
 int main(int argc, char **argv) {
-    static Host host;
+    static PureModule module;
     const char *module_path = NULL, *store = NULL;
-    unsigned port = 8767;
-    size_t budget = 64u << 20;
-    host.capacity = 1024;
-    host.timeout_ms = 10000;
+    unsigned port = 8767, threads = 1;
+    size_t budget = 64u << 20, capacity = 1024;
+    uint64_t timeout_ms = 10000;
     for (int i = 1; i < argc; i += 2) {
         uint64_t value;
         if (i + 1 == argc) goto usage;
@@ -533,99 +643,58 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--store")) store = argv[i + 1];
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
-        else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) host.capacity = (size_t)value;
-        else if (!strcmp(argv[i], "--timeout-ms") && number(argv[i + 1], 3600000, &value) && value) host.timeout_ms = value;
+        else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
+        else if (!strcmp(argv[i], "--threads") && number(argv[i + 1], 256, &value) && value) threads = (unsigned)value;
+        else if (!strcmp(argv[i], "--timeout-ms") && number(argv[i + 1], 3600000, &value) && value) timeout_ms = value;
         else goto usage;
     }
-    if (!module_path || !store || !load_module(&host, module_path)) goto usage;
-    if (pure_store_init(store) != PURE_OK) { fputs("Cannot initialize the store directory\n", stderr); return 1; }
-    PureStore *handle;
-    if (pure_store_open(store, &handle) != PURE_OK) { fputs("Cannot open the store\n", stderr); return 1; }
-    if (pure_app_start(&host.app, &host.module, pure_store_data(handle)) != PURE_OK || !pure_app_defer(&host.app, true)) {
-        fputs("Cannot start the module on the store\n", stderr);
-        return 1;
+    uint32_t show, edit;
+    if (!module_path || !store || !load_module(&module, module_path, &show, &edit)) goto usage;
+    if (threads > 1 && module.states) {
+        fputs("Module: its states have one owner, so it runs with --threads 1\n", stderr);
+        return 2;
     }
-    host.work = calloc(host.capacity, sizeof(*host.work));
-    host.table = calloc(host.capacity, sizeof(*host.table));
-    host.by_slot = calloc(host.capacity, sizeof(*host.by_slot));
-    host.applied = calloc(host.capacity, sizeof(*host.applied));
-    if (!host.work || !host.table || !host.by_slot || !host.applied) { fputs("Cannot allocate connections\n", stderr); return 1; }
-    if (!pure_runtime_init(&host.runtime, host.work, host.capacity, &host.app,
-                           (PureHost){.allocate = allocate_ingress}, budget) ||
-        !pure_runtime_enable_async(&host.runtime)) abort();
-
+    if (pure_store_init(store) != PURE_OK) { fputs("Cannot initialize the store directory\n", stderr); return 1; }
     signal(SIGPIPE, SIG_IGN);
     struct sigaction stop_action = {.sa_handler = stop};
     sigemptyset(&stop_action.sa_mask);
     sigaction(SIGINT, &stop_action, NULL);
     sigaction(SIGTERM, &stop_action, NULL);
-    host.listener = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    int one = 1;
-    setsockopt(host.listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port),
-                                  .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
-    socklen_t address_size = sizeof(address);
-    if (host.listener < 0 || bind(host.listener, (struct sockaddr *)&address, sizeof(address)) ||
-        listen(host.listener, 4096) || getsockname(host.listener, (struct sockaddr *)&address, &address_size)) {
-        perror("listen");
-        return 1;
+    Host *hosts = calloc(threads, sizeof(*hosts));
+    pthread_t *thread = calloc(threads, sizeof(*thread));
+    if (!hosts || !thread) return 1;
+    for (unsigned i = 0; i < threads; ++i) {
+        hosts[i].capacity = capacity;
+        hosts[i].timeout_ms = timeout_ms;
+        hosts[i].listener = hosts[i].epoll = -1;
+        if (!start_shard(&hosts[i], &module, show, edit, store, budget, &port)) return 1;
     }
-    host.epoll = epoll_create1(EPOLL_CLOEXEC);
-    struct epoll_event listen_event = {.events = EPOLLIN, .data.ptr = NULL};
-    if (host.epoll < 0 || epoll_ctl(host.epoll, EPOLL_CTL_ADD, host.listener, &listen_event)) { perror("epoll"); return 1; }
-    printf("{\"port\":%u}\n", ntohs(address.sin_port));
+    printf("{\"port\":%u,\"threads\":%u}\n", port, threads);
     fflush(stdout);
-
-    struct epoll_event events[EVENTS];
-    uint64_t next_sweep = now_ms() + 1000;
-    while (!stopping) {
-        int ready = epoll_wait(host.epoll, events, EVENTS, 1000);
-        for (int e = 0; e < ready; ++e) {
-            Connection *c = events[e].data.ptr;
-            if (!c) { accept_all(&host); continue; }
-            if (c->phase == CLOSED) continue;
-            if (events[e].events & EPOLLERR) { close_connection(c); continue; }
-            if (events[e].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) c->readable = true;
-            if (events[e].events & EPOLLOUT) c->writable = true;
-            drive(c);
-        }
-        serve_bursts(&host);
-        uint64_t now = now_ms();
-        if (now >= next_sweep) {
-            next_sweep = now + 1000;
-            for (size_t i = 0; i < host.capacity; ++i) {
-                Connection *c = host.table[i];
-                if (c && c->phase != WAITING && now >= c->deadline) { ++host.expired; close_connection(c); }
-            }
-        }
-        /* The round is over: closed connections can be reused. */
-        while (host.closed) {
-            Connection *c = host.closed;
-            host.closed = c->next;
-            c->next = host.spare;
-            host.spare = c;
-        }
+    for (unsigned i = 1; i < threads; ++i)
+        if (pthread_create(&thread[i], NULL, run_shard, &hosts[i])) { fputs("Cannot start a thread\n", stderr); return 1; }
+    run_shard(&hosts[0]);
+    for (unsigned i = 1; i < threads; ++i) pthread_join(thread[i], NULL);
+    size_t active = 0, retained = 0;
+    uint64_t accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0;
+    for (unsigned i = 0; i < threads; ++i) {
+        active += hosts[i].active;
+        retained += hosts[i].runtime.retained;
+        accepted += hosts[i].accepted;
+        requests += hosts[i].requests;
+        bursts += hosts[i].bursts;
+        events += hosts[i].burst_events;
+        expired += hosts[i].expired;
+        stop_shard(&hosts[i]);
     }
-    pure_runtime_stop(&host.runtime);
-    serve_bursts(&host);
-    for (size_t i = 0; i < host.capacity; ++i) if (host.table[i]) close_connection(host.table[i]);
     fprintf(stderr, "{\"active\":%zu,\"retained_payload_bytes\":%zu,\"accepted\":%" PRIu64 ",\"requests\":%" PRIu64
-            ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"expired\":%" PRIu64 "}\n",
-            host.active, host.runtime.retained, host.accepted, host.requests, host.bursts, host.burst_events,
-            host.expired);
-    pure_app_stop(&host.app);
-    pure_store_close(handle);
-    close(host.listener);
-    close(host.epoll);
-    for (Connection **list = (Connection *[]){host.spare, host.closed}, **end = list + 2; list < end; ++list)
-        for (Connection *c = *list, *next; c; c = next) { next = c->next; free(c); }
-    free(host.work);
-    free(host.table);
-    free(host.by_slot);
-    free(host.applied);
+            ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"expired\":%" PRIu64 ",\"threads\":%u}\n",
+            active, retained, accepted, requests, bursts, events, expired, threads);
+    free(hosts);
+    free(thread);
     return 0;
 usage:
-    fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--budget BYTES] [--connections 1024] "
-          "[--timeout-ms 10000]\n", stderr);
+    fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1] [--budget BYTES] "
+          "[--connections 1024] [--timeout-ms 10000]\n", stderr);
     return 2;
 }

@@ -72,6 +72,8 @@ def main():
                                    '--store', d, '--port', '0', '--budget', str(args.budget)],
         'pure-serve': lambda d: [PURE / 'build/pure-serve', '--module', args.module, '--store', d, '--port', '0',
                                  '--budget', str(args.budget)],
+        'pure-serve-3': lambda d: [PURE / 'build/pure-serve', '--module', args.module, '--store', d, '--port', '0',
+                                   '--budget', str(args.budget), '--threads', '3'],
         'axum-memory': lambda d: [axum, '--port', '0'],
         'axum-durable': lambda d: [axum, '--port', '0', '--durable', d],
         'axum-atomic': lambda d: [axum, '--port', '0', '--atomic', d],

@@ -30,6 +30,10 @@ PureResult pure_store_open(const char *path, PureStore **out);
 void pure_store_close(PureStore *);
 PureResult pure_store_draft(PureStore *, const char *key, PureDraft **out);
 PureResult pure_store_state(PureStore *, const char *name, PureDraft **out);
+/* Pinned, drafts open at the version found when pinning, without checking
+ * the file each time (a host pins for one burst of requests); commits made
+ * through the handle still move it on. */
+PureResult pure_store_pin(PureStore *, bool pinned);
 /* Memory only. Fails without change on a bad range or when memory runs out. */
 PureResult pure_draft_splice(PureDraft *, size_t offset, size_t remove, PureSpan insert);
 size_t pure_draft_size(const PureDraft *);

@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -36,6 +37,10 @@ enum { COMPACT_SLACK = 1048576 };
 static const unsigned char head_magic[8] = {'P','U','R','E','T','R','E','1'};
 static const unsigned char branch_magic[4] = {'P','T','B','1'};
 static const char tree_name[] = "pure.tree";
+/* Threads of one process take turns as the writer: the file lock arbitrates
+ * only between processes (it is the process's, and closing any descriptor of
+ * the lock file drops it). */
+static pthread_mutex_t writers = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t temporary_sequence;
 
 /* A reference is a file offset, or an index into this edit's node arena.
@@ -704,6 +709,7 @@ PureResult pure_store_init(const char *path) {
     if (!created && errno != EEXIST) return PURE_STORE_ERROR;
     int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (directory < 0) return PURE_STORE_ERROR; /* Never reinterpret an old DB file. */
+    pthread_mutex_lock(&writers);
     int lock = openat(directory, ".writer.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     struct stat info;
     bool ok = lock >= 0 && fstat(lock, &info) == 0 && S_ISREG(info.st_mode) && lock_writer(lock, true);
@@ -724,6 +730,7 @@ PureResult pure_store_init(const char *path) {
     }
     ok = ok && sync_fd(lock) && sync_fd(directory);
     if (lock >= 0) close(lock);
+    pthread_mutex_unlock(&writers);
     close(directory);
     if (ok && created) {
         char *parent = strdup(path);
@@ -827,6 +834,7 @@ typedef struct {
     Head head;
     Tree tree;
     struct stat file;
+    bool turn; /* holds this process's writer turn */
 } Session;
 
 static void close_session(Session *session) {
@@ -834,10 +842,14 @@ static void close_session(Session *session) {
     if (session->fd >= 0) close(session->fd);
     if (session->lock >= 0) close(session->lock);
     if (session->directory >= 0) close(session->directory);
+    if (session->turn) pthread_mutex_unlock(&writers);
+    session->turn = false;
 }
 
 static PureResult open_session(const char *path, Session *session) {
     *session = (Session){.directory = -1, .lock = -1, .fd = -1};
+    pthread_mutex_lock(&writers); /* another thread of this process waits, not fails */
+    session->turn = true;
     session->directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (session->directory < 0) return PURE_STORE_ERROR;
     session->lock = openat(session->directory, ".writer.lock", O_RDWR | O_NOFOLLOW | O_CLOEXEC);
@@ -972,6 +984,7 @@ struct PureStore {
     ino_t inode;
     Head head;
     Mapping *mapping;
+    bool pinned; /* drafts open at the version of the last check */
 };
 
 struct PureDraft {
@@ -1120,9 +1133,16 @@ void pure_store_close(PureStore *store) {
     free(store);
 }
 
+PureResult pure_store_pin(PureStore *store, bool pinned) {
+    store->pinned = false;
+    PureResult result = pinned ? refresh(store) : PURE_OK;
+    store->pinned = pinned && result == PURE_OK;
+    return result;
+}
+
 static PureResult open_through(PureStore *store, const char *key, PureDraft **out) {
     *out = NULL;
-    PureResult result = refresh(store);
+    PureResult result = store->pinned ? PURE_OK : refresh(store);
     if (result != PURE_OK) return result;
     PureDraft *draft = calloc(1, sizeof(*draft));
     if (!draft) return PURE_ALLOCATION;
