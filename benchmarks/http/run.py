@@ -107,10 +107,26 @@ def probe_ms(directory, count=16):
     return round(statistics.median(times), 2)
 
 
+def load_command(port, connections, seconds, method, keys, mode, body=16):
+    return ['taskset', '-c', '3', str(HERE / 'load'), str(port), str(connections), str(seconds), method, str(keys),
+            mode, str(body)]
+
+
 def load(port, connections, seconds, method, keys, mode, body=16):
-    output = subprocess.run(['taskset', '-c', '3', str(HERE / 'load'), str(port), str(connections), str(seconds),
-                             method, str(keys), mode, str(body)], capture_output=True, text=True, check=True)
+    output = subprocess.run(load_command(port, connections, seconds, method, keys, mode, body), capture_output=True,
+                            text=True, check=True)
     return json.loads(output.stdout)
+
+
+def mixed(port, seconds, writers, readers):
+    """Durable posts and reads of the total at once, from two load processes:
+    whether reads wait while writes sync."""
+    writing = subprocess.Popen(load_command(port, writers, seconds, 'score', writers, 'keep-alive'),
+                               stdout=subprocess.PIPE, text=True)
+    reads = load(port, readers, seconds, 'total', readers, 'keep-alive')
+    writes = json.loads(writing.communicate()[0])
+    assert writing.returncode == 0
+    return writes, reads
 
 
 def main():
@@ -159,6 +175,9 @@ def main():
             ('score, 8 conn, keep-alive', dict(connections=8, method='score', keys=8, mode='keep-alive', writes=True)),
             ('total, 64 conn, keep-alive', dict(connections=64, method='total', keys=64, mode='keep-alive')),
             ('page 20 rows, 64 conn, keep-alive', dict(connections=64, method='page', keys=64, mode='keep-alive')),
+            # Reported as two rows: the posts, and the reads made meanwhile.
+            ('mixed, 8 score + 56 total conn', dict(connections=64, method='mixed', keys=64, mode='keep-alive',
+                                                    writes=True)),
         ]
         for name in ('pure-program', 'axum-atomic', 'drogon-atomic'):
             del servers[name]  # atomic is durable for a log already
@@ -184,15 +203,21 @@ def main():
                         put(port, 'k0', b'B' * (1 << 20), 1)
                     probe = probe_ms(base) if workload['method'] == 'put' or workload.get('writes') else None
                     used = cpu_seconds(process.pid)
-                    measured = load(port, workload['connections'], args.seconds, workload['method'],
-                                    workload['keys'], workload['mode'])
+                    if workload['method'] == 'mixed':
+                        writes, reads = mixed(port, args.seconds, 8, 56)
+                        parts = [(f'{label}: posts', writes), (f'{label}: reads', reads)]
+                    else:
+                        parts = [(label, load(port, workload['connections'], args.seconds, workload['method'],
+                                              workload['keys'], workload['mode']))]
                     used = cpu_seconds(process.pid) - used
-                    measured.update(server=name, workload=label, round=round_, probe_ms=probe,
-                                    rss_kib=rss_kib(process.pid, 'VmRSS:'), cpu_seconds=round(used, 2),
-                                    ok_per_cpu_second=round(measured['2xx'] / used) if used else 0,
-                                    ok_per_second=round(measured['2xx'] / args.seconds), idle_rss_kib=idle)
-                    results.append(measured)
-                    print(json.dumps(measured), flush=True)
+                    answered = sum(measured['2xx'] for _, measured in parts)  # per CPU second: all parts together
+                    for part, measured in parts:
+                        measured.update(server=name, workload=part, round=round_, probe_ms=probe,
+                                        rss_kib=rss_kib(process.pid, 'VmRSS:'), cpu_seconds=round(used, 2),
+                                        ok_per_cpu_second=round(answered / used) if used else 0,
+                                        ok_per_second=round(measured['2xx'] / args.seconds), idle_rss_kib=idle)
+                        results.append(measured)
+                        print(json.dumps(measured), flush=True)
                 peak = rss_kib(process.pid, 'VmHWM:')
                 process.send_signal(signal.SIGINT if name.startswith('axum') else signal.SIGTERM)
                 process.communicate(timeout=30)
@@ -207,7 +232,7 @@ def main():
     print(f"medians over {args.rounds} round(s)")
     print(f"{'workload':32s} {'server':14s} {'2xx/s':>9s} {'2xx/cpu-s':>10s} {'p50 us':>8s} {'p99 us':>8s} "
           f"{'errors':>7s} {'non-2xx':>8s} {'probe ms':>9s}")
-    for label, _ in workloads:
+    for label in dict.fromkeys(r['workload'] for r in results):
         for name in chosen:
             rows = [r for r in results if r['server'] == name and r['workload'] == label]
             if not rows:
