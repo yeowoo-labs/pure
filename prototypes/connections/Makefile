@@ -12,6 +12,9 @@ HOST = $(STORE) store-port.c evaluate.c
 # catalog; per-object file stores share a directory listing.
 KEYS = $(if $(filter store-tree.c,$(STORE)),,store-keys.c)
 HEADERS = runtime.h program.h store.h store-port.h state.h flow.h result.h
+# Defined before any rule names them: prerequisites expand when a rule is read.
+MODULE = module.c module-list.c module-save.c module-text.c store-tree.c
+MODULE_HEADERS = module.h module-list.h module-save.h module-text.h $(HEADERS)
 all: core fixed-editor
 core: $(BUILD)/libpure-execution.a
 async-core: $(BUILD)/libpure-execution-async.a
@@ -121,8 +124,6 @@ $(BUILD)/test-splice: test-splice.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUI
 
 # Pure modules: loader/verifier/executor, its tests and a test host.
 # Text states are runtime-owned drafts, so the executor links the tree engine.
-MODULE = module.c module-list.c module-save.c module-text.c store-tree.c
-MODULE_HEADERS = module.h module-list.h module-save.h module-text.h $(HEADERS)
 
 $(BUILD)/test-module: test-module.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-module.c module-store.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
