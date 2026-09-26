@@ -51,7 +51,14 @@ typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PUR
 typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PURE_EQUAL, PURE_NOT_EQUAL } PureRelation;
 
 typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3 } PureInputKind;
-typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2 } PureFieldType;
+/* A message field: a u32le or a binary64 (fixed, at its offset in the
+ * payload's prefix), or bytes or text of any length. The prefix also holds
+ * each variable field's u32le length but the last one's (its offset is
+ * PURE_FIELD_REST), which takes what follows the others; the variable
+ * fields' bytes follow the prefix in declaration order. A text is UTF-8 and
+ * a number finite, or the message fails. */
+typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2, PURE_FIELD_NUMBER = 3, PURE_FIELD_TEXT = 4 } PureFieldType;
+enum { PURE_FIELD_REST = UINT32_MAX };
 typedef enum {
     PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4
 } PureStateType;

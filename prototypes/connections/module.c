@@ -315,7 +315,10 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
             of = O_ARG;
             owner = arg >> 8 & 0xFF;
         }
-        if (out == T_FIELD) out = m->field[shape->field_start + arg].type == PURE_FIELD_U32 ? T_NUM : T_BYTES;
+        if (out == T_FIELD) {
+            uint8_t type = m->field[shape->field_start + arg].type;
+            out = type == PURE_FIELD_TEXT ? T_TEXT : type == PURE_FIELD_BYTES ? T_BYTES : T_NUM;
+        }
         if (out == T_ITEM) out = field_type(m, list_of(arg), item_field(arg));
         if (out) {
             if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
@@ -445,19 +448,24 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         }
         if (shape->kind != PURE_KIND_MESSAGE || read32(at + 8) || shape->field_start != next_field ||
             shape->field_count > out->fields - next_field) REFUSE("message shape", i);
-        /* Fixed u32le fields in order, then at most one bytes tail. */
+        /* The prefix holds the fixed fields and the variable fields' lengths
+         * in order, but the last variable field's: it takes the rest. */
+        uint32_t last = UINT32_MAX;
+        for (uint32_t f = 0; f < shape->field_count; ++f) {
+            uint32_t type = read32(fields + (size_t)(next_field + f) * FIELD_BYTES + 4);
+            if (type == PURE_FIELD_BYTES || type == PURE_FIELD_TEXT) last = f;
+        }
         for (uint32_t f = 0; f < shape->field_count; ++f) {
             const unsigned char *entry = fields + (size_t)(next_field + f) * FIELD_BYTES;
             PureField *field = &out->field[next_field + f];
             field->type = (uint8_t)read32(entry + 4);
-            if (!name_at(text, strings, read32(entry), true, field->name) ||
-                (field->type != PURE_FIELD_U32 && field->type != PURE_FIELD_BYTES) || read32(entry + 4) > 2 ||
-                (field->type == PURE_FIELD_BYTES && f + 1 != shape->field_count))
+            if (!name_at(text, strings, read32(entry), true, field->name) || field->type < PURE_FIELD_U32 ||
+                read32(entry + 4) > PURE_FIELD_TEXT)
                 REFUSE("message field", next_field + f);
             for (uint32_t k = 0; k < f; ++k)
                 if (!strcmp(out->field[next_field + k].name, field->name)) REFUSE("duplicate field", next_field + f);
-            field->offset = shape->prefix;
-            if (field->type == PURE_FIELD_U32) shape->prefix += 4;
+            field->offset = f == last ? PURE_FIELD_REST : shape->prefix;
+            if (f != last) shape->prefix += field->type == PURE_FIELD_NUMBER ? 8 : 4;
         }
         next_field += shape->field_count;
     }
@@ -610,6 +618,7 @@ typedef struct {
     double dt;
     size_t row; /* the row a column is evaluated for */
     bool modified, exists;
+    uint32_t (*spans)[2]; /* a message's variable fields: start and size in the payload */
 } Event;
 
 static PureResult fault(PureApp *app, PureFault kind, uint32_t pc) {
@@ -776,7 +785,8 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         case PURE_OP_FIELD: {
             const PureField *field = &m->field[ev->shape->field_start + arg];
             if (field->type == PURE_FIELD_U32) stack[sp++].num = read32(app->payload.data + field->offset);
-            else stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, field->offset, app->payload.size - field->offset};
+            else if (field->type == PURE_FIELD_NUMBER) stack[sp++].num = read_double(app->payload.data + field->offset);
+            else stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, ev->spans[arg][0], ev->spans[arg][1]};
             continue;
         }
         case PURE_OP_DOC: case PURE_OP_DOC_SIZE: {
@@ -1313,6 +1323,23 @@ PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64
         return PURE_INVALID;
     const PureInputShape *shape = &m->input[input];
     if (payload.size < shape->prefix) return fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
+    /* Where each variable field is; a length past the payload, a text that
+     * is not UTF-8 or a number that is not finite fails the message. */
+    uint32_t spans[PURE_MODULE_FIELDS][2];
+    size_t at = shape->prefix;
+    for (uint32_t f = 0; f < shape->field_count; ++f) {
+        const PureField *field = &m->field[shape->field_start + f];
+        if (field->type == PURE_FIELD_NUMBER && !isfinite(read_double(payload.data + field->offset)))
+            return fault(app, PURE_FAULT_NON_FINITE, UINT32_MAX);
+        if (field->type != PURE_FIELD_BYTES && field->type != PURE_FIELD_TEXT) continue;
+        size_t size = field->offset == PURE_FIELD_REST ? payload.size - at : read32(payload.data + field->offset);
+        if (size > payload.size - at) return fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
+        if (field->type == PURE_FIELD_TEXT && !pure_utf8_valid((PureSpan){size ? payload.data + at : NULL, size}))
+            return fault(app, PURE_FAULT_ENCODING, UINT32_MAX);
+        spans[f][0] = (uint32_t)at;
+        spans[f][1] = (uint32_t)size;
+        at += size;
+    }
     if (shape->keyed && m->collections) {
         if (!app->data.open) return PURE_INVALID;
         /* A key joins a burst once, so its revision moves once per save. */
@@ -1334,7 +1361,8 @@ PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64
         if (base >= 0 && base != app->revision) { pure_app_finish(app); return PURE_CONFLICT; }
     }
     app->payload = payload;
-    Event ev = {.app = app, .shape = shape, .key = key, .base = base, .arena = &app->arena, .exists = app->revision > 0};
+    Event ev = {.app = app, .shape = shape, .key = key, .base = base, .arena = &app->arena, .exists = app->revision > 0,
+                .spans = spans};
     PureResult result = dispatch(app, 1 + 2 * input, &ev);
     if (result != PURE_OK) pure_app_finish(app);
     return result;

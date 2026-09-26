@@ -38,6 +38,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -77,8 +78,14 @@ typedef struct Connection {
     uint64_t deadline;
     char key[65]; /* the document's key, or the view's or input's name */
     RouteKind route;
-    unsigned char fields[4 * PURE_MODULE_FIELDS]; /* a message's u32 fields, from the query */
+    /* An app input's message: its fixed fields from the query, which fields
+     * were given there, and whether the body is a JSON object of the rest.
+     * Its ingress is [u32le payload size][payload][the JSON as it came]. */
+    unsigned char fields[8 * PURE_MODULE_FIELDS];
     size_t field_bytes;
+    bool given[PURE_MODULE_FIELDS], json;
+    uint32_t input;
+    unsigned char *ingress;
     int64_t expected;
     size_t body_size, received, in_used;
     unsigned char *body;
@@ -364,6 +371,7 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
         (c->route == ROUTE_INPUT && !c->post)) return false;
     bool length_seen = false, condition_seen = false, host_seen = false;
     c->body_size = 0;
+    c->json = false;
     c->expected = -1;
     c->keep_alive = true;
     line = next + 2;
@@ -398,6 +406,8 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
             if (condition_seen || strcmp(value, "*")) return false;
             c->expected = 0;
             condition_seen = true;
+        } else if (!strcasecmp(line, "Content-Type")) {
+            c->json = !strncasecmp(value, "application/json", 16);
         } else if (!strcasecmp(line, "Connection")) {
             if (!strcasecmp(value, "close")) c->keep_alive = false;
             else if (strcasecmp(value, "keep-alive")) return false;
@@ -409,13 +419,59 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     return host_seen && !condition_seen && c->body_size == 0;
 }
 
-/* What an app route names in the module, with a message's u32 fields taken
- * from the query into c->fields. NULL, or the error to answer (404 for a
- * name the module lacks, 400 otherwise). */
+static void put_u32(unsigned char *p, uint32_t v) { for (unsigned i = 0; i < 4; ++i) p[i] = (unsigned char)(v >> (8 * i)); }
+static uint32_t get_u32(const unsigned char *p) { return p[0] | p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+/* A JSON number's text: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?, its
+ * length (0 if there is none). An integer has neither part after it. */
+static size_t json_number(const unsigned char *p, size_t size, bool *integer) {
+    size_t i = 0;
+    *integer = true;
+    if (i < size && p[i] == '-') ++i;
+    if (i == size || p[i] < '0' || p[i] > '9') return 0;
+    if (p[i++] != '0') while (i < size && p[i] >= '0' && p[i] <= '9') ++i;
+    if (i < size && p[i] == '.') {
+        *integer = false;
+        if (++i == size || p[i] < '0' || p[i] > '9') return 0;
+        while (i < size && p[i] >= '0' && p[i] <= '9') ++i;
+    }
+    if (i < size && (p[i] == 'e' || p[i] == 'E')) {
+        *integer = false;
+        if (++i < size && (p[i] == '+' || p[i] == '-')) ++i;
+        if (i == size || p[i] < '0' || p[i] > '9') return 0;
+        while (i < size && p[i] >= '0' && p[i] <= '9') ++i;
+    }
+    return i;
+}
+
+/* A fixed field's value from its text (a query value or a JSON number) into
+ * the prefix: a u32 in range, or a finite number. */
+static bool fixed_field(const PureField *field, const unsigned char *text, size_t size, unsigned char *prefix) {
+    bool integer;
+    if (!size || json_number(text, size, &integer) != size || size > 40) return false;
+    char digits[48];
+    memcpy(digits, text, size);
+    digits[size] = 0;
+    if (field->type == PURE_FIELD_U32) {
+        uint64_t n;
+        if (!integer || !number(digits, UINT32_MAX, &n)) return false;
+        put_u32(prefix + field->offset, (uint32_t)n);
+        return true;
+    }
+    double value = strtod(digits, NULL);
+    if (!isfinite(value)) return false;
+    memcpy(prefix + field->offset, &value, 8);
+    return true;
+}
+
+/* What an app route names in the module, with a message's fixed fields
+ * taken from the query into c->fields. NULL, or the error to answer (404
+ * for a name the module lacks, 400 otherwise). */
 static const char *resolve(const Host *host, Connection *c, char *query, Route *route, int *status) {
     const PureModule *m = host->module;
     *status = 404;
     c->field_bytes = 0;
+    memset(c->given, 0, sizeof(c->given));
     if (route->kind == ROUTE_NONE || (route->kind == ROUTE_OBJECT && !host->documents)) return "route";
     if (route->kind == ROUTE_OBJECT) return NULL;
     int found = route->kind == ROUTE_VIEW ? pure_module_view(m, c->key) : pure_module_input(m, c->key);
@@ -428,37 +484,193 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
     bool message = shape && shape->kind == PURE_KIND_MESSAGE;
     if (message && shape->keyed) return "keyed";
     if (shape) {
-        const PureField *last = message && shape->field_count ? &m->field[shape->field_start + shape->field_count - 1] : NULL;
-        if (c->body_size && shape->kind != PURE_KIND_TEXT && !(last && last->type == PURE_FIELD_BYTES)) return "body";
+        /* A body is a text input's text, a message's one variable field, or a
+         * JSON object of a message's fields (two variable fields need one). */
+        unsigned variables = 0;
+        for (uint32_t f = 0; message && f < shape->field_count; ++f)
+            variables += m->field[shape->field_start + f].type == PURE_FIELD_BYTES ||
+                         m->field[shape->field_start + f].type == PURE_FIELD_TEXT;
+        if (c->json && !message) return "json";
+        if (!c->json && (variables > 1 || (c->body_size && shape->kind == PURE_KIND_KEY) ||
+                         (c->body_size && message && !variables))) return variables > 1 ? "json" : "body";
+        c->input = (uint32_t)found;
         c->field_bytes = message ? shape->prefix : 0;
     }
-    /* name=value pairs: a table's from and count, a message's u32 fields. */
-    bool given[PURE_MODULE_FIELDS] = {false};
+    /* name=value pairs: a table's from and count, a message's fixed fields. */
     for (char *pair = query; pair && *pair;) {
         char *end = strchr(pair, '&'), *value = strchr(pair, '=');
         if (end) *end = 0;
         if (!value || (end && value > end)) return "query";
         *value++ = 0;
-        uint64_t n;
-        if (!number(value, route->kind == ROUTE_VIEW ? SIZE_MAX : UINT32_MAX, &n)) return "query";
         if (route->kind == ROUTE_VIEW) {
+            uint64_t n;
             bool from = !strcmp(pair, "from");
-            if (m->view_type[found] != PURE_VIEW_TABLE || (!from && strcmp(pair, "count"))) return "query";
+            if (!number(value, SIZE_MAX, &n) || m->view_type[found] != PURE_VIEW_TABLE || (!from && strcmp(pair, "count")))
+                return "query";
             if (from) route->from = (size_t)n;
             else route->count = (size_t)n;
         } else {
             uint32_t f = 0;
             while (f < (message ? shape->field_count : 0) && strcmp(m->field[shape->field_start + f].name, pair)) ++f;
             const PureField *field = message && f < shape->field_count ? &m->field[shape->field_start + f] : NULL;
-            if (!field || field->type != PURE_FIELD_U32 || given[f]) return "query";
-            given[f] = true;
-            for (unsigned i = 0; i < 4; ++i) c->fields[field->offset + i] = (unsigned char)(n >> (8 * i));
+            if (!field || c->given[f] || (field->type != PURE_FIELD_U32 && field->type != PURE_FIELD_NUMBER) ||
+                !fixed_field(field, (const unsigned char *)value, strlen(value), c->fields)) return "query";
+            c->given[f] = true;
         }
         pair = end ? end + 1 : NULL;
     }
-    for (uint32_t f = 0; message && f < shape->field_count; ++f)
-        if (m->field[shape->field_start + f].type == PURE_FIELD_U32 && !given[f]) return "missing_field";
+    for (uint32_t f = 0; message && !c->json && f < shape->field_count; ++f) {
+        uint8_t type = m->field[shape->field_start + f].type;
+        if ((type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER) && !c->given[f]) return "missing_field";
+    }
     return NULL;
+}
+
+/* A JSON string's contents (after its opening quote) up to the closing one:
+ * its length, or 0 when it does not close or holds a control byte. */
+static size_t json_string_end(const unsigned char *p, size_t size) {
+    for (size_t i = 0; i < size; ++i) {
+        if (p[i] == '"') return i + 1;
+        if (p[i] < 0x20) return 0;
+        if (p[i] == '\\' && ++i == size) return 0;
+    }
+    return 0;
+}
+
+static int hex_digit(unsigned char c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+static bool json_code(const unsigned char *p, size_t left, uint32_t *code) {
+    if (left < 4) return false;
+    *code = 0;
+    for (int i = 0; i < 4; ++i) {
+        int d = hex_digit(p[i]);
+        if (d < 0) return false;
+        *code = *code << 4 | (uint32_t)d;
+    }
+    return true;
+}
+
+/* Unescape a JSON string's contents into out (never longer); false for a
+ * bad escape or a lone surrogate. The result is checked as UTF-8 after. */
+static bool json_unescape(const unsigned char *in, size_t size, unsigned char *out, size_t *written) {
+    size_t o = 0;
+    for (size_t i = 0; i < size;) {
+        unsigned char b = in[i++];
+        if (b != '\\') { out[o++] = b; continue; }
+        if (i == size) return false;
+        b = in[i++];
+        const char *plain = strchr("\"\\/bfnrt", b);
+        if (b && plain) { out[o++] = (unsigned char)"\"\\/\b\f\n\r\t"[plain - "\"\\/bfnrt"]; continue; }
+        uint32_t code, low;
+        if (b != 'u' || !json_code(in + i, size - i, &code)) return false;
+        i += 4;
+        if (code >= 0xDC00 && code <= 0xDFFF) return false;
+        if (code >= 0xD800 && code <= 0xDBFF) {
+            if (size - i < 6 || in[i] != '\\' || in[i + 1] != 'u' || !json_code(in + i + 2, size - i - 2, &low) ||
+                low < 0xDC00 || low > 0xDFFF) return false;
+            i += 6;
+            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+        }
+        if (code < 0x80) out[o++] = (unsigned char)code;
+        else if (code < 0x800) { out[o++] = (unsigned char)(0xC0 | code >> 6); out[o++] = (unsigned char)(0x80 | (code & 0x3F)); }
+        else if (code < 0x10000) {
+            out[o++] = (unsigned char)(0xE0 | code >> 12);
+            out[o++] = (unsigned char)(0x80 | (code >> 6 & 0x3F));
+            out[o++] = (unsigned char)(0x80 | (code & 0x3F));
+        } else {
+            out[o++] = (unsigned char)(0xF0 | code >> 18);
+            out[o++] = (unsigned char)(0x80 | (code >> 12 & 0x3F));
+            out[o++] = (unsigned char)(0x80 | (code >> 6 & 0x3F));
+            out[o++] = (unsigned char)(0x80 | (code & 0x3F));
+        }
+    }
+    *written = o;
+    return true;
+}
+
+static size_t json_space(const unsigned char *p, size_t at, size_t size) {
+    while (at < size && (p[at] == ' ' || p[at] == '\t' || p[at] == '\n' || p[at] == '\r')) ++at;
+    return at;
+}
+
+/* An app input's JSON body, as it came after the payload's room, becomes its
+ * message's payload: an object with a member for each field the query did
+ * not give (a u32, a number, or a string for bytes and text), and no other.
+ * NULL, or the error to answer. */
+static const char *convert(Connection *c) {
+    const PureModule *m = c->host->module;
+    const PureInputShape *shape = &m->input[c->input];
+    const unsigned char *json = c->body;
+    size_t size = c->body_size;
+    unsigned char *payload = c->ingress + 4;
+    struct { const unsigned char *value; size_t size; bool string; } member[PURE_MODULE_FIELDS];
+    bool seen[PURE_MODULE_FIELDS] = {false};
+    size_t at = json_space(json, 0, size);
+    if (at == size || json[at++] != '{') return "json";
+    at = json_space(json, at, size);
+    for (bool first = true; at < size && json[at] != '}'; first = false) {
+        if (!first) {
+            if (json[at++] != ',') return "json";
+            at = json_space(json, at, size);
+        }
+        size_t key_end = at < size && json[at] == '"' ? json_string_end(json + at + 1, size - at - 1) : 0;
+        if (!key_end) return "json";
+        const unsigned char *key = json + at + 1;
+        size_t key_size = key_end - 1;
+        at = json_space(json, at + 1 + key_end, size);
+        if (at == size || json[at++] != ':') return "json";
+        at = json_space(json, at, size);
+        uint32_t f = 0;
+        while (f < shape->field_count && (strlen(m->field[shape->field_start + f].name) != key_size ||
+                                          memcmp(m->field[shape->field_start + f].name, key, key_size))) ++f;
+        if (f == shape->field_count || seen[f] || c->given[f]) return "json_field";
+        seen[f] = true;
+        bool integer, string = at < size && json[at] == '"';
+        size_t length = string ? json_string_end(json + at + 1, size - at - 1) : json_number(json + at, size - at, &integer);
+        if (!length) return "json";
+        member[f].value = json + at + string;
+        member[f].size = length - string;
+        member[f].string = string;
+        at = json_space(json, at + string + length, size);
+    }
+    if (at == size || json_space(json, at + 1, size) != size) return "json";
+    /* The fields in order: fixed ones into the prefix, strings after it. */
+    size_t used = shape->prefix;
+    for (uint32_t f = 0; f < shape->field_count; ++f) {
+        const PureField *field = &m->field[shape->field_start + f];
+        bool variable = field->type == PURE_FIELD_BYTES || field->type == PURE_FIELD_TEXT;
+        if (!seen[f]) {
+            if (!c->given[f]) return "missing_field";
+            continue;
+        }
+        if (member[f].string != variable) return "json_type";
+        if (!variable) {
+            if (!fixed_field(field, member[f].value, member[f].size, payload)) return "json_type";
+            continue;
+        }
+        size_t written;
+        if (!json_unescape(member[f].value, member[f].size, payload + used, &written) ||
+            !pure_utf8_valid((PureSpan){payload + used, written})) return "json";
+        if (field->offset != PURE_FIELD_REST) put_u32(payload + field->offset, (uint32_t)written);
+        used += written;
+    }
+    put_u32(c->ingress, (uint32_t)used);
+    return NULL;
+}
+
+/* A request's body is in: an app input's JSON becomes its payload, and the
+ * request is ready, or it is answered 400 and never runs. */
+static void body_done(Connection *c) {
+    const char *why = c->route == ROUTE_INPUT && c->json ? convert(c) : NULL;
+    if (why) {
+        release_ticket(c); /* never made ready: it never runs */
+        respond(c, 400, "Bad Request", why, 0, (PureSpan){0});
+        return;
+    }
+    if (!pure_runtime_ready(c->ticket)) abort();
+    c->phase = WAITING;
 }
 
 /* A whole head is in `in`: admit the request and take any body bytes that
@@ -477,11 +689,13 @@ static void start_request(Connection *c, size_t head_size) {
     int status;
     const char *why = resolve(host, c, query, &route, &status);
     if (why) { reject(c, status, status == 404 ? "Not Found" : "Bad Request", why); return; }
-    /* A document's PUT and an input's event carry a payload: the message's fields, then the body. */
+    /* A document's PUT carries its body; an input's event its payload's size,
+     * the payload (the fixed fields, then the body), and room for its JSON. */
     bool write = route.kind == ROUTE_INPUT || c->put;
+    size_t input_size = route.kind == ROUTE_INPUT ? 4 + c->field_bytes + c->body_size * (c->json ? 2 : 1) :
+                        write ? c->body_size : 0;
     PureResult admitted = pure_runtime_accept(&host->runtime, write ? PURE_INPUT_WRITE : PURE_INPUT_READ, c->key,
-                                              route.kind == ROUTE_INPUT ? 0 : c->expected,
-                                              write ? c->field_bytes + c->body_size : 0, &c->ticket);
+                                              route.kind == ROUTE_INPUT ? 0 : c->expected, input_size, &c->ticket);
     if (admitted != PURE_OK) {
         c->ticket = (PureTicket){0};
         /* An unread body would desynchronize the stream. */
@@ -492,19 +706,20 @@ static void start_request(Connection *c, size_t head_size) {
     host->by_slot[c->ticket.slot] = c;
     host->routes[c->ticket.slot] = route;
     if (!write) { c->phase = WAITING; return; }
-    unsigned char *ingress = pure_runtime_ingress(c->ticket, NULL); /* NULL for no bytes, as a key press */
-    if (c->field_bytes) memcpy(ingress, c->fields, c->field_bytes);
-    c->body = ingress ? ingress + c->field_bytes : NULL;
+    unsigned char *ingress = c->ingress = pure_runtime_ingress(c->ticket, NULL); /* NULL for no bytes */
+    c->body = ingress;
+    if (route.kind == ROUTE_INPUT) {
+        put_u32(ingress, (uint32_t)(c->field_bytes + c->body_size));
+        if (c->field_bytes) memcpy(ingress + 4, c->fields, c->field_bytes);
+        c->body = ingress + 4 + c->field_bytes + (c->json ? c->body_size : 0);
+    }
     size_t take = c->in_used < c->body_size ? c->in_used : c->body_size;
     if (take) memcpy(c->body, c->in, take);
     memmove(c->in, c->in + take, c->in_used - take);
     c->in_used -= take;
     c->received = take;
     c->phase = READING_BODY;
-    if (c->received == c->body_size) {
-        if (!pure_runtime_ready(c->ticket)) abort();
-        c->phase = WAITING;
-    }
+    if (c->received == c->body_size) body_done(c);
 }
 
 static size_t head_end(const Connection *c) {
@@ -534,10 +749,7 @@ static void drive(Connection *c) {
             if (n > 0) {
                 c->received += (size_t)n;
                 c->deadline = now_ms() + c->host->timeout_ms;
-                if (c->received == c->body_size) {
-                    if (!pure_runtime_ready(c->ticket)) abort();
-                    c->phase = WAITING;
-                }
+                if (c->received == c->body_size) body_done(c);
                 continue;
             }
             if (n < 0 && errno == EAGAIN) { c->readable = false; return; }
@@ -741,14 +953,15 @@ static PureResult show_view(PureApp *app, const Route *route, size_t available, 
  * whose reply (a field of it) is borrowed from the request. */
 static PureResult apply_input(PureApp *app, const Route *route, const PureEffect *effect, Applied *out) {
     const PureInputShape *shape = &app->module->input[route->target];
+    PureSpan payload = {effect->value.data + 4, get_u32(effect->value.data)};
     PureResult status;
     if (shape->kind == PURE_KIND_TEXT) {
-        status = pure_app_text(app, route->target, effect->value);
+        status = pure_app_text(app, route->target, payload);
     } else if (shape->kind == PURE_KIND_KEY) {
         status = pure_app_input(app, route->target, PURE_EDGE_DOWN);
         if (status == PURE_OK) status = pure_app_input(app, route->target, PURE_EDGE_UP);
     } else {
-        status = pure_app_message(app, route->target, NULL, -1, effect->value);
+        status = pure_app_message(app, route->target, NULL, -1, payload);
         Reply reply = {0};
         if (status == PURE_OK) pure_app_reply(app, measure_reply, &reply);
         out->reply = (PureSpan){reply.size ? reply.first : NULL, reply.size};
@@ -994,9 +1207,12 @@ static bool replies_borrow(const PureModule *m, uint32_t input) {
     for (uint32_t h = 0; h < m->handlers; ++h) {
         if (m->handler[h].event != 1 + 2 * input) continue;
         const PureBlock *code = &m->handler[h].code;
-        for (uint32_t pc = code->start; pc < code->start + code->length; ++pc)
-            if (m->code[pc].op == PURE_OP_REPLY && (pc == code->start || m->code[pc - 1].op != PURE_OP_FIELD))
-                return false;
+        /* A field replied as it is, or a text field as its bytes. */
+        for (uint32_t pc = code->start; pc < code->start + code->length; ++pc) {
+            if (m->code[pc].op != PURE_OP_REPLY) continue;
+            uint32_t from = pc > code->start && m->code[pc - 1].op == PURE_OP_BYTES_FROM ? pc - 1 : pc;
+            if (from == code->start || m->code[from - 1].op != PURE_OP_FIELD) return false;
+        }
     }
     return true;
 }

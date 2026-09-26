@@ -627,8 +627,8 @@ static void messages(void) {
     static const H note_handler[] = {{1, 0, 2}};
     bad = (Spec){states, 1, unkeyed, 1, views, 0, note_handler, 1, doc_read, 2, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "document operation outside"));
-    static const F tail_first[] = {{"insert", 2}, {"start", 1}};
-    static const I misplaced[] = {{"edit", NULL, PURE_KIND_MESSAGE, true, tail_first, 2}};
+    static const F unknown_type[] = {{"insert", 5}, {"start", 1}};
+    static const I misplaced[] = {{"edit", NULL, PURE_KIND_MESSAGE, true, unknown_type, 2}};
     bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "message field"));
     static const H even[] = {{2, 0, 0}};
@@ -2191,12 +2191,81 @@ static void keyed_mutations(void) {
     printf("{\"keyed_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
 }
 
+/* A message of a text, a number, bytes and a u32, in that order: the prefix
+ * holds the text's length, the number and the u32; the text's bytes come
+ * first after it and the bytes (the last variable field) take the rest. A
+ * length past the payload, a text that is not UTF-8 or a number that is not
+ * finite fails the message. */
+enum { TSET = PURE_OP_TEXT_SET };
+static void message_fields(void) {
+    static const S nums[] = {{"n", 0}};
+    static const T texts[] = {{"title", 1, 0}};
+    static const char *const constants[] = {""};
+    static const F fields[] = {{"title", PURE_FIELD_TEXT}, {"points", PURE_FIELD_NUMBER}, {"note", PURE_FIELD_BYTES},
+                               {"count", PURE_FIELD_U32}};
+    static const I inputs[] = {{"post", NULL, PURE_KIND_MESSAGE, false, fields, 4}};
+    static const O code[] = {{FIELD, 1, 0}, {FIELD, 3, 0}, {ADD, 0, 0}, {ST, 0, 0}, {FIELD, 0, 0}, {TSET, 1, 0},
+                             {FIELD, 2, 0}, {REPLY, 0, 0}};
+    static const H handlers[] = {{1, 0, 8}};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, handlers, 1, code, LEN(code), NULL, 0, texts, 1, constants, 1, NULL, 0,
+                 NULL, 0, NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    CHECK(module_a.input[0].prefix == 16 && module_a.field[0].offset == 0 && module_a.field[1].offset == 4 &&
+          module_a.field[2].offset == PURE_FIELD_REST && module_a.field[3].offset == 12);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    unsigned char payload[64];
+    /* title "가나" (6 bytes), points 2.5, count 3, then the title's bytes and note "xyz". */
+    size_t size = 0;
+    uint32_t title_size = 6, count = 3;
+    double points = 2.5;
+    memcpy(payload, &title_size, 4);
+    memcpy(payload + 4, &points, 8);
+    memcpy(payload + 12, &count, 4);
+    memcpy(payload + 16, "\xea\xb0\x80\xeb\x82\x98" "xyz", 9);
+    size = 25;
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, size}) == PURE_OK);
+    CHECK(app.values[0] == 5.5 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\xeb\x82\x98") && replied(&app, "xyz"));
+    pure_app_finish(&app);
+    /* Empty variable fields. */
+    title_size = 0;
+    memcpy(payload, &title_size, 4);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_OK && !*state_text(&app, 1) && replied(&app, ""));
+    pure_app_finish(&app);
+    /* A title longer than what is there, a title that is not UTF-8, a number that is not finite, a short prefix. */
+    title_size = 10;
+    memcpy(payload, &title_size, 4);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 25}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
+    title_size = 2;
+    memcpy(payload, &title_size, 4);
+    memcpy(payload + 16, "\xff\xfe", 2);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 18}) == PURE_INVALID && app.fault == PURE_FAULT_ENCODING);
+    title_size = 0;
+    points = NAN;
+    memcpy(payload, &title_size, 4);
+    memcpy(payload + 4, &points, 8);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_INVALID && app.fault == PURE_FAULT_NON_FINITE);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 15}) == PURE_LIMIT);
+    CHECK(app.values[0] == 5.5 && !*state_text(&app, 1)); /* failed messages changed nothing */
+    pure_app_stop(&app);
+    /* A text field is text and a bytes field bytes. */
+    static const O text_as_bytes[] = {{FIELD, 0, 0}, {LEN_, 0, 0}, {ST, 0, 0}};
+    static const O bytes_as_text[] = {{FIELD, 2, 0}, {TSET, 1, 0}};
+    static const H three[] = {{1, 0, 3}}, two[] = {{1, 0, 2}};
+    Spec bad = spec;
+    bad.o = text_as_bytes; bad.no = 3; bad.h = three;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
+    bad.o = bytes_as_text; bad.no = 2; bad.h = two;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
+}
+
 int main(void) {
     behaviour();
     faults();
     rejections();
     mutations();
     messages();
+    message_fields();
     message_mutations();
     texts();
     marks();
@@ -2214,6 +2283,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields\"}");
     return 0;
 }
