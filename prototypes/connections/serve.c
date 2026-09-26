@@ -127,7 +127,8 @@ typedef struct {
     uint64_t bursts, burst_events;
     Applied *applied; /* a round's requests, grown to fit */
     size_t applied_capacity;
-    bool wrote; /* the last round saved an event or an edit */
+    bool wrote;       /* the last round saved an event or an edit */
+    bool reads_first; /* the owner's: a round's reads before its writes */
     double next[PURE_MODULE_INPUTS]; /* when each timer ticks next (wall clock, ms) */
     uint64_t ticks;
 } Executor;
@@ -1068,7 +1069,16 @@ static void save_burst(Executor *ex, Applied *applied, size_t count) {
 /* Run a round's requests in bursts. A burst ends before a document's key
  * repeats or before its documents would outgrow one save, so every request
  * is stored by its burst's save or fails with it; views and events of the
- * app's states join any burst. Each saved burst goes to finish. */
+ * app's states join any burst. Each group of answers goes to finish.
+ *
+ * The owner takes a round's reads first and answers them at once: a
+ * round's requests come from different connections (each has one request
+ * at a time), so nothing orders them, and placed before the writes the
+ * reads see only saved states (a round starts from a save). With writes
+ * going on this halves the reads' wait and doubles both rates. A single
+ * thread does not: it waits out each save itself, and reads answered first
+ * come back first, splitting its next writes over more saves (the owner
+ * gathers after a save instead). */
 static void execute(Executor *ex, const Job *jobs, size_t count, void (*finish)(void *, Applied *, size_t),
                     void *context) {
     if (!count) return;
@@ -1077,22 +1087,27 @@ static void execute(Executor *ex, const Job *jobs, size_t count, void (*finish)(
     /* One look at the store per round: a request made after another shard's
      * answer was sent is read after that answer's commit. */
     bool pinned = pure_store_pin(ex->store, true) == PURE_OK;
-    size_t start = 0, keys = 0;
+    size_t reads = 0;
+    for (size_t i = 0; ex->reads_first && i < count; ++i)
+        if (jobs[i].effect.input == PURE_INPUT_READ) apply_effect(ex, &jobs[i], &applied[reads++]);
+    if (reads) finish(context, applied, reads);
+    size_t n = reads, start = reads, keys = 0;
     for (size_t i = 0; i < count; ++i) {
+        if (ex->reads_first && jobs[i].effect.input == PURE_INPUT_READ) continue;
         bool document = jobs[i].route.kind == ROUTE_OBJECT, repeated = false;
-        for (size_t k = start; k < i && document && !repeated; ++k)
+        for (size_t k = start; k < n && document && !repeated; ++k)
             repeated = applied[k].route == ROUTE_OBJECT && !strcmp(applied[k].key, jobs[i].effect.key);
         if (repeated || (document && keys == PURE_APP_PENDING)) {
-            save_burst(ex, applied + start, i - start);
-            finish(context, applied + start, i - start);
-            start = i;
+            save_burst(ex, applied + start, n - start);
+            finish(context, applied + start, n - start);
+            start = n;
             keys = 0;
         }
-        apply_effect(ex, &jobs[i], &applied[i]);
+        apply_effect(ex, &jobs[i], &applied[n++]);
         keys += document;
     }
-    save_burst(ex, applied + start, count - start);
-    finish(context, applied + start, count - start);
+    save_burst(ex, applied + start, n - start);
+    finish(context, applied + start, n - start);
     if (pinned) pure_store_pin(ex->store, false);
 }
 
@@ -1527,6 +1542,7 @@ int main(int argc, char **argv) {
     if (owned) {
         if (!start_executor(&owner.executor, &module, show, edit, store) || pthread_mutex_init(&owner.lock, NULL) ||
             pthread_cond_init(&owner.waiting, NULL)) return 1;
+        owner.executor.reads_first = true;
         owner.hosts = hosts;
         owner.host_count = threads;
     }
