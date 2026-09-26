@@ -43,8 +43,9 @@ typedef enum {
 /* FOLD's argument: the kind (bits 0-7), the list state (8-15) and the length
  * of the block that follows (16-31), run once per item as a column of that
  * list. count counts the items whose block leaves a non-zero number; sum,
- * max and min take a value and an include flag from their block. */
-typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN } PureFold;
+ * max and min take a value and an include flag from their block; first gives
+ * the index of the first item whose block leaves a non-zero number. */
+typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PURE_FOLD_FIRST } PureFold;
 
 typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3 } PureInputKind;
 typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2 } PureFieldType;

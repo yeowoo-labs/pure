@@ -173,7 +173,7 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_CONSTANT: return arg < m->constants;
     case A_UNIT: return arg <= PURE_UNIT_LINE;
     case A_ROW: return (int)arg == row;
-    case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_MIN && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
+    case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_FIRST && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
     case A_NONE: case A_TARGET: case A_DEPTH: return true;
     default: return state_of(m, arg, (uint8_t)(kind - A_STATE));
     }
@@ -266,7 +266,9 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
             skip = arg >> 16;
             if (view >= FOLD_ONE) REFUSE(view == FILTER ? "fold inside a filter" : "fold inside a fold");
             if (skip > block.length - i - 1) REFUSE("fold block outside its block");
-            const char *why = verify_block(m, (PureBlock){pc + 1, skip}, (arg & 0xFF) == PURE_FOLD_COUNT ? FOLD_ONE : FOLD_TWO,
+            unsigned how = arg & 0xFF;
+            const char *why = verify_block(m, (PureBlock){pc + 1, skip},
+                                           how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? FOLD_ONE : FOLD_TWO,
                                            (int)(arg >> 8 & 0xFF), 0, &inner);
             if (why) { *at = inner; return why; }
             for (uint32_t k = i + 1; k <= i + skip; ++k) {
@@ -296,6 +298,11 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
                 REFUSE(type == T_CURSOR ? "cursor of another text" : "index of another list");
         }
         unsigned char out = signature[op->op].out;
+        if (kind == A_FOLD && (arg & 0xFF) == PURE_FOLD_FIRST) { /* an index of its list */
+            out = T_INDEX;
+            of = O_ARG;
+            owner = arg >> 8 & 0xFF;
+        }
         if (out == T_FIELD) out = m->field[shape->field_start + arg].type == PURE_FIELD_U32 ? T_NUM : T_BYTES;
         if (out == T_ITEM) out = field_type(m, list_of(arg), item_field(arg));
         if (out) {
@@ -959,14 +966,16 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
                 arena->used = mark;
                 if (status != PURE_OK) return status;
                 double value = out[0].num;
-                if (how == PURE_FOLD_COUNT ? value == 0 : out[1].num == 0) continue;
+                if (how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? value == 0 : out[1].num == 0) continue;
+                if (how == PURE_FOLD_FIRST) { total = (double)row; any = true; break; }
                 total = how == PURE_FOLD_COUNT ? total + 1 : how == PURE_FOLD_SUM ? total + value :
                         !any ? value : how == PURE_FOLD_MAX ? maximum(total, value) : minimum(total, value);
                 any = true;
             }
             if (!any && how >= PURE_FOLD_MAX) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
             if (!isfinite(total)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
-            stack[sp++].num = total;
+            stack[sp].num = total;
+            stack[sp++].bytes.owner = (uint16_t)(arg >> 8 & 0xFF); /* first: the list the index is in */
             continue;
         }
         case PURE_OP_PICK: stack[sp] = stack[sp - 1 - arg]; ++sp; continue;

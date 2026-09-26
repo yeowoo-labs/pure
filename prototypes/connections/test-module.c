@@ -1779,10 +1779,12 @@ static const O fold_code[] = {
     {FOLD, FOLDING(PURE_FOLD_MIN, 0, 5), 0}, {ROW, 0, 0}, {IG, F_POINTS, 0}, {ROW, 0, 0},   /* 30 fewest_open */
     {IG, F_DONE, 0}, {NOT, 0, 0},
     {C, 0, 10}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}, {ADD, 0, 0},         /* 36 count_plus */
+    {FOLD, FOLDING(PURE_FOLD_FIRST, 0, 3), 0}, {ROW, 0, 0}, {IG, F_DONE, 0}, {NOT, 0, 0},   /* 40 first_open */
+    {XN, 0, 0},
 };
 static const H fold_handlers[] = {{1, 0, 7}, {3, 7, 5}};
 static const V fold_views[] = {{"open", 12, 4}, {"points", 16, 4}, {"longest", 20, 5}, {"done_points", 25, 5},
-                               {"fewest_open", 30, 6}, {"count_plus", 36, 4}};
+                               {"fewest_open", 30, 6}, {"count_plus", 36, 4}, {"first_open", 40, 5}};
 static Spec fold_spec(const O *code, size_t count, const V *views, size_t nviews, const H *handlers, size_t nhandlers) {
     return (Spec){NULL, 0, fold_inputs, LEN(fold_inputs), views, nviews, handlers, nhandlers, code, count, NULL, 0,
                   fold_states, 2, fold_constants, 1, NULL, 0, fold_records, 1, NULL, 0};
@@ -1795,6 +1797,7 @@ static void folds(void) {
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     CHECK(number_view(&app, 0) == 0 && number_view(&app, 1) == 0 && !pure_app_view(&app, 2, &value));
     CHECK(number_view(&app, 3) == 0 && !pure_app_view(&app, 4, &value) && number_view(&app, 5) == 10);
+    CHECK(!pure_app_view(&app, 6, &value));                           /* no first open task yet */
     const char *const words[] = {"a", "bbb", "\xea\xb0\x80\xea\xb0\x80"}; /* one, three and two characters */
     for (size_t i = 0; i < 3; ++i)
         CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)words[i], strlen(words[i])}) == PURE_OK);
@@ -1802,8 +1805,11 @@ static void folds(void) {
     CHECK(number_view(&app, 3) == 0 && number_view(&app, 4) == 1 && number_view(&app, 5) == 13);
     CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);   /* the last task is done */
     CHECK(number_view(&app, 0) == 2 && number_view(&app, 3) == 2 && number_view(&app, 4) == 1);
+    CHECK(number_view(&app, 6) == 0);                                 /* the first open one: an index */
     CHECK(pure_app_point(&app, 1, 0) == PURE_OK && pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(number_view(&app, 6) == 1);
     CHECK(pure_app_point(&app, 1, 1) == PURE_OK && pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(!pure_app_view(&app, 6, &value));
     CHECK(number_view(&app, 0) == 0 && number_view(&app, 3) == 6 && !pure_app_view(&app, 4, &value)); /* none open */
     pure_app_stop(&app);
 
