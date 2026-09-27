@@ -214,6 +214,11 @@ typedef struct {
     uint64_t durable_ticks, durable_events;
     struct PurePending { void *document; char key[65]; bool edited; } *pending; /* grows to PURE_APP_PENDING */
     unsigned pending_count, pending_capacity;
+    /* The pending documents by key, so a message finds its key in one look:
+     * open addressing over the key's hash, a slot holding one more than the
+     * document's place in pending (0: none). */
+    uint16_t pending_index[2 * PURE_APP_PENDING];
+    bool document_pending; /* the current event's document is among them */
     PureFault fault;
     uint32_t fault_pc;
     uint64_t ticks, events;
@@ -258,6 +263,9 @@ PureResult pure_app_save(PureApp *);
 /* Defer saving to pure_app_save (false: save after each event). Needs a data
  * host that saves documents together (PureData.save). */
 bool pure_app_defer(PureApp *, bool deferred);
+/* Whether key's document is in the unsaved burst: a message for it would
+ * save the burst first. */
+bool pure_app_pending(const PureApp *, const char *key);
 /* Leaves unsaved frame changes unsaved: call pure_app_save first to keep them. */
 void pure_app_stop(PureApp *);
 PureResult pure_app_frame(PureApp *);

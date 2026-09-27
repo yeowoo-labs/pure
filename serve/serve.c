@@ -1190,10 +1190,9 @@ static void execute(Executor *ex, const Job *jobs, size_t count, void (*finish)(
     size_t n = reads, start = reads, keys = 0;
     for (size_t i = 0; i < count; ++i) {
         if (ex->reads_first && jobs[i].effect.input == PURE_INPUT_READ) continue;
-        bool document = jobs[i].route.kind == ROUTE_OBJECT, repeated = false;
-        for (size_t k = start; k < n && document && !repeated; ++k)
-            repeated = applied[k].route == ROUTE_OBJECT && !strcmp(applied[k].key, jobs[i].effect.key);
-        if (repeated || (document && keys == PURE_APP_PENDING)) {
+        /* A document joins a burst once (its revision moves once a save). */
+        bool document = jobs[i].route.kind == ROUTE_OBJECT;
+        if (document && (keys == PURE_APP_PENDING || pure_app_pending(&ex->app, jobs[i].effect.key))) {
             save_burst(ex, applied + start, n - start);
             finish(context, applied + start, n - start);
             start = n;

@@ -1262,14 +1262,23 @@ PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record) {
     return pure_list_new(m->record[record].count, m->record_field_text + m->record[record].first);
 }
 
-static bool pending(const PureApp *app, const void *document) {
-    for (unsigned i = 0; i < app->pending_count; ++i) if (app->pending[i].document == document) return true;
-    return false;
+/* Where key is in the pending index: its slot, or the empty one it would take. */
+static unsigned pending_slot(const PureApp *app, const char *key) {
+    uint32_t hash = 2166136261u; /* FNV-1a */
+    for (const char *c = key; *c; ++c) hash = (hash ^ (unsigned char)*c) * 16777619u;
+    unsigned mask = 2 * PURE_APP_PENDING - 1, slot = hash & mask;
+    while (app->pending_index[slot] && strcmp(app->pending[app->pending_index[slot] - 1].key, key)) slot = (slot + 1) & mask;
+    return slot;
+}
+
+bool pure_app_pending(const PureApp *app, const char *key) {
+    return app->pending_count && app->pending_index[pending_slot(app, key)];
 }
 
 void pure_app_finish(PureApp *app) {
     /* A document in the unsaved burst stays open until the save. */
-    if (app->document && !pending(app, app->document)) app->data.close(app->data.context, app->document);
+    if (app->document && !app->document_pending) app->data.close(app->data.context, app->document);
+    app->document_pending = false;
     free(app->copied);
     app->document = NULL;
     app->copied = NULL;
@@ -1304,7 +1313,9 @@ static void open_burst(PureApp *app) {
 static void close_burst(PureApp *app, bool keep) {
     for (unsigned i = 0; i < app->pending_count; ++i)
         if (app->pending[i].document != app->document) app->data.close(app->data.context, app->pending[i].document);
+    if (app->pending_count) memset(app->pending_index, 0, sizeof(app->pending_index));
     app->pending_count = 0;
+    app->document_pending = false;
     if (!app->open) return;
     const PureModule *m = app->module;
     for (uint32_t i = 0; i < m->states; ++i) {
@@ -1519,9 +1530,11 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     ++app->changes;
     if (!event) ++app->ticks;
     if (app->document) {
+        app->pending_index[pending_slot(app, ev->key)] = (uint16_t)(app->pending_count + 1); /* not there: a key joins once */
         app->pending[app->pending_count].document = app->document;
         app->pending[app->pending_count].edited = ev->modified;
         memcpy(app->pending[app->pending_count++].key, ev->key, strlen(ev->key) + 1);
+        app->document_pending = true;
         app->revision += ev->modified; /* a save moves an edited document one revision */
     }
     if (app->delivering.pending) {
@@ -1627,9 +1640,7 @@ static PureResult message(PureApp *app, uint32_t input, const char *key, int64_t
     if (shape->keyed && m->collections) {
         if (!app->data.open) return PURE_INVALID;
         /* A key joins a burst once, so its revision moves once per save. */
-        bool seen = app->pending_count == PURE_APP_PENDING;
-        for (unsigned i = 0; i < app->pending_count && !seen; ++i) seen = !strcmp(app->pending[i].key, key);
-        if (seen) {
+        if (app->pending_count == PURE_APP_PENDING || pure_app_pending(app, key)) {
             PureResult saved = pure_app_save(app);
             if (saved != PURE_OK) return saved;
         }

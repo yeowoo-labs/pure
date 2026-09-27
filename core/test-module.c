@@ -1716,6 +1716,38 @@ static void deferred_messages(void) {
     remove_store(path);
 }
 
+/* The burst's keys are found in one look (an index over their hashes, most
+ * slots shared at 200 keys): every pending key and no other, reads as well
+ * as edits, and a message for one of them saves the burst first. */
+static void pending_keys(void) {
+    char *path = new_store();
+    CHECK(load(editor_spec, &module_a) == PURE_OK);
+    PureApp app;
+    unsigned char buffer[64];
+    char key[8];
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&app, true));
+    for (int i = 0; i < 200; ++i) {
+        snprintf(key, sizeof(key), "p%d", i);
+        CHECK(!pure_app_pending(&app, key));
+        CHECK(pure_app_message(&app, 1, key, 0, edit_payload(buffer, 0, 0, "q")) == PURE_OK);
+    }
+    CHECK(pure_app_save(&app) == PURE_OK && !pure_app_pending(&app, "p0"));
+    for (int i = 0; i < 200; ++i) {
+        snprintf(key, sizeof(key), "p%d", i);
+        CHECK((i % 2 ? pure_app_message(&app, 0, key, -1, (PureSpan){0})
+                     : pure_app_message(&app, 1, key, 1, edit_payload(buffer, 1, 0, "r"))) == PURE_OK);
+    }
+    for (int i = 0; i < 210; ++i) {
+        snprintf(key, sizeof(key), "p%d", i);
+        CHECK(pure_app_pending(&app, key) == (i < 200));
+    }
+    CHECK(!pure_app_pending(&app, "p") && !pure_app_pending(&app, "p1000") && app.pending_count == 200);
+    CHECK(pure_app_message(&app, 0, "p150", -1, (PureSpan){0}) == PURE_OK && app.pending_count == 1);
+    CHECK(pure_app_pending(&app, "p150") && !pure_app_pending(&app, "p151"));
+    pure_app_stop(&app);
+    remove_store(path);
+}
+
 static void deferred(void) {
     static const char *const list_words[] = {"a", "\xea\xb0\x80", "", "\n", "\xf0\x9f\x98\x80"};
     static const char *const text_words[] = {"a", "\xea\xb0\x80", "\n", "\xf0\x9f\x98\x80", "xy\nz", ""};
@@ -1723,6 +1755,7 @@ static void deferred(void) {
     deferred_equivalence(text_spec, text_words, LEN(text_words), 0x1b873593u);
     deferred_bursts();
     deferred_messages();
+    pending_keys();
 }
 
 /* Text inserted at a cursor goes before it; at a mark (a cursor that stays),
