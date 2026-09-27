@@ -2,7 +2,7 @@
 /* HTTP/1.1 load for Pure's benchmarks: N connections on one epoll thread,
  * each sending one request at a time and measuring its latency.
  *
- * load PORT CONNECTIONS SECONDS get|put|score|total|page|note KEYS [keep-alive|close] [BODY]
+ * load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json KEYS [keep-alive|close] [BODY]
  * get: GET /objects/kI for I in [0, KEYS).
  * put: connection C edits its own key kC (C mod KEYS), inserting BODY bytes
  *      at 0 with If-Match on the revision it last saw (If-None-Match: * at
@@ -10,7 +10,8 @@
  * The scoreboard app: score posts a point for kC (POST /inputs/score?points=1,
  * the name as the body), total reads GET /views/total and page GET
  * /views/leaders?from=0&count=20. note reads GET /views/page (a text state
- * shown as it is, as in a notes app).
+ * shown as it is, as in a notes app). json posts {"name":"k","text":"x..."}
+ * (BODY bytes of text) to POST /inputs/echo as application/json.
  * Prints one JSON line: requests/s, statuses, latency percentiles (µs). */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -68,7 +69,7 @@ static uint64_t percentile(uint64_t total, double p) {
 }
 
 static int port, connections_count, keys;
-static enum { GET, PUT, SCORE, TOTAL, PAGE, NOTE } method;
+static enum { GET, PUT, SCORE, TOTAL, PAGE, NOTE, JSON } method;
 static bool put, keep_alive;
 static char *body;
 static size_t body_bytes;
@@ -76,6 +77,15 @@ static int epoll_fd;
 
 static void prepare(Connection *c) {
     const char *closing = keep_alive ? "" : "Connection: close\r\n";
+    if (method == JSON) {
+        c->request_size = (size_t)snprintf(c->request, sizeof(c->request),
+            "POST /inputs/echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+            "Content-Length: %zu\r\n%s\r\n", body_bytes, closing);
+        c->sent = c->received = c->body_sent = 0;
+        c->body_size = body_bytes;
+        c->started = now_us();
+        return;
+    }
     if (method >= SCORE) {
         char name[16];
         int length = snprintf(name, sizeof(name), "k%d", c->key);
@@ -141,21 +151,28 @@ static bool complete(Connection *c, int *status, bool *closing, size_t *length) 
 
 int main(int argc, char **argv) {
     if (argc < 6) {
-        fputs("load PORT CONNECTIONS SECONDS get|put|score|total|page|note KEYS [keep-alive|close] [BODY]\n", stderr);
+        fputs("load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json KEYS [keep-alive|close] [BODY]\n", stderr);
         return 2;
     }
     port = atoi(argv[1]);
     connections_count = atoi(argv[2]);
     double seconds = atof(argv[3]);
-    static const char *const methods[] = {"get", "put", "score", "total", "page", "note"};
-    for (method = GET; method <= NOTE && strcmp(argv[4], methods[method]); ++method) {}
-    if (method > NOTE) { fprintf(stderr, "load: unknown method %s\n", argv[4]); return 2; }
+    static const char *const methods[] = {"get", "put", "score", "total", "page", "note", "json"};
+    for (method = GET; method <= JSON && strcmp(argv[4], methods[method]); ++method) {}
+    if (method > JSON) { fprintf(stderr, "load: unknown method %s\n", argv[4]); return 2; }
     put = method == PUT;
     keys = atoi(argv[5]);
     keep_alive = argc > 6 && !strcmp(argv[6], "keep-alive");
     body_bytes = argc > 7 ? strtoul(argv[7], NULL, 10) : 16;
-    body = calloc(body_bytes + 8, 1);
+    body = calloc(body_bytes + 32, 1);
     memset(body + 8, 'x', body_bytes);
+    if (method == JSON) {
+        static const char open[] = "{\"name\":\"k\",\"text\":\"";
+        memcpy(body, open, sizeof(open) - 1);
+        memset(body + sizeof(open) - 1, 'x', body_bytes);
+        memcpy(body + sizeof(open) - 1 + body_bytes, "\"}", 2);
+        body_bytes += sizeof(open) - 1 + 2;
+    }
     epoll_fd = epoll_create1(0);
     Connection *all = calloc((size_t)connections_count, sizeof(*all));
     for (int i = 0; i < connections_count; ++i) {

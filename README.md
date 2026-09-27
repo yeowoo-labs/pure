@@ -1,14 +1,15 @@
 # Pure
 
-**Current app model (2026-09-26).** Apps are written in [aup](/srv/git/aup.git) and run as Pure modules
+**Current app model (2026-09-27).** Apps are written in [aup](/srv/git/aup.git) and run as Pure modules
 ([format v5](docs/design/008-module-format.md)), verified completely before they execute: declared states persist
 in Pure's tree store, every event is a transaction, views are pure functions of state. The same spec becomes a
 terminal UI, a CLI, spoken sentences and a web page through [Vega](/srv/git/vega.git), and an HTTP service through
-`pure-serve` (views are GETs, inputs are POSTs with JSON bodies; answers are durable; views are read from a snapshot of
-the last save, so reads never wait for a sync; a commit is one contiguous write and one sync). Measurements against
-axum and drogon on a Raspberry Pi 5 are in [075](docs/research/075-http-host-against-axum.md),
-[077](docs/research/077-apps-as-http-services.md), [080](docs/research/080-snapshot-reads.md) and
-[081](docs/research/081-tail-records.md); the status table is [CHECKPOINT.md](CHECKPOINT.md). The text below
+`pure-serve`: views are GETs and inputs are POSTs, with JSON bodies (groups included) read in place; answers are
+durable, a commit being one contiguous write and one sync; views are read from a snapshot of the last save, so
+reads never wait for a sync. Measurements against axum and drogon on a Raspberry Pi 5 are in
+[075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md),
+[080](docs/research/080-snapshot-reads.md), [081](docs/research/081-tail-records.md) and
+[082](docs/research/082-json-in-place.md); the status table is [CHECKPOINT.md](CHECKPOINT.md). The text below
 records the earlier document runtime this grew from.
 
 A standalone native micro runtime being designed as a small operating

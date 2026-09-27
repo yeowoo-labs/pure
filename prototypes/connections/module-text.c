@@ -12,6 +12,11 @@ enum { CHUNK = 4096 };
 bool pure_utf8_step(unsigned *state, PureSpan span) {
     unsigned remaining = *state & 3, range = *state >> 2;
     for (size_t i = 0; i < span.size; ++i) {
+        /* Eight ASCII bytes at a time between characters. */
+        uint64_t word;
+        while (!remaining && span.size - i >= 8 && (memcpy(&word, span.data + i, 8), !(word & UINT64_C(0x8080808080808080))))
+            i += 8;
+        if (i == span.size) break;
         unsigned char b = span.data[i];
         if (remaining) {
             unsigned low = range == 1 ? 0xA0 : range == 3 ? 0x90 : 0x80;

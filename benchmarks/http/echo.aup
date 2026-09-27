@@ -1,0 +1,5 @@
+input echo = message {
+  name: text
+  text: text
+}
+on echo { reply echo.name }

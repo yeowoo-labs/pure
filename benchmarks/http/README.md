@@ -32,6 +32,9 @@ python3 run.py --module scores.pmod --suite app --rounds 3 --seconds 4 \
     --only pure-serve,pure-serve-2,axum-memory,axum-durable,drogon-memory,drogon-durable
 ```
 
+JSON 본문의 비용은 상태 없는 앱 [echo.aup](echo.aup)에 `load PORT 연결 초 json 1 keep-alive 본문바이트`로 잰다
+(`{"name":"k","text":"x…"}`를 `POST /inputs/echo`로, [082](../../docs/research/082-json-in-place.md)).
+
 앱 벤치마크의 마지막 작업(`mixed`)은 내구성 점수 POST 8연결과 합계 GET 56연결을 부하 생성기 둘로 함께 보내, 쓰기가
 동기화하는 동안 읽기가 기다리는지 본다([080](../../docs/research/080-snapshot-reads.md)). 두 행(posts, reads)으로
 나오고, CPU 1초당 답은 두 행을 합친 것이다.
