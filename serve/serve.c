@@ -204,6 +204,7 @@ struct Host {
     size_t capacity, active;
     int epoll, listener;
     uint64_t timeout_ms;
+    uint64_t now; /* the monotonic clock in ms, read once a round: deadlines count from it */
     uint64_t accepted, requests, expired;
     /* What the owner hands back to answer (swapped for answering), and the
      * eventfd that says so; pending counts requests at the owner. */
@@ -734,7 +735,7 @@ static void drive(Connection *c) {
             if (c->in_used == HEADER_LIMIT) { refuse(c, 431, "Request Header Fields Too Large", "headers"); continue; }
             if (!c->readable) return;
             ssize_t n = recv(c->fd, c->in + c->in_used, HEADER_LIMIT - c->in_used, 0);
-            if (n > 0) { c->in_used += (size_t)n; c->deadline = now_ms() + c->host->timeout_ms; continue; }
+            if (n > 0) { c->in_used += (size_t)n; c->deadline = c->host->now + c->host->timeout_ms; continue; }
             if (n < 0 && errno == EAGAIN) { c->readable = false; return; }
             if (n < 0 && errno == EINTR) continue;
             close_connection(c);
@@ -745,7 +746,7 @@ static void drive(Connection *c) {
             ssize_t n = recv(c->fd, c->body + c->received, c->body_size - c->received, 0);
             if (n > 0) {
                 c->received += (size_t)n;
-                c->deadline = now_ms() + c->host->timeout_ms;
+                c->deadline = c->host->now + c->host->timeout_ms;
                 if (c->received == c->body_size) body_done(c);
                 continue;
             }
@@ -761,7 +762,7 @@ static void drive(Connection *c) {
             if (n < 0 && errno == EAGAIN) { c->writable = false; return; }
             if (n < 0 && errno == EINTR) continue;
             if (n < 0) { close_connection(c); return; }
-            c->deadline = now_ms() + c->host->timeout_ms; /* a slow reader is fine while it reads */
+            c->deadline = c->host->now + c->host->timeout_ms; /* a slow reader is fine while it reads */
             for (size_t sent = (size_t)n; c->out_at < c->out_count;) {
                 struct iovec *v = &c->out[c->out_at];
                 if (sent < v->iov_len) {
@@ -775,7 +776,7 @@ static void drive(Connection *c) {
             if (c->out_at < c->out_count) continue;
             /* Answered: the next request may already be here. */
             finish_output(c);
-            c->deadline = now_ms() + c->host->timeout_ms;
+            c->deadline = c->host->now + c->host->timeout_ms;
             if (!c->keep_alive) { close_connection(c); return; }
             c->phase = READING_HEAD;
             continue;
@@ -1023,7 +1024,6 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
 static void apply_effect(Executor *ex, const Job *job, Applied *out) {
     PureApp *app = &ex->app;
     const PureEffect *effect = &job->effect;
-    app->now = wall_ms();
     *out = (Applied){.host = job->host, .ticket = effect->ticket, .input = effect->input, .route = job->route.kind};
     memcpy(out->key, effect->key, strlen(effect->key) + 1);
     if (job->route.kind == ROUTE_VIEW) {
@@ -1183,6 +1183,7 @@ static void execute(Executor *ex, const Job *jobs, size_t count, void (*finish)(
     /* One look at the store per round: a request made after another shard's
      * answer was sent is read after that answer's commit. */
     bool pinned = pure_store_pin(ex->store, true) == PURE_OK;
+    ex->app.now = wall_ms(); /* a round's events share its time */
     size_t reads = 0;
     for (size_t i = 0; ex->reads_first && i < count; ++i)
         if (jobs[i].effect.input == PURE_INPUT_READ) apply_effect(ex, &jobs[i], &applied[reads++]);
@@ -1500,7 +1501,7 @@ static void accept_all(Host *host) {
         c->fd = fd;
         c->phase = READING_HEAD;
         c->readable = c->writable = c->keep_alive = true;
-        c->deadline = now_ms() + host->timeout_ms;
+        c->deadline = host->now + host->timeout_ms;
         c->ticket = (PureTicket){0};
         c->out = NULL;
         c->out_count = c->out_at = 0;
@@ -1595,11 +1596,13 @@ static bool start_shard(Host *host, const PureModule *module, bool documents, ui
 static void *run_shard(void *context) {
     Host *host = context;
     struct epoll_event events[EVENTS];
-    uint64_t next_sweep = now_ms() + 1000;
+    host->now = now_ms();
+    uint64_t next_sweep = host->now + 1000;
     while (!atomic_load(&stopping)) {
         /* A thread that runs the app ticks its timers on time. */
         long due = host->owner ? -1 : run_timers(&host->local);
         int ready = epoll_wait(host->epoll, events, EVENTS, due >= 0 && due < 1000 ? (int)due : 1000);
+        host->now = now_ms();
         for (int e = 0; e < ready; ++e) {
             Connection *c = events[e].data.ptr;
             if (!c) { accept_all(host); continue; }
@@ -1611,7 +1614,7 @@ static void *run_shard(void *context) {
             drive(c);
         }
         serve_bursts(host);
-        uint64_t now = now_ms();
+        uint64_t now = host->now;
         if (now >= next_sweep) {
             next_sweep = now + 1000;
             for (size_t i = 0; i < host->capacity; ++i) {
