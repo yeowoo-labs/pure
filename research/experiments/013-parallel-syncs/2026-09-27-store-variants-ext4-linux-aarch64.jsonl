@@ -1,0 +1,21 @@
+{"round": 0, "store": "as it is", "posts_per_second": 21552.25, "p50_us": 2048, "p99_us": 13312, "max_us": 278528, "errors": 0}
+{"round": 0, "store": "no compaction", "posts_per_second": 21943.25, "p50_us": 2176, "p99_us": 14336, "max_us": 77824, "errors": 0}
+{"round": 0, "store": "no compaction, no growth", "posts_per_second": 21310.75, "p50_us": 2176, "p99_us": 22528, "max_us": 81920, "errors": 0}
+{"round": 1, "store": "no compaction", "posts_per_second": 21296.25, "p50_us": 2176, "p99_us": 24576, "max_us": 73728, "errors": 0}
+{"round": 1, "store": "no compaction, no growth", "posts_per_second": 22416.25, "p50_us": 2176, "p99_us": 12800, "max_us": 65536, "errors": 0}
+{"round": 1, "store": "as it is", "posts_per_second": 22416.25, "p50_us": 2176, "p99_us": 16384, "max_us": 73728, "errors": 0}
+{"round": 2, "store": "no compaction, no growth", "posts_per_second": 24080.25, "p50_us": 1984, "p99_us": 13312, "max_us": 59392, "errors": 0}
+{"round": 2, "store": "as it is", "posts_per_second": 22864.25, "p50_us": 1984, "p99_us": 19456, "max_us": 65536, "errors": 0}
+{"round": 2, "store": "no compaction", "posts_per_second": 19744.25, "p50_us": 2176, "p99_us": 32768, "max_us": 73728, "errors": 0}
+{"round": 3, "store": "as it is", "posts_per_second": 22789.75, "p50_us": 1984, "p99_us": 19456, "max_us": 73728, "errors": 0}
+{"round": 3, "store": "no compaction", "posts_per_second": 21760.25, "p50_us": 2048, "p99_us": 20480, "max_us": 147456, "errors": 0}
+{"round": 3, "store": "no compaction, no growth", "posts_per_second": 22672.25, "p50_us": 2176, "p99_us": 13312, "max_us": 65536, "errors": 0}
+{"round": 4, "store": "no compaction", "posts_per_second": 23840.25, "p50_us": 2048, "p99_us": 14848, "max_us": 65536, "errors": 0}
+{"round": 4, "store": "no compaction, no growth", "posts_per_second": 21648.25, "p50_us": 2176, "p99_us": 16384, "max_us": 61440, "errors": 0}
+{"round": 4, "store": "as it is", "posts_per_second": 22043.25, "p50_us": 2176, "p99_us": 18432, "max_us": 59392, "errors": 0}
+{"round": 5, "store": "no compaction, no growth", "posts_per_second": 23056.25, "p50_us": 2176, "p99_us": 12288, "max_us": 63488, "errors": 0}
+{"round": 5, "store": "as it is", "posts_per_second": 21997.0, "p50_us": 2176, "p99_us": 16384, "max_us": 73728, "errors": 0}
+{"round": 5, "store": "no compaction", "posts_per_second": 21060.25, "p50_us": 2176, "p99_us": 16384, "max_us": 73728, "errors": 0}
+{"store": "as it is", "rounds": 6, "posts_per_second_median": 22229.75, "p99_us_median": 17408.0, "max_us": 278528}
+{"store": "no compaction", "rounds": 6, "posts_per_second_median": 21528.25, "p99_us_median": 18432.0, "max_us": 147456}
+{"store": "no compaction, no growth", "rounds": 6, "posts_per_second_median": 22544.25, "p99_us_median": 13312.0, "max_us": 81920}
