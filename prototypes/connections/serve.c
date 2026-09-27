@@ -1839,6 +1839,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--store")) store = argv[i + 1];
         else if (!strcmp(argv[i], "--send") && send_count < PURE_MODULE_INPUTS) sends[send_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--name")) name = argv[i + 1];
+        else if (!strcmp(argv[i], "--send-ca")) pure_wire_trust(argv[i + 1]);
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
@@ -1948,6 +1949,7 @@ int main(int argc, char **argv) {
     return 0;
 usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
-          "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=http://host:port/path ...] [--name NAME]\n", stderr);
+          "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=http[s]://host:port/path ...] [--name NAME] "
+          "[--send-ca FILE]\n", stderr);
     return 2;
 }

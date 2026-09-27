@@ -15,8 +15,11 @@
  * once, so a send delivered twice (its answer lost) is harmless. */
 typedef struct PureWire PureWire;
 
-/* A wire for the output named output of m to url (http://host[:port]/path),
- * as source; NULL with why in error when it cannot be. */
+/* A wire for the output named output of m to url (http[s]://host[:port]/path),
+ * as source; NULL with why in error when it cannot be. An https receiver's
+ * certificate must be trusted (the system's CAs, or the file given to
+ * pure_wire_trust before the first https wire) and name its host. */
+void pure_wire_trust(const char *ca_file);
 PureWire *pure_wire_open(const PureModule *m, const char *output, const char *url, const char *source,
                          char *error, size_t size);
 uint32_t pure_wire_output(const PureWire *);

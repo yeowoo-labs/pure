@@ -18,7 +18,7 @@
 | HTTP 서비스 | 보기가 GET, 입력이 POST다(JSON 본문과 그 안의 그룹 객체를 제자리에서 읽는다, 라우터 코드 없음). 앱의 `send`는 이벤트와 함께 저장되고, `--send 출력=URL`로 다른 앱이나 HTTP 끝점에 순서대로 묶어 전해지며, 받는 앱은 번호마다 한 번 적용한다(서버를 죽였다 살려도 정확히 한 번). 답은 저장 뒤에 나간다. 상태를 가진 앱은 소유자 스레드 하나가 입력을 적용하고, 연결 스레드는 마지막 저장의 스냅숏으로 보기를 답한다(쓰기가 동기화하는 동안에도 읽기는 기다리지 않는다) | 008 HTTP 호스트, [077](docs/research/077-apps-as-http-services.md), [080](docs/research/080-snapshot-reads.md), [082](docs/research/082-json-in-place.md), [083](docs/research/083-delivery-over-http.md) |
 | 성능(Pi 5) | 문서 서버: 작은 GET 151.6k/s, 1 MiB GET 2,794/s(axum 1,372, drogon 708), 충돌 안전 PUT은 axum-atomic의 5.1–5.8배. 앱 서비스(aup 22줄 대 손으로 쓴 서비스): 내구성 있는 쓰기 약 76배(그 뒤 저장소 커밋을 한 구간으로 바꿔 64연결 21–26k/s, axum·drogon 내구 약 180/s), 20행 JSON GET 145k/s(axum 95k, drogon 144k), 쓰기와 섞인 읽기 149k/s·p99 0.6 ms(axum·drogon 내구 1.1–1.3k/s·p99 111–156 ms), 최대 RSS 3.0–4.1 MiB(axum 6.4, drogon 11.6) | [075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md), [080](docs/research/080-snapshot-reads.md), [081](docs/research/081-tail-records.md) |
 
-남은 것: macOS 검증, `bool`·`i64`, 꼬리 늘리기·압축을 커밋 밖으로와 열린 부하에서의 저장·적용 겹치기(081 다음 결정), 전달의 TLS와 응답을 이벤트로 돌려받기(083 다음 결정), 앱 라우트의 인증·TLS(문서
+남은 것: macOS 검증, `bool`·`i64`, 꼬리 늘리기·압축을 커밋 밖으로와 열린 부하에서의 저장·적용 겹치기(081 다음 결정), 응답을 이벤트로 돌려받기(083 다음 결정), 앱 라우트의 인증·TLS(문서
 피어의 TLS는 있다), aup·Vega의 배포 묶음.
 
 ## 공개할 작업물과 완료 증거

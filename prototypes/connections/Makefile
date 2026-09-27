@@ -45,7 +45,7 @@ $(BUILD)/pure-connections-async-gated: server.c $(HOST) flow.c program.c $(CORE)
 
 # The HTTP host for aup modules: persistent connections, epoll, group commits.
 $(BUILD)/pure-serve: serve.c deliver.c flow.c module-store.c $(MODULE) $(CORE) deliver.h module-store.h $(MODULE_HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_ASYNC_EFFECTS serve.c deliver.c flow.c module-store.c $(MODULE) $(CORE) $(LDFLAGS) -lm $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_ASYNC_EFFECTS serve.c deliver.c flow.c module-store.c $(MODULE) $(CORE) $(LDFLAGS) -lssl -lcrypto -lm $(LDLIBS) -o $@
 
 $(BUILD)/pure-connections-fixed: server.c $(HOST) flow.c $(CORE) $(HEADERS) $(BUILD)/embedded-plan.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_EMBEDDED_PROGRAM -I$(BUILD) server.c $(HOST) flow.c $(CORE) $(LDFLAGS) $(LDLIBS) -o $@

@@ -5,6 +5,9 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
+#include <arpa/inet.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +19,7 @@
 #include <unistd.h>
 
 enum { TIMEOUT_S = 10, FIRST_PAUSE_MS = 100, LONGEST_PAUSE_MS = 10000, GROUPS = PURE_MODULE_NAME / 2, BATCH_MOST = 256 };
-enum { DELIVERED, AGAIN, REFUSED_BY_PEER };
+enum { DELIVERED, AGAIN, REFUSED_BY_PEER, TLS_FAILED };
 
 typedef struct { char *body; size_t size; uint64_t seq; } Pending;
 
@@ -34,8 +37,31 @@ struct PureWire {
     pthread_t thread;
     void (*notify)(void *);
     void *context;
-    int fd; /* the connection kept for the next send, or -1; changed under the lock */
+    int fd;   /* the connection kept for the next send, or -1; changed under the lock */
+    bool tls; /* https: the connection is TLS */
+    SSL *ssl; /* its TLS session */
 };
+
+/* ---- TLS: one client context, verifying the receiver's certificate against
+ * the system's CAs or the file pure_wire_trust named, and its name. */
+static pthread_once_t tls_once = PTHREAD_ONCE_INIT;
+static SSL_CTX *tls_context;
+static const char *tls_ca;
+
+void pure_wire_trust(const char *ca_file) { tls_ca = ca_file; }
+
+static void make_tls_context(void) {
+    SSL_CTX *context = SSL_CTX_new(TLS_client_method());
+    if (!context) return;
+    if (!SSL_CTX_set_min_proto_version(context, TLS1_2_VERSION) ||
+        !(tls_ca ? SSL_CTX_load_verify_locations(context, tls_ca, NULL) : SSL_CTX_set_default_verify_paths(context))) {
+        SSL_CTX_free(context);
+        return;
+    }
+    SSL_CTX_set_verify(context, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_mode(context, SSL_MODE_AUTO_RETRY);
+    tls_context = context;
+}
 
 /* ---- A send as JSON: its fields in order, a group's fields as an object. */
 
@@ -169,15 +195,22 @@ PureWire *pure_wire_open(const PureModule *m, const char *output, const char *ur
         snprintf(error, size, "a source name has 1 to %d bytes", PURE_SOURCE);
         return NULL;
     }
-    if (strncmp(url, "http://", 7)) {
-        snprintf(error, size, strncmp(url, "https://", 8) ? "a URL is http://host[:port]/path" :
-                                                          "https is not delivered to yet: use http");
+    bool tls = !strncmp(url, "https://", 8);
+    if (!tls && strncmp(url, "http://", 7)) {
+        snprintf(error, size, "a URL is http[s]://host[:port]/path");
         return NULL;
     }
-    const char *host = url + 7, *slash = strchr(host, '/'), *colon = memchr(host, ':', slash ? (size_t)(slash - host) : strlen(host));
+    if (tls) {
+        pthread_once(&tls_once, make_tls_context);
+        if (!tls_context) {
+            snprintf(error, size, "no TLS context: %s cannot be read", tls_ca ? tls_ca : "the system's CAs");
+            return NULL;
+        }
+    }
+    const char *host = url + (tls ? 8 : 7), *slash = strchr(host, '/'), *colon = memchr(host, ':', slash ? (size_t)(slash - host) : strlen(host));
     const char *host_end = colon ? colon : slash ? slash : host + strlen(host);
-    const char *port = colon ? colon + 1 : "80";
-    size_t port_size = colon ? (size_t)((slash ? slash : host + strlen(host)) - port) : 2;
+    const char *port = colon ? colon + 1 : tls ? "443" : "80";
+    size_t port_size = colon ? (size_t)((slash ? slash : host + strlen(host)) - port) : strlen(port);
     if (host_end == host || (size_t)(host_end - host) >= 256 || !port_size || port_size >= 8 ||
         (slash && strlen(slash) >= 1024)) {
         snprintf(error, size, "a URL is http://host[:port]/path");
@@ -192,6 +225,7 @@ PureWire *pure_wire_open(const PureModule *m, const char *output, const char *ur
     snprintf(w->path, sizeof(w->path), "%s", slash ? slash : "/");
     memcpy(w->source, source, length + 1);
     w->fd = -1;
+    w->tls = tls;
     pthread_mutex_init(&w->lock, NULL);
     pthread_cond_init(&w->changed, NULL);
     return w;
@@ -250,13 +284,15 @@ bool pure_wire_queue(PureWire *w, uint64_t seq, PureSpan payload) {
 
 /* ---- HTTP/1.1, one request at a time on a kept connection. */
 
-typedef struct { int fd; char bytes[4096]; size_t at, end; } Reader;
+typedef struct { PureWire *wire; char bytes[4096]; size_t at, end; } Reader;
 
 static bool fill(Reader *r) {
     if (r->at == r->end) r->at = r->end = 0;
     if (r->end == sizeof(r->bytes)) return false;
+    PureWire *w = r->wire;
     ssize_t n;
-    do n = recv(r->fd, r->bytes + r->end, sizeof(r->bytes) - r->end, 0); while (n < 0 && errno == EINTR);
+    if (w->ssl) n = SSL_read(w->ssl, r->bytes + r->end, (int)(sizeof(r->bytes) - r->end));
+    else do n = recv(w->fd, r->bytes + r->end, sizeof(r->bytes) - r->end, 0); while (n < 0 && errno == EINTR);
     if (n <= 0) return false;
     r->end += (size_t)n;
     return true;
@@ -294,15 +330,32 @@ static bool skip(Reader *r, uint64_t size) {
     return true;
 }
 
-static bool send_all(int fd, const char *bytes, size_t size) {
+static bool send_all(PureWire *w, const char *bytes, size_t size) {
     while (size) {
-        ssize_t n = send(fd, bytes, size, MSG_NOSIGNAL);
-        if (n < 0 && errno == EINTR) continue;
+        ssize_t n = w->ssl ? SSL_write(w->ssl, bytes, (int)(size < INT32_MAX ? size : INT32_MAX)) :
+                             send(w->fd, bytes, size, MSG_NOSIGNAL);
+        if (n < 0 && !w->ssl && errno == EINTR) continue;
         if (n <= 0) return false;
         bytes += n;
         size -= (size_t)n;
     }
     return true;
+}
+
+/* TLS over a connected socket: the receiver's certificate must name the host
+ * (a DNS name, or an IP address written as one). */
+static SSL *start_tls(const PureWire *w, int fd) {
+    SSL *ssl = SSL_new(tls_context);
+    if (!ssl) return NULL;
+    unsigned char address[16];
+    bool literal = inet_pton(AF_INET, w->host, address) == 1 || inet_pton(AF_INET6, w->host, address) == 1;
+    bool named = literal ? X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), w->host) == 1 :
+                           SSL_set_tlsext_host_name(ssl, w->host) == 1 && SSL_set1_host(ssl, w->host) == 1;
+    if (!named || SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1 || SSL_get_verify_result(ssl) != X509_V_OK) {
+        SSL_free(ssl);
+        return NULL;
+    }
+    return ssl;
 }
 
 static int connect_to(const PureWire *w) {
@@ -328,7 +381,9 @@ static int connect_to(const PureWire *w) {
 
 static void drop_connection(PureWire *w) {
     pthread_mutex_lock(&w->lock);
+    if (w->ssl) SSL_free(w->ssl);
     if (w->fd >= 0) close(w->fd);
+    w->ssl = NULL;
     w->fd = -1;
     pthread_mutex_unlock(&w->lock);
 }
@@ -342,8 +397,8 @@ static bool refusal(const char *error) {
 
 /* The answer to one request: its status, whether a Pure receiver refused it,
  * and whether the connection may carry the next. */
-static bool read_answer(int fd, int *status, bool *refused, bool *keep, unsigned *batch) {
-    Reader r = {.fd = fd};
+static bool read_answer(PureWire *w, int *status, bool *refused, bool *keep, unsigned *batch) {
+    Reader r = {.wire = w};
     char line[1024];
     if (!read_line(&r, line, sizeof(line)) || strncmp(line, "HTTP/1.", 7) || strlen(line) < 12) return false;
     *status = atoi(line + 9);
@@ -406,15 +461,23 @@ static int post(PureWire *w, const Pending *p, unsigned count) {
             bool stopping = w->stopping;
             pthread_mutex_unlock(&w->lock);
             if (stopping) return AGAIN;
+            SSL *ssl = w->tls ? start_tls(w, fd) : NULL;
+            if (w->tls && !ssl) {
+                drop_connection(w);
+                return TLS_FAILED;
+            }
+            pthread_mutex_lock(&w->lock);
+            w->ssl = ssl;
+            pthread_mutex_unlock(&w->lock);
         }
         int status;
-        bool refused, keep, sent = send_all(w->fd, head, (size_t)size);
+        bool refused, keep, sent = send_all(w, head, (size_t)size);
         unsigned batch_size = 0;
         for (unsigned i = 0; sent && i < count; ++i)
-            sent = (!i || count == 1 || send_all(w->fd, ",", 1)) && (i || count == 1 || send_all(w->fd, "[", 1)) &&
-                   send_all(w->fd, p[i].body, p[i].size);
-        if (sent && count > 1) sent = send_all(w->fd, "]", 1);
-        if (!sent || !read_answer(w->fd, &status, &refused, &keep, &batch_size)) {
+            sent = (!i || count == 1 || send_all(w, ",", 1)) && (i || count == 1 || send_all(w, "[", 1)) &&
+                   send_all(w, p[i].body, p[i].size);
+        if (sent && count > 1) sent = send_all(w, "]", 1);
+        if (!sent || !read_answer(w, &status, &refused, &keep, &batch_size)) {
             drop_connection(w);
             if (fresh) return AGAIN;
             continue;
@@ -458,12 +521,13 @@ static void *deliver(void *context) {
             pthread_mutex_lock(&w->lock);
             continue;
         }
-        if (outcome == REFUSED_BY_PEER && reported != next[0].seq) {
-            fprintf(stderr, "{\"wire\":\"%s\",\"seq\":%llu,\"error\":\"the receiver does not take it; trying again\"}\n",
-                    w->source, (unsigned long long)next[0].seq);
+        if ((outcome == REFUSED_BY_PEER || outcome == TLS_FAILED) && reported != next[0].seq) {
+            fprintf(stderr, "{\"wire\":\"%s\",\"seq\":%llu,\"error\":\"%s\"}\n", w->source,
+                    (unsigned long long)next[0].seq, outcome == TLS_FAILED ? "the receiver's certificate is not trusted; trying again" :
+                    "the receiver does not take it; trying again");
             reported = next[0].seq;
         }
-        pause_ms = outcome == REFUSED_BY_PEER ? LONGEST_PAUSE_MS : pause_ms ? 2 * pause_ms : FIRST_PAUSE_MS;
+        pause_ms = outcome != AGAIN ? LONGEST_PAUSE_MS : pause_ms ? 2 * pause_ms : FIRST_PAUSE_MS;
         if (pause_ms > LONGEST_PAUSE_MS) pause_ms = LONGEST_PAUSE_MS;
         struct timespec until;
         clock_gettime(CLOCK_REALTIME, &until);
@@ -491,6 +555,7 @@ void pure_wire_close(PureWire *w) {
     pthread_cond_broadcast(&w->changed);
     pthread_mutex_unlock(&w->lock);
     if (w->started) pthread_join(w->thread, NULL);
+    if (w->ssl) SSL_free(w->ssl);
     if (w->fd >= 0) close(w->fd);
     for (size_t i = 0; i < w->count; ++i) free(w->queue[w->head + i].body);
     free(w->queue);
