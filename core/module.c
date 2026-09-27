@@ -14,14 +14,15 @@ enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 
 enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8 };
 enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA };
 /* Where an opcode may appear. */
-enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32 };
+enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64 };
 enum { READ = IN_VIEW | IN_HANDLER };
 /* What an argument names: nothing (it is 0), a state of one type (A_STATE +
  * the type), a list and one of its record's fields, a message field, the
  * collection, a constant, a unit, the column's row, a branch target, a stack
- * depth, a fold, a relation or a keyed list. */
+ * depth, a fold, a relation, a keyed list, an output, or the row of the
+ * column a fold runs in. */
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_INDEX + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
-       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT };
+       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER };
 /* A fold's block is verified as a column that leaves one number (count) or
  * two (a value and whether to include it), a table's filter as a column that
  * leaves one: these stand for a view type. */
@@ -90,6 +91,8 @@ static const struct { unsigned char pops, in[3], out, where, arg, of; } signatur
     [PURE_OP_INDEX_LAST] = {0, {0}, T_INDEX, READ, STATE(LIST), O_ARG},
     [PURE_OP_INDEX_NUM] = {1, {T_INDEX}, T_NUM, READ, A_NONE, O_ANY},
     [PURE_OP_ROW] = {0, {0}, T_INDEX, IN_ROW, A_ROW, O_ARG},
+    /* In a fold that runs in a column, the column's row (the fold's own item is ROW's). */
+    [PURE_OP_OUTER_ROW] = {0, {0}, T_INDEX, IN_OUTER, A_OUTER, O_ARG},
     /* Stack copies: their types come from the values they move. */
     [PURE_OP_PICK] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
     [PURE_OP_SLIDE] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
@@ -180,7 +183,8 @@ static unsigned char field_type(const PureModule *m, uint32_t list, uint32_t fie
     return m->record_field_text[m->record[m->state_ref[list]].first + field] ? T_TEXT : T_NUM;
 }
 
-PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg, const PureInputShape *shape, int row) {
+PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg, const PureInputShape *shape, int row,
+                                int outer) {
     switch (kind) {
     case A_ITEM:
         return state_of(m, list_of(arg), PURE_STATE_LIST) && item_field(arg) < m->record[m->state_ref[list_of(arg)]].count;
@@ -189,6 +193,7 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_CONSTANT: return arg < m->constants;
     case A_UNIT: return arg <= PURE_UNIT_LINE;
     case A_ROW: return (int)arg == row;
+    case A_OUTER: return outer >= 0 && (int)arg == outer;
     case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_FIRST && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
     case A_RELATION: return arg <= PURE_NOT_EQUAL;
     case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
@@ -217,16 +222,19 @@ static bool same_stack(const Join *join, int height, const unsigned char *types,
  * in it); the block around treats it as one instruction and may not branch
  * into it. Returns why the block is refused, with at moved to the
  * instruction when one is at fault, or NULL. */
-PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int view, int row, uint32_t event, uint32_t *at);
+PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int view, int row, int outer, uint32_t event,
+                                          uint32_t *at);
 
 /* target marks, per instruction of the block, a branch into it with an empty stack. */
-PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, int view, int row, uint32_t event,
-                                         uint32_t *at, unsigned char *target) {
+/* outer: the row of the column a fold's block runs in (-1: none). */
+PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, int view, int row, int outer,
+                                         uint32_t event, uint32_t *at, unsigned char *target) {
 #define REFUSE(why) do { *at = pc; return why; } while (0)
     if (view >= 0 && !block.length) return "empty view";
     int input = view >= 0 ? -1 : event_input(event);
     const PureInputShape *shape = input >= 0 ? &m->input[input] : NULL;
-    unsigned where = view >= 0 ? IN_VIEW | (row >= 0 ? IN_ROW : 0) : IN_HANDLER;
+    unsigned where = view >= 0 ? IN_VIEW | (row >= 0 ? IN_ROW : 0) | (view >= FOLD_ONE && outer >= 0 ? IN_OUTER : 0)
+                               : IN_HANDLER;
     if (shape && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE | (shape->keyed ? IN_KEYED : 0);
     if (shape && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
     unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK];
@@ -259,6 +267,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         unsigned allowed = signature[op->op].where, kind = signature[op->op].arg, of = signature[op->op].of;
         if (!(allowed & where)) {
             if (allowed & IN_ROW) REFUSE("row outside a column");
+            if (allowed & IN_OUTER) REFUSE("outer row outside a fold in a column");
             if (view == FILTER) REFUSE("filter with an effect");
             if (view >= FOLD_ONE) REFUSE("fold with an effect");
             if (view >= 0) REFUSE("view with an effect");
@@ -269,7 +278,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         uint32_t arg = op->arg;
         if ((kind == A_NONE && arg) || (op->op == PURE_OP_CONST ? !isfinite(op->value) : op->value != 0))
             REFUSE("non-canonical operand");
-        if (!names_arg(m, kind, arg, shape, row)) REFUSE("operand names no such state, field, constant or unit");
+        if (!names_arg(m, kind, arg, shape, row, outer)) REFUSE("operand names no such state, field, constant or unit");
         /* A keyed list places its items by key, and an item's key stays. */
         if (op->op == PURE_OP_LIST_INSERT && m->state_key[arg]) REFUSE("insert by position into a keyed list");
         if (op->op == PURE_OP_ITEM_SET && m->state_key[list_of(arg)] == item_field(arg) + 1)
@@ -294,7 +303,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             unsigned how = arg & 0xFF;
             const char *why = verify_block(m, (PureBlock){pc + 1, skip},
                                            how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? FOLD_ONE : FOLD_TWO,
-                                           (int)(arg >> 8 & 0xFF), 0, &inner);
+                                           (int)(arg >> 8 & 0xFF), row, 0, &inner);
             if (why) { *at = inner; return why; }
             for (uint32_t k = i + 1; k <= i + skip; ++k) {
                 if (target[k]) REFUSE("branch into a fold");
@@ -380,12 +389,12 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
 #undef REFUSE
 }
 
-PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, int view, int row, uint32_t event,
-                                          uint32_t *at) {
+PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, int view, int row, int outer,
+                                          uint32_t event, uint32_t *at) {
     if (block.start > m->code_count || block.length > m->code_count - block.start) return "code range outside module";
     unsigned char *target = calloc((size_t)block.length + 1, 1);
     if (!target) return "out of memory";
-    const char *why = verify_code(m, block, view, row, event, at, target);
+    const char *why = verify_code(m, block, view, row, outer, event, at, target);
     free(target);
     return why;
 }
@@ -653,11 +662,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         bool table = out->view_type[i] == PURE_VIEW_TABLE;
         if ((!table || out->view_code[i].length) &&
             (why = verify_block(out, out->view_code[i], table ? FILTER : out->view_type[i],
-                                table || out->view_table[i] ? out->view_list[i] : -1, 0, &bad))) goto refused;
+                                table || out->view_table[i] ? out->view_list[i] : -1, -1, 0, &bad))) goto refused;
     }
     for (uint32_t i = 0; i < out->handlers; ++i) {
         bad = i;
-        if ((why = verify_block(out, out->handler[i].code, -1, -1, out->handler[i].event, &bad))) goto refused;
+        if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event, &bad))) goto refused;
     }
     return PURE_OK;
 refused:
@@ -714,7 +723,8 @@ typedef struct {
     int64_t base;                /* the revision a message's edit was made against, or -1 */
     PureArena *arena;
     double dt;
-    size_t row; /* the row a column is evaluated for */
+    size_t row;   /* the row a column is evaluated for (in a fold, the fold's item) */
+    size_t outer; /* in a fold, the row of the column it runs in */
     bool modified, exists;
     uint32_t (*spans)[2]; /* a message's variable fields: start and size in the payload */
 } Event;
@@ -1000,6 +1010,10 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             stack[sp++].bytes.owner = (uint16_t)arg;
             continue;
         }
+        case PURE_OP_OUTER_ROW:
+            stack[sp].num = (double)ev->outer;
+            stack[sp++].bytes.owner = (uint16_t)arg;
+            continue;
         case PURE_OP_CUR_MOVE: case PURE_OP_INDEX_MOVE: {
             double count = stack[--sp].num;
             Slot *at = &stack[sp - 1];
@@ -1151,6 +1165,7 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             double total = 0;
             bool any = false;
             Event per = *ev;
+            per.outer = ev->row;
             for (size_t row = 0, items = pure_list_count(list); row < items; ++row) {
                 Slot out[2];
                 size_t mark = arena->used;
