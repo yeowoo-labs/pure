@@ -29,7 +29,7 @@
 |---|---|---|
 | `core/` | 실행·소유권·한도·완료(`runtime.c`, `flow.c`), 앱 모델(`module*.c`: 실행 전에 검증한 모듈, 트랜잭션인 이벤트, draft인 상태), 코어가 저장소에 요구하는 것(`state.h`, `store.h`) | `build/libpure.a`(저장소와 함께) |
 | `store/` | 트리 저장소. 한 파일, 커밋은 한 연속 쓰기와 동기화 한 번 | `libpure.a` 안 |
-| `serve/` | `pure-serve`: HTTP 호스트, 나가는 전달, 제자리 JSON. OpenSSL을 쓰는 부분(https 수신자로의 TLS, 봉인한 전달)은 따로 두어 쓰는 서버만 매핑한다 | `build/pure-serve`, `build/pure-crypto.so` |
+| `serve/` | `pure-serve`: HTTP 호스트, 나가는 전달, 제자리 JSON, 노드 안에서 도는 사람을 위한 표면([010](010-surfaces.md)). OpenSSL을 쓰는 부분(https 수신자로의 TLS, 봉인한 전달)은 따로 두어 쓰는 서버만 매핑한다 | `build/pure-serve`, `build/pure-crypto.so` |
 | `cli/` | 명령행 호스트 | `build/pure-run`, `build/pure-edit-module` |
 | `prototypes/` | 이전 문서 런타임. `core/`와 `store/`를 가져다 빌드한다 | `make -C prototypes/connections` |
 

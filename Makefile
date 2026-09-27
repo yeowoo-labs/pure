@@ -38,9 +38,10 @@ $(BUILD)/libpure.a: $(OBJECTS)
 
 # The runtime's tickets and budgets, with effects completed off the owner thread.
 # It links after the library, last as it always was, so code keeps its place.
+# The app model's functions are exported for a surface it maps (serve/surface.h).
 $(BUILD)/pure-serve: $(SERVE) core/runtime.c $(BUILD)/libpure.a $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve -DPURE_ASYNC_EFFECTS $(SERVE) $(BUILD)/libpure.a core/runtime.c \
-		$(LDFLAGS) -lm -pthread $(LDLIBS) -o $@
+		$(LDFLAGS) -Wl,--export-dynamic-symbol='pure_*' -lm -pthread $(LDLIBS) -o $@
 
 $(BUILD)/pure-crypto.so: serve/crypto-openssl.c $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve -fPIC -shared serve/crypto-openssl.c $(LDFLAGS) -lssl -lcrypto \

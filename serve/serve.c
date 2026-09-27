@@ -31,12 +31,14 @@
  * bursts take the requests of every thread, one save each. */
 #include "deliver.h"
 #include "seal.h"
+#include "surface.h"
 #include "message-json.h"
 #include "module-store.h"
 #include "module-text.h"
 #include "runtime.h"
 #include "store.h"
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -139,8 +141,12 @@ typedef struct Connection {
  * it. A read answered from the store lends its extents: they point into a
  * store mapping, which the resource holds and the runtime charges and
  * releases with the ticket. */
+/* A surface's event, waiting for its save: done, and how it went. */
+typedef struct { PureResult status; bool done; } Waiter;
+
 typedef struct {
-    Host *host;
+    Host *host;       /* NULL for a surface's event */
+    Waiter *waiter;   /* and then its waiter */
     PureTicket ticket;
     PureInput input;
     PureResult status;
@@ -178,6 +184,7 @@ typedef struct {
     pthread_mutex_t published_lock;
     PureSnapshot *published;
     uint64_t published_changes, publications;
+    struct PureSurfaceHost *surface; /* told of each snapshot published */
     /* The owner's: outputs wired to HTTP receivers, and how far each was trimmed. */
     PureWire *wires[PURE_MODULE_INPUTS];
     unsigned wire_count;
@@ -185,14 +192,15 @@ typedef struct {
     bool held[PURE_MODULE_INPUTS]; /* an answer failed to apply: the wire's sends stay until a restart */
 } Executor;
 
-/* A request made ready: its effect, what it names, and the thread that answers it. */
-typedef struct { Host *host; PureEffect effect; Route route; } Job;
+/* A request made ready: its effect, what it names, and the thread that
+ * answers it (or, for a surface's event, the waiter it wakes). */
+typedef struct { Host *host; PureEffect effect; Route route; Waiter *waiter; } Job;
 
 /* The owner of an app with states served by several connection threads:
  * their requests wait here, and it runs them in bursts, one save each
  * however many threads they came from, handing each thread back its
- * applied requests to answer. */
-typedef struct {
+ * applied requests to answer (and a surface its events). */
+typedef struct Owner {
     Executor executor;
     pthread_mutex_t lock;
     pthread_cond_t waiting;
@@ -1144,7 +1152,8 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
 static void apply_effect(Executor *ex, const Job *job, Applied *out) {
     PureApp *app = &ex->app;
     const PureEffect *effect = &job->effect;
-    *out = (Applied){.host = job->host, .ticket = effect->ticket, .input = effect->input, .route = job->route.kind};
+    *out = (Applied){.host = job->host, .waiter = job->waiter, .ticket = effect->ticket, .input = effect->input,
+                     .route = job->route.kind};
     memcpy(out->key, effect->key, strlen(effect->key) + 1);
     if (job->route.kind == ROUTE_VIEW) {
         out->status = show_view(app, &job->route, effect->available, out);
@@ -1185,6 +1194,24 @@ static void apply_effect(Executor *ex, const Job *job, Applied *out) {
                                    .release = release_copy};
 }
 
+/* ---- A surface in the node (serve/surface.h): one, run in its own thread,
+ * reading published snapshots and giving events to the owner. */
+struct PureSurfaceHost {
+    struct Owner *owner;
+    pthread_mutex_t lock;
+    pthread_cond_t applied; /* a waiter's event was applied and saved (or not) */
+    PureSurface table;
+    PureSurfaceRun run;
+    int argc, result;
+    char **argv;
+    pthread_t thread;
+};
+
+static void surface_changed(PureSurfaceHost *s) {
+    uint64_t one = 1;
+    if (write(s->table.changes, &one, sizeof(one)) != sizeof(one)) { /* full: it is readable already */ }
+}
+
 /* After a save, before its answers go: from now on views show what it
  * saved, so a read made after a write's answer sees the write. A failed save
  * returns the app to the last save's states, which the snapshot still shows. */
@@ -1198,6 +1225,7 @@ static void publish(Executor *ex) {
     pure_snapshot_release(old);
     ex->published_changes = ex->app.changes;
     ++ex->publications;
+    if (ex->surface) surface_changed(ex->surface);
 }
 
 /* The saved sends of wired outputs not queued yet go to their wires, in
@@ -1378,6 +1406,16 @@ static void answer_burst(void *context, Applied *applied, size_t count) {
 /* On the owner: give each connection thread its applied requests, and wake it. */
 static void hand_back(void *context, Applied *applied, size_t count) {
     Owner *owner = context;
+    PureSurfaceHost *surface = owner->executor.surface;
+    bool events = false;
+    for (size_t i = 0; i < count; ++i) events = events || !applied[i].host;
+    if (events) { /* a surface's: its waiter wakes */
+        pthread_mutex_lock(&surface->lock);
+        for (size_t i = 0; i < count; ++i)
+            if (!applied[i].host) applied[i].waiter->status = applied[i].status, applied[i].waiter->done = true;
+        pthread_cond_broadcast(&surface->applied);
+        pthread_mutex_unlock(&surface->lock);
+    }
     for (unsigned h = 0; h < owner->host_count; ++h) {
         Host *host = &owner->hosts[h];
         size_t mine = 0;
@@ -1432,7 +1470,7 @@ static void serve_bursts(Host *host) {
         size_t count = 0;
         PureEffect effect;
         while (pure_runtime_take(&host->runtime, &effect) == PURE_TAKE_EFFECT)
-            host->jobs[count++] = (Job){host, effect, host->routes[effect.ticket.slot]};
+            host->jobs[count++] = (Job){host, effect, host->routes[effect.ticket.slot], NULL};
         if (!count) return;
         if (!host->owner) {
             execute(&host->local, host->jobs, count, answer_burst, NULL);
@@ -1558,6 +1596,99 @@ static void *run_owner(void *context) {
     }
     free(spare);
     return NULL;
+}
+
+/* The surface's table (serve/surface.h). */
+static PureSnapshot *surface_read(PureSurfaceHost *s, PureApp *reader) {
+    Executor *ex = &s->owner->executor;
+    pthread_mutex_lock(&ex->published_lock);
+    PureSnapshot *snapshot = ex->published;
+    if (snapshot) pure_snapshot_hold(snapshot);
+    pthread_mutex_unlock(&ex->published_lock);
+    if (snapshot) pure_app_read(reader, snapshot);
+    return snapshot;
+}
+
+static void surface_release(PureSurfaceHost *s, PureSnapshot *snapshot) {
+    (void)s;
+    pure_snapshot_release(snapshot);
+}
+
+/* An event queued at the owner as a request is, waited for until its save. */
+static PureResult surface_event(PureSurfaceHost *s, uint32_t input, PureSpan text) {
+    Owner *owner = s->owner;
+    const PureModule *m = owner->executor.module;
+    if (input >= m->inputs || (m->input[input].kind != PURE_KIND_KEY && m->input[input].kind != PURE_KIND_TEXT) ||
+        (text.size && !text.data))
+        return PURE_INVALID;
+    if (text.size > PURE_OBJECT_LIMIT) return PURE_LIMIT;
+    unsigned char *value = malloc(4 + text.size); /* as a request's ingress: its size, then its bytes */
+    if (!value) return PURE_ALLOCATION;
+    put_u32(value, (uint32_t)text.size);
+    if (text.size) memcpy(value + 4, text.data, text.size);
+    Waiter waiter = {PURE_INVALID, false};
+    Job job = {.route = {.kind = ROUTE_INPUT, .target = input}, .waiter = &waiter,
+               .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {value, 4 + text.size}}};
+    pthread_mutex_lock(&owner->lock);
+    bool queued = !owner->stopping && grow(&owner->jobs, &owner->capacity, owner->count + 1, sizeof(*owner->jobs));
+    if (queued) {
+        owner->jobs[owner->count++] = job;
+        ++owner->arrivals;
+        pthread_cond_signal(&owner->waiting);
+    }
+    pthread_mutex_unlock(&owner->lock);
+    pthread_mutex_lock(&s->lock);
+    while (queued && !waiter.done) pthread_cond_wait(&s->applied, &s->lock);
+    pthread_mutex_unlock(&s->lock);
+    free(value);
+    return queued ? waiter.status : PURE_INVALID;
+}
+
+static PureResult surface_press(PureSurfaceHost *s, uint32_t input) {
+    return input < s->owner->executor.module->inputs &&
+                   s->owner->executor.module->input[input].kind == PURE_KIND_KEY
+               ? surface_event(s, input, (PureSpan){0})
+               : PURE_INVALID;
+}
+
+static PureResult surface_type(PureSurfaceHost *s, uint32_t input, PureSpan text) {
+    return input < s->owner->executor.module->inputs &&
+                   s->owner->executor.module->input[input].kind == PURE_KIND_TEXT
+               ? surface_event(s, input, text)
+               : PURE_INVALID;
+}
+
+static bool surface_stopping(PureSurfaceHost *s) {
+    (void)s;
+    return atomic_load(&stopping);
+}
+
+static void *run_surface(void *context) {
+    PureSurfaceHost *s = context;
+    s->result = s->run(&s->table, s->argc, s->argv);
+    fprintf(stderr, "{\"surface\":\"%s\",\"returned\":%d}\n", s->argv[0], s->result);
+    return NULL;
+}
+
+/* --surface LIBRARY [-- ARGUMENTS]: mapped now, run in its own thread. */
+static bool start_surface(PureSurfaceHost *s, Owner *owner, int argc, char **argv) {
+    void *library = dlopen(argv[0], RTLD_NOW | RTLD_LOCAL);
+    PureSurfaceRun run = library ? (PureSurfaceRun)(uintptr_t)dlsym(library, "pure_surface_run") : NULL;
+    if (!run) {
+        fprintf(stderr, "--surface %s: %s\n", argv[0], library ? "no pure_surface_run in it" : dlerror());
+        return false;
+    }
+    *s = (PureSurfaceHost){.owner = owner, .run = run, .argc = argc, .argv = argv};
+    s->table = (PureSurface){PURE_SURFACE_VERSION, sizeof(PureApp), sizeof(PureModule), owner->executor.module, s,
+                             eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC), surface_read, surface_release, surface_press,
+                             surface_type, surface_stopping};
+    if (s->table.changes < 0 || pthread_mutex_init(&s->lock, NULL) || pthread_cond_init(&s->applied, NULL)) return false;
+    owner->executor.surface = s; /* before the thread: its first snapshot may come any time */
+    if (pthread_create(&s->thread, NULL, run_surface, s)) {
+        owner->executor.surface = NULL;
+        return false;
+    }
+    return true;
 }
 
 /* A write's reply is borrowed from its request, so the handler of an input
@@ -1909,17 +2040,27 @@ static unsigned auto_threads(bool owner) {
 int main(int argc, char **argv) {
     static PureModule module;
     static Owner owner;
-    const char *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
+    static PureSurfaceHost surface;
+    /* What follows -- is the surface's: its library first, then its arguments. */
+    int options = argc, surface_argc = 0;
+    char *surface_argv[64];
+    for (int i = 1; i < argc; ++i)
+        if (!strcmp(argv[i], "--")) {
+            options = i;
+            break;
+        }
+    const char *surface_path = NULL, *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
     const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL;
     unsigned send_count = 0, reply_count = 0, seal_count = 0, named_count = 0;
     unsigned port = 8767, threads = 1;
     size_t budget = 64u << 20, capacity = 1024;
     uint64_t timeout_ms = 10000;
-    for (int i = 1; i < argc; i += 2) {
+    for (int i = 1; i < options; i += 2) {
         uint64_t value;
         if (!strcmp(argv[i], "--sealed-only")) { sealed_only = true; --i; continue; }
-        if (i + 1 == argc) goto usage;
+        if (i + 1 == options) goto usage;
         if (!strcmp(argv[i], "--module")) module_path = argv[i + 1];
+        else if (!strcmp(argv[i], "--surface")) surface_path = argv[i + 1];
         else if (!strcmp(argv[i], "--key")) key_path = argv[i + 1];
         else if (!strcmp(argv[i], "--seal") && seal_count < PURE_MODULE_INPUTS) seals[seal_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--store")) store = argv[i + 1];
@@ -1936,6 +2077,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--timeout-ms") && number(argv[i + 1], 3600000, &value) && value) timeout_ms = value;
         else goto usage;
     }
+    if (surface_path) surface_argv[surface_argc++] = (char *)surface_path;
+    for (int i = options + 1; i < argc && surface_argc < 63; ++i) surface_argv[surface_argc++] = argv[i];
+    surface_argv[surface_argc] = NULL;
+    if (options < argc && !surface_path) goto usage;
     uint32_t show, edit;
     bool documents;
     if (!module_path || !store || !load_module(&module, module_path, &documents, &show, &edit)) goto usage;
@@ -1998,10 +2143,17 @@ int main(int argc, char **argv) {
     if (*public_key) printf("{\"port\":%u,\"threads\":%u,\"public_key\":\"%s\"}\n", port, threads, public_key);
     else printf("{\"port\":%u,\"threads\":%u}\n", port, threads);
     fflush(stdout);
+    /* A surface reads the owner's snapshots and gives it events. */
+    if (surface_path && !owned) { fputs("--surface needs an app with states\n", stderr); return 2; }
+    if (surface_path && !start_surface(&surface, &owner, surface_argc, surface_argv)) return 1;
     for (unsigned i = 1; i < threads; ++i)
         if (pthread_create(&thread[i], NULL, run_shard, &hosts[i])) { fputs("Cannot start a thread\n", stderr); return 1; }
     run_shard(&hosts[0]);
     for (unsigned i = 1; i < threads; ++i) pthread_join(thread[i], NULL);
+    if (surface_path) { /* stopped before the owner, which may still apply its last event */
+        surface_changed(&surface);
+        pthread_join(surface.thread, NULL);
+    }
     if (owned) {
         pthread_mutex_lock(&owner.lock);
         owner.stopping = true;
@@ -2052,6 +2204,6 @@ usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
           "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=http[s]://host:port/path ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
-          "[--sender NAME=KEY ...]\n", stderr);
+          "[--sender NAME=KEY ...] [--surface LIBRARY [-- ARGUMENTS]]\n", stderr);
     return 2;
 }

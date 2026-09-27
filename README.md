@@ -23,7 +23,7 @@ The source follows the principle below, a small core with the rest selected arou
 |---|---|---|
 | `core/` | execution, ownership, limits and completion (`runtime.c`); the app model: modules verified before they run, events as transactions, states as drafts (`module*.c`); what the core asks of storage (`state.h`, `store.h`) | `build/libpure.a` (with the store) |
 | `store/` | the tree store: one file, a commit is one contiguous write and one sync (formats `PURETRE3`, `PUREREC1`) | in `libpure.a` |
-| `serve/` | `pure-serve`: the HTTP host, outbound delivery, JSON read in place; OpenSSL's part (TLS to https receivers, sealed sends) apart, mapped only by a server that uses one | `build/pure-serve`, `build/pure-crypto.so` |
+| `serve/` | `pure-serve`: the HTTP host, outbound delivery, JSON read in place, surfaces for people run in the node ([010](docs/design/010-surfaces.md)); OpenSSL's part (TLS to https receivers, sealed sends) apart, mapped only by a server that uses one | `build/pure-serve`, `build/pure-crypto.so` |
 | `cli/` | command-line hosts | `build/pure-run`, `build/pure-edit-module` |
 | `prototypes/` | the earlier document runtime (000-077), built against `core/` and `store/` | `make -C prototypes/connections` |
 | `tests/` | the hosts checked end to end, with apps built by aup (the sibling checkout) | `make check` |

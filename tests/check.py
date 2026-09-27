@@ -937,6 +937,92 @@ def server_sealed(aup, pure, work):
         relay.shutdown()
 
 
+SURFACE_SOURCE = """record Task {
+  title: text
+  done = 0
+}
+state tasks: list of Task
+state at: index of tasks
+input typed = text
+input toggle = key Space
+on typed {
+  tasks.append(Task { title: typed })
+  at = tasks.last
+}
+on toggle.down { at.done = !at.done }
+view count = tasks.count
+view current = if tasks.count > 0 { at.title } else { "(empty)" }
+view finished = at.done
+"""
+
+
+def server_surface(aup, pure, work):
+    """A surface in the node (--surface, serve/surface.h): a library that
+    pure-serve maps and runs beside its connection threads types text and
+    presses a key as a person at the node's display would. The owner applies
+    its events with the requests, one save a round, and it reads each save's
+    views where they are: its events show in HTTP views, and an HTTP input
+    shows in it through the changes descriptor. An event for an input of
+    another kind, or for none, is refused; it stops with the server; and a
+    module without states cannot have one."""
+    import select
+    import signal
+    import time
+    probe = work / 'surface-probe.so'
+    subprocess.run(['cc', '-O2', '-std=c17', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC', f'-I{pure / "core"}',
+                    f'-I{pure / "serve"}', str(pure / 'tests' / 'surface-probe.c'), '-o', str(probe)], check=True)
+    source, module = work / 'surface.aup', work / 'surface.pmod'
+    source.write_text(SURFACE_SOURCE)
+    compile_module(aup, source, module)
+    out = work / 'surface.jsonl'
+    process = subprocess.Popen([str(a) for a in (pure / 'build/pure-serve', '--module', module, '--store',
+                                                 work / 'surface-store', '--port', '0', '--surface', probe, '--', out,
+                                                 'typed', 'toggle', 'one,two,three', 'count', 'current', 'finished')],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def lines():
+        return [json.loads(line) for line in out.read_text().splitlines()] if out.exists() else []
+
+    def wait_for(condition):
+        deadline = time.time() + 20
+        while not condition() and time.time() < deadline:
+            time.sleep(0.05)
+        return condition()
+
+    try:
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        assert ready, 'host did not start'
+        port = json.loads(process.stdout.readline())['port']
+        assert wait_for(lambda: any(line['event'].startswith('wrong kind') for line in lines())), lines()
+        assert http(port, 'GET', '/views/count')[3] == b'3' and http(port, 'GET', '/views/current')[3] == b'three'
+        assert http(port, 'POST', '/inputs/typed', b'four')[0] == 200
+        assert wait_for(lambda: any(line['event'] == 'changed' and line['views']['count'] == 4 for line in lines()))
+    finally:
+        process.send_signal(signal.SIGTERM)
+        _, error = process.communicate(timeout=30)
+    assert process.returncode == 0 and b'"returned":0' in error, error[-500:]
+    got = lines()
+    views = [line['views'] for line in got]
+    assert [line['event'] for line in got[:6]] == ['start', 'typed one: 0', 'typed two: 0', 'typed three: 0', 'pressed: 0',
+                                                    'wrong kind: 8, no input: 8'], got[:6]
+    assert views[:6] == [{'count': 0, 'current': '(empty)', 'finished': None},
+                         {'count': 1, 'current': 'one', 'finished': 0}, {'count': 2, 'current': 'two', 'finished': 0},
+                         {'count': 3, 'current': 'three', 'finished': 0}, {'count': 3, 'current': 'three', 'finished': 1},
+                         {'count': 3, 'current': 'three', 'finished': 1}], views[:6]
+    assert views[-1] == {'count': 4, 'current': 'four', 'finished': 0}, views[-1]
+    changes = [line['changes'] for line in got]
+    assert changes[1:5] == sorted(set(changes[1:5])) and changes[-1] > changes[4], changes
+    # A module without states has no owner to apply a surface's events.
+    stateless = work / 'surface-echo.aup'
+    stateless.write_text('input shout = text\non shout { }\n')
+    compile_module(aup, stateless, stateless.with_suffix('.pmod'))
+    refused = subprocess.run([str(a) for a in (pure / 'build/pure-serve', '--module', stateless.with_suffix('.pmod'),
+                                               '--store', work / 'surface-echo', '--port', '0', '--surface', probe, '--',
+                                               out, 'shout', 'shout', 'x')], capture_output=True, timeout=30)
+    assert refused.returncode == 2 and b'needs an app with states' in refused.stderr, refused.stderr
+    return {'events': 5, 'lines': len(got)}
+
+
 def server_webhook(aup, pure, work):
     """An output wired to a third-party HTTPS endpoint (a Python server with
     a certificate of its own): five orders arrive in order as JSON with the
@@ -1396,6 +1482,7 @@ def main():
         report['server_links'] = server_links(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)
         report['server_sealed'] = server_sealed(aup, pure, work)
+        report['server_surface'] = server_surface(aup, pure, work)
         report['server_answers'] = server_answers(aup, pure, work)
     print(json.dumps(report))
 
