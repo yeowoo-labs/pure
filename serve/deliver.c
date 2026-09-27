@@ -552,19 +552,40 @@ static bool form_answer(const PureWire *w, int status, const Text *body, const P
     return true;
 }
 
+static int send_request(PureWire *w, const char *request, size_t size, const Pending *p, Answer *answer);
+
 /* One request for count sends from p (numbered in a row): one object, or
  * an array of them for a receiver that takes batches. A final answer to a
  * send whose answers are wired is made into *answer. */
 static int post(PureWire *w, const Pending *p, unsigned count, Answer *answer) {
     size_t body = count > 1 ? count + 1 : 0;
     for (unsigned i = 0; i < count; ++i) body += p[i].size;
-    char head[2048], batch[32] = "";
+    char batch[32] = "";
     if (count > 1) snprintf(batch, sizeof(batch), "X-Pure-Count: %u\r\n", count);
-    int size = snprintf(head, sizeof(head),
+    /* The request in one piece, its head and then a batch in its brackets:
+     * one write where there were two a send (a batch drained at 91k sends a
+     * second, and at 470k in one piece). */
+    enum { HEAD = 2048 }; /* the longest path, host and source leave room to spare */
+    char *request = malloc(HEAD + body);
+    if (!request) return AGAIN;
+    int head = snprintf(request, HEAD,
                         "POST %s HTTP/1.1\r\nHost: %s:%s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n"
                         "X-Pure-Source: %s\r\nX-Pure-Sequence: %llu\r\n%sIdempotency-Key: %s-%llu\r\n\r\n",
                         w->path, w->host, w->port, body, w->source, (unsigned long long)p->seq, batch, w->source,
                         (unsigned long long)p->seq);
+    char *at = request + head;
+    for (unsigned i = 0; i < count; ++i) {
+        if (count > 1) *at++ = i ? ',' : '[';
+        memcpy(at, p[i].body, p[i].size);
+        at += p[i].size;
+    }
+    if (count > 1) *at++ = ']';
+    int result = send_request(w, request, (size_t)(at - request), p, answer);
+    free(request);
+    return result;
+}
+
+static int send_request(PureWire *w, const char *request, size_t size, const Pending *p, Answer *answer) {
     /* A kept connection the peer closed is tried once more on a new one. */
     for (int attempt = 0; attempt < 2; ++attempt) {
         bool fresh = w->fd < 0;
@@ -586,13 +607,9 @@ static int post(PureWire *w, const Pending *p, unsigned count, Answer *answer) {
             pthread_mutex_unlock(&w->lock);
         }
         int status;
-        bool refused, keep, sent = send_all(w, head, (size_t)size);
+        bool refused, keep, sent = send_all(w, request, size);
         unsigned batch_size = 0;
         Text body = {0};
-        for (unsigned i = 0; sent && i < count; ++i)
-            sent = (!i || count == 1 || send_all(w, ",", 1)) && (i || count == 1 || send_all(w, "[", 1)) &&
-                   send_all(w, p[i].body, p[i].size);
-        if (sent && count > 1) sent = send_all(w, "]", 1);
         if (!sent || !read_answer(w, &status, &refused, &keep, &batch_size, w->answer_input >= 0 ? &body : NULL)) {
             free(body.bytes);
             drop_connection(w);
