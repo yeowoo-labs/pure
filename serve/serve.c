@@ -84,6 +84,7 @@ typedef struct Connection {
     int fd;
     Phase phase;
     bool readable, writable, keep_alive, put, post;
+    bool hung_up; /* the peer closed its side: read until the end, never stop at a short read */
     uint64_t deadline;
     char key[65]; /* the document's key, or the view's or input's name */
     RouteKind route;
@@ -770,8 +771,17 @@ static void drive(Connection *c) {
             if (end) { start_request(c, end); continue; }
             if (c->in_used == HEADER_LIMIT) { refuse(c, 431, "Request Header Fields Too Large", "headers"); continue; }
             if (!c->readable) return;
-            ssize_t n = recv(c->fd, c->in + c->in_used, HEADER_LIMIT - c->in_used, 0);
-            if (n > 0) { c->in_used += (size_t)n; c->deadline = c->host->now + c->host->timeout_ms; continue; }
+            size_t room = HEADER_LIMIT - c->in_used;
+            ssize_t n = recv(c->fd, c->in + c->in_used, room, 0);
+            if (n > 0) {
+                c->in_used += (size_t)n;
+                c->deadline = c->host->now + c->host->timeout_ms;
+                /* A short read emptied the socket; the edge-triggered epoll
+                 * tells when more comes. Not asking again spares a recv that
+                 * would fail (EAGAIN) after every request. */
+                if ((size_t)n < room && !c->hung_up) c->readable = false;
+                continue;
+            }
             if (n < 0 && errno == EAGAIN) { c->readable = false; return; }
             if (n < 0 && errno == EINTR) continue;
             close_connection(c);
@@ -779,10 +789,12 @@ static void drive(Connection *c) {
         }
         if (c->phase == READING_BODY) {
             if (!c->readable) return;
-            ssize_t n = recv(c->fd, c->body + c->received, c->body_size - c->received, 0);
+            size_t room = c->body_size - c->received;
+            ssize_t n = recv(c->fd, c->body + c->received, room, 0);
             if (n > 0) {
                 c->received += (size_t)n;
                 c->deadline = c->host->now + c->host->timeout_ms;
+                if ((size_t)n < room && !c->hung_up) c->readable = false;
                 if (c->received == c->body_size) body_done(c);
                 continue;
             }
@@ -1537,6 +1549,7 @@ static void accept_all(Host *host) {
         c->fd = fd;
         c->phase = READING_HEAD;
         c->readable = c->writable = c->keep_alive = true;
+        c->hung_up = false;
         c->deadline = host->now + host->timeout_ms;
         c->ticket = (PureTicket){0};
         c->out = NULL;
@@ -1646,6 +1659,7 @@ static void *run_shard(void *context) {
             if (c->phase == CLOSED) continue;
             if (events[e].events & EPOLLERR) { close_connection(c); continue; }
             if (events[e].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) c->readable = true;
+            if (events[e].events & (EPOLLRDHUP | EPOLLHUP)) c->hung_up = true;
             if (events[e].events & EPOLLOUT) c->writable = true;
             drive(c);
         }
