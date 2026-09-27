@@ -17,7 +17,7 @@ enum {
     PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 64,
     PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 65535, PURE_MODULE_STACK = 64,
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 40,
-    PURE_MODULE_FIELDS = 32, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 4096,
+    PURE_MODULE_FIELDS = 64, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 4096,
     PURE_MODULE_CONSTANT_BYTES = 1 << 20, PURE_MODULE_RECORDS = 8, PURE_MODULE_RECORD_FIELDS = 64,
     PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8, PURE_APP_PENDING = 256
 };
@@ -256,6 +256,13 @@ PureResult pure_app_text(PureApp *, uint32_t input, PureSpan text);
  * pure_app_finish. On return app->revision is the document's revision
  * (deferred: the revision the next save gives it). */
 PureResult pure_app_message(PureApp *, uint32_t input, const char *key, int64_t base, PureSpan payload);
+/* The same, with the variable fields where the host found them: field f
+ * starts at placed[2f] in payload and has placed[2f + 1] bytes (entries of
+ * fixed fields are not read, nor are the variable fields' lengths in the
+ * prefix). A host that parsed a request in place passes the fields' bytes
+ * where they are. */
+PureResult pure_app_message_fields(PureApp *, uint32_t input, const char *key, int64_t base, PureSpan payload,
+                                   const uint32_t *placed);
 /* Visit the reply of the last message in order, without copying, until the
  * next event (deferred: copy it before a later save too). */
 PureResult pure_app_reply(const PureApp *, bool (*visit)(void *, PureSpan), void *context);

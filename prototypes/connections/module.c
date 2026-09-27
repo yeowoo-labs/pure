@@ -138,16 +138,21 @@ static bool document_key(const char *key) {
     return true;
 }
 
-/* Strings are [u8 length][bytes]; a name is an ASCII identifier of 1..31 bytes. */
+/* Strings are [u8 length][bytes]; a name is 1..31 bytes: an ASCII identifier,
+ * a path of identifiers joined by dots (a message field inside a group, as
+ * user.name), or any printable ASCII (a key's name). */
+enum { NAME_IDENTIFIER, NAME_PATH, NAME_PRINTABLE };
 PURE_COLD static bool name_at(const unsigned char *strings, uint32_t size, uint32_t offset,
-                    bool identifier, char out[PURE_MODULE_NAME]) {
+                    int kind, char out[PURE_MODULE_NAME]) {
     if (offset >= size) return false;
     uint32_t length = strings[offset];
     if (!length || length >= PURE_MODULE_NAME || length > size - offset - 1) return false;
-    for (uint32_t i = 0; i < length; ++i) {
+    for (uint32_t i = 0, start = 0; i < length; ++i) {
         unsigned char c = strings[offset + 1 + i];
         bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
-        if (!letter && !(i && c >= '0' && c <= '9') && (identifier || c < 32 || c > 126)) return false;
+        if (kind == NAME_PATH && c == '.' && i > start && i + 1 < length) { start = i + 1; continue; }
+        if (!letter && !(i > start && c >= '0' && c <= '9') && (kind != NAME_PRINTABLE || c < 32 || c > 126))
+            return false;
     }
     memcpy(out, strings + offset + 1, length);
     out[length] = 0;
@@ -461,7 +466,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     if (constant_bytes) memcpy(out->constant_data, p + size - constant_bytes, constant_bytes);
     for (uint32_t i = 0; i < out->states; ++i, at += STATE_BYTES) {
         out->state_type[i] = (uint8_t)read32(at + 4);
-        if (!name_at(text, strings, read32(at), true, out->state_names[i])) REFUSE("state name", i);
+        if (!name_at(text, strings, read32(at), NAME_IDENTIFIER, out->state_names[i])) REFUSE("state name", i);
         if (read32(at + 4) > PURE_STATE_INDEX) REFUSE("state type", i);
         if (out->state_type[i] == PURE_STATE_NUM) {
             out->initial[i] = read_double(at + 8);
@@ -478,7 +483,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         }
     }
     for (uint32_t i = 0; i < out->collections; ++i, at += COLLECTION_BYTES) {
-        if (!name_at(text, strings, read32(at), true, out->collection_names[i])) REFUSE("collection name", i);
+        if (!name_at(text, strings, read32(at), NAME_IDENTIFIER, out->collection_names[i])) REFUSE("collection name", i);
         if (read32(at + 4) != 1 || read32(at + 8) != 1) REFUSE("collection must hold bytes by key", i);
     }
     uint32_t next_field = 0;
@@ -489,11 +494,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         shape->keyed = at[5];
         shape->field_start = (uint16_t)read16(at + 12);
         shape->field_count = (uint16_t)read16(at + 14);
-        if (!name_at(text, strings, read32(at), true, out->input_names[i])) REFUSE("input name", i);
+        if (!name_at(text, strings, read32(at), NAME_IDENTIFIER, out->input_names[i])) REFUSE("input name", i);
         if (read16(at + 6) || at[5] > 1) REFUSE("input flags", i);
         if (shape->kind == PURE_KIND_KEY) {
             if (shape->keyed || shape->field_start || shape->field_count ||
-                !name_at(text, strings, read32(at + 8), false, out->input_keys[i]) ||
+                !name_at(text, strings, read32(at + 8), NAME_PRINTABLE, out->input_keys[i]) ||
                 !key_name(out->input_keys[i])) REFUSE("input key", i);
             for (uint32_t k = 0; k < i; ++k)
                 if (out->input[k].kind == PURE_KIND_KEY && !strcmp(out->input_keys[k], out->input_keys[i]))
@@ -524,11 +529,17 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             const unsigned char *entry = fields + (size_t)(next_field + f) * FIELD_BYTES;
             PureField *field = &out->field[next_field + f];
             field->type = (uint8_t)read32(entry + 4);
-            if (!name_at(text, strings, read32(entry), true, field->name) || field->type < PURE_FIELD_U32 ||
+            if (!name_at(text, strings, read32(entry), NAME_PATH, field->name) || field->type < PURE_FIELD_U32 ||
                 read32(entry + 4) > PURE_FIELD_TEXT)
                 REFUSE("message field", next_field + f);
-            for (uint32_t k = 0; k < f; ++k)
-                if (!strcmp(out->field[next_field + k].name, field->name)) REFUSE("duplicate field", next_field + f);
+            /* A name is a field or a group, never both (user and user.name). */
+            for (uint32_t k = 0; k < f; ++k) {
+                const char *a = out->field[next_field + k].name, *b = field->name;
+                size_t la = strlen(a), lb = strlen(b);
+                if (!strcmp(a, b)) REFUSE("duplicate field", next_field + f);
+                if ((la < lb && !memcmp(a, b, la) && b[la] == '.') || (lb < la && !memcmp(a, b, lb) && a[lb] == '.'))
+                    REFUSE("field and group", next_field + f);
+            }
             field->offset = f == last ? PURE_FIELD_REST : shape->prefix;
             if (f != last) shape->prefix += field->type == PURE_FIELD_NUMBER ? 8 : 4;
         }
@@ -550,14 +561,14 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         PureRecord *record = &out->record[i];
         record->first = (uint16_t)read16(at + 4);
         record->count = (uint16_t)read16(at + 6);
-        if (!name_at(text, strings, read32(at), true, out->record_names[i]) || record->first != next_record_field ||
+        if (!name_at(text, strings, read32(at), NAME_IDENTIFIER, out->record_names[i]) || record->first != next_record_field ||
             !record->count || record->count > PURE_RECORD_FIELDS || record->count > out->record_fields - next_record_field)
             REFUSE("record", i);
         for (uint32_t f = record->first; f < record->first + record->count; ++f) {
             const unsigned char *entry = fields_at + (size_t)f * RECORD_FIELD_BYTES;
             uint32_t type = read32(entry + 4);
             out->record_field_text[f] = type == 1;
-            if (!name_at(text, strings, read32(entry), true, out->record_field_names[f]) || type > 1)
+            if (!name_at(text, strings, read32(entry), NAME_IDENTIFIER, out->record_field_names[f]) || type > 1)
                 REFUSE("record field", f);
             for (uint32_t k = record->first; k < f; ++k)
                 if (!strcmp(out->record_field_names[k], out->record_field_names[f])) REFUSE("duplicate record field", f);
@@ -578,7 +589,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             REFUSE("state reference", i);
     /* A table names its list in place of code; its columns follow it. */
     for (uint32_t i = 0; i < out->views; ++i, at += VIEW_BYTES) {
-        if (!name_at(text, strings, read32(at), true, out->view_names[i])) REFUSE("view name", i);
+        if (!name_at(text, strings, read32(at), NAME_IDENTIFIER, out->view_names[i])) REFUSE("view name", i);
         out->view_type[i] = at[4];
         out->view_table[i] = (uint16_t)read16(at + 6);
         out->view_code[i] = (PureBlock){read32(at + 8), read32(at + 12)};
@@ -1435,7 +1446,10 @@ static PureResult keep_reply(PureApp *app) {
     return PURE_OK;
 }
 
-PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64_t base, PureSpan payload) {
+/* A message whose variable fields are where placed says (start and size in
+ * the payload), or, without it, one after another after the prefix. */
+static PureResult message(PureApp *app, uint32_t input, const char *key, int64_t base, PureSpan payload,
+                          const uint32_t *placed) {
     pure_app_finish(app);
     const PureModule *m = app->module;
     app->fault = PURE_FAULT_NONE;
@@ -1455,13 +1469,16 @@ PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64
         if (field->type == PURE_FIELD_NUMBER && !isfinite(read_double(payload.data + field->offset)))
             return fault(app, PURE_FAULT_NON_FINITE, UINT32_MAX);
         if (field->type != PURE_FIELD_BYTES && field->type != PURE_FIELD_TEXT) continue;
-        size_t size = field->offset == PURE_FIELD_REST ? payload.size - at : read32(payload.data + field->offset);
-        if (size > payload.size - at) return fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
-        if (field->type == PURE_FIELD_TEXT && !pure_utf8_valid((PureSpan){size ? payload.data + at : NULL, size}))
+        size_t start = placed ? placed[2 * f] : at;
+        if (start > payload.size) return fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
+        size_t size = placed ? placed[2 * f + 1] : field->offset == PURE_FIELD_REST ? payload.size - at :
+                      read32(payload.data + field->offset);
+        if (size > payload.size - start) return fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
+        if (field->type == PURE_FIELD_TEXT && !pure_utf8_valid((PureSpan){size ? payload.data + start : NULL, size}))
             return fault(app, PURE_FAULT_ENCODING, UINT32_MAX);
-        spans[f][0] = (uint32_t)at;
+        spans[f][0] = (uint32_t)start;
         spans[f][1] = (uint32_t)size;
-        at += size;
+        at = start + size;
     }
     if (shape->keyed && m->collections) {
         if (!app->data.open) return PURE_INVALID;
@@ -1489,6 +1506,15 @@ PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64
     PureResult result = dispatch(app, 1 + 2 * input, &ev);
     if (result != PURE_OK) pure_app_finish(app);
     return result;
+}
+
+PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64_t base, PureSpan payload) {
+    return message(app, input, key, base, payload, NULL);
+}
+
+PureResult pure_app_message_fields(PureApp *app, uint32_t input, const char *key, int64_t base, PureSpan payload,
+                                   const uint32_t *placed) {
+    return message(app, input, key, base, payload, placed);
 }
 
 PureResult pure_app_reply(const PureApp *app, bool (*visit)(void *, PureSpan), void *context) {

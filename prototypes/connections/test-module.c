@@ -2486,6 +2486,57 @@ static void message_fields(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
     bad.o = bytes_as_text; bad.no = 2; bad.h = two;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
+
+    /* Placed by the host: the variable fields wherever they are in the
+     * payload (here a JSON body after the prefix), in any order; the
+     * prefix's lengths are not read. */
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    static const char body[] = "{\"note\":\"xyz\",\"title\":\"\xea\xb0\x80\xeb\x82\x98\"}";
+    points = 2.5;
+    title_size = 999;
+    memcpy(payload, &title_size, 4);
+    memcpy(payload + 4, &points, 8);
+    memcpy(payload + 12, &count, 4);
+    memcpy(payload + 16, body, sizeof(body) - 1);
+    size = 16 + sizeof(body) - 1;
+    uint32_t placed[8] = {16 + 23, 6, 0, 0, 16 + 9, 3, 0, 0};
+    CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_OK);
+    CHECK(app.values[0] == 5.5 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\xeb\x82\x98") && replied(&app, "xyz"));
+    pure_app_finish(&app);
+    /* A field that starts or ends past the payload, or a title that is not UTF-8 there. */
+    placed[0] = (uint32_t)size + 1;
+    CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_LIMIT);
+    placed[0] = (uint32_t)size - 2;
+    placed[1] = 3;
+    CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_LIMIT);
+    placed[0] = 16 + 24;
+    placed[1] = 2;
+    CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_INVALID &&
+          app.fault == PURE_FAULT_ENCODING);
+    CHECK(app.values[0] == 5.5);
+    pure_app_stop(&app);
+
+    /* Fields in groups: a name is a path of identifiers (user.name), and
+     * never both a field and a group. */
+    static const F grouped[] = {{"user.name", PURE_FIELD_TEXT}, {"user.age", PURE_FIELD_U32}, {"plan", PURE_FIELD_TEXT}};
+    static const I grouped_inputs[] = {{"post", NULL, PURE_KIND_MESSAGE, false, grouped, 3}};
+    static const O grouped_code[] = {{FIELD, 1, 0}, {ST, 0, 0}, {FIELD, 0, 0}, {TSET, 1, 0}};
+    static const H grouped_handlers[] = {{1, 0, 4}};
+    Spec groups = spec;
+    groups.in = grouped_inputs; groups.o = grouped_code; groups.no = LEN(grouped_code); groups.h = grouped_handlers;
+    CHECK(load(groups, &module_b) == PURE_OK && !strcmp(module_b.field[0].name, "user.name"));
+    static const char *const refused_paths[] = {"user..name", ".user", "user.", "user.1st", "user name"};
+    for (size_t i = 0; i < LEN(refused_paths); ++i) {
+        F renamed[3] = {grouped[0], grouped[1], grouped[2]};
+        renamed[0].name = refused_paths[i];
+        I renamed_inputs[1] = {{"post", NULL, PURE_KIND_MESSAGE, false, renamed, 3}};
+        groups.in = renamed_inputs;
+        CHECK(load(groups, &module_b) == PURE_INVALID && strstr(error, "message field"));
+    }
+    F both[3] = {{"user", PURE_FIELD_TEXT}, grouped[1], grouped[2]};
+    I both_inputs[1] = {{"post", NULL, PURE_KIND_MESSAGE, false, both, 3}};
+    groups.in = both_inputs;
+    CHECK(load(groups, &module_b) == PURE_INVALID && strstr(error, "field and group"));
 }
 
 /* A timer's tick sees the time the host set; floor and a floored modulo
