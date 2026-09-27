@@ -21,9 +21,23 @@
  * successful one frees what it replaced. */
 typedef struct { double num; unsigned char *text; size_t size; } PureCell;
 typedef struct PureList PureList;
-typedef struct { void *entries; size_t count, capacity; } PureUndo;
-/* Items a list let go while a shared copy may still read them. */
+/* An event's list changes; a removed item's cells wait in cells. */
+typedef struct {
+    void *entries;
+    size_t count, capacity;
+    PureCell *cells;
+    size_t cell_count, cell_capacity;
+} PureUndo;
+/* Nodes and texts a list let go while a shared copy may still read them. */
 typedef struct { void *entries; size_t count, capacity; } PureRetired;
+/* Items one after another, as a leaf of the list keeps them: positions start
+ * to start + count - 1, each field's cells side by side (a number field's as
+ * numbers, a text field's as spans). */
+typedef struct {
+    size_t start;
+    unsigned count;
+    union { const double *numbers; const PureSpan *texts; } column[16];
+} PureRun;
 
 enum { PURE_LIST_ITEMS = 1 << 24 };
 
@@ -31,16 +45,17 @@ PureList *pure_list_new(unsigned fields, const uint8_t *text_fields);
 void pure_list_free(PureList *);
 size_t pure_list_count(const PureList *);
 /* Share the items as they are with a read-only copy (for readers on other
- * threads), without copying them: from then on the list copies an item it
- * changes, and items it lets go go to retired instead of being freed, since
- * the copy may still read them. The copy is freed with pure_list_free, on any
- * thread, when its last reference goes (pure_list_hold takes one more). Only
- * between events (no change waits to be committed or undone). */
+ * threads), without copying them: from then on the list copies the nodes it
+ * changes, and nodes and texts it lets go go to retired instead of being
+ * freed, since the copy may still read them. The copy is freed with
+ * pure_list_free, on any thread, when its last reference goes
+ * (pure_list_hold takes one more). Only between events (no change waits to
+ * be committed or undone). */
 PureList *pure_list_share(PureList *, PureRetired *retired);
 void pure_list_hold(PureList *copy);
 /* Whether copy shares list's items as they are now. */
 bool pure_list_current(const PureList *copy, const PureList *list);
-/* Free items retired while no copy that shared them remains. */
+/* Free what was retired while no copy that shared it remains. */
 void pure_retired_free(PureRetired *);
 /* Insert a copy of cells (text bytes are copied) before position at. A NULL
  * log means the change is not undone. */
@@ -48,6 +63,9 @@ PureResult pure_list_insert(PureList *, size_t at, const PureCell *cells, PureUn
 PureResult pure_list_remove(PureList *, size_t at, PureUndo *);
 PureResult pure_list_set(PureList *, size_t at, unsigned field, PureCell value, PureUndo *);
 PureCell pure_list_get(const PureList *, size_t at, unsigned field);
+/* The run holding position at (false past the end): for reading item after
+ * item without finding each. Valid until the list changes. */
+bool pure_list_run(const PureList *, size_t at, PureRun *);
 /* In a list ordered by field (a keyed list): the first position whose item's
  * field does not order below key (numbers by value, texts by bytes), and
  * whether that item's field is key. */
