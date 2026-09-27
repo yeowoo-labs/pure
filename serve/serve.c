@@ -69,7 +69,7 @@ typedef struct Host Host;
 /* What a request names: a document, a view (a table's rows from, count) or
  * an input. Kept per work slot, so an accepted event runs even if its
  * connection is gone before the burst. */
-typedef enum { ROUTE_NONE, ROUTE_OBJECT, ROUTE_VIEW, ROUTE_INPUT } RouteKind;
+typedef enum { ROUTE_NONE, ROUTE_OBJECT, ROUTE_VIEW, ROUTE_INPUT, ROUTE_QUERY } RouteKind;
 typedef struct { RouteKind kind; uint32_t target; size_t from, count; } Route;
 
 /* This node's key, for deliveries sealed to it (--key), and whether it
@@ -498,7 +498,7 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     if (strcmp(version, "HTTP/1.1")) return false;
     if ((*query = strchr(path, '?'))) *(*query)++ = 0;
     static const struct { const char *prefix; RouteKind kind; } routes[] = {
-        {"/objects/", ROUTE_OBJECT}, {"/views/", ROUTE_VIEW}, {"/inputs/", ROUTE_INPUT}};
+        {"/objects/", ROUTE_OBJECT}, {"/views/", ROUTE_VIEW}, {"/inputs/", ROUTE_INPUT}, {"/queries/", ROUTE_QUERY}};
     const char *key = "";
     c->route = ROUTE_NONE;
     for (size_t i = 0; i < sizeof(routes) / sizeof(*routes) && c->route == ROUTE_NONE; ++i)
@@ -514,9 +514,11 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
             return false;
     }
     memcpy(c->key, key, key_size + 1);
-    /* Each route has its method: documents GET and PUT, views GET, inputs POST. */
+    /* Each route has its method: documents GET and PUT, views GET, inputs
+     * POST, queries PUT (registered) and GET (shown). */
     if ((c->route == ROUTE_OBJECT && (c->post || *query)) || (c->route == ROUTE_VIEW && (c->put || c->post)) ||
-        (c->route == ROUTE_INPUT && !c->post)) return false;
+        (c->route == ROUTE_INPUT && !c->post) || (c->route == ROUTE_QUERY && (c->post || (c->put && *query))))
+        return false;
     bool length_seen = false, condition_seen = false, host_seen = false;
     c->source[0] = 0;
     c->sequence = 0;
@@ -586,7 +588,8 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     }
     if (!*c->source != !c->sequence || (*c->source && c->route != ROUTE_INPUT) || (counted && !*c->source) ||
         c->sequence > UINT64_MAX - c->batch) return false;
-    if (c->put) return host_seen && length_seen && condition_seen;
+    /* A document's PUT names the revision it was made against; a query's replaces what was registered. */
+    if (c->put) return host_seen && length_seen && condition_seen == (c->route != ROUTE_QUERY);
     if (c->post) return host_seen && !condition_seen; /* no Content-Length: no body */
     return host_seen && !condition_seen && c->body_size == 0;
 }
@@ -604,8 +607,27 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
     *status = 404;
     c->field_bytes = 0;
     memset(c->given, 0, sizeof(c->given));
-    if (route->kind == ROUTE_NONE || (route->kind == ROUTE_OBJECT && !host->documents)) return "route";
+    if (route->kind == ROUTE_NONE || (route->kind == ROUTE_OBJECT && !host->documents) ||
+        (route->kind == ROUTE_QUERY && !host->owner)) return "route"; /* a query reads an app's states */
     if (route->kind == ROUTE_OBJECT) return NULL;
+    if (route->kind == ROUTE_QUERY) { /* the view is the query module's, found when shown */
+        route->from = 0;
+        route->count = SIZE_MAX;
+        *status = 400;
+        for (char *pair = query; pair && *pair;) {
+            char *end = strchr(pair, '&'), *value = strchr(pair, '=');
+            if (end) *end = 0;
+            uint64_t n;
+            if (!value || (end && value > end)) return "query";
+            *value++ = 0;
+            bool from = !strcmp(pair, "from");
+            if (!number(value, SIZE_MAX, &n) || (!from && strcmp(pair, "count"))) return "query";
+            if (from) route->from = (size_t)n;
+            else route->count = (size_t)n;
+            pair = end ? end + 1 : NULL;
+        }
+        return NULL;
+    }
     int found = route->kind == ROUTE_VIEW ? pure_module_view(m, c->key) : pure_module_input(m, c->key);
     /* An output is the app's to send and a timer ticks by itself: neither is posted. */
     if (found >= 0 && route->kind == ROUTE_INPUT &&
@@ -803,7 +825,8 @@ static void start_request(Connection *c, size_t head_size) {
     size_t input_size = route.kind == ROUTE_INPUT ? lead + c->batch * (table + c->field_bytes) + c->body_size :
                         write ? c->body_size : 0;
     PureResult admitted = pure_runtime_accept(&host->runtime, write ? PURE_INPUT_WRITE : PURE_INPUT_READ, c->key,
-                                              route.kind == ROUTE_INPUT ? 0 : c->expected, input_size, &c->ticket);
+                                              route.kind == ROUTE_INPUT || route.kind == ROUTE_QUERY ? 0 : c->expected,
+                                              input_size, &c->ticket);
     if (admitted != PURE_OK) {
         c->ticket = (PureTicket){0};
         /* An unread body would desynchronize the stream. */
@@ -1461,6 +1484,103 @@ static PureSnapshot *read_published(Host *host) {
     return snapshot;
 }
 
+/* ---- Queries: PUT /queries/NAME registers a module of the app's states and
+ * views of its own (aup query), checked when it comes: it must load (be
+ * verified) with its states laid out as the app's, and have a view NAME.
+ * GET /queries/NAME shows that view from the last save's snapshot, on the
+ * connection thread, as the app's views are: a query never waits for, nor
+ * holds up, the owner's writes. */
+enum { QUERIES = 64 };
+typedef struct { PureModule module; unsigned refs; } Held;
+static struct { char name[65]; Held *held; } queries[QUERIES];
+static pthread_mutex_t queries_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void let_go_query(Held *held) {
+    pthread_mutex_lock(&queries_lock);
+    bool last = !--held->refs;
+    pthread_mutex_unlock(&queries_lock);
+    if (!last) return;
+    pure_module_release(&held->module);
+    free(held);
+}
+
+/* Whether a's states are laid out as b's: names, kinds, what each refers to,
+ * keys, and the records and document collections behind them. */
+static bool same_states(const PureModule *a, const PureModule *b) {
+    if (a->states != b->states || a->records != b->records || a->record_fields != b->record_fields ||
+        a->collections != b->collections)
+        return false;
+    for (uint32_t i = 0; i < a->states; ++i)
+        if (strcmp(a->state_names[i], b->state_names[i]) || a->state_type[i] != b->state_type[i] ||
+            a->state_ref[i] != b->state_ref[i] || a->state_flags[i] != b->state_flags[i] || a->state_key[i] != b->state_key[i])
+            return false;
+    for (uint32_t i = 0; i < a->records; ++i)
+        if (strcmp(a->record_names[i], b->record_names[i]) || a->record[i].first != b->record[i].first ||
+            a->record[i].count != b->record[i].count)
+            return false;
+    for (uint32_t i = 0; i < a->record_fields; ++i)
+        if (strcmp(a->record_field_names[i], b->record_field_names[i]) || a->record_field_text[i] != b->record_field_text[i])
+            return false;
+    for (uint32_t i = 0; i < a->collections; ++i)
+        if (strcmp(a->collection_names[i], b->collection_names[i])) return false;
+    return true;
+}
+
+static PureResult register_query(const Host *host, const Job *job) {
+    Held *held = calloc(1, sizeof(*held));
+    char error[128];
+    if (!held) return PURE_ALLOCATION;
+    if (pure_module_load(job->effect.value.data, job->effect.value.size, &held->module, error, sizeof(error)) != PURE_OK) {
+        free(held);
+        return PURE_INVALID;
+    }
+    PureResult status = !same_states(&held->module, host->module)          ? PURE_CONFLICT
+                        : pure_module_view(&held->module, job->effect.key) < 0 ? PURE_NOT_FOUND
+                                                                               : PURE_OK;
+    Held *old = NULL;
+    held->refs = 1;
+    if (status == PURE_OK) {
+        pthread_mutex_lock(&queries_lock);
+        int slot = -1;
+        for (int i = 0; i < QUERIES && slot < 0; ++i)
+            if (queries[i].held && !strcmp(queries[i].name, job->effect.key)) slot = i;
+        for (int i = 0; i < QUERIES && slot < 0; ++i)
+            if (!queries[i].held) slot = i;
+        if (slot < 0) status = PURE_LIMIT;
+        else {
+            old = queries[slot].held;
+            snprintf(queries[slot].name, sizeof(queries[slot].name), "%s", job->effect.key);
+            queries[slot].held = held;
+        }
+        pthread_mutex_unlock(&queries_lock);
+    }
+    if (status != PURE_OK) let_go_query(held);
+    if (old) let_go_query(old);
+    return status;
+}
+
+static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) {
+    Held *held = NULL;
+    pthread_mutex_lock(&queries_lock);
+    for (int i = 0; i < QUERIES && !held; ++i)
+        if (queries[i].held && !strcmp(queries[i].name, job->effect.key)) (held = queries[i].held)->refs++;
+    pthread_mutex_unlock(&queries_lock);
+    if (!held) return PURE_NOT_FOUND;
+    if (!snapshot) {
+        let_go_query(held);
+        return PURE_BUSY;
+    }
+    PureApp reader = {0};
+    pure_app_read(&reader, snapshot);
+    reader.module = &held->module; /* the app's states, the query's views */
+    Route route = job->route;
+    route.target = (uint32_t)pure_module_view(&held->module, job->effect.key);
+    PureResult status = show_view(&reader, &route, job->effect.available, a);
+    pure_app_stop(&reader);
+    let_go_query(held);
+    return status;
+}
+
 /* Every request made ready since the last round: run here, or handed to the
  * owner. Views are shown here from the snapshot when there is one, after the
  * rest went to the owner, which meanwhile applies and saves them. Answering
@@ -1477,31 +1597,39 @@ static void serve_bursts(Host *host) {
             continue;
         }
         PureSnapshot *snapshot = NULL;
-        size_t views = 0;
-        for (size_t i = 0; i < count; ++i) views += host->jobs[i].route.kind == ROUTE_VIEW;
-        if (views && !(snapshot = read_published(host))) views = 0; /* the owner shows them */
-        size_t handed = count - views;
+        size_t views = 0, queried = 0;
+        for (size_t i = 0; i < count; ++i) {
+            views += host->jobs[i].route.kind == ROUTE_VIEW;
+            queried += host->jobs[i].route.kind == ROUTE_QUERY;
+        }
+        if ((views || queried) && !(snapshot = read_published(host))) views = 0; /* the owner shows them */
+        size_t handed = count - views - queried; /* queries are all this thread's */
         if (handed) {
             Owner *owner = host->owner;
             pthread_mutex_lock(&owner->lock);
             if (!grow(&owner->jobs, &owner->capacity, owner->count + handed, sizeof(*owner->jobs))) abort();
             for (size_t i = 0; i < count; ++i)
-                if (!snapshot || host->jobs[i].route.kind != ROUTE_VIEW) owner->jobs[owner->count++] = host->jobs[i];
+                if ((!snapshot || host->jobs[i].route.kind != ROUTE_VIEW) && host->jobs[i].route.kind != ROUTE_QUERY)
+                    owner->jobs[owner->count++] = host->jobs[i];
             owner->arrivals += handed;
             pthread_cond_signal(&owner->waiting);
             pthread_mutex_unlock(&owner->lock);
             host->pending += handed;
         }
-        if (!views) return;
+        if (!views && !queried) return;
         /* Shown first and answered after, as a burst is. */
-        if (!grow(&host->views, &host->views_capacity, views, sizeof(*host->views))) abort();
+        if (!grow(&host->views, &host->views_capacity, views + queried, sizeof(*host->views))) abort();
         size_t shown = 0;
         for (size_t i = 0; i < count; ++i) {
             const Job *job = &host->jobs[i];
-            if (job->route.kind != ROUTE_VIEW) continue;
+            if (job->route.kind != ROUTE_QUERY && (job->route.kind != ROUTE_VIEW || !snapshot)) continue;
             Applied *a = &host->views[shown++];
-            *a = (Applied){.host = host, .ticket = job->effect.ticket, .input = job->effect.input, .route = ROUTE_VIEW};
-            a->status = show_view(&host->reader, &job->route, job->effect.available, a);
+            bool registering = job->route.kind == ROUTE_QUERY && job->effect.input == PURE_INPUT_WRITE;
+            *a = (Applied){.host = host, .ticket = job->effect.ticket, .input = job->effect.input,
+                           .route = registering ? ROUTE_QUERY : ROUTE_VIEW};
+            a->status = job->route.kind == ROUTE_VIEW ? show_view(&host->reader, &job->route, job->effect.available, a)
+                        : registering              ? register_query(host, job)
+                                                   : run_query(job, snapshot, a);
         }
         pure_snapshot_release(snapshot); /* what answers lend holds its own mapping */
         for (size_t i = 0; i < shown; ++i) answer_applied(host, &host->views[i]);

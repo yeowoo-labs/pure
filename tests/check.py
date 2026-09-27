@@ -1023,6 +1023,130 @@ def server_surface(aup, pure, work):
     return {'events': 5, 'lines': len(got)}
 
 
+def server_queries(aup, pure, work):
+    """Queries as verified programs over a snapshot (PUT and GET /queries/NAME):
+    aup query compiles a bank's declarations with views of its own; the node
+    checks the module when it is registered (it loads, its states are the
+    bank's, it has the view named) and shows that view from the last save's
+    snapshot. A per-branch total (a fold reading its column's row, as a
+    correlated subquery does), a join of history rows with their accounts and
+    tellers (keyed lookups), and a self-join (each rich account's rank) match
+    a model of the same events, also asked while transfers go on; a module of
+    another app is refused (409), bytes that are no module too (400), and a
+    query registered again answers anew."""
+    import random
+    import threading
+    bank = pure / 'benchmarks' / 'bank' / 'bank.aup'
+    module = work / 'queries-bank.pmod'
+    compile_module(aup, bank, module)
+    queries = {
+        'per_branch': 'view per_branch = each b in branches {\n  bid = b.bid\n'
+                      '  total = sum(a.balance for a in accounts where a.bid == b.bid)\n'
+                      '  accounts = count(a in accounts where a.bid == b.bid)\n}\n',
+        'large': 'view large = each h in history where h.delta > 4000 {\n  aid = h.aid\n  delta = h.delta\n'
+                 '  account = accounts[h.aid].balance\n  teller = tellers[h.tid].balance\n}\n',
+        'ranks': 'view ranks = each a in accounts where a.balance > 15000 {\n  aid = a.aid\n'
+                 '  richer = count(b in accounts where b.balance > a.balance)\n}\n',
+        'rich': 'view rich = count(a in accounts where a.balance > 0)\n',
+    }
+    compiled = {}
+    for name, text in queries.items():
+        source = work / f'query-{name}.aup'
+        source.write_text(text)
+        out = work / f'query-{name}.pmod'
+        run(aup, 'query', bank, source, '-o', out)
+        compiled[name] = out.read_bytes()
+    other = work / 'queries-other.pmod'
+    (work / 'queries-other.aup').write_text('state accounts = 0\nview rich = accounts\n')
+    compile_module(aup, work / 'queries-other.aup', other)
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'queries-store', '--threads', '2'])
+
+    def call(method, path, body=None, json_body=False):
+        import http.client
+        connection = http.client.HTTPConnection('127.0.0.1', host.port, timeout=30)
+        try:
+            connection.request(method, path, body, {'Content-Type': 'application/json'} if json_body else {})
+            answer = connection.getresponse()
+            return answer.status, answer.getheader('X-Pure-Error'), answer.read()
+        finally:
+            connection.close()
+
+    try:
+        for b in range(1, 4):
+            assert call('POST', '/inputs/branch', json.dumps({'bid': b}).encode(), True)[0] == 200
+        for t in range(1, 31):
+            assert call('POST', '/inputs/teller', json.dumps({'tid': t, 'bid': (t - 1) // 10 + 1}).encode(), True)[0] == 200
+        for a in range(1, 301):
+            assert call('POST', '/inputs/account', json.dumps({'aid': a, 'bid': (a - 1) // 100 + 1}).encode(), True)[0] == 200
+        accounts, tellers, history = {a: 0 for a in range(1, 301)}, {t: 0 for t in range(1, 31)}, []
+        rng = random.Random(8)
+
+        def transfer():
+            aid, tid, bid, delta = rng.randint(1, 300), rng.randint(1, 30), rng.randint(1, 3), rng.randint(-5000, 5000)
+            assert call('POST', '/inputs/transfer', json.dumps({'aid': aid, 'tid': tid, 'bid': bid, 'delta': delta}).encode(),
+                        True)[0] == 200
+            accounts[aid] += delta
+            tellers[tid] += delta
+            history.append((aid, tid, delta))
+
+        for _ in range(600):
+            transfer()
+        for name, bytes_ in compiled.items():
+            assert call('PUT', f'/queries/{name}', bytes_) == (200, 'none', b''), name
+
+        def expected(name):
+            if name == 'per_branch':
+                return [{'bid': b, 'total': sum(v for a, v in accounts.items() if (a - 1) // 100 + 1 == b), 'accounts': 100}
+                        for b in range(1, 4)]
+            if name == 'large':
+                return [{'aid': a, 'delta': d, 'account': accounts[a], 'teller': tellers[t]} for a, t, d in history if d > 4000]
+            if name == 'ranks':
+                return [{'aid': a, 'richer': sum(1 for v in accounts.values() if v > balance)}
+                        for a, balance in sorted(accounts.items()) if balance > 15000]
+            return sum(1 for v in accounts.values() if v > 0)
+
+        def answer(name):
+            status, error, data = call('GET', f'/queries/{name}')
+            assert status == 200, (name, status, error)
+            return json.loads(data)['items'] if name != 'rich' else int(data)
+
+        for name in compiled:
+            assert answer(name) == expected(name), name
+        # Asked while transfers go on, a query sees one save or the next, whole.
+        seen, stop = [], threading.Event()
+
+        def ask():
+            while not stop.is_set():
+                seen.append(sum(row['total'] for row in answer('per_branch')))
+
+        asker = threading.Thread(target=ask)
+        asker.start()
+        for _ in range(200):
+            transfer()
+        stop.set()
+        asker.join()
+        totals = [0]
+        for _, _, delta in history:
+            totals.append(totals[-1] + delta)
+        assert seen and all(total in totals for total in seen), seen[:5]
+        assert answer('per_branch') == expected('per_branch')
+        page = json.loads(call('GET', '/queries/large?from=1&count=2')[2])
+        assert page['items'] == expected('large')[1:3] and page['rows'] == len(expected('large'))
+        # Refused: another app's states, bytes that are no module, a module without the view named.
+        assert call('PUT', '/queries/rich', other.read_bytes())[:2] == (409, 'conflict')
+        assert call('PUT', '/queries/rich', b'not a module')[:2] == (400, 'invalid')
+        assert call('PUT', '/queries/missing', compiled['rich'])[:2] == (404, 'not_found')
+        assert call('GET', '/queries/missing')[:2] == (404, 'no_value')
+        # Registered again: the new module answers.
+        (work / 'query-rich2.aup').write_text('view rich = count(a in accounts where a.balance < 0)\n')
+        run(aup, 'query', bank, work / 'query-rich2.aup', '-o', work / 'query-rich2.pmod')
+        assert call('PUT', '/queries/rich', (work / 'query-rich2.pmod').read_bytes())[0] == 200
+        assert answer('rich') == sum(1 for v in accounts.values() if v < 0)
+    finally:
+        host.stop()
+    return {'queries': len(compiled), 'asked_while_writing': len(seen), 'history': len(history)}
+
+
 def server_webhook(aup, pure, work):
     """An output wired to a third-party HTTPS endpoint (a Python server with
     a certificate of its own): five orders arrive in order as JSON with the
@@ -1483,6 +1607,7 @@ def main():
         report['server_webhook'] = server_webhook(aup, pure, work)
         report['server_sealed'] = server_sealed(aup, pure, work)
         report['server_surface'] = server_surface(aup, pure, work)
+        report['server_queries'] = server_queries(aup, pure, work)
         report['server_answers'] = server_answers(aup, pure, work)
     print(json.dumps(report))
 
