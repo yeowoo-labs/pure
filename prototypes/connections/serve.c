@@ -49,6 +49,7 @@
 #include <string.h>
 #include <strings.h>
 #include <poll.h>
+#include <sched.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -1650,6 +1651,16 @@ static void stop_shard(Host *host) {
     free(host->views);
 }
 
+/* --threads auto: a connection thread for each CPU this process may run on,
+ * less the one the owner of an app with states takes. */
+static unsigned auto_threads(bool owner) {
+    cpu_set_t set;
+    long cpus = sched_getaffinity(0, sizeof(set), &set) ? sysconf(_SC_NPROCESSORS_ONLN) : CPU_COUNT(&set);
+    if (cpus < 1) cpus = 1;
+    if (owner && cpus > 1) --cpus;
+    return cpus > 256 ? 256 : (unsigned)cpus;
+}
+
 int main(int argc, char **argv) {
     static PureModule module;
     static Owner owner;
@@ -1665,6 +1676,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
+        else if (!strcmp(argv[i], "--threads") && !strcmp(argv[i + 1], "auto")) threads = 0;
         else if (!strcmp(argv[i], "--threads") && number(argv[i + 1], 256, &value) && value) threads = (unsigned)value;
         else if (!strcmp(argv[i], "--timeout-ms") && number(argv[i + 1], 3600000, &value) && value) timeout_ms = value;
         else goto usage;
@@ -1672,6 +1684,7 @@ int main(int argc, char **argv) {
     uint32_t show, edit;
     bool documents;
     if (!module_path || !store || !load_module(&module, module_path, &documents, &show, &edit)) goto usage;
+    if (!threads) threads = auto_threads(module.states);
     if (pure_store_init(store) != PURE_OK) { fputs("Cannot initialize the store directory\n", stderr); return 1; }
     signal(SIGPIPE, SIG_IGN);
     struct sigaction stop_action = {.sa_handler = stop};
@@ -1746,7 +1759,7 @@ int main(int argc, char **argv) {
     free(thread);
     return 0;
 usage:
-    fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1] [--budget BYTES] "
+    fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
           "[--connections 1024] [--timeout-ms 10000]\n", stderr);
     return 2;
 }
