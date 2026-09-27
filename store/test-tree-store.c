@@ -1098,6 +1098,48 @@ static void one_sync(const char *path) {
     CHECK(pure_tree_test_syncs() - syncs == 20 && file_size(path) == size);
 }
 
+/* A compacted file carries written zeros for its whole cycle: once the sizes
+ * settle, the commits between two compactions never grow the file (no new
+ * blocks, no journal commit for them). When the live data shrinks, the file
+ * shrinks with it. */
+static void cycles(const char *path) {
+    char name[512], key[16];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    unsigned char big[4096], small[64];
+    memset(big, 'b', sizeof(big));
+    memset(small, 's', sizeof(small));
+    int64_t revisions[32] = {0};
+    struct stat was, now;
+    CHECK(stat(name, &was) == 0);
+    unsigned compactions = 0, grown = 0, sized = 0;
+    uint64_t largest = 0;
+    for (unsigned i = 0; i < 1600; ++i) {
+        snprintf(key, sizeof(key), "c%u", i % 32);
+        CHECK(pure_store_put(path, key, revisions[i % 32], (PureSpan){big, sizeof(big)}, &revisions[i % 32]) == PURE_OK);
+        CHECK(stat(name, &now) == 0);
+        /* Once the 32 values all exist (after the first compaction past them
+         * the next compacted file is sized for them), no cycle grows. */
+        if (now.st_ino != was.st_ino) {
+            if (i >= 32 && !sized) sized = compactions + 2;
+            ++compactions;
+        } else if (sized && compactions >= sized && now.st_size != was.st_size) ++grown;
+        if ((uint64_t)now.st_size > largest) largest = (uint64_t)now.st_size;
+        was = now;
+    }
+    CHECK(sized && compactions >= sized + 4 && grown == 0);
+    /* The same keys with small values: a few compactions later the file is
+     * down to the least a fresh file has (its data and 256 KiB of zeros). */
+    unsigned settled = compactions;
+    for (unsigned i = 0; i < 20000 && compactions < settled + 3; ++i) {
+        snprintf(key, sizeof(key), "c%u", i % 32);
+        CHECK(pure_store_put(path, key, revisions[i % 32], (PureSpan){small, sizeof(small)}, &revisions[i % 32]) == PURE_OK);
+        CHECK(stat(name, &now) == 0);
+        if (now.st_ino != was.st_ino) ++compactions;
+        was = now;
+    }
+    CHECK(compactions == settled + 3 && (uint64_t)now.st_size < largest / 2);
+}
+
 static void clean(const char *path) {
     DIR *entries = opendir(path);
     CHECK(entries);
@@ -1115,7 +1157,7 @@ int main(void) {
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, threads, grouped,
-                                      lost_commit, pending_head, one_sync, records};
+                                      lost_commit, pending_head, one_sync, records, cycles};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -1126,6 +1168,7 @@ int main(void) {
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
-         "atomic-batch-runtime-keys-store-handle-threads-group-commit-lost-commit-pending-head-one-sync-records\"}");
+         "atomic-batch-runtime-keys-store-handle-threads-group-commit-lost-commit-pending-head-one-sync-records-"
+         "cycles\"}");
     return 0;
 }

@@ -1,0 +1,36 @@
+{"round": 0, "store": "as it is", "posts_per_second": 23632.25, "p50_us": 1984, "p99_us": 21504, "max_us": 61440, "errors": 0}
+{"round": 0, "store": "no compaction", "posts_per_second": 21552.25, "p50_us": 2176, "p99_us": 17408, "max_us": 147456, "errors": 0}
+{"round": 0, "store": "no compaction, no growth", "posts_per_second": 24320.25, "p50_us": 1984, "p99_us": 12800, "max_us": 61440, "errors": 0}
+{"round": 0, "store": "tail grown as commits need it", "posts_per_second": 21392.25, "p50_us": 2176, "p99_us": 16384, "max_us": 69632, "errors": 0}
+{"round": 1, "store": "no compaction", "posts_per_second": 21942.75, "p50_us": 2176, "p99_us": 13312, "max_us": 65536, "errors": 0}
+{"round": 1, "store": "no compaction, no growth", "posts_per_second": 22688.25, "p50_us": 1984, "p99_us": 15360, "max_us": 163840, "errors": 0}
+{"round": 1, "store": "tail grown as commits need it", "posts_per_second": 21433.5, "p50_us": 2176, "p99_us": 14336, "max_us": 73728, "errors": 0}
+{"round": 1, "store": "as it is", "posts_per_second": 24960.25, "p50_us": 1984, "p99_us": 12800, "max_us": 73728, "errors": 0}
+{"round": 2, "store": "no compaction, no growth", "posts_per_second": 23088.0, "p50_us": 2176, "p99_us": 12800, "max_us": 53248, "errors": 0}
+{"round": 2, "store": "tail grown as commits need it", "posts_per_second": 22016.25, "p50_us": 2176, "p99_us": 15360, "max_us": 65536, "errors": 0}
+{"round": 2, "store": "as it is", "posts_per_second": 23760.25, "p50_us": 1984, "p99_us": 12288, "max_us": 90112, "errors": 0}
+{"round": 2, "store": "no compaction", "posts_per_second": 21280.25, "p50_us": 2176, "p99_us": 14336, "max_us": 59392, "errors": 0}
+{"round": 3, "store": "tail grown as commits need it", "posts_per_second": 22081.25, "p50_us": 2176, "p99_us": 13824, "max_us": 65536, "errors": 0}
+{"round": 3, "store": "as it is", "posts_per_second": 22594.75, "p50_us": 2176, "p99_us": 12288, "max_us": 81920, "errors": 0}
+{"round": 3, "store": "no compaction", "posts_per_second": 21104.25, "p50_us": 2176, "p99_us": 21504, "max_us": 139264, "errors": 0}
+{"round": 3, "store": "no compaction, no growth", "posts_per_second": 23419.25, "p50_us": 2176, "p99_us": 13312, "max_us": 57344, "errors": 0}
+{"round": 4, "store": "as it is", "posts_per_second": 22673.25, "p50_us": 2048, "p99_us": 15360, "max_us": 81920, "errors": 0}
+{"round": 4, "store": "no compaction", "posts_per_second": 23472.25, "p50_us": 2048, "p99_us": 14336, "max_us": 69632, "errors": 0}
+{"round": 4, "store": "no compaction, no growth", "posts_per_second": 23881.5, "p50_us": 1984, "p99_us": 16384, "max_us": 61440, "errors": 0}
+{"round": 4, "store": "tail grown as commits need it", "posts_per_second": 17632.25, "p50_us": 2304, "p99_us": 12800, "max_us": 589824, "errors": 0}
+{"round": 5, "store": "no compaction", "posts_per_second": 19040.25, "p50_us": 2176, "p99_us": 14336, "max_us": 655360, "errors": 0}
+{"round": 5, "store": "no compaction, no growth", "posts_per_second": 23552.25, "p50_us": 2048, "p99_us": 18432, "max_us": 59392, "errors": 0}
+{"round": 5, "store": "tail grown as commits need it", "posts_per_second": 22192.0, "p50_us": 2176, "p99_us": 15872, "max_us": 73728, "errors": 0}
+{"round": 5, "store": "as it is", "posts_per_second": 20928.25, "p50_us": 2176, "p99_us": 21504, "max_us": 77824, "errors": 0}
+{"round": 6, "store": "no compaction, no growth", "posts_per_second": 24608.25, "p50_us": 1984, "p99_us": 12800, "max_us": 61440, "errors": 0}
+{"round": 6, "store": "tail grown as commits need it", "posts_per_second": 19088.25, "p50_us": 2176, "p99_us": 15872, "max_us": 589824, "errors": 0}
+{"round": 6, "store": "as it is", "posts_per_second": 22576.25, "p50_us": 2048, "p99_us": 20480, "max_us": 77824, "errors": 0}
+{"round": 6, "store": "no compaction", "posts_per_second": 23184.25, "p50_us": 1984, "p99_us": 16384, "max_us": 73728, "errors": 0}
+{"round": 7, "store": "tail grown as commits need it", "posts_per_second": 22080.25, "p50_us": 2176, "p99_us": 14336, "max_us": 69632, "errors": 0}
+{"round": 7, "store": "as it is", "posts_per_second": 23088.25, "p50_us": 2048, "p99_us": 21504, "max_us": 65536, "errors": 0}
+{"round": 7, "store": "no compaction", "posts_per_second": 23051.75, "p50_us": 2048, "p99_us": 14336, "max_us": 65536, "errors": 0}
+{"round": 7, "store": "no compaction, no growth", "posts_per_second": 22586.5, "p50_us": 2048, "p99_us": 19456, "max_us": 57344, "errors": 0}
+{"store": "as it is", "rounds": 8, "posts_per_second_median": 22880.75, "p99_us_median": 17920.0, "max_us": 90112}
+{"store": "no compaction", "rounds": 8, "posts_per_second_median": 21747.5, "p99_us_median": 14336.0, "max_us": 655360}
+{"store": "no compaction, no growth", "rounds": 8, "posts_per_second_median": 23485.75, "p99_us_median": 14336.0, "max_us": 163840}
+{"store": "tail grown as commits need it", "rounds": 8, "posts_per_second_median": 21724.875, "p99_us_median": 14848.0, "max_us": 589824}

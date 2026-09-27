@@ -925,15 +925,28 @@ static int create_temporary(int directory, char name[96]) {
     return -1;
 }
 
+/* Where a fresh file's written zeros should reach: past everything the cycle
+ * to the next compaction will write (4 x live + slack more), so the commits
+ * of that cycle neither grow the file nor take new blocks, whose sync costs
+ * a journal commit (research 084: +22% commits, half the p99). No further
+ * than the file it replaces reached, so a store never takes more space than
+ * it did; a store whose live data shrank shrinks with it. */
+static uint64_t cycle_end(const Head *head, uint64_t replaced) {
+    uint64_t cycle = head->end + 4 * head->live + COMPACT_SLACK + TAIL_MIN;
+    uint64_t end = cycle < replaced ? cycle : replaced;
+    return end > tail_end(head->end) ? end : tail_end(head->end);
+}
+
 /* Publish a fresh file with both slots pointing at head. It is synced whole
- * before it is renamed into place, so its head names no commit bytes. */
-static bool install(int directory, char temporary[96], int fd, Head *head) {
+ * before it is renamed into place, so its head names no commit bytes.
+ * replaced: the size of the file it replaces (0 for none). */
+static bool install(int directory, char temporary[96], int fd, Head *head, uint64_t replaced) {
     unsigned char slot[SLOT];
     struct stat file;
     head->start = head->end;
     head->check = digest_end(&(Digest){0});
     encode_head(slot, head_magic, head);
-    zero_fill(fd, head->end, tail_end(head->end));
+    zero_fill(fd, head->end, cycle_end(head, replaced));
     bool ok = write_at(fd, slot, SLOT, 0) && write_at(fd, slot, SLOT, BLOCK) && sync_fd(fd) && !fstat(fd, &file);
     if (close(fd)) ok = false;
     ok = ok && !renameat(directory, temporary, directory, tree_name);
@@ -971,7 +984,7 @@ static void compact(int directory, int source, const struct stat *file, const He
          write_root(&tree, writer, &fresh, false) && flush(writer);
     if (ok) {
         Head compacted = {head->seq + 1, writer->at, fresh.ref, fresh.bytes, writer->at - DATA, 0, 0};
-        ok = install(directory, temporary, fd, &compacted);
+        ok = install(directory, temporary, fd, &compacted, (uint64_t)file->st_size);
         fd = -1;
     }
     if (fd >= 0) close(fd);
@@ -1010,7 +1023,7 @@ PureResult pure_store_init(const char *path) {
             char temporary[96];
             int created_fd = create_temporary(directory, temporary);
             head = (Head){.seq = 1, .end = DATA};
-            ok = created_fd >= 0 && install(directory, temporary, created_fd, &head);
+            ok = created_fd >= 0 && install(directory, temporary, created_fd, &head, 0);
             if (*temporary) unlinkat(directory, temporary, 0);
         }
     }

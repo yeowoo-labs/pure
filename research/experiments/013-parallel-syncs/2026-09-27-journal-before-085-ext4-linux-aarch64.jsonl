@@ -1,0 +1,20 @@
+{"round": 0, "store": "as it is", "commits_per_second": 362, "p50_ms": 1.26, "p90_ms": 3.98, "p99_ms": 55.11, "journal_commits": 113}
+{"round": 0, "store": "no compaction", "commits_per_second": 427, "p50_ms": 1.27, "p90_ms": 3.91, "p99_ms": 36.68, "journal_commits": 44}
+{"round": 0, "store": "no compaction, no growth", "commits_per_second": 541, "p50_ms": 1.27, "p90_ms": 3.17, "p99_ms": 5.49, "journal_commits": 8}
+{"round": 0, "store": "compacted file sized like the old", "commits_per_second": 477, "p50_ms": 1.26, "p90_ms": 3.21, "p99_ms": 10.87, "journal_commits": 46}
+{"round": 1, "store": "no compaction", "commits_per_second": 458, "p50_ms": 1.28, "p90_ms": 3.52, "p99_ms": 16.56, "journal_commits": 43}
+{"round": 1, "store": "no compaction, no growth", "commits_per_second": 440, "p50_ms": 1.27, "p90_ms": 4.08, "p99_ms": 25.17, "journal_commits": 7}
+{"round": 1, "store": "compacted file sized like the old", "commits_per_second": 413, "p50_ms": 1.26, "p90_ms": 3.22, "p99_ms": 25.22, "journal_commits": 48}
+{"round": 1, "store": "as it is", "commits_per_second": 370, "p50_ms": 1.29, "p90_ms": 4.01, "p99_ms": 33.16, "journal_commits": 110}
+{"round": 2, "store": "no compaction, no growth", "commits_per_second": 424, "p50_ms": 1.28, "p90_ms": 3.94, "p99_ms": 25.66, "journal_commits": 9}
+{"round": 2, "store": "compacted file sized like the old", "commits_per_second": 461, "p50_ms": 1.26, "p90_ms": 3.3, "p99_ms": 21.71, "journal_commits": 46}
+{"round": 2, "store": "as it is", "commits_per_second": 340, "p50_ms": 1.28, "p90_ms": 4.21, "p99_ms": 35.79, "journal_commits": 114}
+{"round": 2, "store": "no compaction", "commits_per_second": 404, "p50_ms": 1.28, "p90_ms": 4.13, "p99_ms": 31.76, "journal_commits": 33}
+{"round": 3, "store": "compacted file sized like the old", "commits_per_second": 433, "p50_ms": 1.25, "p90_ms": 3.13, "p99_ms": 25.18, "journal_commits": 46}
+{"round": 3, "store": "as it is", "commits_per_second": 373, "p50_ms": 1.27, "p90_ms": 3.94, "p99_ms": 56.67, "journal_commits": 114}
+{"round": 3, "store": "no compaction", "commits_per_second": 384, "p50_ms": 1.27, "p90_ms": 3.98, "p99_ms": 53.28, "journal_commits": 36}
+{"round": 3, "store": "no compaction, no growth", "commits_per_second": 475, "p50_ms": 1.27, "p90_ms": 3.91, "p99_ms": 21.46, "journal_commits": 13}
+{"store": "as it is", "commits": 4000, "commits_per_second": 366.0, "p50_ms": 1.275, "p90_ms": 3.995, "p99_ms": 45.45, "journal_commits": 113.5}
+{"store": "no compaction", "commits": 4000, "commits_per_second": 415.5, "p50_ms": 1.275, "p90_ms": 3.9450000000000003, "p99_ms": 34.22, "journal_commits": 39.5}
+{"store": "no compaction, no growth", "commits": 4000, "commits_per_second": 457.5, "p50_ms": 1.27, "p90_ms": 3.925, "p99_ms": 23.315, "journal_commits": 8.5}
+{"store": "compacted file sized like the old", "commits": 4000, "commits_per_second": 447.0, "p50_ms": 1.26, "p90_ms": 3.215, "p99_ms": 23.445, "journal_commits": 46.0}

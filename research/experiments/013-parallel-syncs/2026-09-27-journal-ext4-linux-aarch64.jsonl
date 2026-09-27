@@ -1,0 +1,20 @@
+{"round": 0, "store": "as it is", "commits_per_second": 411, "p50_ms": 1.27, "p90_ms": 3.96, "p99_ms": 25.68, "journal_commits": 52}
+{"round": 0, "store": "no compaction", "commits_per_second": 449, "p50_ms": 1.27, "p90_ms": 3.99, "p99_ms": 23.52, "journal_commits": 46}
+{"round": 0, "store": "no compaction, no growth", "commits_per_second": 519, "p50_ms": 1.27, "p90_ms": 3.14, "p99_ms": 5.55, "journal_commits": 4}
+{"round": 0, "store": "tail grown as commits need it", "commits_per_second": 346, "p50_ms": 1.29, "p90_ms": 4.01, "p99_ms": 26.25, "journal_commits": 117}
+{"round": 1, "store": "no compaction", "commits_per_second": 360, "p50_ms": 1.28, "p90_ms": 3.94, "p99_ms": 32.97, "journal_commits": 42}
+{"round": 1, "store": "no compaction, no growth", "commits_per_second": 413, "p50_ms": 1.28, "p90_ms": 4.07, "p99_ms": 26.58, "journal_commits": 18}
+{"round": 1, "store": "tail grown as commits need it", "commits_per_second": 270, "p50_ms": 1.28, "p90_ms": 4.34, "p99_ms": 50.93, "journal_commits": 110}
+{"round": 1, "store": "as it is", "commits_per_second": 382, "p50_ms": 1.25, "p90_ms": 3.99, "p99_ms": 26.49, "journal_commits": 40}
+{"round": 2, "store": "no compaction, no growth", "commits_per_second": 463, "p50_ms": 1.27, "p90_ms": 3.96, "p99_ms": 22.29, "journal_commits": 21}
+{"round": 2, "store": "tail grown as commits need it", "commits_per_second": 289, "p50_ms": 1.27, "p90_ms": 3.99, "p99_ms": 32.56, "journal_commits": 104}
+{"round": 2, "store": "as it is", "commits_per_second": 356, "p50_ms": 1.27, "p90_ms": 3.93, "p99_ms": 37.21, "journal_commits": 46}
+{"round": 2, "store": "no compaction", "commits_per_second": 393, "p50_ms": 1.26, "p90_ms": 4.08, "p99_ms": 32.96, "journal_commits": 41}
+{"round": 3, "store": "tail grown as commits need it", "commits_per_second": 406, "p50_ms": 1.27, "p90_ms": 4.12, "p99_ms": 26.45, "journal_commits": 108}
+{"round": 3, "store": "as it is", "commits_per_second": 389, "p50_ms": 1.27, "p90_ms": 4.06, "p99_ms": 27.31, "journal_commits": 44}
+{"round": 3, "store": "no compaction", "commits_per_second": 392, "p50_ms": 1.26, "p90_ms": 3.4, "p99_ms": 52.8, "journal_commits": 44}
+{"round": 3, "store": "no compaction, no growth", "commits_per_second": 469, "p50_ms": 1.27, "p90_ms": 3.88, "p99_ms": 22.84, "journal_commits": 15}
+{"store": "as it is", "commits": 4000, "commits_per_second": 385.5, "p50_ms": 1.27, "p90_ms": 3.975, "p99_ms": 26.9, "journal_commits": 45.0}
+{"store": "no compaction", "commits": 4000, "commits_per_second": 392.5, "p50_ms": 1.2650000000000001, "p90_ms": 3.965, "p99_ms": 32.965, "journal_commits": 43.0}
+{"store": "no compaction, no growth", "commits": 4000, "commits_per_second": 466.0, "p50_ms": 1.27, "p90_ms": 3.92, "p99_ms": 22.564999999999998, "journal_commits": 16.5}
+{"store": "tail grown as commits need it", "commits": 4000, "commits_per_second": 317.5, "p50_ms": 1.275, "p90_ms": 4.0649999999999995, "p99_ms": 29.505000000000003, "journal_commits": 109.0}

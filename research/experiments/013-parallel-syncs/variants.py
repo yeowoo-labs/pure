@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Where the tree store's extra sync work goes (docs/research/084-parallel-syncs.md).
 
-Builds pure-serve with three stores from store/store-tree.c: as it is; with no
-compaction; and with no compaction and a 64 MiB tail written at creation (no
-tail growth during a run). Then durable score posts (64 connections), the
+Builds pure-serve with stores from store/store-tree.c: as it is; with no
+compaction; with no compaction and a 64 MiB tail written at creation (no tail
+growth during a run); and as before 085, compacted files getting only 256 KiB
+of zeros and commits growing the tail as they need it. Then durable score posts (64 connections), the
 builds in rotated order per round, each on a fresh store after 64 warm-up
 posts. Prints one JSON line per run and a summary.
 """
@@ -25,6 +26,9 @@ PATCHES = {
     'no compaction': [('enum { COMPACT_SLACK = 1048576 };', 'enum { COMPACT_SLACK = 1 << 30 };')],
     'no compaction, no growth': [('enum { COMPACT_SLACK = 1048576 };', 'enum { COMPACT_SLACK = 1 << 30 };'),
                                  ('TAIL_STEP = 262144', 'TAIL_STEP = 67108864')],
+    # Before 085: a compacted file got 256 KiB of zeros, and commits grew the tail as they needed it.
+    'tail grown as commits need it': [('zero_fill(fd, head->end, cycle_end(head, replaced));',
+                                       'zero_fill(fd, head->end, tail_end(head->end));')],
 }
 
 
