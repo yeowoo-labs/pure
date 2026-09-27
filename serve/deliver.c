@@ -49,8 +49,13 @@ struct PureWire {
     size_t answer_head, answer_count, answer_capacity;
     Answer taken;     /* the one the owner took last, kept until it takes the next */
     uint32_t placed[2 * PURE_MODULE_FIELDS];
-    bool sealed;                       /* the sends go sealed to peer's key */
-    unsigned char peer[PURE_SEAL_KEY];
+    /* Sealed sends: to peer's key, authenticated by the node's own key when
+     * it has one (its public half is from), in one session made at the first
+     * seal (and again after one fails); enc opens it. */
+    bool sealed;
+    unsigned char peer[PURE_SEAL_KEY], from[PURE_SEAL_KEY], enc[PURE_SEAL_KEY];
+    const PureSealKey *own;
+    PureSealer *sealer;
 };
 
 /* TLS verifies a receiver's certificate against the system's CAs or the
@@ -518,9 +523,55 @@ static bool form_answer(const PureWire *w, int status, const Text *body, const P
 
 static int send_request(PureWire *w, const char *request, size_t size, const Pending *p, Answer *answer);
 
-void pure_wire_seal(PureWire *w, const unsigned char peer[PURE_SEAL_KEY]) {
+void pure_wire_seal(PureWire *w, const unsigned char peer[PURE_SEAL_KEY], const PureSealKey *own,
+                    const unsigned char *from) {
     memcpy(w->peer, peer, PURE_SEAL_KEY);
+    w->own = own;
+    if (own) memcpy(w->from, from, PURE_SEAL_KEY);
     w->sealed = true;
+}
+
+/* count sends from p as one body: one object, or an array of them. */
+static void put_body(unsigned char *at, const Pending *p, unsigned count) {
+    for (unsigned i = 0; i < count; ++i) {
+        if (count > 1) *at++ = i ? ',' : '[';
+        memcpy(at, p[i].body, p[i].size);
+        at += p[i].size;
+    }
+    if (count > 1) *at = ']';
+}
+
+static void hex(const unsigned char *bytes, size_t size, char *out) {
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < size; ++i) out[2 * i] = digits[bytes[i] >> 4], out[2 * i + 1] = digits[bytes[i] & 15];
+    out[2 * size] = 0;
+}
+
+/* The body sealed whole in the wire's session, bound to its source, first
+ * number and count; the X-Pure-Seal line that opens it (suite, session,
+ * number, and the sender's key when it sealed with its own) into line. */
+static unsigned char *seal_body(PureWire *w, const Pending *p, unsigned count, size_t body, char *line, size_t size) {
+    unsigned char *plain = malloc(body), *sealed = malloc(body + PURE_SEAL_OVERHEAD);
+    char aad[PURE_SOURCE + 48];
+    snprintf(aad, sizeof(aad), "%s %llu %u", w->source, (unsigned long long)p->seq, count);
+    uint64_t n = 0;
+    if (plain && sealed) {
+        put_body(plain, p, count);
+        if (!w->sealer) w->sealer = pure_sealer(w->peer, w->own, w->enc);
+    }
+    bool ok = plain && sealed && w->sealer && pure_seal(w->sealer, aad, plain, body, sealed, &n);
+    free(plain);
+    if (!ok) {
+        pure_sealer_free(w->sealer); /* the next try makes a new session */
+        w->sealer = NULL;
+        free(sealed);
+        return NULL;
+    }
+    char enc[2 * PURE_SEAL_KEY + 1], from[2 * PURE_SEAL_KEY + 2] = "";
+    hex(w->enc, PURE_SEAL_KEY, enc);
+    if (w->own) from[0] = ' ', hex(w->from, PURE_SEAL_KEY, from + 1);
+    snprintf(line, size, "X-Pure-Seal: %s %s %llu%s\r\n", pure_seal_suite(), enc, (unsigned long long)n, from);
+    return sealed;
 }
 
 /* One request for count sends from p (numbered in a row): one object, or
@@ -530,19 +581,17 @@ static int post(PureWire *w, const Pending *p, unsigned count, Answer *answer) {
     size_t body = count > 1 ? count + 1 : 0;
     for (unsigned i = 0; i < count; ++i) body += p[i].size;
     size_t length = body + (w->sealed ? PURE_SEAL_OVERHEAD : 0);
-    char batch[32] = "", seal[48] = "";
+    char batch[32] = "", seal[256] = "";
     if (count > 1) snprintf(batch, sizeof(batch), "X-Pure-Count: %u\r\n", count);
-    if (w->sealed) snprintf(seal, sizeof(seal), "X-Pure-Seal: %s\r\n", pure_seal_suite());
+    unsigned char *sealed = w->sealed ? seal_body(w, p, count, body, seal, sizeof(seal)) : NULL;
+    if (w->sealed && !sealed) return AGAIN;
     /* The request in one piece, its head and then a batch in its brackets:
      * one write where there were two a send (a batch drained at 91k sends a
-     * second, and at 470k in one piece). Sealed, the body is sealed whole,
-     * bound to its source, first number and count. */
-    enum { HEAD = 2048 }; /* the longest path, host and source leave room to spare */
+     * second, and at 470k in one piece). */
+    enum { HEAD = 2048 }; /* the longest path, host, source and seal leave room to spare */
     char *request = malloc(HEAD + length);
-    unsigned char *plain = w->sealed ? malloc(body) : NULL;
-    if (!request || (w->sealed && !plain)) {
-        free(request);
-        free(plain);
+    if (!request) {
+        free(sealed);
         return AGAIN;
     }
     int head = snprintf(request, HEAD,
@@ -550,23 +599,9 @@ static int post(PureWire *w, const Pending *p, unsigned count, Answer *answer) {
                         "X-Pure-Source: %s\r\nX-Pure-Sequence: %llu\r\n%s%sIdempotency-Key: %s-%llu\r\n\r\n",
                         w->path, w->host, w->port, length, w->source, (unsigned long long)p->seq, batch, seal, w->source,
                         (unsigned long long)p->seq);
-    unsigned char *at = plain ? plain : (unsigned char *)request + head;
-    for (unsigned i = 0; i < count; ++i) {
-        if (count > 1) *at++ = i ? ',' : '[';
-        memcpy(at, p[i].body, p[i].size);
-        at += p[i].size;
-    }
-    if (count > 1) *at++ = ']';
-    if (plain) {
-        char aad[PURE_SOURCE + 48];
-        snprintf(aad, sizeof(aad), "%s %llu %u", w->source, (unsigned long long)p->seq, count);
-        bool sealed = pure_seal(w->peer, aad, plain, body, (unsigned char *)request + head);
-        free(plain);
-        if (!sealed) {
-            free(request);
-            return AGAIN;
-        }
-    }
+    if (sealed) memcpy(request + head, sealed, length);
+    else put_body((unsigned char *)request + head, p, count);
+    free(sealed);
     int result = send_request(w, request, (size_t)head + length, p, answer);
     free(request);
     return result;
@@ -706,6 +741,7 @@ void pure_wire_close(PureWire *w) {
     pthread_mutex_unlock(&w->lock);
     if (w->started) pthread_join(w->thread, NULL);
     pure_tls_close(w->session);
+    pure_sealer_free(w->sealer);
     if (w->fd >= 0) close(w->fd);
     for (size_t i = 0; i < w->count; ++i) {
         free(w->queue[w->head + i].body);

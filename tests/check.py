@@ -769,12 +769,17 @@ def server_links(aup, pure, work):
 
 
 def server_sealed(aup, pure, work):
-    """Sends sealed end to end (--seal to the receiver's --key): through a relay
-    that records what passes, every order is applied once and the relay saw
-    no item and no field name; one byte changed on the way is refused (400
-    seal) and applies nothing, the recorded request sent again applies
-    nothing twice, an unsealed delivery is refused (403) by a node that keeps
-    its deliveries sealed, and a seal to another key does not open."""
+    """Sends sealed end to end (--seal to the receiver's --key), in one session
+    a wire and authenticated by the sender's own --key: through a relay that
+    records what passes, every order is applied once, the relay saw no item
+    and no field name, and the wire's requests share one session, numbered
+    in order. One byte changed on the way, another number or another
+    sender's key is refused (400 seal) and applies nothing; the recorded
+    request sent again applies nothing twice; an unsealed delivery is
+    refused (403) by a node that keeps its deliveries sealed; a seal to
+    another key does not open. Restarted naming its sender (--sender), the
+    receiver opens that sender's session again unasked, and refuses another
+    node claiming the sender's name with its own key (403 sender)."""
     import select
     import threading
     import time
@@ -807,12 +812,25 @@ def server_sealed(aup, pure, work):
         finally:
             connection.close()
 
+    def buy(port, item, count):
+        assert request(port, {'Content-Type': 'application/json'}, json.dumps({'item': item, 'count': count}).encode(),
+                       '/inputs/buy')[0] == 200
+
+    def wait_for(condition, seconds=20):
+        deadline = time.time() + seconds
+        while not condition() and time.time() < deadline:
+            time.sleep(0.05)
+        return condition()
+
+    def count():
+        return int(http(port_b, 'GET', '/views/count')[3])
+
     key = work / 'seal-receiver.key'
     receiver, started = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'seal-b',
                                '--key', key, '--sealed-only'])
     port_b, public_key = started['port'], started['public_key']
     assert len(public_key) == 64 and (key.stat().st_mode & 0o777) == 0o600, (public_key, oct(key.stat().st_mode))
-    seen = []
+    seen = []  # (headers, body, status, X-Pure-Error) of each request relayed
 
     class Relay(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
@@ -821,11 +839,11 @@ def server_sealed(aup, pure, work):
             body = self.rfile.read(int(self.headers['Content-Length']))
             headers = {name: value for name, value in self.headers.items()
                        if name.lower().startswith('x-pure-') or name.lower() in ('content-type', 'idempotency-key')}
-            seen.append((headers, body))
             connection = HTTPConnection('127.0.0.1', port_b, timeout=10)
             connection.request('POST', self.path, body, headers)
             answer = connection.getresponse()
             data = answer.read()
+            seen.append((headers, body, answer.status, answer.getheader('X-Pure-Error')))
             self.send_response(answer.status)
             for name, value in answer.getheaders():
                 if name.lower().startswith('x-pure-'):
@@ -841,58 +859,78 @@ def server_sealed(aup, pure, work):
     relay = ThreadingHTTPServer(('127.0.0.1', 0), Relay)
     port_relay = relay.server_address[1]
     threading.Thread(target=relay.serve_forever, daemon=True).start()
+    wire = f'ordered=http://127.0.0.1:{port_relay}/inputs/order'
     sender, sender_started = start([pure / 'build/pure-serve', '--module', sender_module, '--store', work / 'seal-a',
-                                    '--send', f'ordered=http://127.0.0.1:{port_relay}/inputs/order',
-                                    '--seal', f'ordered={public_key}'])
-    port_a = sender_started['port']
-    stranger = None
+                                    '--key', work / 'seal-sender.key', '--send', wire, '--seal', f'ordered={public_key}'])
+    port_a, sender_key = sender_started['port'], sender_started['public_key']
+    stranger = impostor = None
     try:
         orders, total = 60, 0
         for i in range(orders):
-            count = i % 7 + 1
-            total += count
-            assert request(port_a, {'Content-Type': 'application/json'},
-                           json.dumps({'item': f'secret-{i}', 'count': count}).encode(), '/inputs/buy')[0] == 200
-        deadline = time.time() + 20
-        while int(http(port_b, 'GET', '/views/count')[3]) < orders and time.time() < deadline:
-            time.sleep(0.05)
-        assert int(http(port_b, 'GET', '/views/count')[3]) == orders
+            total += i % 7 + 1
+            buy(port_a, f'secret-{i}', i % 7 + 1)
+        assert wait_for(lambda: count() == orders), count()
         assert int(http(port_b, 'GET', '/views/total')[3]) == total
-        assert seen and all('X-Pure-Seal' in headers for headers, _ in seen), seen[:1]
-        assert not any(b'secret' in body or b'item' in body or b'city' in body for _, body in seen)
-        headers, body = seen[0]
+        seals = [headers['X-Pure-Seal'].split() for headers, _, _, _ in seen]
+        assert seen and all(len(parts) == 4 and parts[3] == sender_key for parts in seals), seals[:1]
+        assert len({parts[1] for parts in seals}) == 1  # one session
+        numbers = [int(parts[2]) for parts in seals]
+        assert numbers == list(range(len(numbers))), numbers
+        assert all(status == 200 for _, _, status, _ in seen)
+        assert not any(b'secret' in body or b'item' in body or b'city' in body for _, body, _, _ in seen)
+        headers, body, _, _ = seen[0]
+        suite, enc, n, _ = headers['X-Pure-Seal'].split()
         changed = bytearray(body)
         changed[len(changed) // 2] ^= 1
         assert request(port_b, headers, bytes(changed)) == (400, 'seal')
+        renumbered = dict(headers, **{'X-Pure-Seal': f'{suite} {enc} {int(n) + 1} {sender_key}'})
+        assert request(port_b, renumbered, body) == (400, 'seal')
+        other_sender = f'{suite} {enc} {n} {public_key}'
+        assert request(port_b, dict(headers, **{'X-Pure-Seal': other_sender}), body) == (400, 'seal')
         assert request(port_b, headers, body)[0] == 200  # heard before: applied once
         plain = {name: value for name, value in headers.items() if name != 'X-Pure-Seal'}
         assert request(port_b, plain, json.dumps({'item': 'plain', 'count': 1, 'to': {'city': 'x'}}).encode()) == \
             (403, 'unsealed')
+        assert count() == orders
         # A sender sealing to another node's key: the receiver cannot open it.
         other, other_started = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'seal-c',
                                       '--key', work / 'seal-other.key'])
         other.terminate()
         other.wait()
         stranger, stranger_started = start([pure / 'build/pure-serve', '--module', sender_module, '--store',
-                                            work / 'seal-d', '--send', f'ordered=http://127.0.0.1:{port_relay}/inputs/order',
-                                            '--seal', f'ordered={other_started["public_key"]}'])
+                                            work / 'seal-d', '--send', wire, '--seal',
+                                            f'ordered={other_started["public_key"]}'])
         before = len(seen)
-        assert request(stranger_started['port'], {'Content-Type': 'application/json'},
-                       json.dumps({'item': 'stranger', 'count': 5}).encode(), '/inputs/buy')[0] == 200
-        deadline = time.time() + 5
-        while len(seen) == before and time.time() < deadline:
-            time.sleep(0.05)
-        time.sleep(0.2)
-        assert len(seen) > before and int(http(port_b, 'GET', '/views/count')[3]) == orders
-        # The same key file gives the same public key after a restart.
+        buy(stranger_started['port'], 'stranger', 5)
+        assert wait_for(lambda: len(seen) > before, 5)
+        assert seen[before][2:] == (400, 'seal') and len(seen[before][0]['X-Pure-Seal'].split()) == 3
+        assert count() == orders
+        # Restarted naming its sender: the same key opens the sender's session
+        # again, and another node claiming the sender's name is refused.
+        source = seen[0][0]['X-Pure-Source']
         receiver.terminate()
         receiver.wait()
         receiver, again = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'seal-b',
-                                 '--key', key, '--sealed-only'])
+                                 '--key', key, '--sender', f'{source}={sender_key}'])
+        port_b = again['port']
         assert again['public_key'] == public_key
-        return {'orders': orders, 'relayed': before, 'suite': seen[0][0]['X-Pure-Seal']}
+        before = len(seen)
+        buy(port_a, 'after', 2)
+        assert wait_for(lambda: count() == orders + 1), count()
+        assert seen[-1][0]['X-Pure-Seal'].split()[1] == enc  # the same session, opened again unasked
+        impostor, impostor_started = start([pure / 'build/pure-serve', '--module', sender_module, '--store',
+                                            work / 'seal-e', '--key', work / 'seal-impostor.key', '--send', wire,
+                                            '--seal', f'ordered={public_key}'])
+        before = len(seen)
+        buy(impostor_started['port'], 'impostor', 9)
+        assert wait_for(lambda: any(h['X-Pure-Seal'].split()[3] == impostor_started['public_key']
+                                    for h, _, _, _ in seen[before:]), 5)
+        claimed = [entry for entry in seen[before:] if entry[0]['X-Pure-Seal'].split()[3] != sender_key]
+        assert claimed and claimed[0][0]['X-Pure-Source'] == source and claimed[0][2:] == (403, 'sender'), claimed[:1]
+        assert count() == orders + 1
+        return {'orders': orders, 'relayed': len(seen), 'suite': suite, 'sessions': 1}
     finally:
-        for process in (sender, receiver, stranger):
+        for process in (sender, receiver, stranger, impostor):
             if process:
                 process.terminate()
                 process.wait()

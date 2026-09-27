@@ -1,0 +1,9 @@
+{"round": 0, "variant": "plain", "sends": 20000, "sends_per_second": 462162, "receiver_requests": 85, "delivery_attempts": 80}
+{"round": 0, "variant": "sealed", "sends": 20000, "sends_per_second": 461190, "receiver_requests": 85, "delivery_attempts": 80}
+{"round": 0, "variant": "baseline", "sends": 20000, "sends_per_second": 207310, "receiver_requests": 90, "delivery_attempts": 80}
+{"round": 1, "variant": "sealed", "sends": 20000, "sends_per_second": 463529, "receiver_requests": 85, "delivery_attempts": 80}
+{"round": 1, "variant": "baseline", "sends": 20000, "sends_per_second": 233662, "receiver_requests": 89, "delivery_attempts": 80}
+{"round": 1, "variant": "plain", "sends": 20000, "sends_per_second": 468355, "receiver_requests": 85, "delivery_attempts": 80}
+{"round": 2, "variant": "baseline", "sends": 20000, "sends_per_second": 233342, "receiver_requests": 89, "delivery_attempts": 80}
+{"round": 2, "variant": "plain", "sends": 20000, "sends_per_second": 470174, "receiver_requests": 85, "delivery_attempts": 80}
+{"round": 2, "variant": "sealed", "sends": 20000, "sends_per_second": 463747, "receiver_requests": 85, "delivery_attempts": 80}

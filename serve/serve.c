@@ -71,9 +71,27 @@ typedef enum { ROUTE_NONE, ROUTE_OBJECT, ROUTE_VIEW, ROUTE_INPUT } RouteKind;
 typedef struct { RouteKind kind; uint32_t target; size_t from, count; } Route;
 
 /* This node's key, for deliveries sealed to it (--key), and whether it
- * takes only those (--sealed-only). */
+ * takes only those (--sealed-only), or only those from the senders named,
+ * each by the key it seals with (--sender NAME=KEY). */
 static PureSealKey *seal_key;
 static bool sealed_only;
+static struct Sender { char name[PURE_SOURCE + 1]; unsigned char key[PURE_SEAL_KEY]; } senders[PURE_MODULE_INPUTS];
+static unsigned sender_count;
+
+/* A delivery's X-Pure-Seal: the suite, the sender's session (its
+ * encapsulated key), the seal's number in it and, when the sender sealed
+ * with a key of its own, that key. */
+typedef struct {
+    char suite[32]; /* empty: not sealed */
+    unsigned char enc[PURE_SEAL_KEY], from[PURE_SEAL_KEY];
+    uint64_t n;
+    bool authenticated;
+} Seal;
+
+/* Sessions a connection thread has opened, the least used replaced first:
+ * a sender's key agreement is made once a session, not once a request. */
+enum { SESSIONS = 16 };
+typedef struct { Seal seal; PureOpener *opener; uint64_t used; } Session;
 
 /* Allocated when accepted and reused after closing: memory follows the
  * connections that are open, not the configured maximum. */
@@ -101,10 +119,11 @@ typedef struct Connection {
     char source[PURE_SOURCE + 1]; /* a delivered message's sender (X-Pure-Source), or empty */
     uint64_t sequence;            /* and its number (X-Pure-Sequence) */
     unsigned batch;               /* how many numbered messages the body holds (X-Pure-Count) */
-    /* A sealed delivery: the suite it names (X-Pure-Seal), what the seal is
-     * bound to (source, number, count), and how many plain bytes the body
-     * holds once opened, cleared when its ticket goes. */
-    char seal[40], aad[PURE_SOURCE + 48];
+    /* A sealed delivery: its seal (X-Pure-Seal), what the seal is bound to
+     * (source, number, count), and how many plain bytes the body holds once
+     * opened, cleared when its ticket goes. */
+    Seal seal;
+    char aad[PURE_SOURCE + 48];
     size_t opened;
     int64_t expected;
     size_t body_size, received, in_used;
@@ -207,6 +226,8 @@ struct Host {
     uint64_t timeout_ms;
     uint64_t now; /* the monotonic clock in ms, read once a round: deadlines count from it */
     uint64_t accepted, requests, expired;
+    Session sessions[SESSIONS];
+    uint64_t session_uses;
     /* What the owner hands back to answer (swapped for answering), and the
      * eventfd that says so; pending counts requests at the owner. */
     pthread_mutex_t lock;
@@ -416,6 +437,34 @@ static void answer_app(Connection *c, PureOutcome result, bool view, PureFault f
     if (!result.body.size) release_ticket(c);
 }
 
+/* "SUITE ENC N[ FROM]": the keys as 64 hex digits, the number in decimal. */
+static bool read_seal(const char *value, Seal *seal) {
+    char copy[256], *rest, *suite = NULL, *enc = NULL, *n = NULL, *from = NULL, *extra = NULL;
+    if (strlen(value) >= sizeof(copy)) return false;
+    strcpy(copy, value);
+    suite = strtok_r(copy, " ", &rest);
+    if (suite) enc = strtok_r(NULL, " ", &rest);
+    if (enc) n = strtok_r(NULL, " ", &rest);
+    if (n) from = strtok_r(NULL, " ", &rest);
+    if (from) extra = strtok_r(NULL, " ", &rest);
+    uint64_t sequence;
+    if (!n || extra || strlen(suite) >= sizeof(seal->suite) || !pure_seal_peer(enc, seal->enc) ||
+        !number(n, UINT64_MAX, &sequence) || (from && !pure_seal_peer(from, seal->from)))
+        return false;
+    strcpy(seal->suite, suite);
+    seal->n = sequence;
+    seal->authenticated = from != NULL;
+    return true;
+}
+
+/* A sender this node names, sealing with the key it was named with. */
+static bool known_sender(const char *source, const Seal *seal) {
+    for (unsigned i = 0; i < sender_count; ++i)
+        if (!strcmp(senders[i].name, source))
+            return seal->authenticated && !memcmp(senders[i].key, seal->from, PURE_SEAL_KEY);
+    return false;
+}
+
 /* Parse one request head of `size` bytes (through the blank line): the same
  * bounded HTTP/1.1 subset as server.c, plus Connection, POST and the app
  * routes. A query stays in head for start_request; an unknown path is
@@ -464,7 +513,7 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     c->source[0] = 0;
     c->sequence = 0;
     c->batch = 1;
-    c->seal[0] = 0;
+    c->seal.suite[0] = 0;
     bool counted = false;
     c->body_size = 0;
     c->json = false;
@@ -517,9 +566,8 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
             if (c->sequence || !number(value, UINT64_MAX, &n) || !n) return false;
             c->sequence = n;
         } else if (!strcasecmp(line, "X-Pure-Seal")) {
-            /* A delivery sealed to this node's key, in the suite named. */
-            if (*c->seal || strlen(value) >= sizeof(c->seal)) return false;
-            strcpy(c->seal, value);
+            /* A delivery sealed to this node's key: suite, session, number[, sender]. */
+            if (*c->seal.suite || !read_seal(value, &c->seal)) return false;
         } else if (!strcasecmp(line, "X-Pure-Count")) {
             /* Numbered messages from X-Pure-Sequence on, as a JSON array. */
             if (counted || !number(value, BATCH, &n) || !n) return false;
@@ -656,13 +704,35 @@ static const char *convert(Connection *c) {
     return NULL;
 }
 
+/* The session a seal was made in: one this thread opened before, or opened
+ * now in place of the least used; NULL when it does not open. */
+static PureOpener *session(Host *host, const Seal *seal) {
+    Session *least = &host->sessions[0];
+    for (unsigned i = 0; i < SESSIONS; ++i) {
+        Session *k = &host->sessions[i];
+        if (k->opener && !memcmp(k->seal.enc, seal->enc, PURE_SEAL_KEY) && !strcmp(k->seal.suite, seal->suite) &&
+            k->seal.authenticated == seal->authenticated &&
+            (!seal->authenticated || !memcmp(k->seal.from, seal->from, PURE_SEAL_KEY))) {
+            k->used = ++host->session_uses;
+            return k->opener;
+        }
+        if (k->used < least->used) least = k;
+    }
+    PureOpener *opener = pure_opener(seal_key, seal->suite, seal->enc, seal->authenticated ? seal->from : NULL);
+    if (!opener) return NULL;
+    pure_opener_free(least->opener);
+    *least = (Session){*seal, opener, ++host->session_uses};
+    return opener;
+}
+
 /* A sealed body opened where it lies, or false (another key, another
- * delivery's binding, or changed on the way). */
+ * session or sender, another delivery's binding, or changed on the way). */
 static bool open_seal(Connection *c) {
     if (c->body_size < PURE_SEAL_OVERHEAD) return false;
+    PureOpener *opener = session(c->host, &c->seal);
     size_t size = c->body_size - PURE_SEAL_OVERHEAD;
-    unsigned char *plain = malloc(size ? size : 1);
-    bool opened = plain && pure_unseal(seal_key, c->seal, c->aad, c->body, c->body_size, plain);
+    unsigned char *plain = opener ? malloc(size ? size : 1) : NULL;
+    bool opened = plain && pure_unseal(opener, c->seal.n, c->aad, c->body, c->body_size, plain);
     if (opened) {
         memcpy(c->body, plain, size);
         c->body_size = size;
@@ -676,7 +746,7 @@ static bool open_seal(Connection *c) {
 /* A request's body is in: an app input's JSON becomes its payload, and the
  * request is ready, or it is answered 400 and never runs. */
 static void body_done(Connection *c) {
-    if (*c->seal && !open_seal(c)) {
+    if (*c->seal.suite && !open_seal(c)) {
         release_ticket(c); /* never made ready: it never runs */
         respond(c, 400, "Bad Request", "seal", 0, (PureSpan){0});
         return;
@@ -701,11 +771,13 @@ static void start_request(Connection *c, size_t head_size) {
     memmove(c->in, c->in + head_size, extra);
     c->in_used = extra;
     if (!parse_head(c, head, head_size, &query)) { refuse(c, 400, "Bad Request", "request"); return; }
-    /* A node that keeps its deliveries sealed refuses the others; a seal
-     * needs this node's key, and binds the delivery's source, number and count. */
-    if (*c->source && sealed_only && !*c->seal) { refuse(c, 403, "Forbidden", "unsealed"); return; }
-    if (*c->seal) {
+    /* A node that keeps its deliveries sealed refuses the others, and one
+     * that names its senders refuses any other sender; a seal needs this
+     * node's key, and binds the delivery's source, number and count. */
+    if (*c->source && (sealed_only || sender_count) && !*c->seal.suite) { refuse(c, 403, "Forbidden", "unsealed"); return; }
+    if (*c->seal.suite) {
         if (!*c->source || !seal_key || !c->json) { refuse(c, 400, "Bad Request", "seal"); return; }
+        if (sender_count && !known_sender(c->source, &c->seal)) { refuse(c, 403, "Forbidden", "sender"); return; }
         snprintf(c->aad, sizeof(c->aad), "%s %llu %u", c->source, (unsigned long long)c->sequence, c->batch);
     }
     if (c->body_size > PURE_OBJECT_LIMIT) { refuse(c, 413, "Content Too Large", "limit"); return; }
@@ -1697,6 +1769,7 @@ static void stop_shard(Host *host) {
     if (host->listener >= 0) close(host->listener);
     if (host->epoll >= 0) close(host->epoll);
     if (host->wake >= 0) close(host->wake);
+    for (unsigned i = 0; i < SESSIONS; ++i) pure_opener_free(host->sessions[i].opener);
     while (host->closed) {
         Connection *c = host->closed;
         host->closed = c->next;
@@ -1753,7 +1826,8 @@ static bool open_wires(Executor *ex, const PureModule *m, const char *const *sen
 }
 
 /* --seal OUTPUT=KEY: that output's sends sealed to the receiver's public key (hex). */
-static bool wire_seals(Executor *ex, const PureModule *m, const char *const *seals, unsigned count) {
+static bool wire_seals(Executor *ex, const PureModule *m, const char *const *seals, unsigned count,
+                       const unsigned char *own_public) {
     char error[512];
     if (count && !pure_seal_ready(error, sizeof(error))) {
         fprintf(stderr, "--seal: %s\n", error);
@@ -1775,7 +1849,25 @@ static bool wire_seals(Executor *ex, const PureModule *m, const char *const *sea
             fprintf(stderr, "--seal takes OUTPUT=KEY for an output given to --send, the key as 64 hex digits: %s\n", seals[i]);
             return false;
         }
-        pure_wire_seal(wire, peer);
+        pure_wire_seal(wire, peer, seal_key, own_public); /* sealed with this node's key when it has one */
+    }
+    return true;
+}
+
+/* --sender NAME=KEY: deliveries from source NAME are taken only sealed with
+ * that key (hex); with any, only named senders are taken. */
+static bool name_senders(const char *const *named, unsigned count) {
+    for (unsigned i = 0; i < count; ++i) {
+        const char *equals = strchr(named[i], '=');
+        size_t length = equals ? (size_t)(equals - named[i]) : 0;
+        struct Sender *sender = &senders[sender_count];
+        if (!length || length > PURE_SOURCE || !pure_seal_peer(equals + 1, sender->key)) {
+            fprintf(stderr, "--sender takes NAME=KEY, the key as 64 hex digits: %s\n", named[i]);
+            return false;
+        }
+        memcpy(sender->name, named[i], length);
+        sender->name[length] = 0;
+        ++sender_count;
     }
     return true;
 }
@@ -1818,8 +1910,8 @@ int main(int argc, char **argv) {
     static PureModule module;
     static Owner owner;
     const char *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
-    const char *seals[PURE_MODULE_INPUTS], *key_path = NULL;
-    unsigned send_count = 0, reply_count = 0, seal_count = 0;
+    const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL;
+    unsigned send_count = 0, reply_count = 0, seal_count = 0, named_count = 0;
     unsigned port = 8767, threads = 1;
     size_t budget = 64u << 20, capacity = 1024;
     uint64_t timeout_ms = 10000;
@@ -1835,6 +1927,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--name")) name = argv[i + 1];
         else if (!strcmp(argv[i], "--send-ca")) pure_wire_trust(argv[i + 1]);
         else if (!strcmp(argv[i], "--reply") && reply_count < PURE_MODULE_INPUTS) replies[reply_count++] = argv[i + 1];
+        else if (!strcmp(argv[i], "--sender") && named_count < PURE_MODULE_INPUTS) named[named_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
@@ -1852,7 +1945,10 @@ int main(int argc, char **argv) {
         char error[256];
         if (!(seal_key = pure_seal_key(key_path, public_key, error, sizeof(error)))) { fprintf(stderr, "--key %s\n", error); return 2; }
     }
-    if (sealed_only && !seal_key) { fputs("--sealed-only needs --key\n", stderr); return 2; }
+    if ((sealed_only || named_count) && !seal_key) { fputs("--sealed-only and --sender need --key\n", stderr); return 2; }
+    if (!name_senders(named, named_count)) return 2;
+    unsigned char own_public[PURE_SEAL_KEY];
+    if (seal_key && !pure_seal_peer(public_key, own_public)) return 2;
     if (pure_store_init(store) != PURE_OK) { fputs("Cannot initialize the store directory\n", stderr); return 1; }
     signal(SIGPIPE, SIG_IGN);
     struct sigaction stop_action = {.sa_handler = stop};
@@ -1884,7 +1980,7 @@ int main(int argc, char **argv) {
         owner.executor.publishes = true;
         if (!open_wires(&owner.executor, &module, sends, send_count, name) ||
             !wire_replies(&owner.executor, &module, replies, reply_count) ||
-            !wire_seals(&owner.executor, &module, seals, seal_count)) return 2;
+            !wire_seals(&owner.executor, &module, seals, seal_count, seal_key ? own_public : NULL)) return 2;
         after_save(&owner.executor); /* the snapshot, and the sends stored before */
         for (unsigned i = 0; i < owner.executor.wire_count; ++i)
             if (!pure_wire_start(owner.executor.wires[i], wire_delivered, &owner)) { fputs("Cannot start a wire\n", stderr); return 1; }
@@ -1955,6 +2051,7 @@ int main(int argc, char **argv) {
 usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
           "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=http[s]://host:port/path ...] [--name NAME] "
-          "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only]\n", stderr);
+          "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
+          "[--sender NAME=KEY ...]\n", stderr);
     return 2;
 }

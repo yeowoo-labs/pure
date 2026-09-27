@@ -106,16 +106,30 @@ PureSealKey *pure_seal_key(const char *path, char public_hex[2 * PURE_SEAL_KEY +
     return c ? c->seal_key(path, public_hex, error, size) : NULL;
 }
 
-/* A key exists only once the table is loaded. */
+/* A key or a session exists only once the table is loaded. */
 void pure_seal_key_free(PureSealKey *key) { if (key) crypto->seal_key_free(key); }
 
-bool pure_seal(const unsigned char peer[PURE_SEAL_KEY], const char *aad, const unsigned char *plain, size_t size,
-               unsigned char *out) {
+PureSealer *pure_sealer(const unsigned char peer[PURE_SEAL_KEY], const PureSealKey *own,
+                        unsigned char enc[PURE_SEAL_KEY]) {
     const PureCrypto *c = loaded(NULL, 0);
-    return c && c->seal(pure_seal_suite(), peer, aad, plain, size, out);
+    return c ? c->sealer(pure_seal_suite(), peer, own, enc) : NULL;
 }
 
-bool pure_unseal(const PureSealKey *key, const char *suite, const char *aad, const unsigned char *sealed, size_t size,
-                 unsigned char *plain) {
-    return key && crypto->unseal(key, suite, aad, sealed, size, plain);
+bool pure_seal(PureSealer *s, const char *aad, const unsigned char *plain, size_t size, unsigned char *out,
+               uint64_t *n) {
+    return crypto->seal(s, aad, plain, size, out, n);
 }
+
+void pure_sealer_free(PureSealer *s) { if (s) crypto->sealer_free(s); }
+
+PureOpener *pure_opener(const PureSealKey *key, const char *suite, const unsigned char enc[PURE_SEAL_KEY],
+                        const unsigned char *from) {
+    return key ? crypto->opener(key, suite, enc, from) : NULL;
+}
+
+bool pure_unseal(PureOpener *o, uint64_t n, const char *aad, const unsigned char *sealed, size_t size,
+                 unsigned char *plain) {
+    return crypto->unseal(o, n, aad, sealed, size, plain);
+}
+
+void pure_opener_free(PureOpener *o) { if (o) crypto->opener_free(o); }

@@ -56,11 +56,14 @@ static int tls_read(PureTls *tls, void *bytes, int size) { return SSL_read((SSL 
 static int tls_write(PureTls *tls, const void *bytes, int size) { return SSL_write((SSL *)tls, bytes, size); }
 static void tls_close(PureTls *tls) { SSL_free((SSL *)tls); }
 
-/* ---- Sealing: HPKE base mode (RFC 9180), X25519 and HKDF-SHA256, with the
- * AEAD the suite names. */
+/* ---- Sealing: HPKE (RFC 9180), X25519 and HKDF-SHA256, with the AEAD the
+ * suite names; auth mode when the sender seals with a key of its own. A
+ * session is one encapsulation, its seals numbered by the context. */
 struct PureSealKey { EVP_PKEY *key; };
+struct PureSealer { OSSL_HPKE_CTX *context; };
+struct PureOpener { OSSL_HPKE_CTX *context; };
 
-static const unsigned char info[] = "pure sealed send 1";
+static const unsigned char info[] = "pure sealed send 2";
 
 static bool suite_named(const char *name, OSSL_HPKE_SUITE *out) {
     OSSL_HPKE_SUITE suite = {OSSL_HPKE_KEM_ID_X25519, OSSL_HPKE_KDF_ID_HKDF_SHA256, 0};
@@ -120,34 +123,68 @@ static void seal_key_free(PureSealKey *key) {
     free(key);
 }
 
-static bool seal(const char *suite_name, const unsigned char peer[PURE_SEAL_KEY], const char *aad,
-                 const unsigned char *plain, size_t size, unsigned char *out) {
+static PureSealer *sealer(const char *suite_name, const unsigned char peer[PURE_SEAL_KEY], const PureSealKey *own,
+                          unsigned char enc[PURE_SEAL_KEY]) {
     OSSL_HPKE_SUITE suite;
-    if (!suite_named(suite_name, &suite)) return false;
-    OSSL_HPKE_CTX *context = OSSL_HPKE_CTX_new(OSSL_HPKE_MODE_BASE, suite, OSSL_HPKE_ROLE_SENDER, NULL, NULL);
-    size_t encapsulated = PURE_SEAL_KEY, sealed = size + 16;
-    bool ok = context && OSSL_HPKE_encap(context, out, &encapsulated, peer, PURE_SEAL_KEY, info, sizeof(info) - 1) == 1 &&
-              encapsulated == PURE_SEAL_KEY &&
-              OSSL_HPKE_seal(context, out + PURE_SEAL_KEY, &sealed, (const unsigned char *)aad, strlen(aad), plain, size) == 1 &&
-              sealed == size + 16;
-    OSSL_HPKE_CTX_free(context);
-    return ok;
+    PureSealer *made = suite_named(suite_name, &suite) ? calloc(1, sizeof(*made)) : NULL;
+    if (!made) return NULL;
+    made->context = OSSL_HPKE_CTX_new(own ? OSSL_HPKE_MODE_AUTH : OSSL_HPKE_MODE_BASE, suite, OSSL_HPKE_ROLE_SENDER,
+                                      NULL, NULL);
+    size_t length = PURE_SEAL_KEY;
+    if (!made->context || (own && OSSL_HPKE_CTX_set1_authpriv(made->context, own->key) != 1) ||
+        OSSL_HPKE_encap(made->context, enc, &length, peer, PURE_SEAL_KEY, info, sizeof(info) - 1) != 1 ||
+        length != PURE_SEAL_KEY) {
+        OSSL_HPKE_CTX_free(made->context);
+        free(made);
+        return NULL;
+    }
+    return made;
 }
 
-static bool unseal(const PureSealKey *key, const char *suite_name, const char *aad, const unsigned char *sealed,
-                   size_t size, unsigned char *plain) {
+static bool seal(PureSealer *s, const char *aad, const unsigned char *plain, size_t size, unsigned char *out,
+                 uint64_t *n) {
+    size_t sealed = size + PURE_SEAL_OVERHEAD;
+    return OSSL_HPKE_CTX_get_seq(s->context, n) == 1 &&
+           OSSL_HPKE_seal(s->context, out, &sealed, (const unsigned char *)aad, strlen(aad), plain, size) == 1 &&
+           sealed == size + PURE_SEAL_OVERHEAD;
+}
+
+static void sealer_free(PureSealer *s) {
+    if (!s) return;
+    OSSL_HPKE_CTX_free(s->context);
+    free(s);
+}
+
+static PureOpener *opener(const PureSealKey *key, const char *suite_name, const unsigned char enc[PURE_SEAL_KEY],
+                          const unsigned char *from) {
     OSSL_HPKE_SUITE suite;
-    if (!key || size < PURE_SEAL_OVERHEAD || !suite_named(suite_name, &suite)) return false;
-    OSSL_HPKE_CTX *context = OSSL_HPKE_CTX_new(OSSL_HPKE_MODE_BASE, suite, OSSL_HPKE_ROLE_RECEIVER, NULL, NULL);
+    PureOpener *made = key && suite_named(suite_name, &suite) ? calloc(1, sizeof(*made)) : NULL;
+    if (!made) return NULL;
+    made->context = OSSL_HPKE_CTX_new(from ? OSSL_HPKE_MODE_AUTH : OSSL_HPKE_MODE_BASE, suite, OSSL_HPKE_ROLE_RECEIVER,
+                                      NULL, NULL);
+    if (!made->context || (from && OSSL_HPKE_CTX_set1_authpub(made->context, from, PURE_SEAL_KEY) != 1) ||
+        OSSL_HPKE_decap(made->context, enc, PURE_SEAL_KEY, key->key, info, sizeof(info) - 1) != 1) {
+        OSSL_HPKE_CTX_free(made->context);
+        free(made);
+        return NULL;
+    }
+    return made;
+}
+
+/* A receiver may set the number (a sender may not: it would reuse a nonce). */
+static bool unseal(PureOpener *o, uint64_t n, const char *aad, const unsigned char *sealed, size_t size,
+                   unsigned char *plain) {
     size_t opened = size - PURE_SEAL_OVERHEAD;
-    bool ok = context &&
-              OSSL_HPKE_decap(context, sealed, PURE_SEAL_KEY, key->key, info, sizeof(info) - 1) == 1 &&
-              OSSL_HPKE_open(context, plain, &opened, (const unsigned char *)aad, strlen(aad), sealed + PURE_SEAL_KEY,
-                             size - PURE_SEAL_KEY) == 1 &&
-              opened == size - PURE_SEAL_OVERHEAD;
-    OSSL_HPKE_CTX_free(context);
-    return ok;
+    return size >= PURE_SEAL_OVERHEAD && OSSL_HPKE_CTX_set_seq(o->context, n) == 1 &&
+           OSSL_HPKE_open(o->context, plain, &opened, (const unsigned char *)aad, strlen(aad), sealed, size) == 1 &&
+           opened == size - PURE_SEAL_OVERHEAD;
+}
+
+static void opener_free(PureOpener *o) {
+    if (!o) return;
+    OSSL_HPKE_CTX_free(o->context);
+    free(o);
 }
 
 const PureCrypto pure_crypto = {PURE_CRYPTO_VERSION, tls_start, tls_open, tls_read, tls_write, tls_close,
-                                seal_key, seal_key_free, seal, unseal};
+                                seal_key, seal_key_free, sealer, seal, sealer_free, opener, unseal, opener_free};

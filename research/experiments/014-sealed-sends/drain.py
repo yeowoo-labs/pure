@@ -4,10 +4,11 @@
 A sender app (tests/check.py's LINK_SENDER) takes --sends orders from eight
 clients while its receiver is stopped (SIGSTOP), so the sends pile up in the
 sender's store; the receiver is then continued and timed until it has
-applied them all. Runs plain and sealed (--seal to the receiver's --key) in
-alternating order per round, and a --baseline pure-serve (plain only) when
-given. Both servers on cores 0-2. Then the AEADs and X25519 on one core
-(openssl speed). Prints one JSON line per run.
+applied them all. Runs plain and sealed (--seal to the receiver's --key,
+the sender sealing with its own --key) in rotated order per round, and a
+--baseline pure-serve (plain, or sealed with --baseline-sealed) when given,
+with its pure-crypto.so beside it. Both servers on cores 0-2. Then the
+AEADs and X25519 on one core (openssl speed). Prints one JSON line per run.
 """
 import argparse
 import json
@@ -53,7 +54,7 @@ def run(work, binary, sends, sealed):
     key = ['--key', work / 'key' / 'receiver.key'] if sealed else []
     receiver, started = start([binary, '--module', work / 'receiver.pmod', '--store', work / 'b', *key])
     os.kill(receiver.pid, signal.SIGSTOP)
-    seal = ['--seal', f'ordered={started["public_key"]}'] if sealed else []
+    seal = ['--seal', f'ordered={started["public_key"]}', '--key', work / 'key' / 'sender.key'] if sealed else []
     sender, sender_started = start([binary, '--module', work / 'sender.pmod', '--store', work / 'a',
                                     '--send', f'ordered=http://127.0.0.1:{started["port"]}/inputs/order', *seal])
 
@@ -100,6 +101,7 @@ def main():
     parser.add_argument('--aup', type=Path, default=ROOT.parent / 'aup' / 'build' / 'aup')
     parser.add_argument('--binary', type=Path, default=ROOT / 'build' / 'pure-serve')
     parser.add_argument('--baseline', type=Path, help='an earlier pure-serve, run plain')
+    parser.add_argument('--baseline-sealed', action='store_true', help='run the baseline sealed instead')
     parser.add_argument('--sends', type=int, default=20000)
     parser.add_argument('--rounds', type=int, default=3)
     args = parser.parse_args()
@@ -111,7 +113,7 @@ def main():
         for round_ in range(args.rounds):
             variants = [('plain', args.binary, False), ('sealed', args.binary, True)]
             if args.baseline:
-                variants.append(('baseline', args.baseline.resolve(), False))
+                variants.append(('baseline', args.baseline.resolve(), args.baseline_sealed))
             shift = round_ % len(variants)
             for name, binary, sealed in variants[shift:] + variants[:shift]:
                 result = run(work, binary, args.sends, sealed)

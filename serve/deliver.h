@@ -1,6 +1,7 @@
 #ifndef PURE_DELIVER_H
 #define PURE_DELIVER_H
 #include "module.h"
+#include "seal.h"
 
 /* Delivering an app's saved sends over HTTP (docs/research/083-delivery-over-http.md).
  * A wire takes one output's sends in order: each goes as a JSON object of
@@ -23,10 +24,12 @@ void pure_wire_trust(const char *ca_file);
 PureWire *pure_wire_open(const PureModule *m, const char *output, const char *url, const char *source,
                          char *error, size_t size);
 uint32_t pure_wire_output(const PureWire *);
-/* Seal the wire's sends to the receiver's public key (serve/seal.h): each
+/* Seal the wire's sends to the receiver's public key (serve/seal.h),
+ * authenticated by own (whose public half is from) when given: each
  * request's body, bound to its source, first number and count, goes with
- * X-Pure-Seal naming the suite. Before pure_wire_start. */
-void pure_wire_seal(PureWire *, const unsigned char peer[32]);
+ * X-Pure-Seal naming the suite, the session, the seal's number and the
+ * sender's key. Before pure_wire_start. */
+void pure_wire_seal(PureWire *, const unsigned char peer[32], const PureSealKey *own, const unsigned char *from);
 /* The owner's side: queue a saved send numbered after the last queued one
  * (it is encoded now); false when it cannot be (a bytes field that is not
  * UTF-8 has no JSON form), and the wire then stops at it. */

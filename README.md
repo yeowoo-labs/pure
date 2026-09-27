@@ -7,12 +7,13 @@ terminal UI, a CLI, spoken sentences and a web page through [Vega](/srv/git/vega
 `pure-serve`: views are GETs and inputs are POSTs, with JSON bodies (groups included) read in place; answers are
 durable, a commit being one contiguous write and one sync; views are read from a snapshot of the last save, so
 reads never wait for a sync. What an app sends is saved with its event and delivered over HTTP in order and in
-batches, and a receiving app applies each message once; sealed to the receiver's key (HPKE), no relay between
-them can read or change it. Measurements against axum and drogon on a Raspberry Pi 5
+batches, and a receiving app applies each message once; sealed to the receiver's key (HPKE, one session a wire,
+authenticated by the sender's key), no relay between them can read or change it, at the speed of unsealed sends. Measurements against axum and drogon on a Raspberry Pi 5
 are in [075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md),
 [080](docs/research/080-snapshot-reads.md), [081](docs/research/081-tail-records.md),
 [082](docs/research/082-json-in-place.md), [083](docs/research/083-delivery-over-http.md),
-[086](docs/research/086-sealed-sends.md) and [087](docs/research/087-small-reads-and-idle-memory.md); the status table is
+[086](docs/research/086-sealed-sends.md), [087](docs/research/087-small-reads-and-idle-memory.md) and
+[088](docs/research/088-sealed-sessions.md); the status table is
 [CHECKPOINT.md](CHECKPOINT.md).
 
 The source follows the principle below, a small core with the rest selected around it
