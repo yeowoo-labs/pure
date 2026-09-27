@@ -11,8 +11,8 @@ batches, and a receiving app applies each message once; sealed to the receiver's
 them can read or change it. Measurements against axum and drogon on a Raspberry Pi 5
 are in [075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md),
 [080](docs/research/080-snapshot-reads.md), [081](docs/research/081-tail-records.md),
-[082](docs/research/082-json-in-place.md), [083](docs/research/083-delivery-over-http.md) and
-[086](docs/research/086-sealed-sends.md); the status table is
+[082](docs/research/082-json-in-place.md), [083](docs/research/083-delivery-over-http.md),
+[086](docs/research/086-sealed-sends.md) and [087](docs/research/087-small-reads-and-idle-memory.md); the status table is
 [CHECKPOINT.md](CHECKPOINT.md).
 
 The source follows the principle below, a small core with the rest selected around it
