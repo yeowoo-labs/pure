@@ -920,6 +920,215 @@ static const char *item_title(const PureApp *app, uint32_t list, size_t at) {
 /* A task list: made (num), tasks (list of task {title, done}), at (index of
  * tasks). Indices follow their item across inserts and removes; a failed
  * event undoes every list change. */
+/* ---- Lists as persistent trees (module-list.c): a model array beside a list
+ * of thousands of items, changed by events that are committed or undone at
+ * random, with a stored copy (a draft) kept byte for byte, shares (a
+ * snapshot's copies) that keep what they shared while the list changes on,
+ * and a keyed list searched by key. */
+
+typedef struct { double key; char text[12]; size_t size; } ModelItem;
+typedef struct { ModelItem *items; size_t count, capacity; } Model;
+
+static void model_insert(Model *m, size_t at, ModelItem item) {
+    if (m->count == m->capacity) {
+        m->capacity = m->capacity ? 2 * m->capacity : 64;
+        m->items = realloc(m->items, m->capacity * sizeof(*m->items));
+        CHECK(m->items);
+    }
+    memmove(m->items + at + 1, m->items + at, (m->count - at) * sizeof(*m->items));
+    m->items[at] = item;
+    ++m->count;
+}
+
+static void model_copy(Model *to, const Model *from) {
+    to->count = from->count;
+    if (to->capacity < from->count) {
+        to->capacity = from->capacity;
+        to->items = realloc(to->items, to->capacity * sizeof(*to->items));
+        CHECK(to->items);
+    }
+    if (from->count) memcpy(to->items, from->items, from->count * sizeof(*to->items));
+}
+
+static bool same_items(const PureList *list, const Model *m) {
+    if (pure_list_count(list) != m->count) return false;
+    for (size_t i = 0; i < m->count; ++i) {
+        PureCell key = pure_list_get(list, i, 0), text = pure_list_get(list, i, 1);
+        if (key.num != m->items[i].key || text.size != m->items[i].size ||
+            (text.size && memcmp(text.text, m->items[i].text, text.size)))
+            return false;
+    }
+    return true;
+}
+
+typedef struct { unsigned char *bytes; size_t size, capacity; } Grown;
+
+static bool collect_bytes(void *context, PureSpan span) {
+    Grown *b = context;
+    if (b->size + span.size > b->capacity) {
+        b->capacity = 2 * (b->size + span.size);
+        b->bytes = realloc(b->bytes, b->capacity);
+        CHECK(b->bytes);
+    }
+    memcpy(b->bytes + b->size, span.data, span.size);
+    b->size += span.size;
+    return true;
+}
+
+/* The stored form of the model: a number's binary64 bits, a text's u32le length and bytes. */
+static bool stored_as(PureDraft *draft, const Model *m) {
+    Grown got = {0};
+    CHECK(pure_draft_read(draft, 0, pure_draft_size(draft), collect_bytes, &got) == PURE_OK);
+    size_t at = 0;
+    bool same = true;
+    for (size_t i = 0; i < m->count && same; ++i) {
+        uint64_t bits, size = 0;
+        memcpy(&bits, &m->items[i].key, 8);
+        for (unsigned k = 0; k < 8; ++k) same = same && at + k < got.size && got.bytes[at + k] == (unsigned char)(bits >> (8 * k));
+        at += 8;
+        for (unsigned k = 0; k < 4 && at + k < got.size; ++k) size |= (uint64_t)got.bytes[at + k] << (8 * k);
+        at += 4;
+        same = same && size == m->items[i].size && at + size <= got.size && !memcmp(got.bytes + at, m->items[i].text, size);
+        at += size;
+    }
+    same = same && at == got.size;
+    free(got.bytes);
+    return same;
+}
+
+static void list_trees(void) {
+    static const uint8_t text_fields[2] = {0, 1};
+    uint32_t seed = 0x5eed1234u;
+    PureList *list = pure_list_new(2, text_fields);
+    PureDraft *draft = pure_draft_new();
+    CHECK(list && draft);
+    pure_list_mirror(list, draft, 0);
+    PureUndo undo = {0};
+    Model model = {0}, before = {0};
+    /* Up to four shares at a time, each with what it shared and the items
+     * and nodes retired while it was the newest. */
+    enum { SHARES = 4 };
+    PureList *copies[SHARES];
+    Model shared[SHARES] = {{0}};
+    PureRetired retired[SHARES + 1] = {{0}};
+    unsigned first = 0, held = 0, splits_seen = 0;
+    size_t largest = 0, events = 0, undone = 0;
+    for (unsigned event = 0; event < 6000; ++event) {
+        size_t mark = undo.count;
+        model_copy(&before, &model);
+        pure_draft_hold(draft, true);
+        PureVersion version = pure_draft_version(draft);
+        /* Mostly growing to a few thousand, then shrinking back down, so the
+         * tree gains and loses levels. */
+        unsigned grow = event < 2500 ? 70 : event < 4500 ? 30 : 60;
+        for (unsigned change = 1 + (unsigned)(next_random(&seed) % 12); change--;) {
+            unsigned roll = (unsigned)(next_random(&seed) % 100);
+            if (roll < grow || !model.count) {
+                size_t at = model.count ? next_random(&seed) % (model.count + 1) : 0;
+                ModelItem item = {(double)(next_random(&seed) % 100000) - 50000, "", next_random(&seed) % 11};
+                for (size_t k = 0; k < item.size; ++k) item.text[k] = (char)('a' + next_random(&seed) % 26);
+                PureCell cells[2] = {{item.key, NULL, 0}, {0, (unsigned char *)item.text, item.size}};
+                CHECK(pure_list_insert(list, at, cells, &undo) == PURE_OK);
+                model_insert(&model, at, item);
+            } else if (roll < grow + 25) {
+                size_t at = next_random(&seed) % model.count;
+                CHECK(pure_list_remove(list, at, &undo) == PURE_OK);
+                memmove(model.items + at, model.items + at + 1, (model.count - at - 1) * sizeof(*model.items));
+                --model.count;
+            } else {
+                size_t at = next_random(&seed) % model.count;
+                if (next_random(&seed) % 2) {
+                    double key = (double)(next_random(&seed) % 1000);
+                    CHECK(pure_list_set(list, at, 0, (PureCell){key, NULL, 0}, &undo) == PURE_OK);
+                    model.items[at].key = key;
+                } else {
+                    ModelItem *item = &model.items[at];
+                    item->size = next_random(&seed) % 11;
+                    for (size_t k = 0; k < item->size; ++k) item->text[k] = (char)('A' + next_random(&seed) % 26);
+                    CHECK(pure_list_set(list, at, 1, (PureCell){0, (unsigned char *)item->text, item->size}, &undo) == PURE_OK);
+                }
+            }
+        }
+        if (next_random(&seed) % 5 == 0) { /* undone: the list and its stored copy as before */
+            pure_undo_rollback(&undo, mark);
+            pure_draft_restore(draft, version);
+            model_copy(&model, &before);
+            ++undone;
+        } else
+            pure_undo_commit(&undo);
+        pure_draft_hold(draft, false);
+        ++events;
+        largest = model.count > largest ? model.count : largest;
+        splits_seen += model.count > 32;
+        if (event % 7 == 0) CHECK(same_items(list, &model));
+        if (event % 50 == 0) CHECK(stored_as(draft, &model));
+        /* A share now and then, as a snapshot takes one; the oldest goes with
+         * the items and nodes retired while it was the newest. */
+        if (event % 40 == 20) {
+            if (held == SHARES) {
+                CHECK(same_items(copies[first], &shared[first]));
+                pure_list_free(copies[first]);
+                pure_retired_free(&retired[first]);
+                first = (first + 1) % SHARES;
+                --held;
+            }
+            unsigned slot = (first + held) % SHARES;
+            CHECK((copies[slot] = pure_list_share(list, &retired[slot])));
+            model_copy(&shared[slot], &model);
+            ++held;
+        }
+        if (event % 25 == 0)
+            for (unsigned i = 0; i < held; ++i) CHECK(same_items(copies[(first + i) % SHARES], &shared[(first + i) % SHARES]));
+    }
+    CHECK(same_items(list, &model) && stored_as(draft, &model) && largest > 2000 && undone > 500);
+    for (; held; --held, first = (first + 1) % SHARES) {
+        CHECK(same_items(copies[first], &shared[first]));
+        pure_list_free(copies[first]);
+        pure_retired_free(&retired[first]);
+    }
+    pure_list_free(list);
+    pure_draft_close(draft);
+    pure_undo_free(&undo);
+
+    /* A keyed list: items kept in key order, found by key. */
+    PureList *keyed = pure_list_new(2, text_fields);
+    Model keys = {0};
+    CHECK(keyed);
+    for (unsigned round = 0; round < 40000; ++round) {
+        double key = (double)(next_random(&seed) % 20000);
+        bool found;
+        size_t at = pure_list_seek(keyed, 0, (PureCell){key, NULL, 0}, &found);
+        size_t low = 0, high = keys.count;
+        while (low < high) {
+            size_t middle = (low + high) / 2;
+            if (keys.items[middle].key < key) low = middle + 1;
+            else high = middle;
+        }
+        CHECK(at == low && found == (low < keys.count && keys.items[low].key == key));
+        if (!found) {
+            PureCell cells[2] = {{key, NULL, 0}, {0, (unsigned char *)"k", 1}};
+            CHECK(pure_list_insert(keyed, at, cells, NULL) == PURE_OK);
+            model_insert(&keys, at, (ModelItem){key, "k", 1});
+        } else if (next_random(&seed) % 3 == 0) {
+            PureUndo removal = {0};
+            CHECK(pure_list_remove(keyed, at, &removal) == PURE_OK);
+            pure_undo_commit(&removal);
+            pure_undo_free(&removal);
+            memmove(keys.items + at, keys.items + at + 1, (keys.count - at - 1) * sizeof(*keys.items));
+            --keys.count;
+        }
+    }
+    CHECK(same_items(keyed, &keys) && keys.count > 5000);
+    pure_list_free(keyed);
+    free(model.items);
+    free(before.items);
+    free(keys.items);
+    for (unsigned i = 0; i < SHARES; ++i) free(shared[i].items);
+    for (unsigned i = 0; i <= SHARES; ++i) pure_retired_free(&retired[i]);
+    printf("{\"list_tree_events\":%zu,\"undone\":%zu,\"largest\":%zu,\"keyed_items\":%zu}\n", events, undone,
+           largest, keys.count);
+}
+
 static void lists(void) {
     static const S nums[] = {{"made", 0}};
     static const T states[] = {{"tasks", 3, 0}, {"at", 4, 1}};
@@ -2867,6 +3076,7 @@ int main(void) {
     marks();
     text_mutations();
     lists();
+    list_trees();
     folds();
     filters();
     keyed();

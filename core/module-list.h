@@ -25,7 +25,7 @@ typedef struct { void *entries; size_t count, capacity; } PureUndo;
 /* Items a list let go while a shared copy may still read them. */
 typedef struct { void *entries; size_t count, capacity; } PureRetired;
 
-enum { PURE_LIST_ITEMS = 65536 };
+enum { PURE_LIST_ITEMS = 1 << 24 };
 
 PureList *pure_list_new(unsigned fields, const uint8_t *text_fields);
 void pure_list_free(PureList *);
