@@ -500,6 +500,12 @@ def rpc_bytes(path):
     return json.dumps(json.loads(path.read_text()), ensure_ascii=False, separators=(',', ':')).encode()
 
 
+def source(name):
+    """A source file of this document runtime; the core's live in ../../core."""
+    here = ROOT / name
+    return here if here.exists() else ROOT.parent.parent / 'core' / name
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', type=Path, default=ROOT / 'build/pure-connections')
@@ -532,7 +538,7 @@ def main():
     result['environment'] = {'platform': platform.platform(), 'machine': platform.machine(),
         'python': platform.python_version(), 'node': subprocess.check_output(['node', '--version'], text=True).strip()}
     result['source_sha256'] = {str(path.relative_to(ROOT.parent.parent)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in [args.store_source.resolve(), *(ROOT / name for name in ('flow.c', 'flow.h', 'store.h', 'program.c', 'program.h',
+        for path in [args.store_source.resolve(), *(source(name) for name in ('flow.c', 'flow.h', 'store.h', 'program.c', 'program.h',
                          'runtime.c', 'runtime.h', 'result.h', 'evaluate.c', 'store-port.c', 'store-port.h', 'test-runtime.c',
                          'server.c', 'check.py', 'check_edits.py', 'edit.c', 'test-splice.c',
                          'test-flow.c', 'test-program.c', 'test-fields.c', 'Makefile',

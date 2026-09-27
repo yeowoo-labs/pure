@@ -1,5 +1,10 @@
 # Pure: 작성한 연결을 준비해 실행하는 네이티브 경로
 
+2026-09-27부터 실행 코어(`runtime.c`, `flow.c`, 저장소 계약 `store.h`·`state.h`)와 트리 저장소는 저장소 최상위의
+[`core/`](../../core)와 [`store/`](../../store)에 있다. 여기의 이전 문서 런타임(000–077)은 그것들을 가져다 빌드한다
+(`make -C prototypes/connections check`, `check-tree`). 모듈 앱의 호스트(`pure-serve`, `pure-run`)는 최상위 `make`가
+만든다. [배치](../../docs/design/009-layout.md).
+
 기존 Workbench에서 만든 코드·배치를 실제 TCP 요청으로 저장하고 새 실행기에서 복원한다.
 서버는 C17 네이티브 실행 파일이다. SQL·SQLite 의존성을 제거했고, 호출자의 바이트를
 그대로 파일에 기록한다. 저장할 구간과 응답할 구간은 `.pure` 파일로 작성하며 서버 시작 때

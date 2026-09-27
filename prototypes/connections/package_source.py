@@ -10,7 +10,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
 PREFIX = 'pure-source-preview'
-SOURCE_ROOTS = ('prototypes/connections', 'prototypes/workbench', 'prototypes/common')
+SOURCE_ROOTS = ('core', 'store', 'serve', 'cli', 'prototypes/connections', 'prototypes/workbench', 'prototypes/common')
 SKIP_DIRS = {'build', 'results', '__pycache__', 'node_modules', '.git', '.playwright-cli'}
 SUFFIXES = {'.c', '.h', '.py', '.mjs', '.js', '.zig', '.json', '.pure',
             '.html', '.css', '.svg', '.wasm', '.md', '.txt'}

@@ -1,7 +1,7 @@
 # Pure 모듈 형식 v5
 
-2026-09-25. 구현 `prototypes/connections/module.{h,c}`, `module-text.c`, `module-list.c`, 상태 저장 `module-save.c`,
-트리 저장소 연결 `module-store.c`.
+2026-09-25. 구현 `core/module.{h,c}`, `module-text.c`, `module-list.c`, 상태 저장 `module-save.c`,
+모듈 파일 읽기 `module-store.c`, 트리 저장소 `store/store-tree.c`, HTTP 호스트 `serve/`.
 
 Pure가 실행하는 앱 정의의 형식이다. JVM이 class 파일 형식을 소유하듯 Pure가 이 형식과
 검증 규칙을 소유한다. 생산자는 [aup](/srv/git/aup.git) 같은 툴체인이다. Pure는 소스·문법을 모르며,

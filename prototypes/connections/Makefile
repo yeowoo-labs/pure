@@ -2,19 +2,23 @@ CC ?= cc
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -Werror
 BUILD ?= build
+# The core (runtime, flow, the storage contracts) and the tree store now live
+# in ../../core and ../../store; this earlier document runtime builds on them.
+PURE_ROOT = ../..
+CFLAGS += -I$(PURE_ROOT)/core
+FLOW = $(PURE_ROOT)/core/flow.c
 
-.PHONY: all core async-core editor fixed-editor fixed-server fixed-tui source-tui compiler mirror window server async-server document-peer document-server check check-policy check-policy-peer check-portable check-portable-tui check-paged-portable check-tree check-module check-portable-peer check-native-checkpoint check-mirror check-core check-async check-async-server check-async-service-scale check-profile check-fixed-profile check-fixed-server check-service-scale check-tui-profile check-source-tui-profile check-tui check-source-tui check-release check-micro-memory check-hybrid check-flat-export check-copy-range check-peer-profile check-document-server-profile check-window-profile check-document-peer check-document-server FORCE
-CORE = runtime.c
+.PHONY: all core async-core editor fixed-editor fixed-server fixed-tui source-tui compiler mirror window server async-server document-peer document-server check check-policy check-policy-peer check-portable check-portable-tui check-paged-portable check-tree check-portable-peer check-native-checkpoint check-mirror check-core check-async check-async-server check-async-service-scale check-profile check-fixed-profile check-fixed-server check-service-scale check-tui-profile check-source-tui-profile check-tui check-source-tui check-release check-micro-memory check-hybrid check-flat-export check-copy-range check-peer-profile check-document-server-profile check-window-profile check-document-peer check-document-server FORCE
+CORE = $(PURE_ROOT)/core/runtime.c
 STORE ?= store.c
 FIXED_PROGRAM ?= examples/editor.pure
-HOST = $(STORE) store-port.c evaluate.c
+STORE_FILE = $(if $(filter store-tree.c,$(STORE)),$(PURE_ROOT)/store/store-tree.c,$(STORE))
+HOST = $(STORE_FILE) store-port.c evaluate.c
 # Document browsers list keys through the store. The tree store keeps its own
 # catalog; per-object file stores share a directory listing.
 KEYS = $(if $(filter store-tree.c,$(STORE)),,store-keys.c)
-HEADERS = runtime.h program.h store.h store-port.h state.h flow.h result.h
-# Defined before any rule names them: prerequisites expand when a rule is read.
-MODULE = module.c module-list.c module-save.c module-text.c store-tree.c
-MODULE_HEADERS = module.h module-list.h module-save.h module-text.h $(HEADERS)
+CORE_HEADERS = $(addprefix $(PURE_ROOT)/core/,runtime.h store.h state.h flow.h result.h)
+HEADERS = $(CORE_HEADERS) program.h store-port.h
 all: core fixed-editor
 core: $(BUILD)/libpure-execution.a
 async-core: $(BUILD)/libpure-execution-async.a
@@ -34,21 +38,17 @@ document-server: $(BUILD)/pure-document-server
 $(BUILD):
 	mkdir -p $@
 
-$(BUILD)/pure-connections: server.c $(HOST) flow.c program.c $(CORE) $(HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS server.c $(HOST) flow.c program.c $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/pure-connections: server.c $(HOST) $(FLOW) program.c $(CORE) $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS server.c $(HOST) $(FLOW) program.c $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BUILD)/pure-connections-async: server.c $(HOST) flow.c program.c $(CORE) $(HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_ASYNC_EFFECTS -DPURE_HTTP_ASYNC server.c $(HOST) flow.c program.c $(CORE) $(LDFLAGS) -pthread $(LDLIBS) -o $@
+$(BUILD)/pure-connections-async: server.c $(HOST) $(FLOW) program.c $(CORE) $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_ASYNC_EFFECTS -DPURE_HTTP_ASYNC server.c $(HOST) $(FLOW) program.c $(CORE) $(LDFLAGS) -pthread $(LDLIBS) -o $@
 
-$(BUILD)/pure-connections-async-gated: server.c $(HOST) flow.c program.c $(CORE) test-async-server-gate.c $(HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_ASYNC_EFFECTS -DPURE_HTTP_ASYNC -DPURE_STORE_TEST server.c $(HOST) flow.c program.c $(CORE) test-async-server-gate.c $(LDFLAGS) -pthread $(LDLIBS) -o $@
+$(BUILD)/pure-connections-async-gated: server.c $(HOST) $(FLOW) program.c $(CORE) test-async-server-gate.c $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_ASYNC_EFFECTS -DPURE_HTTP_ASYNC -DPURE_STORE_TEST server.c $(HOST) $(FLOW) program.c $(CORE) test-async-server-gate.c $(LDFLAGS) -pthread $(LDLIBS) -o $@
 
-# The HTTP host for aup modules: persistent connections, epoll, group commits.
-$(BUILD)/pure-serve: serve.c deliver.c message-json.c flow.c module-store.c $(MODULE) $(CORE) deliver.h message-json.h module-store.h $(MODULE_HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_ASYNC_EFFECTS serve.c deliver.c message-json.c flow.c module-store.c $(MODULE) $(CORE) $(LDFLAGS) -lssl -lcrypto -lm $(LDLIBS) -o $@
-
-$(BUILD)/pure-connections-fixed: server.c $(HOST) flow.c $(CORE) $(HEADERS) $(BUILD)/embedded-plan.h | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_EMBEDDED_PROGRAM -I$(BUILD) server.c $(HOST) flow.c $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/pure-connections-fixed: server.c $(HOST) $(FLOW) $(CORE) $(HEADERS) $(BUILD)/embedded-plan.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_EMBEDDED_PROGRAM -I$(BUILD) server.c $(HOST) $(FLOW) $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
 
 $(BUILD)/pure-edit: edit.c $(HOST) program.c $(CORE) $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) edit.c $(HOST) program.c $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
@@ -87,13 +87,13 @@ $(BUILD)/pure-edit-window: edit-window.c $(HOST) program.c $(CORE) $(HEADERS) | 
 	pkg-config --atleast-version=4.10 gtk4
 	$(CC) $(CPPFLAGS) $(CFLAGS) $$(pkg-config --cflags gtk4) edit-window.c $(HOST) program.c $(CORE) $(LDFLAGS) $$(pkg-config --libs gtk4) $(LDLIBS) -o $@
 
-$(BUILD)/runtime.o: runtime.c $(HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c runtime.c -o $@
+$(BUILD)/runtime.o: $(CORE) $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $(CORE) -o $@
 
-$(BUILD)/runtime-async.o: runtime.c $(HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_ASYNC_EFFECTS -c runtime.c -o $@
+$(BUILD)/runtime-async.o: $(CORE) $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_ASYNC_EFFECTS -c $(CORE) -o $@
 
-$(BUILD)/evaluate.o: evaluate.c program.h flow.h | $(BUILD)
+$(BUILD)/evaluate.o: evaluate.c program.h $(PURE_ROOT)/core/flow.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c evaluate.c -o $@
 
 $(BUILD)/libpure-execution.a: $(BUILD)/runtime.o
@@ -104,13 +104,13 @@ $(BUILD)/libpure-execution-async.a: $(BUILD)/runtime-async.o
 	rm -f $@
 	$(AR) rcs $@ $^
 
-$(BUILD)/test-flow: test-flow.c store.c flow.c store.h flow.h result.h | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-flow.c store.c flow.c $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/test-flow: test-flow.c store.c $(FLOW) $(PURE_ROOT)/core/store.h $(PURE_ROOT)/core/flow.h $(PURE_ROOT)/core/result.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-flow.c store.c $(FLOW) $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BUILD)/test-program: test-program.c program.c evaluate.c program.h store.h flow.h result.h | $(BUILD)
+$(BUILD)/test-program: test-program.c program.c evaluate.c program.h $(PURE_ROOT)/core/store.h $(PURE_ROOT)/core/flow.h $(PURE_ROOT)/core/result.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) test-program.c program.c evaluate.c $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BUILD)/test-fields: test-fields.c program.c evaluate.c program.h store.h flow.h result.h | $(BUILD)
+$(BUILD)/test-fields: test-fields.c program.c evaluate.c program.h $(PURE_ROOT)/core/store.h $(PURE_ROOT)/core/flow.h $(PURE_ROOT)/core/result.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) test-fields.c program.c evaluate.c $(LDFLAGS) $(LDLIBS) -o $@
 
 $(BUILD)/test-runtime: test-runtime.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUILD)
@@ -122,24 +122,8 @@ $(BUILD)/test-async: test-async.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUILD
 $(BUILD)/test-splice: test-splice.c program.c $(CORE) $(HOST) $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_RUNTIME_METRICS -DPURE_STORE_TEST test-splice.c program.c $(CORE) $(HOST) $(LDFLAGS) $(LDLIBS) -o $@
 
-# Pure modules: loader/verifier/executor, its tests and a test host.
-# Text states are runtime-owned drafts, so the executor links the tree engine.
-
-$(BUILD)/test-module: test-module.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-module.c module-store.c $(MODULE) $(LDFLAGS) -pthread -lm $(LDLIBS) -o $@
-
-$(BUILD)/pure-run: pure-run.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) pure-run.c module-store.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
-
-# The document CLI contract driven by a module on the tree store.
-$(BUILD)/pure-edit-module: edit-module.c module-store.c $(MODULE) module-store.h $(MODULE_HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) edit-module.c module-store.c $(MODULE) $(LDFLAGS) -lm $(LDLIBS) -o $@
-
-check-module: $(BUILD)/test-module $(BUILD)/pure-run $(BUILD)/pure-edit-module $(BUILD)/pure-serve
-	$(BUILD)/test-module
-
-$(BUILD)/test-tree-store: test-tree-store.c store-tree.c $(HEADERS) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-tree-store.c store-tree.c $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/test-tree-store: $(PURE_ROOT)/store/test-tree-store.c $(PURE_ROOT)/store/store-tree.c $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST $(PURE_ROOT)/store/test-tree-store.c $(PURE_ROOT)/store/store-tree.c $(LDFLAGS) $(LDLIBS) -o $@
 
 $(BUILD)/test-paged-store: test-paged-store.c store-paged.c $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DPURE_STORE_TEST test-paged-store.c store-paged.c $(LDFLAGS) $(LDLIBS) -o $@
@@ -248,7 +232,7 @@ check: $(BUILD)/test-flow $(BUILD)/test-program $(BUILD)/test-fields $(BUILD)/te
 	$(BUILD)/test-flow
 	$(BUILD)/test-program
 	$(BUILD)/test-fields
-	python3 check.py --server $(BUILD)/pure-connections --runtime-test $(BUILD)/test-runtime --splice-test $(BUILD)/test-splice --editor $(BUILD)/pure-edit --store-source $(STORE) $(if $(EVIDENCE),--output "$(EVIDENCE)")
+	python3 check.py --server $(BUILD)/pure-connections --runtime-test $(BUILD)/test-runtime --splice-test $(BUILD)/test-splice --editor $(BUILD)/pure-edit --store-source $(STORE_FILE) $(if $(EVIDENCE),--output "$(EVIDENCE)")
 
 check-policy: editor server source-tui
 	$(MAKE) BUILD=$(BUILD)/policy FIXED_PROGRAM=examples/bounded-editor.pure fixed-editor fixed-server fixed-tui

@@ -11,8 +11,22 @@ batches, and a receiving app applies each message once. Measurements against axu
 are in [075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md),
 [080](docs/research/080-snapshot-reads.md), [081](docs/research/081-tail-records.md),
 [082](docs/research/082-json-in-place.md) and [083](docs/research/083-delivery-over-http.md); the status table is
-[CHECKPOINT.md](CHECKPOINT.md). The text below
-records the earlier document runtime this grew from.
+[CHECKPOINT.md](CHECKPOINT.md).
+
+The source follows the principle below, a small core with the rest selected around it
+([layout](docs/design/009-layout.md)):
+
+| Directory | What | Built as |
+|---|---|---|
+| `core/` | execution, ownership, limits and completion (`runtime.c`); the app model: modules verified before they run, events as transactions, states as drafts (`module*.c`); what the core asks of storage (`state.h`, `store.h`) | `build/libpure.a` (with the store) |
+| `store/` | the tree store: one file, a commit is one contiguous write and one sync (formats `PURETRE3`, `PUREREC1`) | in `libpure.a` |
+| `serve/` | `pure-serve`: the HTTP host, outbound delivery, JSON read in place | `build/pure-serve` |
+| `cli/` | command-line hosts | `build/pure-run`, `build/pure-edit-module` |
+| `prototypes/` | the earlier document runtime (000-077), built against `core/` and `store/` | `make -C prototypes/connections` |
+
+`make` builds the library and the hosts, `make check` runs the store's and the app model's tests. Interfaces for
+people are [Vega](/srv/git/vega.git), which links `libpure.a`. The text below records the earlier document runtime
+this grew from.
 
 A standalone native micro runtime being designed as a small operating
 system. Pure owns the application model for execution, memory, protection,

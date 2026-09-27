@@ -7,7 +7,7 @@ Pure의 문서 서버들과 같은 계약의 axum(Rust)·drogon(C++) 서비스�
 cc -O2 -std=c17 -o load load.c
 (cd axum-baseline && cargo build --release)
 drogon-baseline/build.sh   # Debian의 drogon 패키지를 설치하지 않고 .deps에 풀어 빌드한다
-make -C ../../prototypes/connections build/pure-serve
+make -C ../.. build/pure-serve
 make -C ../../prototypes/connections BUILD=build/tree STORE=store-tree.c build/tree/pure-connections
 aup build ../../../aup/examples/editor.aup -o editor.pmod
 python3 run.py --module editor.pmod --directory /var/tmp   # 저장소를 둘 장치에서

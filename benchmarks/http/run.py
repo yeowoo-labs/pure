@@ -38,7 +38,8 @@ import http.client
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PURE = HERE.parent.parent / 'prototypes' / 'connections'
+PURE = HERE.parent.parent  # build/pure-serve; the earlier document server stays in prototypes/connections
+PROTOTYPES = PURE / "prototypes" / "connections"
 
 
 def start(args):
@@ -145,7 +146,7 @@ def main():
     drogon = HERE / 'drogon-baseline/drogon-baseline'
     base = Path(tempfile.mkdtemp(dir=args.directory, prefix='pure-http-bench-'))
     servers = {
-        'pure-program': lambda d: [PURE / 'build/tree/pure-connections', '--program', PURE / 'examples/editor.pure',
+        'pure-program': lambda d: [PROTOTYPES / 'build/tree/pure-connections', '--program', PROTOTYPES / 'examples/editor.pure',
                                    '--store', d, '--port', '0', '--budget', str(args.budget)],
         'pure-serve': lambda d: [PURE / 'build/pure-serve', '--module', args.module, '--store', d, '--port', '0',
                                  '--budget', str(args.budget)],

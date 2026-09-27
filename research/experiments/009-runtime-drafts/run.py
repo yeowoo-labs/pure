@@ -8,12 +8,12 @@ import subprocess
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CONNECTIONS = HERE.parents[2] / 'prototypes' / 'connections'
+ROOT = HERE.parents[2]
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--work', type=Path, default=CONNECTIONS / 'build' / 'bench-drafts')
+    parser.add_argument('--work', type=Path, default=ROOT / 'build' / 'bench-drafts')
     parser.add_argument('--size', type=int, default=1048576)
     parser.add_argument('--saves', type=int, default=24)
     parser.add_argument('--rounds', type=int, default=3)
@@ -24,8 +24,8 @@ def main():
     device = subprocess.check_output(['findmnt', '-n', '-T', str(args.work), '-o', 'SOURCE,FSTYPE'], text=True).split()
     assert device[1] != 'tmpfs', 'fsync is free on tmpfs'
     binary = args.work / 'bench'
-    subprocess.run(['cc', '-std=c17', '-O2', '-Wall', '-Wextra', '-Werror', f'-I{CONNECTIONS}',
-                    str(HERE / 'bench.c'), str(CONNECTIONS / 'store-tree.c'), '-o', str(binary)], check=True)
+    subprocess.run(['cc', '-std=c17', '-O2', '-Wall', '-Wextra', '-Werror', f'-I{ROOT / "core"}',
+                    str(HERE / 'bench.c'), str(ROOT / 'store' / 'store-tree.c'), '-o', str(binary)], check=True)
     runs = []
     for round_number in range(args.rounds):
         for mode in (('copy', 'draft') if round_number % 2 == 0 else ('draft', 'copy')):

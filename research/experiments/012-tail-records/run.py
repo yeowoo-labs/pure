@@ -18,12 +18,19 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-PURE = ROOT / 'prototypes' / 'connections'
+CORE = ROOT / 'core'  # the store's headers
+STORE = ROOT / 'store' / 'store-tree.c'
 COMMITS = HERE.parent / '010-one-sync-commit' / 'commits.c'
 
 
+def stored_at(revision):
+    """Where the tree store was at a revision: store/ now, prototypes/connections/ before."""
+    moved = subprocess.run(['git', '-C', str(ROOT), 'cat-file', '-e', f'{revision}:store/store-tree.c'], capture_output=True)
+    return 'store/store-tree.c' if moved.returncode == 0 else 'prototypes/connections/store-tree.c'
+
+
 def build(output, sources):
-    subprocess.run(['cc', '-O2', '-std=c17', f'-I{PURE}', '-o', str(output)] + [str(s) for s in sources] + ['-lpthread'],
+    subprocess.run(['cc', '-O2', '-std=c17', f'-I{CORE}', '-o', str(output)] + [str(s) for s in sources] + ['-lpthread'],
                    check=True)
 
 
@@ -37,12 +44,12 @@ def main():
     with tempfile.TemporaryDirectory() as work:
         work = Path(work)
         before = work / 'store-tree-before.c'
-        before.write_text(subprocess.run(['git', '-C', str(ROOT), 'show', f'{args.before}:prototypes/connections/store-tree.c'],
+        before.write_text(subprocess.run(['git', '-C', str(ROOT), 'show', f'{args.before}:{stored_at(args.before)}'],
                                          capture_output=True, text=True, check=True).stdout)
         build(work / 'probe', [HERE / 'probe.c'])
         builds = {'heads in slots': work / 'commits-before', 'heads as records': work / 'commits-after'}
         build(builds['heads in slots'], [COMMITS, before])
-        build(builds['heads as records'], [COMMITS, PURE / 'store-tree.c'])
+        build(builds['heads as records'], [COMMITS, STORE])
         results = {'rounds': []}
         for round_ in range(args.rounds):
             measured = {'probe': [], 'commits': {}}
