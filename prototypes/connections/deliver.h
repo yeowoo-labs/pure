@@ -34,6 +34,27 @@ uint64_t pure_wire_delivered(PureWire *);
 bool pure_wire_start(PureWire *, void (*notify)(void *), void *context);
 /* Stop (a delivery under way is finished or abandoned) and free. */
 void pure_wire_close(PureWire *);
+/* Answers as events: the final answer to each send (a 2xx, or a 4xx but 408
+ * and 429) becomes a message event of input (a message without a key), in
+ * the order sent: its fields come from the answer's JSON object by name
+ * (other members are skipped), a field the answer lacks from the send's
+ * field of that name and type (as a request's id), and a u32 field named
+ * http_status is the answer's status. An answer that makes no message is
+ * logged and the send tried again every 10 s. Answers go one per request. */
+bool pure_wire_reply(PureWire *, uint32_t input, char *error, size_t size);
+/* The owner's side: the next answer in order, or false. Taking it counts
+ * its send delivered (the owner applies the answer, then trims); what out
+ * points to is the wire's until the next call. The answer is applied with
+ * pure_app_deliver from the wire's source with the send's number, so an
+ * answer that comes again after a restart is applied once. */
+typedef struct {
+    uint32_t input;
+    uint64_t seq;
+    PureSpan payload;
+    const uint32_t *placed;
+    const char *source;
+} PureWireAnswer;
+bool pure_wire_answer(PureWire *, PureWireAnswer *out);
 /* Counts for a host's report. */
 void pure_wire_counts(PureWire *, uint64_t *delivered, uint64_t *attempts);
 #endif

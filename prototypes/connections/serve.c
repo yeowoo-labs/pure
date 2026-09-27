@@ -150,7 +150,8 @@ typedef struct {
     /* The owner's: outputs wired to HTTP receivers, and how far each was trimmed. */
     PureWire *wires[PURE_MODULE_INPUTS];
     unsigned wire_count;
-    uint64_t trimmed[PURE_MODULE_INPUTS];
+    uint64_t trimmed[PURE_MODULE_INPUTS], answers;
+    bool held[PURE_MODULE_INPUTS]; /* an answer failed to apply: the wire's sends stay until a restart */
 } Executor;
 
 /* A request made ready: its effect, what it names, and the thread that answers it. */
@@ -1051,14 +1052,32 @@ static void after_save(Executor *ex) {
     if (ex->wire_count) pure_app_outbox(&ex->app, queue_send, &q);
 }
 
-/* What the wires delivered leaves the outbox (with the next save). */
-static void trim_delivered(Executor *ex) {
+/* The answers the wires made become events, in order; then what the wires
+ * delivered leaves the outbox (with the next save). True when an answer was
+ * applied (the caller saves). */
+static bool take_deliveries(Executor *ex) {
+    bool answered = false;
     for (unsigned i = 0; i < ex->wire_count; ++i) {
+        PureWireAnswer answer;
+        while (pure_wire_answer(ex->wires[i], &answer)) {
+            ex->app.now = wall_ms();
+            PureResult result = pure_app_deliver(&ex->app, answer.input, answer.source, answer.seq, answer.payload,
+                                                 answer.placed);
+            if (result != PURE_OK && ex->app.fault == PURE_FAULT_NONE) {
+                ex->held[i] = true; /* not applied and not refused: sent again after a restart */
+                fprintf(stderr, "{\"wire\":\"%s\",\"seq\":%" PRIu64 ",\"error\":\"its answer was not applied\"}\n",
+                        answer.source, answer.seq);
+            }
+            pure_app_finish(&ex->app);
+            answered = true;
+            ++ex->answers;
+        }
         uint64_t delivered = pure_wire_delivered(ex->wires[i]);
-        if (delivered <= ex->trimmed[i]) continue;
+        if (delivered <= ex->trimmed[i] || ex->held[i]) continue;
         pure_app_trim(&ex->app, pure_wire_output(ex->wires[i]), delivered);
         ex->trimmed[i] = delivered;
     }
+    return answered;
 }
 
 /* One save for a burst: its requests are durable with it or fail with it. */
@@ -1290,8 +1309,14 @@ static void *run_owner(void *context) {
             owner->delivered = false;
             pthread_mutex_unlock(&owner->lock);
             long due = run_timers(&owner->executor);
-            if (delivered) trim_delivered(&owner->executor);
+            bool answered = delivered && take_deliveries(&owner->executor);
             pthread_mutex_lock(&owner->lock);
+            /* Answers are saved with the next round, or now if none waits. */
+            if (answered && !owner->count && !owner->stopping) {
+                pthread_mutex_unlock(&owner->lock);
+                if (pure_app_save(&owner->executor.app) == PURE_OK) after_save(&owner->executor);
+                pthread_mutex_lock(&owner->lock);
+            }
             if (owner->count || owner->stopping) break;
             if (owner->delivered) continue;
             if (due < 0) {
@@ -1604,6 +1629,30 @@ static bool open_wires(Executor *ex, const PureModule *m, const char *const *sen
     return true;
 }
 
+/* --reply OUTPUT=INPUT: the answers to that output's sends become INPUT's events. */
+static bool wire_replies(Executor *ex, const PureModule *m, const char *const *replies, unsigned count) {
+    for (unsigned i = 0; i < count; ++i) {
+        const char *equals = strchr(replies[i], '=');
+        char output[PURE_MODULE_NAME], error[160] = "";
+        size_t length = equals ? (size_t)(equals - replies[i]) : 0;
+        int input = equals ? pure_module_input(m, equals + 1) : -1;
+        PureWire *wire = NULL;
+        if (length && length < sizeof(output)) {
+            memcpy(output, replies[i], length);
+            output[length] = 0;
+            int index = pure_module_input(m, output);
+            for (unsigned k = 0; k < ex->wire_count && index >= 0; ++k)
+                if (pure_wire_output(ex->wires[k]) == (uint32_t)index) wire = ex->wires[k];
+        }
+        if (!wire || input < 0 || !pure_wire_reply(wire, (uint32_t)input, error, sizeof(error))) {
+            fprintf(stderr, "--reply %s: %s\n", replies[i], !wire ? "takes OUTPUT=INPUT of an output given --send" :
+                                                         input < 0 ? "no such input" : error);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* --threads auto: a connection thread for each CPU this process may run on,
  * less the one the owner of an app with states takes. */
 static unsigned auto_threads(bool owner) {
@@ -1617,8 +1666,8 @@ static unsigned auto_threads(bool owner) {
 int main(int argc, char **argv) {
     static PureModule module;
     static Owner owner;
-    const char *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS];
-    unsigned send_count = 0;
+    const char *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
+    unsigned send_count = 0, reply_count = 0;
     unsigned port = 8767, threads = 1;
     size_t budget = 64u << 20, capacity = 1024;
     uint64_t timeout_ms = 10000;
@@ -1630,6 +1679,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--send") && send_count < PURE_MODULE_INPUTS) sends[send_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--name")) name = argv[i + 1];
         else if (!strcmp(argv[i], "--send-ca")) pure_wire_trust(argv[i + 1]);
+        else if (!strcmp(argv[i], "--reply") && reply_count < PURE_MODULE_INPUTS) replies[reply_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
@@ -1671,7 +1721,8 @@ int main(int argc, char **argv) {
             return 1;
         owner.executor.reads_first = true;
         owner.executor.publishes = true;
-        if (!open_wires(&owner.executor, &module, sends, send_count, name)) return 2;
+        if (!open_wires(&owner.executor, &module, sends, send_count, name) ||
+            !wire_replies(&owner.executor, &module, replies, reply_count)) return 2;
         after_save(&owner.executor); /* the snapshot, and the sends stored before */
         for (unsigned i = 0; i < owner.executor.wire_count; ++i)
             if (!pure_wire_start(owner.executor.wires[i], wire_delivered, &owner)) { fputs("Cannot start a wire\n", stderr); return 1; }
@@ -1731,15 +1782,16 @@ int main(int argc, char **argv) {
     fprintf(stderr, "{\"active\":%zu,\"retained_payload_bytes\":%zu,\"accepted\":%" PRIu64 ",\"requests\":%" PRIu64
             ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"ticks\":%" PRIu64 ",\"expired\":%" PRIu64
             ",\"threads\":%u,\"owner\":%s,\"snapshots\":%" PRIu64 ",\"views_from_snapshots\":%" PRIu64
-            ",\"delivered\":%" PRIu64 ",\"delivery_attempts\":%" PRIu64 ",\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
+            ",\"delivered\":%" PRIu64 ",\"delivery_attempts\":%" PRIu64 ",\"answers\":%" PRIu64
+            ",\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
-            owner.executor.publications, shown, delivered, attempts, groups, grouped);
+            owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped);
     free(hosts);
     free(thread);
     return 0;
 usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
           "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=http[s]://host:port/path ...] [--name NAME] "
-          "[--send-ca FILE]\n", stderr);
+          "[--send-ca FILE] [--reply OUTPUT=INPUT ...]\n", stderr);
     return 2;
 }
