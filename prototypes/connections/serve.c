@@ -30,6 +30,7 @@
  * threads hand it their ready requests and answer what it hands back. Its
  * bursts take the requests of every thread, one save each. */
 #include "deliver.h"
+#include "message-json.h"
 #include "module-store.h"
 #include "module-text.h"
 #include "runtime.h"
@@ -482,48 +483,6 @@ static void put_u64(unsigned char *p, uint64_t v) { for (unsigned i = 0; i < 8; 
 static uint32_t get_u32(const unsigned char *p) { return p[0] | p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint64_t get_u64(const unsigned char *p) { return get_u32(p) | (uint64_t)get_u32(p + 4) << 32; }
 
-/* A JSON number's text: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?, its
- * length (0 if there is none). An integer has neither part after it. */
-static size_t json_number(const unsigned char *p, size_t size, bool *integer) {
-    size_t i = 0;
-    *integer = true;
-    if (i < size && p[i] == '-') ++i;
-    if (i == size || p[i] < '0' || p[i] > '9') return 0;
-    if (p[i++] != '0') while (i < size && p[i] >= '0' && p[i] <= '9') ++i;
-    if (i < size && p[i] == '.') {
-        *integer = false;
-        if (++i == size || p[i] < '0' || p[i] > '9') return 0;
-        while (i < size && p[i] >= '0' && p[i] <= '9') ++i;
-    }
-    if (i < size && (p[i] == 'e' || p[i] == 'E')) {
-        *integer = false;
-        if (++i < size && (p[i] == '+' || p[i] == '-')) ++i;
-        if (i == size || p[i] < '0' || p[i] > '9') return 0;
-        while (i < size && p[i] >= '0' && p[i] <= '9') ++i;
-    }
-    return i;
-}
-
-/* A fixed field's value from its text (a query value or a JSON number) into
- * the prefix: a u32 in range, or a finite number. */
-static bool fixed_field(const PureField *field, const unsigned char *text, size_t size, unsigned char *prefix) {
-    bool integer;
-    if (!size || json_number(text, size, &integer) != size || size > 40) return false;
-    char digits[48];
-    memcpy(digits, text, size);
-    digits[size] = 0;
-    if (field->type == PURE_FIELD_U32) {
-        uint64_t n;
-        if (!integer || !number(digits, UINT32_MAX, &n)) return false;
-        put_u32(prefix + field->offset, (uint32_t)n);
-        return true;
-    }
-    double value = strtod(digits, NULL);
-    if (!isfinite(value)) return false;
-    memcpy(prefix + field->offset, &value, 8);
-    return true;
-}
-
 /* What an app route names in the module, with a message's fixed fields
  * taken from the query into c->fields. NULL, or the error to answer (404
  * for a name the module lacks, 400 otherwise). */
@@ -579,7 +538,7 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
             while (f < (message ? shape->field_count : 0) && strcmp(m->field[shape->field_start + f].name, pair)) ++f;
             const PureField *field = message && f < shape->field_count ? &m->field[shape->field_start + f] : NULL;
             if (!field || c->given[f] || (field->type != PURE_FIELD_U32 && field->type != PURE_FIELD_NUMBER) ||
-                !fixed_field(field, (const unsigned char *)value, strlen(value), c->fields)) return "query";
+                !pure_json_fixed(field, (const unsigned char *)value, strlen(value), c->fields)) return "query";
             c->given[f] = true;
         }
         pair = end ? end + 1 : NULL;
@@ -595,84 +554,6 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
     return NULL;
 }
 
-/* A JSON string's contents (after its opening quote) up to the closing one:
- * its length, or 0 when it does not close or holds a control byte. */
-static size_t json_string_end(const unsigned char *p, size_t size) {
-    for (size_t i = 0; i < size; ++i) {
-        /* Eight bytes at a time while none is a quote, a backslash or a control byte. */
-        const uint64_t ones = UINT64_C(0x0101010101010101), highs = UINT64_C(0x8080808080808080);
-        for (uint64_t w, q, s; size - i >= 8; i += 8) {
-            memcpy(&w, p + i, 8);
-            q = w ^ (ones * '"');
-            s = w ^ (ones * '\\');
-            if (((q - ones) & ~q & highs) | ((s - ones) & ~s & highs) | ((w - ones * 0x20) & ~w & highs)) break;
-        }
-        if (i == size) break;
-        if (p[i] == '"') return i + 1;
-        if (p[i] < 0x20) return 0;
-        if (p[i] == '\\' && ++i == size) return 0;
-    }
-    return 0;
-}
-
-static int hex_digit(unsigned char c) {
-    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
-}
-
-static bool json_code(const unsigned char *p, size_t left, uint32_t *code) {
-    if (left < 4) return false;
-    *code = 0;
-    for (int i = 0; i < 4; ++i) {
-        int d = hex_digit(p[i]);
-        if (d < 0) return false;
-        *code = *code << 4 | (uint32_t)d;
-    }
-    return true;
-}
-
-/* Unescape a JSON string's contents into out (never longer); false for a
- * bad escape or a lone surrogate. The result is checked as UTF-8 after. */
-static bool json_unescape(const unsigned char *in, size_t size, unsigned char *out, size_t *written) {
-    size_t o = 0;
-    for (size_t i = 0; i < size;) {
-        unsigned char b = in[i++];
-        if (b != '\\') { out[o++] = b; continue; }
-        if (i == size) return false;
-        b = in[i++];
-        const char *plain = strchr("\"\\/bfnrt", b);
-        if (b && plain) { out[o++] = (unsigned char)"\"\\/\b\f\n\r\t"[plain - "\"\\/bfnrt"]; continue; }
-        uint32_t code, low;
-        if (b != 'u' || !json_code(in + i, size - i, &code)) return false;
-        i += 4;
-        if (code >= 0xDC00 && code <= 0xDFFF) return false;
-        if (code >= 0xD800 && code <= 0xDBFF) {
-            if (size - i < 6 || in[i] != '\\' || in[i + 1] != 'u' || !json_code(in + i + 2, size - i - 2, &low) ||
-                low < 0xDC00 || low > 0xDFFF) return false;
-            i += 6;
-            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-        }
-        if (code < 0x80) out[o++] = (unsigned char)code;
-        else if (code < 0x800) { out[o++] = (unsigned char)(0xC0 | code >> 6); out[o++] = (unsigned char)(0x80 | (code & 0x3F)); }
-        else if (code < 0x10000) {
-            out[o++] = (unsigned char)(0xE0 | code >> 12);
-            out[o++] = (unsigned char)(0x80 | (code >> 6 & 0x3F));
-            out[o++] = (unsigned char)(0x80 | (code & 0x3F));
-        } else {
-            out[o++] = (unsigned char)(0xF0 | code >> 18);
-            out[o++] = (unsigned char)(0x80 | (code >> 12 & 0x3F));
-            out[o++] = (unsigned char)(0x80 | (code >> 6 & 0x3F));
-            out[o++] = (unsigned char)(0x80 | (code & 0x3F));
-        }
-    }
-    *written = o;
-    return true;
-}
-
-static size_t json_space(const unsigned char *p, size_t at, size_t size) {
-    while (at < size && (p[at] == ' ' || p[at] == '\t' || p[at] == '\n' || p[at] == '\r')) ++at;
-    return at;
-}
-
 /* Parsing a JSON body in place: the payload it is in, the placed fields'
  * table, and which fields it gave. */
 #define PLACED (UINT32_C(1) << 31)
@@ -682,98 +563,6 @@ static size_t json_space(const unsigned char *p, size_t at, size_t size) {
  * and the JSON. */
 #define DELIVERED (UINT32_C(1) << 30)
 enum { DELIVERY = 80 };
-typedef struct {
-    Connection *c;
-    const PureInputShape *shape;
-    unsigned char *payload, *table;
-    bool seen[PURE_MODULE_FIELDS];
-} Body;
-
-/* The field named path.key (key alone at the top), or the field count when
- * none is; group says whether fields are named inside it instead. */
-static uint32_t field_named(const Body *b, const char *path, size_t path_size, const unsigned char *key,
-                            size_t key_size, bool *group) {
-    const PureModule *m = b->c->host->module;
-    size_t size = path_size + !!path_size + key_size;
-    *group = false;
-    for (uint32_t f = 0; f < b->shape->field_count; ++f) {
-        const char *name = m->field[b->shape->field_start + f].name;
-        size_t length = strlen(name);
-        if (length < size || memcmp(name, path, path_size) || (path_size && name[path_size] != '.') ||
-            memcmp(name + path_size + !!path_size, key, key_size)) continue;
-        if (length == size) return f;
-        if (name[size] == '.') *group = true;
-    }
-    return b->shape->field_count;
-}
-
-/* An object's members from json[*at] (its opening brace), in the group named
- * path: a field's value, or a group's object. Strings stay where they are
- * (an escaped one is unescaped over itself, which never makes it longer).
- * NULL, or the error to answer. */
-static const char *members(Body *b, unsigned char *json, size_t size, size_t *at, const char *path, size_t path_size) {
-    const PureModule *m = b->c->host->module;
-    if (*at == size || json[(*at)++] != '{') return "json";
-    *at = json_space(json, *at, size);
-    for (bool first = true; *at < size && json[*at] != '}'; first = false) {
-        if (!first) {
-            if (json[(*at)++] != ',') return "json";
-            *at = json_space(json, *at, size);
-        }
-        size_t key_end = *at < size && json[*at] == '"' ? json_string_end(json + *at + 1, size - *at - 1) : 0;
-        if (!key_end) return "json";
-        const unsigned char *key = json + *at + 1;
-        size_t key_size = key_end - 1;
-        *at = json_space(json, *at + 1 + key_end, size);
-        if (*at == size || json[(*at)++] != ':') return "json";
-        *at = json_space(json, *at, size);
-        bool group;
-        uint32_t f = field_named(b, path, path_size, key, key_size, &group);
-        if (*at < size && json[*at] == '{') {
-            if (!group) return f < b->shape->field_count ? "json_type" : "json_field";
-            char inner[PURE_MODULE_NAME];
-            size_t inner_size = path_size + !!path_size + key_size;
-            memcpy(inner, path, path_size);
-            if (path_size) inner[path_size] = '.';
-            memcpy(inner + path_size + !!path_size, key, key_size);
-            const char *why = members(b, json, size, at, inner, inner_size);
-            if (why) return why;
-            *at = json_space(json, *at, size);
-            continue;
-        }
-        if (f == b->shape->field_count) return group ? "json_type" : "json_field";
-        if (b->seen[f] || b->c->given[f]) return "json_field";
-        b->seen[f] = true;
-        const PureField *field = &m->field[b->shape->field_start + f];
-        bool variable = field->type == PURE_FIELD_BYTES || field->type == PURE_FIELD_TEXT, integer;
-        if (*at < size && json[*at] == '"') {
-            size_t end = json_string_end(json + *at + 1, size - *at - 1), written;
-            if (!end) return "json";
-            if (!variable) return "json_type";
-            unsigned char *value = json + *at + 1;
-            if (!memchr(value, '\\', end - 1)) written = end - 1;
-            else if (!json_unescape(value, end - 1, value, &written)) return "json";
-            if (field->type == PURE_FIELD_TEXT && !pure_utf8_valid((PureSpan){value, written})) return "json";
-            put_u32(b->table + 8 * f, (uint32_t)(value - b->payload));
-            put_u32(b->table + 8 * f + 4, (uint32_t)written);
-            *at = json_space(json, *at + 1 + end, size);
-            continue;
-        }
-        size_t length = json_number(json + *at, size - *at, &integer);
-        if (!length) {
-            static const char *const words[] = {"true", "false", "null"};
-            for (size_t w = 0; w < 3 && !length; ++w)
-                if (size - *at >= strlen(words[w]) && !memcmp(json + *at, words[w], strlen(words[w]))) return "json_type";
-            return *at < size && json[*at] == '[' ? "json_type" : "json";
-        }
-        if (variable || !fixed_field(field, json + *at, length, b->payload)) return "json_type";
-        *at = json_space(json, *at + length, size);
-    }
-    if (*at == size) return "json";
-    ++*at;
-    return NULL;
-}
-
 /* An app input's JSON body becomes its message: an object with a member for
  * each field the query did not give (a u32, a number, or a string for bytes
  * and text), groups as objects inside it, and nothing else. Fixed fields go
@@ -785,26 +574,27 @@ static const char *convert(Connection *c) {
     size_t table = 8 * (size_t)shape->field_count;
     unsigned char *tables = c->ingress + 4 + (delivered ? DELIVERY : 0), *prefixes = tables + c->batch * table;
     unsigned char *json = c->body;
-    size_t size = c->body_size, at = json_space(json, 0, size);
+    size_t size = c->body_size, at = pure_json_space(json, 0, size);
     /* A batch is an array of its messages' objects. */
     if (c->batch > 1) {
         if (at == size || json[at++] != '[') return "json";
-        at = json_space(json, at, size);
+        at = pure_json_space(json, at, size);
     }
     for (unsigned i = 0; i < c->batch; ++i) {
         if (i) {
             if (at == size || json[at++] != ',') return "json";
-            at = json_space(json, at, size);
+            at = pure_json_space(json, at, size);
         }
-        Body b = {.c = c, .shape = shape, .table = tables + i * table, .payload = prefixes + i * c->field_bytes};
-        const char *why = members(&b, json, size, &at, "", 0);
+        PureJsonMessage b = {.module = c->host->module, .shape = shape, .table = tables + i * table,
+                             .payload = prefixes + i * c->field_bytes, .given = c->given};
+        const char *why = pure_json_message(&b, json, size, &at);
         if (why) return why;
-        at = json_space(json, at, size);
+        at = pure_json_space(json, at, size);
         for (uint32_t f = 0; f < shape->field_count; ++f)
             if (!b.seen[f] && !c->given[f]) return "missing_field";
     }
     if (c->batch > 1 && (at == size || json[at++] != ']')) return "json";
-    if (json_space(json, at, size) != size) return "json";
+    if (pure_json_space(json, at, size) != size) return "json";
     put_u32(c->ingress, (uint32_t)(c->batch * c->field_bytes + c->body_size) | PLACED | delivered);
     return NULL;
 }
