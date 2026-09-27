@@ -879,6 +879,12 @@ static bool write_root(const Tree *tree, Writer *writer, Entry *root, bool reloc
     return root_height(tree, *root, &height) && write_subtree(tree, writer, root, height, relocate);
 }
 
+/* How large a value under key may grow: a runtime-owned state's ('.', or no
+ * key at all) or a document's (store.h). */
+static uint64_t limit_of(const char *key) {
+    return !key[0] || key[0] == '.' ? PURE_STATE_LIMIT : PURE_OBJECT_LIMIT;
+}
+
 static bool read_record(const Tree *tree, Entry catalog, uint64_t index,
                         unsigned char record[RECORD], Entry *document, int64_t *revision) {
     unsigned height;
@@ -888,7 +894,7 @@ static bool read_record(const Tree *tree, Entry catalog, uint64_t index,
     uint64_t stored = decode64(record + KEY + 16);
     *revision = (int64_t)stored;
     return stored && stored <= (uint64_t)INT64_MAX && !document->ref == !document->bytes &&
-           document->bytes <= PURE_OBJECT_LIMIT;
+           document->bytes <= limit_of((const char *)record);
 }
 
 /* Binary search over records ordered by their zero-padded key bytes. */
@@ -1579,7 +1585,7 @@ static void collect(PureDraft *draft) {
 PureResult pure_draft_splice(PureDraft *draft, size_t offset, size_t remove, PureSpan insert) {
     uint64_t size = draft->root.bytes;
     if (insert.size && !insert.data) return PURE_INVALID;
-    if (offset > size || remove > size - offset || insert.size > PURE_OBJECT_LIMIT - (size - remove))
+    if (offset > size || remove > size - offset || insert.size > limit_of(draft->key) - (size - remove))
         return PURE_LIMIT;
     if (!remove && !insert.size) return PURE_OK;
     Entry next;

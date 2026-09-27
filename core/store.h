@@ -5,6 +5,11 @@
 #include <stdint.h>
 
 #define PURE_OBJECT_LIMIT ((2u * 6u + 32u) * 32768u + 8192u)
+/* A document (what a host carries whole, as an HTTP body) is at most
+ * PURE_OBJECT_LIMIT bytes. A value the runtime owns (an app's list or text
+ * state: a key starting with '.', or a draft without a key) may grow to
+ * PURE_STATE_LIMIT: a table of a million rows is one such value. */
+#define PURE_STATE_LIMIT (UINT64_C(1) << 30)
 typedef struct {
     void *mapping;
     size_t mapped_size, object_size;
