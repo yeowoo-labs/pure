@@ -23,6 +23,10 @@ void pure_wire_trust(const char *ca_file);
 PureWire *pure_wire_open(const PureModule *m, const char *output, const char *url, const char *source,
                          char *error, size_t size);
 uint32_t pure_wire_output(const PureWire *);
+/* Seal the wire's sends to the receiver's public key (serve/seal.h): each
+ * request's body, bound to its source, first number and count, goes with
+ * X-Pure-Seal naming the suite. Before pure_wire_start. */
+void pure_wire_seal(PureWire *, const unsigned char peer[32]);
 /* The owner's side: queue a saved send numbered after the last queued one
  * (it is encoded now); false when it cannot be (a bytes field that is not
  * UTF-8 has no JSON form), and the wire then stops at it. */

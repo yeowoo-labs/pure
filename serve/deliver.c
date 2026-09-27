@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "deliver.h"
+#include "seal.h"
 #include "message-json.h"
 #include "module-text.h"
 #include <errno.h>
@@ -50,6 +51,8 @@ struct PureWire {
     size_t answer_head, answer_count, answer_capacity;
     Answer taken;     /* the one the owner took last, kept until it takes the next */
     uint32_t placed[2 * PURE_MODULE_FIELDS];
+    bool sealed;                       /* the sends go sealed to peer's key */
+    unsigned char peer[PURE_SEAL_KEY];
 };
 
 /* ---- TLS: one client context, verifying the receiver's certificate against
@@ -554,33 +557,56 @@ static bool form_answer(const PureWire *w, int status, const Text *body, const P
 
 static int send_request(PureWire *w, const char *request, size_t size, const Pending *p, Answer *answer);
 
+void pure_wire_seal(PureWire *w, const unsigned char peer[PURE_SEAL_KEY]) {
+    memcpy(w->peer, peer, PURE_SEAL_KEY);
+    w->sealed = true;
+}
+
 /* One request for count sends from p (numbered in a row): one object, or
  * an array of them for a receiver that takes batches. A final answer to a
  * send whose answers are wired is made into *answer. */
 static int post(PureWire *w, const Pending *p, unsigned count, Answer *answer) {
     size_t body = count > 1 ? count + 1 : 0;
     for (unsigned i = 0; i < count; ++i) body += p[i].size;
-    char batch[32] = "";
+    size_t length = body + (w->sealed ? PURE_SEAL_OVERHEAD : 0);
+    char batch[32] = "", seal[48] = "";
     if (count > 1) snprintf(batch, sizeof(batch), "X-Pure-Count: %u\r\n", count);
+    if (w->sealed) snprintf(seal, sizeof(seal), "X-Pure-Seal: %s\r\n", pure_seal_suite());
     /* The request in one piece, its head and then a batch in its brackets:
      * one write where there were two a send (a batch drained at 91k sends a
-     * second, and at 470k in one piece). */
+     * second, and at 470k in one piece). Sealed, the body is sealed whole,
+     * bound to its source, first number and count. */
     enum { HEAD = 2048 }; /* the longest path, host and source leave room to spare */
-    char *request = malloc(HEAD + body);
-    if (!request) return AGAIN;
+    char *request = malloc(HEAD + length);
+    unsigned char *plain = w->sealed ? malloc(body) : NULL;
+    if (!request || (w->sealed && !plain)) {
+        free(request);
+        free(plain);
+        return AGAIN;
+    }
     int head = snprintf(request, HEAD,
                         "POST %s HTTP/1.1\r\nHost: %s:%s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n"
-                        "X-Pure-Source: %s\r\nX-Pure-Sequence: %llu\r\n%sIdempotency-Key: %s-%llu\r\n\r\n",
-                        w->path, w->host, w->port, body, w->source, (unsigned long long)p->seq, batch, w->source,
+                        "X-Pure-Source: %s\r\nX-Pure-Sequence: %llu\r\n%s%sIdempotency-Key: %s-%llu\r\n\r\n",
+                        w->path, w->host, w->port, length, w->source, (unsigned long long)p->seq, batch, seal, w->source,
                         (unsigned long long)p->seq);
-    char *at = request + head;
+    unsigned char *at = plain ? plain : (unsigned char *)request + head;
     for (unsigned i = 0; i < count; ++i) {
         if (count > 1) *at++ = i ? ',' : '[';
         memcpy(at, p[i].body, p[i].size);
         at += p[i].size;
     }
     if (count > 1) *at++ = ']';
-    int result = send_request(w, request, (size_t)(at - request), p, answer);
+    if (plain) {
+        char aad[PURE_SOURCE + 48];
+        snprintf(aad, sizeof(aad), "%s %llu %u", w->source, (unsigned long long)p->seq, count);
+        bool sealed = pure_seal(w->peer, aad, plain, body, (unsigned char *)request + head);
+        free(plain);
+        if (!sealed) {
+            free(request);
+            return AGAIN;
+        }
+    }
+    int result = send_request(w, request, (size_t)head + length, p, answer);
     free(request);
     return result;
 }

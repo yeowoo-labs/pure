@@ -1,0 +1,16 @@
+{"round": 0, "variant": "plain", "sends": 20000, "sends_per_second": 469622, "receiver_requests": 85, "delivery_attempts": 80}
+{"round": 0, "variant": "sealed", "sends": 20000, "sends_per_second": 235074, "receiver_requests": 89, "delivery_attempts": 80}
+{"round": 0, "variant": "baseline", "sends": 20000, "sends_per_second": 91082, "receiver_requests": 102, "delivery_attempts": 80}
+{"round": 1, "variant": "sealed", "sends": 20000, "sends_per_second": 234780, "receiver_requests": 89, "delivery_attempts": 80}
+{"round": 1, "variant": "baseline", "sends": 20000, "sends_per_second": 90993, "receiver_requests": 102, "delivery_attempts": 80}
+{"round": 1, "variant": "plain", "sends": 20000, "sends_per_second": 469046, "receiver_requests": 85, "delivery_attempts": 80}
+{"round": 2, "variant": "baseline", "sends": 20000, "sends_per_second": 95491, "receiver_requests": 101, "delivery_attempts": 80}
+{"round": 2, "variant": "plain", "sends": 20000, "sends_per_second": 469907, "receiver_requests": 85, "delivery_attempts": 80}
+{"round": 2, "variant": "sealed", "sends": 20000, "sends_per_second": 232933, "receiver_requests": 89, "delivery_attempts": 80}
+{"aead": "aes-128-gcm", "bytes": 64, "kb_per_second": 182960.79}
+{"aead": "chacha20-poly1305", "bytes": 64, "kb_per_second": 257240.61}
+{"aead": "aes-128-gcm", "bytes": 1024, "kb_per_second": 1349597.18}
+{"aead": "chacha20-poly1305", "bytes": 1024, "kb_per_second": 682410.58}
+{"aead": "aes-128-gcm", "bytes": 16384, "kb_per_second": 2282373.12}
+{"aead": "chacha20-poly1305", "bytes": 16384, "kb_per_second": 707640.6}
+{"x25519_per_second": 6105.0}

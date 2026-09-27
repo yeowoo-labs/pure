@@ -21,6 +21,9 @@ tests are core/test-module.c and store/test-tree-store.c.
    batches to another app, which applies each once, across kill -9 of either
    side; webhooks receive them over HTTPS only from a trusted receiver; an
    API's answers become the app's events (--reply).
+7. Sealed sends: sealed to the receiver's key, they pass a relay unread and
+   unchanged (a changed byte is refused, a replay applies nothing), and a
+   node that keeps its deliveries sealed refuses unsealed ones.
 """
 import argparse
 import json
@@ -765,6 +768,137 @@ def server_links(aup, pure, work):
             'attempts_after_restart': stats['a']['delivery_attempts']}
 
 
+def server_sealed(aup, pure, work):
+    """Sends sealed end to end (--seal to the receiver's --key): through a relay
+    that records what passes, every order is applied once and the relay saw
+    no item and no field name; one byte changed on the way is refused (400
+    seal) and applies nothing, the recorded request sent again applies
+    nothing twice, an unsealed delivery is refused (403) by a node that keeps
+    its deliveries sealed, and a seal to another key does not open."""
+    import select
+    import threading
+    import time
+    from http.client import HTTPConnection
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    sender_module, receiver_module = work / 'seal-sender.pmod', work / 'seal-receiver.pmod'
+    for module, text in ((sender_module, LINK_SENDER), (receiver_module, LINK_RECEIVER)):
+        source = module.with_suffix('.aup')
+        source.write_text(text)
+        compile_module(aup, source, module)
+
+    def start(args):
+        """A host on a port of its own choosing (--port 0: no port probed
+        free and then taken by another socket before it binds)."""
+        process = subprocess.Popen([str(a) for a in args] + ['--port', '0'], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        assert ready, 'host did not start'
+        line = process.stdout.readline()
+        assert line, process.communicate()[1][-1000:]
+        return process, json.loads(line)
+
+    def request(port, headers, body, path='/inputs/order'):
+        connection = HTTPConnection('127.0.0.1', port, timeout=10)
+        try:
+            connection.request('POST', path, body, headers)
+            response = connection.getresponse()
+            response.read()
+            return response.status, response.getheader('X-Pure-Error')
+        finally:
+            connection.close()
+
+    key = work / 'seal-receiver.key'
+    receiver, started = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'seal-b',
+                               '--key', key, '--sealed-only'])
+    port_b, public_key = started['port'], started['public_key']
+    assert len(public_key) == 64 and (key.stat().st_mode & 0o777) == 0o600, (public_key, oct(key.stat().st_mode))
+    seen = []
+
+    class Relay(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers['Content-Length']))
+            headers = {name: value for name, value in self.headers.items()
+                       if name.lower().startswith('x-pure-') or name.lower() in ('content-type', 'idempotency-key')}
+            seen.append((headers, body))
+            connection = HTTPConnection('127.0.0.1', port_b, timeout=10)
+            connection.request('POST', self.path, body, headers)
+            answer = connection.getresponse()
+            data = answer.read()
+            self.send_response(answer.status)
+            for name, value in answer.getheaders():
+                if name.lower().startswith('x-pure-'):
+                    self.send_header(name, value)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            connection.close()
+
+        def log_message(self, *args):
+            pass
+
+    relay = ThreadingHTTPServer(('127.0.0.1', 0), Relay)
+    port_relay = relay.server_address[1]
+    threading.Thread(target=relay.serve_forever, daemon=True).start()
+    sender, sender_started = start([pure / 'build/pure-serve', '--module', sender_module, '--store', work / 'seal-a',
+                                    '--send', f'ordered=http://127.0.0.1:{port_relay}/inputs/order',
+                                    '--seal', f'ordered={public_key}'])
+    port_a = sender_started['port']
+    stranger = None
+    try:
+        orders, total = 60, 0
+        for i in range(orders):
+            count = i % 7 + 1
+            total += count
+            assert request(port_a, {'Content-Type': 'application/json'},
+                           json.dumps({'item': f'secret-{i}', 'count': count}).encode(), '/inputs/buy')[0] == 200
+        deadline = time.time() + 20
+        while int(http(port_b, 'GET', '/views/count')[3]) < orders and time.time() < deadline:
+            time.sleep(0.05)
+        assert int(http(port_b, 'GET', '/views/count')[3]) == orders
+        assert int(http(port_b, 'GET', '/views/total')[3]) == total
+        assert seen and all('X-Pure-Seal' in headers for headers, _ in seen), seen[:1]
+        assert not any(b'secret' in body or b'item' in body or b'city' in body for _, body in seen)
+        headers, body = seen[0]
+        changed = bytearray(body)
+        changed[len(changed) // 2] ^= 1
+        assert request(port_b, headers, bytes(changed)) == (400, 'seal')
+        assert request(port_b, headers, body)[0] == 200  # heard before: applied once
+        plain = {name: value for name, value in headers.items() if name != 'X-Pure-Seal'}
+        assert request(port_b, plain, json.dumps({'item': 'plain', 'count': 1, 'to': {'city': 'x'}}).encode()) == \
+            (403, 'unsealed')
+        # A sender sealing to another node's key: the receiver cannot open it.
+        other, other_started = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'seal-c',
+                                      '--key', work / 'seal-other.key'])
+        other.terminate()
+        other.wait()
+        stranger, stranger_started = start([pure / 'build/pure-serve', '--module', sender_module, '--store',
+                                            work / 'seal-d', '--send', f'ordered=http://127.0.0.1:{port_relay}/inputs/order',
+                                            '--seal', f'ordered={other_started["public_key"]}'])
+        before = len(seen)
+        assert request(stranger_started['port'], {'Content-Type': 'application/json'},
+                       json.dumps({'item': 'stranger', 'count': 5}).encode(), '/inputs/buy')[0] == 200
+        deadline = time.time() + 5
+        while len(seen) == before and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2)
+        assert len(seen) > before and int(http(port_b, 'GET', '/views/count')[3]) == orders
+        # The same key file gives the same public key after a restart.
+        receiver.terminate()
+        receiver.wait()
+        receiver, again = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'seal-b',
+                                 '--key', key, '--sealed-only'])
+        assert again['public_key'] == public_key
+        return {'orders': orders, 'relayed': before, 'suite': seen[0][0]['X-Pure-Seal']}
+    finally:
+        for process in (sender, receiver, stranger):
+            if process:
+                process.terminate()
+                process.wait()
+        relay.shutdown()
+
+
 def server_webhook(aup, pure, work):
     """An output wired to a third-party HTTPS endpoint (a Python server with
     a certificate of its own): five orders arrive in order as JSON with the
@@ -1223,6 +1357,7 @@ def main():
         report['server_timer_beats'] = server_timers(aup, pure, work)
         report['server_links'] = server_links(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)
+        report['server_sealed'] = server_sealed(aup, pure, work)
         report['server_answers'] = server_answers(aup, pure, work)
     print(json.dumps(report))
 
