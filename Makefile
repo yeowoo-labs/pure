@@ -14,6 +14,8 @@ BUILD ?= build
 #   cli/    command-line hosts.
 # libpure.a is the app model with the tree store: what a host embeds (Vega's
 # surfaces link it). prototypes/ keeps the earlier document runtime (000-077).
+# Unit tests sit by their part (core/test-module.c, store/test-tree-store.c);
+# tests/check.py checks the hosts end to end.
 INCLUDES = -Icore
 MODEL = core/module.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c
 STORE = store/store-tree.c
@@ -54,6 +56,12 @@ $(BUILD)/test-tree-store: store/test-tree-store.c $(STORE) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -DPURE_STORE_TEST store/test-tree-store.c $(STORE) $(LDFLAGS) $(LDLIBS) -o $@
 
+# The HTTP host's checks build their apps with aup (the sibling checkout) and
+# compare documents with the earlier document server.
+AUP ?= ../aup
 check: all $(BUILD)/test-module $(BUILD)/test-tree-store
 	$(BUILD)/test-tree-store
 	$(BUILD)/test-module
+	$(MAKE) -C $(AUP) build/aup
+	$(MAKE) -C prototypes/connections BUILD=build/tree STORE=store-tree.c build/tree/pure-connections
+	python3 tests/check.py --aup $(AUP)/build/aup --aup-root $(AUP)

@@ -23,8 +23,10 @@ The source follows the principle below, a small core with the rest selected arou
 | `serve/` | `pure-serve`: the HTTP host, outbound delivery, JSON read in place | `build/pure-serve` |
 | `cli/` | command-line hosts | `build/pure-run`, `build/pure-edit-module` |
 | `prototypes/` | the earlier document runtime (000-077), built against `core/` and `store/` | `make -C prototypes/connections` |
+| `tests/` | the hosts checked end to end, with apps built by aup (the sibling checkout) | `make check` |
 
-`make` builds the library and the hosts, `make check` runs the store's and the app model's tests. Interfaces for
+`make` builds the library and the hosts; `make check` runs the store's and the app model's unit tests (beside
+their parts) and then `tests/check.py`. Interfaces for
 people are [Vega](/srv/git/vega.git), which links `libpure.a`. The text below records the earlier document runtime
 this grew from.
 

@@ -33,6 +33,11 @@
 | `cli/` | 명령행 호스트 | `build/pure-run`, `build/pure-edit-module` |
 | `prototypes/` | 이전 문서 런타임. `core/`와 `store/`를 가져다 빌드한다 | `make -C prototypes/connections` |
 
+검사도 부품을 따른다. 부품의 단위 검사는 그 옆에(`core/test-module.c`, `store/test-tree-store.c`), 저장소 전체를 끝에서
+끝까지 보는 검사는 `tests/check.py`에 둔다. aup와 Vega도 같다(aup `compiler/`, Vega `lib/`·`surfaces/`·`symbols/`, 둘 다
+`tests/check.py`). pure-serve의 HTTP 검사는 전에 aup의 검사 안에 있었다. 호스트를 바꾸면 aup에서 확인해야 했던 것이다.
+이제 Pure의 `make check`가 aup로 앱을 빌드해 돌린다(Vega가 aup와 pure-serve를 쓰는 것과 같은 방향이다).
+
 저장소 계약(`state.h`, `store.h`)은 코어 쪽에 둔다. 코어가 필요한 것을 정하고 저장소 구현이 그것을 채운다. 트리
 저장소는 그 계약의 한 구현이다(이전 세대의 `store.c`, `store-paged.c`도 `store.h`의 구현이다).
 

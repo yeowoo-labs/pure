@@ -358,7 +358,7 @@ text·리스트가 남을 때만 위치를 유지한다.
   응답만 복사한다. PUT 응답은 요청 본문에서 빌려야 하므로 `edit` 핸들러는 메시지 필드만 응답할 수
   있다(`reply edit.insert`). 시작할 때 확인한다.
 
-성능과 비교는 [연구 075](../research/075-http-host-against-axum.md). 검증(aup `make check`): 무작위 요청에 기존 서버와
+성능과 비교는 [연구 075](../research/075-http-host-against-axum.md). 검증(Pure `make check`의 `tests/check.py`, 앱은 aup가 빌드): 무작위 요청에 기존 서버와
 상태 코드·ETag·오류·본문이 같고, 동시 편집이 커밋을 나누어 쓰며, `kill -9` 뒤에도 확인 응답한 편집이 모두 남는다.
 앱 라우트는 키 있는 리스트 앱에 무작위 POST(쿼리 필드와 본문을 가진 메시지, text, 키)와 GET(수, text, 표의 쪽)을
 800번 보내 상태 코드·오류·본문·JSON 행이 파이썬 모델과 같고, 멈췄다 다시 띄워도, 여섯 클라이언트가 보내는 중에
