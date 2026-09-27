@@ -1033,23 +1033,46 @@ static void publish(Executor *ex) {
     ++ex->publications;
 }
 
-/* The saved sends of wired outputs not queued yet go to their wires, in order;
- * a wire that cannot take one takes the rest at a later save. */
-typedef struct { Executor *executor; bool blocked[PURE_MODULE_INPUTS]; } Queueing;
+/* The saved sends of wired outputs not queued yet go to their wires, in
+ * order; a wire that cannot take one takes the rest at a later save. The
+ * outbox is looked at newest first, only as far back as the new sends go,
+ * however many older ones wait for their receivers. */
+typedef struct { uint32_t wire; uint64_t seq; PureSpan payload; } Fresh;
+typedef struct { Executor *executor; Fresh *fresh; size_t count, capacity; unsigned done; bool failed; } Queueing;
 
-static bool queue_send(void *context, uint32_t output, uint64_t seq, PureSpan payload) {
+static bool find_fresh(void *context, uint32_t output, uint64_t seq, PureSpan payload) {
     Queueing *q = context;
     Executor *ex = q->executor;
-    for (unsigned i = 0; i < ex->wire_count; ++i)
-        if (pure_wire_output(ex->wires[i]) == output && !q->blocked[i] && seq > pure_wire_queued(ex->wires[i]))
-            q->blocked[i] = !pure_wire_queue(ex->wires[i], seq, payload);
-    return true;
+    for (unsigned i = 0; i < ex->wire_count; ++i) {
+        if (pure_wire_output(ex->wires[i]) != output || (q->done >> i & 1)) continue;
+        if (seq <= pure_wire_queued(ex->wires[i])) {
+            q->done |= 1u << i; /* older ones were queued before */
+            break;
+        }
+        if (q->count == q->capacity) {
+            size_t capacity = q->capacity ? 2 * q->capacity : 64;
+            Fresh *grown = realloc(q->fresh, capacity * sizeof(*grown));
+            if (!grown) { q->failed = true; return false; }
+            q->fresh = grown;
+            q->capacity = capacity;
+        }
+        q->fresh[q->count++] = (Fresh){i, seq, payload};
+        break;
+    }
+    return q->done != (ex->wire_count >= 32 ? UINT32_MAX : (1u << ex->wire_count) - 1);
 }
 
 static void after_save(Executor *ex) {
     publish(ex);
+    if (!ex->wire_count) return;
     Queueing q = {.executor = ex};
-    if (ex->wire_count) pure_app_outbox(&ex->app, queue_send, &q);
+    pure_app_outbox_newest(&ex->app, find_fresh, &q);
+    bool blocked[PURE_MODULE_INPUTS] = {false};
+    for (size_t k = q.failed ? 0 : q.count; k-- > 0;) {
+        const Fresh *f = &q.fresh[k];
+        if (!blocked[f->wire]) blocked[f->wire] = !pure_wire_queue(ex->wires[f->wire], f->seq, f->payload);
+    }
+    free(q.fresh);
 }
 
 /* The answers the wires made become events, in order; then what the wires

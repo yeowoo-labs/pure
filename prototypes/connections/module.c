@@ -1668,6 +1668,13 @@ void pure_app_outbox(const PureApp *app, PureSentVisit visit, void *context) {
     }
 }
 
+void pure_app_outbox_newest(const PureApp *app, PureSentVisit visit, void *context) {
+    for (size_t i = app->sent_durable; i-- > 0;) {
+        const struct PureSent *sent = &app->sent[i];
+        if (!sent->trimmed && !visit(context, sent->output, sent->seq, (PureSpan){sent->payload, sent->size})) return;
+    }
+}
+
 void pure_app_trim(PureApp *app, uint32_t output, uint64_t through) {
     for (size_t i = 0; i < app->sent_durable; ++i)
         if (app->sent[i].output == output && app->sent[i].seq <= through && !app->sent[i].trimmed) {
