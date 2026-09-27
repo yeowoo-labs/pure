@@ -33,8 +33,9 @@ $(BUILD)/libpure.a: $(OBJECTS)
 	$(AR) rcs $@ $^
 
 # The runtime's tickets and budgets, with effects completed off the owner thread.
+# It links after the library, last as it always was, so code keeps its place.
 $(BUILD)/pure-serve: $(SERVE) core/runtime.c $(BUILD)/libpure.a $(HEADERS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve -DPURE_ASYNC_EFFECTS $(SERVE) core/runtime.c $(BUILD)/libpure.a \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve -DPURE_ASYNC_EFFECTS $(SERVE) $(BUILD)/libpure.a core/runtime.c \
 		$(LDFLAGS) -lssl -lcrypto -lm -pthread $(LDLIBS) -o $@
 
 $(BUILD)/pure-run: cli/pure-run.c $(BUILD)/libpure.a $(HEADERS)

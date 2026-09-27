@@ -141,6 +141,8 @@ def main():
     parser.add_argument('--rounds', type=int, default=1, help='repeat every server, rotating their order')
     parser.add_argument('--pause', type=float, default=0, help='seconds to rest the device between runs')
     parser.add_argument('--budget', type=int, default=64 << 20, help="Pure's payload budget in bytes")
+    parser.add_argument('--baseline', type=Path, help='another pure-serve binary (an earlier build) run in turn with this '
+                        "one, as pure-serve-baseline; --threads N as pure-serve-N's")
     args = parser.parse_args()
     axum = HERE / 'axum-baseline/target/release/axum-baseline'
     drogon = HERE / 'drogon-baseline/drogon-baseline'
@@ -154,6 +156,10 @@ def main():
                                    '--budget', str(args.budget), '--threads', '3'],
         'pure-serve-2': lambda d: [PURE / 'build/pure-serve', '--module', args.module, '--store', d, '--port', '0',
                                    '--budget', str(args.budget), '--threads', '2'],
+        **({f'pure-serve{suffix}-baseline': (lambda threads: lambda d: [args.baseline.resolve(), '--module', args.module, '--store', d,
+                                                                         '--port', '0', '--budget', str(args.budget),
+                                                                         *(['--threads', threads] if threads else [])])(threads)
+            for suffix, threads in (('', ''), ('-3', '3'), ('-2', '2'))} if args.baseline else {}),
         'axum-memory': lambda d: [axum, '--port', '0'],
         'axum-durable': lambda d: [axum, '--port', '0', '--durable', d],
         'axum-atomic': lambda d: [axum, '--port', '0', '--atomic', d],
