@@ -156,6 +156,7 @@ typedef struct {
     pthread_cond_t waiting;
     Job *jobs;
     size_t count, capacity;
+    uint64_t arrivals; /* requests handed to the owner, ever */
     bool stopping;
     Host *hosts;
     unsigned host_count;
@@ -1328,6 +1329,7 @@ static void serve_bursts(Host *host) {
             if (!grow(&owner->jobs, &owner->capacity, owner->count + handed, sizeof(*owner->jobs))) abort();
             for (size_t i = 0; i < count; ++i)
                 if (!snapshot || host->jobs[i].route.kind != ROUTE_VIEW) owner->jobs[owner->count++] = host->jobs[i];
+            owner->arrivals += handed;
             pthread_cond_signal(&owner->waiting);
             pthread_mutex_unlock(&owner->lock);
             host->pending += handed;
@@ -1367,6 +1369,7 @@ static void *run_owner(void *context) {
     Job *spare = NULL;
     size_t spare_capacity = 0;
     bool gather = false;
+    uint64_t answered_at = 0; /* arrivals when the last round's answers were handed back */
     for (;;) {
         pthread_mutex_lock(&owner->lock);
         /* Wait for requests, or until the next timer is due. */
@@ -1387,15 +1390,20 @@ static void *run_owner(void *context) {
         /* After a round that saved, its answers bring requests back from the
          * connection threads: gather them until none has come for 100 µs (a
          * millisecond at most), so they share one save as they would on a
-         * single thread, where answering takes that long anyway. */
+         * single thread, where answering takes that long anyway. The quiet
+         * counts only once a request came after the answers: requests that
+         * waited out the save alone would otherwise start the next round
+         * without the clients just answered, and the clients would settle
+         * into two halves taking turns, each save carrying half of them. */
         struct timespec now, end;
         clock_gettime(CLOCK_REALTIME, &now);
         end = later(now, 1000000);
         while (gather && owner->count && !owner->stopping && before(now, end)) {
             size_t seen = owner->count;
+            bool returned = owner->arrivals != answered_at;
             struct timespec quiet = later(now, 100000);
-            pthread_cond_timedwait(&owner->waiting, &owner->lock, before(quiet, end) ? &quiet : &end);
-            if (owner->count == seen) break;
+            pthread_cond_timedwait(&owner->waiting, &owner->lock, returned && before(quiet, end) ? &quiet : &end);
+            if (returned && owner->count == seen) break;
             clock_gettime(CLOCK_REALTIME, &now);
         }
         if (!owner->count) {
@@ -1411,6 +1419,9 @@ static void *run_owner(void *context) {
         owner->executor.wrote = false;
         execute(&owner->executor, jobs, count, hand_back, owner);
         gather = owner->executor.wrote;
+        pthread_mutex_lock(&owner->lock);
+        answered_at = owner->arrivals;
+        pthread_mutex_unlock(&owner->lock);
         spare = jobs;
         spare_capacity = capacity;
     }
