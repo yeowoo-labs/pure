@@ -29,6 +29,7 @@
  * for a module with them, one more thread owns the app, and the connection
  * threads hand it their ready requests and answer what it hands back. Its
  * bursts take the requests of every thread, one save each. */
+#include "deliver.h"
 #include "module-store.h"
 #include "module-text.h"
 #include "runtime.h"
@@ -57,7 +58,7 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { HEADER_LIMIT = 4096, EVENTS = 256 };
+enum { HEADER_LIMIT = 4096, EVENTS = 256, BATCH = 256 };
 typedef enum { CLOSED, READING_HEAD, READING_BODY, WAITING, WRITING } Phase;
 typedef struct Host Host;
 
@@ -89,6 +90,9 @@ typedef struct Connection {
     bool given[PURE_MODULE_FIELDS], json;
     uint32_t input;
     unsigned char *ingress;
+    char source[PURE_SOURCE + 1]; /* a delivered message's sender (X-Pure-Source), or empty */
+    uint64_t sequence;            /* and its number (X-Pure-Sequence) */
+    unsigned batch;               /* how many numbered messages the body holds (X-Pure-Count) */
     int64_t expected;
     size_t body_size, received, in_used;
     unsigned char *body;
@@ -142,6 +146,10 @@ typedef struct {
     pthread_mutex_t published_lock;
     PureSnapshot *published;
     uint64_t published_changes, publications;
+    /* The owner's: outputs wired to HTTP receivers, and how far each was trimmed. */
+    PureWire *wires[PURE_MODULE_INPUTS];
+    unsigned wire_count;
+    uint64_t trimmed[PURE_MODULE_INPUTS];
 } Executor;
 
 /* A request made ready: its effect, what it names, and the thread that answers it. */
@@ -159,6 +167,7 @@ typedef struct {
     size_t count, capacity;
     uint64_t arrivals; /* requests handed to the owner, ever */
     bool stopping;
+    bool delivered; /* a wire delivered a send: trim it */
     Host *hosts;
     unsigned host_count;
 } Owner;
@@ -269,10 +278,13 @@ static void respond_typed(Connection *c, int status, const char *reason, const c
                           const char *type, const struct iovec *extents, size_t count, size_t size) {
     char tag[48] = "";
     if (revision > 0) snprintf(tag, sizeof(tag), "ETag: \"%" PRId64 "\"\r\n", revision);
+    /* A delivery's answer tells how many numbered messages one request may carry. */
+    char batch[32] = "";
+    if (*c->source) snprintf(batch, sizeof(batch), "X-Pure-Batch: %d\r\n", BATCH);
     int length = snprintf(c->head, sizeof(c->head),
         "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\n%sContent-Type: %s\r\n"
-        "Cache-Control: no-store\r\nX-Pure-Error: %s\r\n%s\r\n",
-        status, reason, size, c->keep_alive ? "" : "Connection: close\r\n", type, error, tag);
+        "Cache-Control: no-store\r\nX-Pure-Error: %s\r\n%s%s\r\n",
+        status, reason, size, c->keep_alive ? "" : "Connection: close\r\n", type, error, tag, batch);
     c->out = count < sizeof(c->small) / sizeof(*c->small) ? c->small : malloc((count + 1) * sizeof(*c->out));
     c->phase = WRITING;
     if (!c->out) { c->keep_alive = false; c->out = c->small; count = 0; } /* cannot send it: the close tells */
@@ -396,6 +408,10 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     if ((c->route == ROUTE_OBJECT && (c->post || *query)) || (c->route == ROUTE_VIEW && (c->put || c->post)) ||
         (c->route == ROUTE_INPUT && !c->post)) return false;
     bool length_seen = false, condition_seen = false, host_seen = false;
+    c->source[0] = 0;
+    c->sequence = 0;
+    c->batch = 1;
+    bool counted = false;
     c->body_size = 0;
     c->json = false;
     c->expected = -1;
@@ -437,16 +453,34 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
         } else if (!strcasecmp(line, "Connection")) {
             if (!strcasecmp(value, "close")) c->keep_alive = false;
             else if (strcasecmp(value, "keep-alive")) return false;
+        } else if (!strcasecmp(line, "X-Pure-Source")) {
+            /* A message delivered from another app's output: applied once per number. */
+            size_t length = strlen(value);
+            if (*c->source || !length || length > PURE_SOURCE) return false;
+            for (size_t i = 0; i < length; ++i) if (value[i] <= ' ' || value[i] > '~') return false;
+            memcpy(c->source, value, length + 1);
+        } else if (!strcasecmp(line, "X-Pure-Sequence")) {
+            if (c->sequence || !number(value, UINT64_MAX, &n) || !n) return false;
+            c->sequence = n;
+        } else if (!strcasecmp(line, "X-Pure-Count")) {
+            /* Numbered messages from X-Pure-Sequence on, as a JSON array. */
+            if (counted || !number(value, BATCH, &n) || !n) return false;
+            c->batch = (unsigned)n;
+            counted = true;
         } else if (!strcasecmp(line, "Transfer-Encoding") || !strcasecmp(line, "Expect")) return false;
         line = next + 2;
     }
+    if (!*c->source != !c->sequence || (*c->source && c->route != ROUTE_INPUT) || (counted && !*c->source) ||
+        c->sequence > UINT64_MAX - c->batch) return false;
     if (c->put) return host_seen && length_seen && condition_seen;
     if (c->post) return host_seen && !condition_seen; /* no Content-Length: no body */
     return host_seen && !condition_seen && c->body_size == 0;
 }
 
 static void put_u32(unsigned char *p, uint32_t v) { for (unsigned i = 0; i < 4; ++i) p[i] = (unsigned char)(v >> (8 * i)); }
+static void put_u64(unsigned char *p, uint64_t v) { for (unsigned i = 0; i < 8; ++i) p[i] = (unsigned char)(v >> (8 * i)); }
 static uint32_t get_u32(const unsigned char *p) { return p[0] | p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static uint64_t get_u64(const unsigned char *p) { return get_u32(p) | (uint64_t)get_u32(p + 4) << 32; }
 
 /* A JSON number's text: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?, its
  * length (0 if there is none). An integer has neither part after it. */
@@ -512,6 +546,8 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
     const PureInputShape *shape = route->kind == ROUTE_INPUT ? &m->input[found] : NULL;
     bool message = shape && shape->kind == PURE_KIND_MESSAGE;
     if (message && shape->keyed) return "keyed";
+    if (*c->source && !message) return "delivery";
+    if (!host->owner) c->source[0] = 0; /* an app without states or outputs applies it as a message */
     if (shape) {
         /* A body is a text input's text, a message's one variable field, or a
          * JSON object of a message's fields (two variable fields need one). */
@@ -552,6 +588,10 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
         uint8_t type = m->field[shape->field_start + f].type;
         if ((type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER) && !c->given[f]) return "missing_field";
     }
+    for (uint32_t f = 0; c->batch > 1 && f < shape->field_count; ++f)
+        if (c->given[f]) return "delivery"; /* a batch's fields are all in its objects */
+    if (c->batch > 1 && !c->json) return "delivery";
+    if (!*c->source) c->batch = 1;
     return NULL;
 }
 
@@ -636,6 +676,12 @@ static size_t json_space(const unsigned char *p, size_t at, size_t size) {
 /* Parsing a JSON body in place: the payload it is in, the placed fields'
  * table, and which fields it gave. */
 #define PLACED (UINT32_C(1) << 31)
+/* After the size: a delivered message's number (u64le), how many follow it
+ * (u32le: a batch) and its source (u8 length and the bytes), in DELIVERY
+ * bytes before the tables; then a table for each message, a prefix for each
+ * and the JSON. */
+#define DELIVERED (UINT32_C(1) << 30)
+enum { DELIVERY = 80 };
 typedef struct {
     Connection *c;
     const PureInputShape *shape;
@@ -735,16 +781,31 @@ static const char *members(Body *b, unsigned char *json, size_t size, size_t *at
  * NULL, or the error to answer. */
 static const char *convert(Connection *c) {
     const PureInputShape *shape = &c->host->module->input[c->input];
-    Body b = {.c = c, .shape = shape, .table = c->ingress + 4};
-    b.payload = b.table + 8 * shape->field_count;
+    uint32_t delivered = get_u32(c->ingress) & DELIVERED;
+    size_t table = 8 * (size_t)shape->field_count;
+    unsigned char *tables = c->ingress + 4 + (delivered ? DELIVERY : 0), *prefixes = tables + c->batch * table;
     unsigned char *json = c->body;
     size_t size = c->body_size, at = json_space(json, 0, size);
-    const char *why = members(&b, json, size, &at, "", 0);
-    if (why) return why;
+    /* A batch is an array of its messages' objects. */
+    if (c->batch > 1) {
+        if (at == size || json[at++] != '[') return "json";
+        at = json_space(json, at, size);
+    }
+    for (unsigned i = 0; i < c->batch; ++i) {
+        if (i) {
+            if (at == size || json[at++] != ',') return "json";
+            at = json_space(json, at, size);
+        }
+        Body b = {.c = c, .shape = shape, .table = tables + i * table, .payload = prefixes + i * c->field_bytes};
+        const char *why = members(&b, json, size, &at, "", 0);
+        if (why) return why;
+        at = json_space(json, at, size);
+        for (uint32_t f = 0; f < shape->field_count; ++f)
+            if (!b.seen[f] && !c->given[f]) return "missing_field";
+    }
+    if (c->batch > 1 && (at == size || json[at++] != ']')) return "json";
     if (json_space(json, at, size) != size) return "json";
-    for (uint32_t f = 0; f < shape->field_count; ++f)
-        if (!b.seen[f] && !c->given[f]) return "missing_field";
-    put_u32(c->ingress, (uint32_t)(c->field_bytes + c->body_size) | PLACED);
+    put_u32(c->ingress, (uint32_t)(c->batch * c->field_bytes + c->body_size) | PLACED | delivered);
     return NULL;
 }
 
@@ -781,7 +842,10 @@ static void start_request(Connection *c, size_t head_size) {
      * the payload (the fixed fields, then the body), and room for its JSON. */
     bool write = route.kind == ROUTE_INPUT || c->put;
     size_t table = route.kind == ROUTE_INPUT && c->json ? 8 * (size_t)host->module->input[c->input].field_count : 0;
-    size_t input_size = route.kind == ROUTE_INPUT ? 4 + table + c->field_bytes + c->body_size : write ? c->body_size : 0;
+    size_t lead = 4 + (route.kind == ROUTE_INPUT && *c->source ? DELIVERY : 0);
+    /* A batch has a table and a prefix for each of its messages. */
+    size_t input_size = route.kind == ROUTE_INPUT ? lead + c->batch * (table + c->field_bytes) + c->body_size :
+                        write ? c->body_size : 0;
     PureResult admitted = pure_runtime_accept(&host->runtime, write ? PURE_INPUT_WRITE : PURE_INPUT_READ, c->key,
                                               route.kind == ROUTE_INPUT ? 0 : c->expected, input_size, &c->ticket);
     if (admitted != PURE_OK) {
@@ -797,9 +861,16 @@ static void start_request(Connection *c, size_t head_size) {
     unsigned char *ingress = c->ingress = pure_runtime_ingress(c->ticket, NULL); /* NULL for no bytes */
     c->body = ingress;
     if (route.kind == ROUTE_INPUT) {
-        put_u32(ingress, (uint32_t)(c->field_bytes + c->body_size));
-        if (c->field_bytes) memcpy(ingress + 4 + table, c->fields, c->field_bytes);
-        c->body = ingress + 4 + table + c->field_bytes;
+        put_u32(ingress, (uint32_t)(c->batch * c->field_bytes + c->body_size) | (lead > 4 ? DELIVERED : 0));
+        if (lead > 4) {
+            size_t length = strlen(c->source);
+            put_u64(ingress + 4, c->sequence);
+            put_u32(ingress + 12, c->batch);
+            ingress[16] = (unsigned char)length;
+            memcpy(ingress + 17, c->source, length);
+        }
+        if (c->field_bytes) memcpy(ingress + lead + c->batch * table, c->fields, c->field_bytes);
+        c->body = ingress + lead + c->batch * (table + c->field_bytes);
     }
     size_t take = c->in_used < c->body_size ? c->in_used : c->body_size;
     if (take) memcpy(c->body, c->in, take);
@@ -1072,8 +1143,10 @@ static PureResult show_view(PureApp *app, const Route *route, size_t available, 
 static PureResult apply_input(PureApp *app, const Route *route, const PureEffect *effect, Applied *out) {
     const PureInputShape *shape = &app->module->input[route->target];
     uint32_t header = get_u32(effect->value.data);
-    size_t table = header & PLACED ? 8 * (size_t)shape->field_count : 0;
-    PureSpan payload = {effect->value.data + 4 + table, header & ~PLACED};
+    const unsigned char *delivery = effect->value.data + 4;
+    unsigned batch = header & DELIVERED ? get_u32(delivery + 8) : 1;
+    size_t lead = 4 + (header & DELIVERED ? DELIVERY : 0), table = header & PLACED ? 8 * (size_t)shape->field_count : 0;
+    PureSpan payload = {effect->value.data + lead + batch * table, header & ~(PLACED | DELIVERED)};
     PureResult status;
     if (shape->kind == PURE_KIND_TEXT) {
         status = pure_app_text(app, route->target, payload);
@@ -1083,9 +1156,24 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
     } else {
         uint32_t placed[2 * PURE_MODULE_FIELDS];
         for (size_t i = 0; table && i < 2 * (size_t)shape->field_count; ++i)
-            placed[i] = get_u32(effect->value.data + 4 + 4 * i);
-        status = table ? pure_app_message_fields(app, route->target, NULL, -1, payload, placed) :
-                         pure_app_message(app, route->target, NULL, -1, payload);
+            placed[i] = get_u32(effect->value.data + lead + 4 * i);
+        if (header & DELIVERED) {
+            char source[PURE_SOURCE + 1];
+            memcpy(source, delivery + 13, delivery[12]);
+            source[delivery[12]] = 0;
+            status = pure_app_deliver(app, route->target, source, get_u64(delivery), payload, table ? placed : NULL);
+            /* The rest of a batch, in order: an app's refusal was heard and the
+             * batch goes on; another failure stops it, to be sent again. */
+            for (unsigned i = 1; i < batch && (status == PURE_OK || app->fault != PURE_FAULT_NONE); ++i) {
+                const unsigned char *at = effect->value.data + lead + i * table;
+                for (size_t k = 0; k < 2 * (size_t)shape->field_count; ++k) placed[k] = get_u32(at + 4 * k);
+                PureSpan next = {payload.data + i * shape->prefix, payload.size - i * shape->prefix};
+                status = pure_app_deliver(app, route->target, source, get_u64(delivery) + i, next, placed);
+            }
+            if (batch > 1 && app->fault != PURE_FAULT_NONE) status = PURE_OK;
+        } else
+            status = table ? pure_app_message_fields(app, route->target, NULL, -1, payload, placed) :
+                             pure_app_message(app, route->target, NULL, -1, payload);
         Reply reply = {0};
         if (status == PURE_OK) pure_app_reply(app, measure_reply, &reply);
         out->reply = (PureSpan){reply.size ? reply.first : NULL, reply.size};
@@ -1154,6 +1242,35 @@ static void publish(Executor *ex) {
     ++ex->publications;
 }
 
+/* The saved sends of wired outputs not queued yet go to their wires, in order;
+ * a wire that cannot take one takes the rest at a later save. */
+typedef struct { Executor *executor; bool blocked[PURE_MODULE_INPUTS]; } Queueing;
+
+static bool queue_send(void *context, uint32_t output, uint64_t seq, PureSpan payload) {
+    Queueing *q = context;
+    Executor *ex = q->executor;
+    for (unsigned i = 0; i < ex->wire_count; ++i)
+        if (pure_wire_output(ex->wires[i]) == output && !q->blocked[i] && seq > pure_wire_queued(ex->wires[i]))
+            q->blocked[i] = !pure_wire_queue(ex->wires[i], seq, payload);
+    return true;
+}
+
+static void after_save(Executor *ex) {
+    publish(ex);
+    Queueing q = {.executor = ex};
+    if (ex->wire_count) pure_app_outbox(&ex->app, queue_send, &q);
+}
+
+/* What the wires delivered leaves the outbox (with the next save). */
+static void trim_delivered(Executor *ex) {
+    for (unsigned i = 0; i < ex->wire_count; ++i) {
+        uint64_t delivered = pure_wire_delivered(ex->wires[i]);
+        if (delivered <= ex->trimmed[i]) continue;
+        pure_app_trim(&ex->app, pure_wire_output(ex->wires[i]), delivered);
+        ex->trimmed[i] = delivered;
+    }
+}
+
 /* One save for a burst: its requests are durable with it or fail with it. */
 static void save_burst(Executor *ex, Applied *applied, size_t count) {
     if (!count) return;
@@ -1161,7 +1278,7 @@ static void save_burst(Executor *ex, Applied *applied, size_t count) {
         ex->wrote = ex->wrote || (applied[i].status == PURE_OK && applied[i].input == PURE_INPUT_WRITE);
     PureResult saved = pure_app_save(&ex->app);
     ++ex->bursts;
-    if (saved == PURE_OK) publish(ex);
+    if (saved == PURE_OK) after_save(ex);
     for (size_t i = 0; i < count; ++i)
         if (applied[i].status == PURE_OK) applied[i].status = saved;
 }
@@ -1230,7 +1347,7 @@ static long run_timers(Executor *ex) {
         }
         if (soonest < 0 || ex->next[i] - now < soonest) soonest = ex->next[i] - now;
     }
-    if (ticked && pure_app_save(&ex->app) == PURE_OK) publish(ex); /* a failed save undoes the ticks */
+    if (ticked && pure_app_save(&ex->app) == PURE_OK) after_save(ex); /* a failed save undoes the ticks */
     return soonest < 0 ? -1 : (long)ceil(soonest);
 }
 
@@ -1376,12 +1493,17 @@ static void *run_owner(void *context) {
     uint64_t answered_at = 0; /* arrivals when the last round's answers were handed back */
     for (;;) {
         pthread_mutex_lock(&owner->lock);
-        /* Wait for requests, or until the next timer is due. */
+        /* Wait for requests, or until the next timer is due; trim what the
+         * wires delivered meanwhile. */
         for (;;) {
+            bool delivered = owner->delivered;
+            owner->delivered = false;
             pthread_mutex_unlock(&owner->lock);
             long due = run_timers(&owner->executor);
+            if (delivered) trim_delivered(&owner->executor);
             pthread_mutex_lock(&owner->lock);
             if (owner->count || owner->stopping) break;
+            if (owner->delivered) continue;
             if (due < 0) {
                 pthread_cond_wait(&owner->waiting, &owner->lock);
                 continue;
@@ -1654,6 +1776,44 @@ static void stop_shard(Host *host) {
     free(host->views);
 }
 
+/* A wire delivered a send: the owner trims it. */
+static void wire_delivered(void *context) {
+    Owner *owner = context;
+    pthread_mutex_lock(&owner->lock);
+    owner->delivered = true;
+    pthread_cond_signal(&owner->waiting);
+    pthread_mutex_unlock(&owner->lock);
+}
+
+/* --send OUTPUT=URL: that output's saved sends go to url, from NAME.OUTPUT. */
+static bool open_wires(Executor *ex, const PureModule *m, const char *const *sends, unsigned count, const char *name) {
+    for (unsigned i = 0; i < count; ++i) {
+        const char *equals = strchr(sends[i], '=');
+        char output[PURE_MODULE_NAME], source[PURE_SOURCE + 2], error[160];
+        size_t length = equals ? (size_t)(equals - sends[i]) : 0;
+        if (!length || length >= sizeof(output)) {
+            fprintf(stderr, "--send takes OUTPUT=URL, not %s\n", sends[i]);
+            return false;
+        }
+        memcpy(output, sends[i], length);
+        output[length] = 0;
+        int written = snprintf(source, sizeof(source), "%s.%s", name, output);
+        PureWire *wire = written > 0 && written <= PURE_SOURCE ? pure_wire_open(m, output, equals + 1, source, error, sizeof(error)) : NULL;
+        if (!wire) {
+            fprintf(stderr, "--send %s: %s\n", sends[i], written > PURE_SOURCE ? "the name and output are longer than 64 bytes" : error);
+            return false;
+        }
+        for (unsigned k = 0; k < ex->wire_count; ++k)
+            if (pure_wire_output(ex->wires[k]) == pure_wire_output(wire)) {
+                fprintf(stderr, "--send %s: the output is wired already\n", sends[i]);
+                pure_wire_close(wire);
+                return false;
+            }
+        ex->wires[ex->wire_count++] = wire;
+    }
+    return true;
+}
+
 /* --threads auto: a connection thread for each CPU this process may run on,
  * less the one the owner of an app with states takes. */
 static unsigned auto_threads(bool owner) {
@@ -1667,7 +1827,8 @@ static unsigned auto_threads(bool owner) {
 int main(int argc, char **argv) {
     static PureModule module;
     static Owner owner;
-    const char *module_path = NULL, *store = NULL;
+    const char *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS];
+    unsigned send_count = 0;
     unsigned port = 8767, threads = 1;
     size_t budget = 64u << 20, capacity = 1024;
     uint64_t timeout_ms = 10000;
@@ -1676,6 +1837,8 @@ int main(int argc, char **argv) {
         if (i + 1 == argc) goto usage;
         if (!strcmp(argv[i], "--module")) module_path = argv[i + 1];
         else if (!strcmp(argv[i], "--store")) store = argv[i + 1];
+        else if (!strcmp(argv[i], "--send") && send_count < PURE_MODULE_INPUTS) sends[send_count++] = argv[i + 1];
+        else if (!strcmp(argv[i], "--name")) name = argv[i + 1];
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
@@ -1697,16 +1860,30 @@ int main(int argc, char **argv) {
     Host *hosts = calloc(threads, sizeof(*hosts));
     pthread_t *thread = calloc(threads, sizeof(*thread)), owner_thread;
     if (!hosts || !thread) return 1;
-    /* States have one owner on a thread of its own, whose snapshots the
-     * connection threads read. */
-    bool owned = module.states;
+    /* States (and outputs, whose sends are the app's state) have one owner on
+     * a thread of its own, whose snapshots the connection threads read. */
+    bool outputs = false;
+    for (uint32_t i = 0; i < module.inputs; ++i) outputs = outputs || module.input[i].kind == PURE_KIND_OUTPUT;
+    bool owned = module.states || outputs;
+    /* The sender's name: --name, or the module file's name without .pmod. */
+    char stem[PURE_SOURCE + 1];
+    if (!name) {
+        const char *base = strrchr(module_path, '/') ? strrchr(module_path, '/') + 1 : module_path;
+        size_t length = strlen(base);
+        if (length > 5 && !strcmp(base + length - 5, ".pmod")) length -= 5;
+        snprintf(stem, sizeof(stem), "%.*s", (int)length, base);
+        name = stem;
+    }
     if (owned) {
         if (!start_executor(&owner.executor, &module, show, edit, store) || pthread_mutex_init(&owner.lock, NULL) ||
             pthread_cond_init(&owner.waiting, NULL) || pthread_mutex_init(&owner.executor.published_lock, NULL))
             return 1;
         owner.executor.reads_first = true;
         owner.executor.publishes = true;
-        publish(&owner.executor);
+        if (!open_wires(&owner.executor, &module, sends, send_count, name)) return 2;
+        after_save(&owner.executor); /* the snapshot, and the sends stored before */
+        for (unsigned i = 0; i < owner.executor.wire_count; ++i)
+            if (!pure_wire_start(owner.executor.wires[i], wire_delivered, &owner)) { fputs("Cannot start a wire\n", stderr); return 1; }
         owner.hosts = hosts;
         owner.host_count = threads;
     }
@@ -1746,6 +1923,14 @@ int main(int argc, char **argv) {
         expired += hosts[i].expired;
         stop_shard(&hosts[i]);
     }
+    uint64_t delivered = 0, attempts = 0;
+    for (unsigned i = 0; i < owner.executor.wire_count; ++i) {
+        uint64_t d, a;
+        pure_wire_counts(owner.executor.wires[i], &d, &a);
+        delivered += d;
+        attempts += a;
+        pure_wire_close(owner.executor.wires[i]); /* what was not delivered stays in the outbox */
+    }
     if (owned) {
         stop_executor(&owner.executor);
         free(owner.jobs);
@@ -1755,14 +1940,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "{\"active\":%zu,\"retained_payload_bytes\":%zu,\"accepted\":%" PRIu64 ",\"requests\":%" PRIu64
             ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"ticks\":%" PRIu64 ",\"expired\":%" PRIu64
             ",\"threads\":%u,\"owner\":%s,\"snapshots\":%" PRIu64 ",\"views_from_snapshots\":%" PRIu64
-            ",\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
+            ",\"delivered\":%" PRIu64 ",\"delivery_attempts\":%" PRIu64 ",\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
-            owner.executor.publications, shown, groups, grouped);
+            owner.executor.publications, shown, delivered, attempts, groups, grouped);
     free(hosts);
     free(thread);
     return 0;
 usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
-          "[--connections 1024] [--timeout-ms 10000]\n", stderr);
+          "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=http://host:port/path ...] [--name NAME]\n", stderr);
     return 2;
 }

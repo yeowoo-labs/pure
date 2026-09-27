@@ -2581,7 +2581,7 @@ static PureResult deliver(PureApp *app, const char *source, uint64_t seq, const 
     memcpy(payload, &count, 4);
     memcpy(payload + 4, &total, 8);
     memcpy(payload + 12, item, length);
-    PureResult result = pure_app_deliver(app, 0, source, seq, (PureSpan){payload, 12 + length});
+    PureResult result = pure_app_deliver(app, 0, source, seq, (PureSpan){payload, 12 + length}, NULL);
     pure_app_finish(app);
     return result;
 }
@@ -2618,10 +2618,10 @@ static void links(void) {
     Outbox o = outbox_of(&a);
     CHECK(o.count == 1 && o.items[0].output == 2 && o.items[0].seq == 1 && o.items[0].size == 15 && a.values[0] == 1);
     PureSpan sent = {o.items[0].payload, o.items[0].size};
-    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent) == PURE_OK && !b.duplicate && b.values[0] == 2 &&
+    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent, NULL) == PURE_OK && !b.duplicate && b.values[0] == 2 &&
           !strcmp(state_text(&b, 1), "pen"));
     pure_app_finish(&b);
-    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent) == PURE_OK && b.duplicate && b.values[0] == 2);
+    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent, NULL) == PURE_OK && b.duplicate && b.values[0] == 2);
     CHECK(deliver(&b, "other", 1, "cup", 5) == PURE_OK && !b.duplicate && b.values[0] == 7);
     CHECK(deliver(&b, "orders.ordered", 3, "hat", 1) == PURE_OK && b.values[0] == 8); /* numbers may skip */
     CHECK(deliver(&b, "orders.ordered", 2, "old", 1) == PURE_OK && b.duplicate && b.values[0] == 8);
@@ -2630,7 +2630,7 @@ static void links(void) {
     CHECK(deliver(&b, "other", 2, "big", 1) == PURE_OK && b.duplicate && b.values[0] == 8);
     /* Bad deliveries change nothing. */
     CHECK(deliver(&b, "", 4, "x", 1) == PURE_INVALID && deliver(&b, "a b", 4, "x", 1) == PURE_INVALID);
-    CHECK(deliver(&b, "other", 0, "x", 1) == PURE_INVALID && pure_app_deliver(&a, 2, "s", 1, sent) == PURE_INVALID);
+    CHECK(deliver(&b, "other", 0, "x", 1) == PURE_INVALID && pure_app_deliver(&a, 2, "s", 1, sent, NULL) == PURE_INVALID);
     CHECK(pure_app_message(&a, 2, NULL, -1, sent) == PURE_INVALID);
     /* Trimmed, a send is gone at once for the host and from the store at the next save. */
     pure_app_trim(&a, 2, 1);

@@ -316,8 +316,9 @@ void pure_app_trim(PureApp *, uint32_t output, uint64_t through);
  * before is not applied again: it succeeds with app->duplicate set. The
  * number counts as heard with the event's changes, and also when the app
  * refuses the message (a fault: it was delivered, and refused); not when a
- * save fails. */
-PureResult pure_app_deliver(PureApp *, uint32_t input, const char *source, uint64_t seq, PureSpan payload);
+ * save fails. placed is as for pure_app_message_fields, or NULL. */
+PureResult pure_app_deliver(PureApp *, uint32_t input, const char *source, uint64_t seq, PureSpan payload,
+                            const uint32_t *placed);
 
 /* Readers on other threads. Right after a save an app can make a snapshot of
  * its saved states, for evaluating views anywhere while it keeps applying

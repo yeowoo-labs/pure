@@ -1676,7 +1676,8 @@ void pure_app_trim(PureApp *app, uint32_t output, uint64_t through) {
         }
 }
 
-PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, uint64_t seq, PureSpan payload) {
+PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, uint64_t seq, PureSpan payload,
+                            const uint32_t *placed) {
     const PureModule *m = app->module;
     size_t length = source ? strlen(source) : 0;
     app->duplicate = false;
@@ -1700,7 +1701,7 @@ PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, ui
     app->delivering.source = source;
     app->delivering.seq = seq;
     app->delivering.pending = true;
-    PureResult result = message(app, input, NULL, -1, payload, NULL);
+    PureResult result = message(app, input, NULL, -1, payload, placed);
     if (!app->delivering.pending) return result;
     /* Not applied. Refused by the app (a fault), the message was delivered
      * all the same: its number is heard, saved like a key event's changes. */
