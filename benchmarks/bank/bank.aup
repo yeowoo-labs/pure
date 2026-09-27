@@ -1,0 +1,64 @@
+# A bank as pgbench's TPC-B-like transaction: accounts, tellers and branches,
+# each a list kept in key order, and a history of every transfer. A transfer
+# moves a teller's delta into an account, the teller and its branch, and
+# records it, all in one event: one transaction over four tables.
+record Account {
+  aid = 0
+  bid = 0
+  balance = 0
+  filler: text
+}
+record Teller {
+  tid = 0
+  bid = 0
+  balance = 0
+}
+record Branch {
+  bid = 0
+  balance = 0
+}
+record Transfer {
+  tid = 0
+  bid = 0
+  aid = 0
+  delta = 0
+  at = 0
+}
+
+state accounts: list of Account by aid
+state tellers: list of Teller by tid
+state branches: list of Branch by bid
+state history: list of Transfer
+
+input branch = message {
+  bid: u32
+}
+input teller = message {
+  tid: u32
+  bid: u32
+}
+input account = message {
+  aid: u32
+  bid: u32
+}
+input transfer = message {
+  aid: u32
+  tid: u32
+  bid: u32
+  delta: number
+}
+
+on branch { branches.add(Branch { bid: branch.bid }) }
+on teller { tellers.add(Teller { tid: teller.tid, bid: teller.bid }) }
+on account { accounts.add(Account { aid: account.aid, bid: account.bid, filler: "" }) }
+
+on transfer {
+  accounts[transfer.aid].balance = accounts[transfer.aid].balance + transfer.delta
+  tellers[transfer.tid].balance = tellers[transfer.tid].balance + transfer.delta
+  branches[transfer.bid].balance = branches[transfer.bid].balance + transfer.delta
+  history.append(Transfer { tid: transfer.tid, bid: transfer.bid, aid: transfer.aid, delta: transfer.delta, at: now })
+}
+
+view accounts_count = accounts.count
+view history_count = history.count
+view total = sum(b.balance for b in branches)

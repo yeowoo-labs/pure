@@ -8,5 +8,6 @@ __pycache__/
 /benchmarks/http/axum-baseline/target/
 /benchmarks/http/load
 /benchmarks/sample
+/benchmarks/bank/sqlite-bank
 /benchmarks/http/*.pmod
 /build/

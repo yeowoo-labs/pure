@@ -1,0 +1,15 @@
+{"lists": "array (before 1421a28)", "directory": "/dev/shm", "accounts": 1000, "setup_s": 0.16, "transfers_per_second": 7870, "p50_us": 1984, "p99_us": 3968, "errors": 0, "non_2xx": 0, "cpu_us_per_transfer": 118.1}
+{"lists": "array (before 1421a28)", "directory": "/dev/shm", "accounts": 10000, "setup_s": 2.05, "transfers_per_second": 6371, "p50_us": 2432, "p99_us": 5120, "errors": 0, "non_2xx": 0, "cpu_us_per_transfer": 147.1}
+{"lists": "array (before 1421a28)", "directory": "/dev/shm", "accounts": 30000, "setup_s": 12.59, "transfers_per_second": 3245, "p50_us": 4608, "p99_us": 9728, "errors": 0, "non_2xx": 0, "cpu_us_per_transfer": 298.6}
+{"lists": "tree", "directory": "/dev/shm", "accounts": 1000, "setup_s": 0.16, "transfers_per_second": 30546, "p50_us": 480, "p99_us": 768, "errors": 0, "non_2xx": 0, "cpu_us_per_transfer": 24.0}
+{"lists": "tree", "directory": "/dev/shm", "accounts": 10000, "setup_s": 1.47, "transfers_per_second": 27737, "p50_us": 512, "p99_us": 1088, "errors": 0, "non_2xx": 0, "cpu_us_per_transfer": 27.1}
+{"lists": "tree", "directory": "/dev/shm", "accounts": 30000, "setup_s": 4.46, "transfers_per_second": 26413, "p50_us": 544, "p99_us": 960, "errors": 0, "non_2xx": 0, "cpu_us_per_transfer": 29.1}
+{"lists": "tree", "directory": "/dev/shm", "accounts": 100000, "setup_s": 15.49, "transfers_per_second": 24485, "p50_us": 576, "p99_us": 896, "errors": 0, "non_2xx": 0, "cpu_us_per_transfer": 32.1}
+{"lists": "tree", "directory": "/var/tmp", "connections": 16, "accounts": 100000, "setup_s": 83.32, "transfers_per_second": 1339, "p50_us": 4864, "p99_us": 155648, "errors": 0, "non_2xx": 0, "cpu_us_per_transfer": 49.2}
+{"lists": "tree", "directory": "/var/tmp", "connections": 64, "accounts": 100000, "setup_s": 90.02, "transfers_per_second": 962, "p50_us": 8192, "p99_us": 589824, "errors": 0, "non_2xx": 0, "cpu_us_per_transfer": 43.2}
+{"sqlite":"3.46.1","directory": "/dev/shm","synchronous":"off","accounts":100000,"threads":16,"setup_s":0.07,"transfers_per_second":39817,"p50_us":21,"p99_us":64,"failed":0,"history":163249}
+{"sqlite":"3.46.1","directory": "/dev/shm","synchronous":"full","accounts":100000,"threads":16,"setup_s":0.07,"transfers_per_second":40471,"p50_us":21,"p99_us":58,"failed":0,"history":165788}
+{"sqlite":"3.46.1","directory": "/var/tmp","synchronous":"full","accounts":100000,"threads":16,"setup_s":0.35,"transfers_per_second":141,"p50_us":2304,"p99_us":6029312,"failed":0,"history":996}
+{"sqlite":"3.46.1","directory": "/var/tmp","synchronous":"normal","accounts":100000,"threads":16,"setup_s":0.29,"transfers_per_second":1243,"p50_us":28,"p99_us":108,"failed":0,"history":25532}
+{"sqlite":"3.46.1","directory": "/var/tmp","synchronous":"full","accounts":100000,"threads":1,"setup_s":0.29,"transfers_per_second":153,"p50_us":1792,"p99_us":86016,"failed":0,"history":922}
+{"sqlite":"3.46.1","directory": "/var/tmp","synchronous":"full","accounts":100000,"threads":64,"setup_s":0.25,"transfers_per_second":84,"p50_us":4096,"p99_us":9437184,"failed":0,"history":900}

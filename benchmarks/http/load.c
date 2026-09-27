@@ -2,7 +2,7 @@
 /* HTTP/1.1 load for Pure's benchmarks: N connections on one epoll thread,
  * each sending one request at a time and measuring its latency.
  *
- * load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json KEYS [keep-alive|close] [BODY]
+ * load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json|transfer KEYS [keep-alive|close] [BODY]
  * get: GET /objects/kI for I in [0, KEYS).
  * put: connection C edits its own key kC (C mod KEYS), inserting BODY bytes
  *      at 0 with If-Match on the revision it last saw (If-None-Match: * at
@@ -11,7 +11,11 @@
  * the name as the body), total reads GET /views/total and page GET
  * /views/leaders?from=0&count=20. note reads GET /views/page (a text state
  * shown as it is, as in a notes app). json posts {"name":"k","text":"x..."}
- * (BODY bytes of text) to POST /inputs/echo as application/json.
+ * (BODY bytes of text) to POST /inputs/echo as application/json. transfer is
+ * pgbench's TPC-B-like transaction for benchmarks/bank: POST /inputs/transfer
+ * {"aid","tid","bid","delta"}, a random account of KEYS, teller and branch of
+ * the scale (100,000 accounts, 10 tellers and a branch each) and delta in
+ * [-5000, 5000], as pgbench picks them.
  * Prints one JSON line: requests/s, statuses, latency percentiles (µs). */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -37,7 +41,7 @@ typedef struct {
     size_t request_size, sent, body_size, body_sent;
     char *response;
     size_t received;
-    uint64_t started, revision;
+    uint64_t started, revision, random;
 } Connection;
 
 static uint64_t now_us(void) {
@@ -69,14 +73,36 @@ static uint64_t percentile(uint64_t total, double p) {
 }
 
 static int port, connections_count, keys;
-static enum { GET, PUT, SCORE, TOTAL, PAGE, NOTE, JSON } method;
+static enum { GET, PUT, SCORE, TOTAL, PAGE, NOTE, JSON, TRANSFER } method;
 static bool put, keep_alive;
 static char *body;
 static size_t body_bytes;
 static int epoll_fd;
 
+/* xorshift64: each connection its own sequence. */
+static uint64_t next_random(uint64_t *state) {
+    uint64_t x = *state;
+    x ^= x << 13, x ^= x >> 7, x ^= x << 17;
+    return *state = x;
+}
+
 static void prepare(Connection *c) {
     const char *closing = keep_alive ? "" : "Connection: close\r\n";
+    if (method == TRANSFER) {
+        unsigned scale = keys / 100000 ? (unsigned)(keys / 100000) : 1;
+        char json[128];
+        int length = snprintf(json, sizeof(json), "{\"aid\":%u,\"tid\":%u,\"bid\":%u,\"delta\":%d}",
+                              (unsigned)(next_random(&c->random) % (uint64_t)keys) + 1,
+                              (unsigned)(next_random(&c->random) % (10u * scale)) + 1,
+                              (unsigned)(next_random(&c->random) % scale) + 1,
+                              (int)(next_random(&c->random) % 10001) - 5000);
+        c->request_size = (size_t)snprintf(c->request, sizeof(c->request),
+            "POST /inputs/transfer HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+            "Content-Length: %d\r\n%s\r\n%s", length, closing, json);
+        c->sent = c->received = c->body_sent = c->body_size = 0;
+        c->started = now_us();
+        return;
+    }
     if (method == JSON) {
         c->request_size = (size_t)snprintf(c->request, sizeof(c->request),
             "POST /inputs/echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
@@ -151,15 +177,16 @@ static bool complete(Connection *c, int *status, bool *closing, size_t *length) 
 
 int main(int argc, char **argv) {
     if (argc < 6) {
-        fputs("load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json KEYS [keep-alive|close] [BODY]\n", stderr);
+        fputs("load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json|transfer KEYS [keep-alive|close] [BODY]\n",
+              stderr);
         return 2;
     }
     port = atoi(argv[1]);
     connections_count = atoi(argv[2]);
     double seconds = atof(argv[3]);
-    static const char *const methods[] = {"get", "put", "score", "total", "page", "note", "json"};
-    for (method = GET; method <= JSON && strcmp(argv[4], methods[method]); ++method) {}
-    if (method > JSON) { fprintf(stderr, "load: unknown method %s\n", argv[4]); return 2; }
+    static const char *const methods[] = {"get", "put", "score", "total", "page", "note", "json", "transfer"};
+    for (method = GET; method <= TRANSFER && strcmp(argv[4], methods[method]); ++method) {}
+    if (method > TRANSFER) { fprintf(stderr, "load: unknown method %s\n", argv[4]); return 2; }
     put = method == PUT;
     keys = atoi(argv[5]);
     keep_alive = argc > 6 && !strcmp(argv[6], "keep-alive");
@@ -177,6 +204,7 @@ int main(int argc, char **argv) {
     Connection *all = calloc((size_t)connections_count, sizeof(*all));
     for (int i = 0; i < connections_count; ++i) {
         all[i].key = i % keys;
+        all[i].random = 0x9e3779b97f4a7c15u * (uint64_t)(i + 1);
         all[i].response = malloc(RESPONSE);
         open_connection(&all[i]);
         prepare(&all[i]);

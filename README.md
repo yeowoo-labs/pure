@@ -15,7 +15,8 @@ are in [075](docs/research/075-http-host-against-axum.md), [077](docs/research/0
 [080](docs/research/080-snapshot-reads.md), [081](docs/research/081-tail-records.md),
 [082](docs/research/082-json-in-place.md), [083](docs/research/083-delivery-over-http.md),
 [086](docs/research/086-sealed-sends.md), [087](docs/research/087-small-reads-and-idle-memory.md),
-[088](docs/research/088-sealed-sessions.md) and [089](docs/research/089-messenger.md); the status table is
+[088](docs/research/088-sealed-sessions.md), [089](docs/research/089-messenger.md) and
+[090](docs/research/090-tables.md); the status table is
 [CHECKPOINT.md](CHECKPOINT.md).
 
 The source follows the principle below, a small core with the rest selected around it
