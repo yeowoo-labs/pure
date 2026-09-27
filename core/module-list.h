@@ -60,6 +60,8 @@ PureList *pure_list_share(PureList *, PureRetired *retired);
 void pure_list_hold(PureList *copy);
 /* Whether copy shares list's items as they are now. */
 bool pure_list_current(const PureList *copy, const PureList *list);
+/* Which list, and its version: the same pair means the same items. */
+void pure_list_stamp(const PureList *, uint64_t *id, uint64_t *version);
 /* Free what was retired while no copy that shared it remains. */
 void pure_retired_free(PureRetired *);
 /* Insert a copy of cells (text bytes are copied) before position at. A NULL

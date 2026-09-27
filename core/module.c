@@ -433,6 +433,128 @@ PURE_COLD static void plan_folds(PureModule *m, PureBlock block) {
     }
 }
 
+/* A planned fold's block as a tree (its lane forms have no branch; one
+ * with PICK or SLIDE is left alone): per instruction, its operands' nodes
+ * and the first instruction of its subtree, whether it reads the fold's
+ * item (item), and whether it reads nothing but the fold's list, its item
+ * and constants (own): what one pass over the list can compute. */
+typedef struct { uint32_t first; int kid[3]; bool item, own; } Node;
+
+PURE_COLD static unsigned arity(uint8_t op) {
+    switch (op) {
+    case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_INDEX_LOAD: case PURE_OP_ROW: case PURE_OP_OUTER_ROW:
+    case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
+        return 0;
+    case PURE_OP_ITEM_GET: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: case PURE_OP_NEG: case PURE_OP_NOT:
+    case PURE_OP_FLOOR: case PURE_OP_INDEX_NUM:
+        return 1;
+    case PURE_OP_CLAMP: return 3;
+    default: return 2;
+    }
+}
+
+/* The list an instruction reads, if any (-1: none). */
+PURE_COLD static int list_read(const PureOp *op) {
+    switch (op->op) {
+    case PURE_OP_ITEM_GET: return (int)list_of(op->arg);
+    case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_LIST_FIND:
+    case PURE_OP_LIST_HAS: case PURE_OP_ROW:
+        return (int)op->arg;
+    default: return -1;
+    }
+}
+
+PURE_COLD static bool block_tree(const PureModule *m, PureBlock block, int list, Node *nodes, int *roots, unsigned *count) {
+    int stack[PURE_MODULE_STACK];
+    unsigned sp = 0;
+    for (uint32_t i = 0; i < block.length; ++i) {
+        const PureOp *op = &m->code[block.start + i];
+        if (op->op == PURE_OP_PICK || op->op == PURE_OP_SLIDE) return false;
+        unsigned pops = arity(op->op);
+        Node *node = &nodes[i];
+        int read = list_read(op);
+        node->first = block.start + i;
+        node->item = op->op == PURE_OP_ROW;
+        node->own = op->op != PURE_OP_LOAD && op->op != PURE_OP_INDEX_LOAD && op->op != PURE_OP_OUTER_ROW &&
+                    (read < 0 || read == list);
+        for (unsigned k = 0; k < 3; ++k) node->kid[k] = -1;
+        for (unsigned k = 0; k < pops; ++k) {
+            int kid = stack[sp - pops + k];
+            node->kid[k] = kid;
+            node->item = node->item || nodes[kid].item;
+            node->own = node->own && nodes[kid].own;
+        }
+        if (pops) node->first = nodes[stack[sp - pops]].first;
+        sp -= pops;
+        stack[sp++] = (int)i;
+    }
+    memcpy(roots, stack, sp * sizeof(*stack));
+    *count = sp;
+    return true;
+}
+
+/* The comparisons a test ANDs together (at most 16). */
+PURE_COLD static bool conjuncts(const PureModule *m, PureBlock block, const Node *nodes, int at, int *out, unsigned *count) {
+    if (m->code[block.start + at].op == PURE_OP_AND)
+        return conjuncts(m, block, nodes, nodes[at].kid[0], out, count) &&
+               conjuncts(m, block, nodes, nodes[at].kid[1], out, count);
+    if (*count == 16) return false;
+    out[(*count)++] = at;
+    return true;
+}
+
+/* The shape of a planned fold in a column, if it has one (see PureShape). */
+PURE_COLD static void shape_fold(PureModule *m, uint32_t pc) {
+    PureOp *fold = &m->code[pc];
+    unsigned how = fold->arg & 0xFF;
+    int list = (int)(fold->arg >> 8 & 0xFF);
+    PureBlock block = {pc + 1, fold->arg >> 16};
+    if (!fold->plan || m->shapes == PURE_MODULE_SHAPES) return;
+    Node *nodes = malloc(block.length * sizeof(*nodes));
+    int roots[PURE_MODULE_STACK], tests[16];
+    unsigned count = 0, tested = 0;
+    if (!nodes) return;
+    if (!block_tree(m, block, list, nodes, roots, &count) || !conjuncts(m, block, nodes, roots[count - 1], tests, &tested) ||
+        (count == 2 && !nodes[roots[0]].own)) {
+        free(nodes);
+        return;
+    }
+    /* One comparison of the item's field with a key; the rest the item's own. */
+    int test = -1;
+    for (unsigned k = 0; k < tested; ++k) {
+        if (nodes[tests[k]].own) continue;
+        if (test >= 0) test = -2;
+        else test = tests[k];
+    }
+    PureShape shape = {0};
+    if (test >= 0) {
+        const PureOp *compare = &m->code[block.start + test];
+        const Node *node = &nodes[test];
+        uint8_t op = compare->op;
+        for (unsigned side = 0; side < 2 && !shape.form && (op == PURE_OP_EQ || op == PURE_OP_LT || op == PURE_OP_LE ||
+                                                              op == PURE_OP_GT || op == PURE_OP_GE); ++side) {
+            int field = node->kid[side], key = node->kid[1 - side];
+            const PureOp *get = &m->code[block.start + field];
+            if (get->op != PURE_OP_ITEM_GET || m->code[block.start + nodes[field].kid[0]].op != PURE_OP_ROW ||
+                nodes[key].item)
+                continue;
+            static const uint8_t flipped[] = {[PURE_OP_LT] = PURE_OP_GT, [PURE_OP_LE] = PURE_OP_GE,
+                                              [PURE_OP_GT] = PURE_OP_LT, [PURE_OP_GE] = PURE_OP_LE};
+            shape = (PureShape){op == PURE_OP_EQ ? PURE_SHAPE_GROUP : PURE_SHAPE_RANK,
+                                op == PURE_OP_EQ || !side ? op : flipped[op], (uint16_t)item_field(get->arg),
+                                block.start + (uint32_t)test,
+                                {nodes[key].first, block.start + (uint32_t)key + 1 - nodes[key].first}};
+        }
+        /* A rank answers a count tested by the comparison alone. */
+        if (shape.form == PURE_SHAPE_RANK && (how != PURE_FOLD_COUNT || tested != 1)) shape.form = 0;
+    }
+    if (shape.form) {
+        m->shape[m->shapes++] = shape;
+        fold->shape = m->shapes;
+    }
+    free(nodes);
+}
+
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
     FILE *file = fopen(path, "rb");
     unsigned char *bytes = NULL;
@@ -706,6 +828,12 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         plan_folds(out, out->view_code[i]);
         out->view_plan[i] = out->view_type[i] == PURE_VIEW_TABLE && out->view_code[i].length &&
                             block_has_lanes(out, out->view_code[i]);
+        /* A fold in a column runs for every row: one pass may answer them all. */
+        for (uint32_t pc = out->view_code[i].start; out->view_table[i] && pc < out->view_code[i].start + out->view_code[i].length; ++pc)
+            if (out->code[pc].op == PURE_OP_FOLD) {
+                shape_fold(out, pc);
+                pc += out->code[pc].arg >> 16;
+            }
     }
     for (uint32_t i = 0; i < out->handlers; ++i) plan_folds(out, out->handler[i].code);
     return PURE_OK;
@@ -1053,7 +1181,7 @@ static bool lanes_op(uint8_t op, const double *a, size_t sa, const double *b, si
  * per stack depth, or into the list's leaf). false when run would fault for
  * some item. */
 static bool run_lanes(const PureModule *m, const double *values, PureBlock block, const Event *ev, const PureRun *items,
-                      Lanes *result, double (*store)[PURE_LIST_RUN], Memo *memo) {
+                      Lanes *result, double (*store)[PURE_LIST_RUN], Memo *memo, const PureShape *shape) {
     PureApp *app = ev->app;
     Lanes stack[PURE_MODULE_STACK];
     double scratch[2][PURE_LIST_RUN];
@@ -1064,6 +1192,16 @@ static bool run_lanes(const PureModule *m, const double *values, PureBlock block
         uint32_t arg = op->arg;
         Lanes *top = sp ? &stack[sp - 1] : stack;
         double *out = store[sp ? sp - 1 : 0]; /* where the top's new lanes go */
+        /* A group's pass: every group at once, so its key is not needed and its test holds. */
+        if (shape && pc == shape->key.start) {
+            stack[sp++] = (Lanes){NULL, 0, false, 0};
+            pc = shape->key.start + shape->key.length - 1;
+            continue;
+        }
+        if (shape && pc == shape->test) {
+            stack[--sp - 1] = (Lanes){NULL, 1, false, 0};
+            continue;
+        }
         switch (op->op) {
         case PURE_OP_CONST: stack[sp++] = (Lanes){NULL, op->value, false, 0}; continue;
         case PURE_OP_LOAD: stack[sp++] = (Lanes){NULL, values[arg], false, 0}; continue;
@@ -1253,7 +1391,7 @@ static PureResult fold_runs(const PureModule *m, double *values, PureBlock inner
     memo.known = 0;
     for (bool more = pure_list_run(list, 0, &items); more && !fold->done; more = pure_list_next(list, &items)) {
         Lanes out[2];
-        if (!run_lanes(m, values, inner, per, &items, out, store, &memo)) {
+        if (!run_lanes(m, values, inner, per, &items, out, store, &memo, NULL)) {
             PureResult status = fold_rows(m, values, inner, per, items.start, items.start + items.count, fold);
             if (status != PURE_OK) return status;
             continue;
@@ -1277,6 +1415,225 @@ static PureResult fold_runs(const PureModule *m, double *values, PureBlock inner
             for (unsigned i = 0; i < items.count && !fold->done; ++i) fold_in(fold, items.start + i, v[i], c[i]);
     }
     return PURE_OK;
+}
+
+/* ---- Passes: a shaped fold in a column answered for every row --------
+ * A fold in a column runs once per row, over its whole list each time. A
+ * shaped one (PureShape) is answered from one pass over the list instead,
+ * kept by the app for the list's version: a group pass folds the items of
+ * every group at once (the fold's test with its comparison taken as true,
+ * the item's field naming its group), a rank pass orders the field's values.
+ * A row then runs the key alone and looks it up. The pass is made at the
+ * second row that asks for the same list, so a fold asked once scans once.
+ *
+ * It answers exactly as the fold would: items join a group in order (a sum
+ * adds as it would), a key that faults leaves the row to run the fold as
+ * written (which faults, or not over no item, as it would), and an item
+ * that would fault in the pass leaves every row to run it as written. */
+typedef struct { double key; Fold fold; bool used; } Group;
+struct PurePass {
+    const PureModule *module;
+    uint32_t pc;             /* the fold's */
+    uint64_t list, version;  /* its list as it was */
+    unsigned asked;          /* rows that asked before it was made */
+    bool made, failed;
+    Group *groups;           /* a group pass: open addressing by key */
+    size_t capacity, count;
+    uint64_t *ordered;       /* a rank pass: the field's values in order (order_bits) */
+    size_t items;
+};
+enum { PASSES = 16 };
+
+static void free_pass(struct PurePass *pass) {
+    free(pass->groups);
+    free(pass->ordered);
+}
+
+unsigned pure_app_passes(const PureApp *app) {
+    unsigned made = 0;
+    for (unsigned i = 0; i < app->pass_count; ++i) made += app->passes[i].made;
+    return made;
+}
+
+static void drop_passes(PureApp *app) {
+    for (unsigned i = 0; i < app->pass_count; ++i) free_pass(&app->passes[i]);
+    free(app->passes);
+    app->passes = NULL;
+    app->pass_count = 0;
+}
+
+/* The app's pass for a fold over a list as it is: one kept, or a new one in
+ * place of this fold's older ones (or of the oldest). NULL without room. */
+static struct PurePass *pass_for(PureApp *app, const PureModule *m, uint32_t pc, const PureList *list) {
+    uint64_t id, version;
+    pure_list_stamp(list, &id, &version);
+    unsigned kept = 0;
+    struct PurePass *found = NULL;
+    for (unsigned i = 0; i < app->pass_count; ++i) {
+        struct PurePass *pass = &app->passes[i];
+        if (pass->module == m && pass->pc == pc && pass->list == id && pass->version == version) found = pass;
+        else if (pass->module == m && pass->pc == pc) free_pass(pass); /* the list has moved on */
+        else app->passes[kept++] = *pass;
+        if (found == pass) app->passes[kept++] = *pass, found = &app->passes[kept - 1];
+    }
+    app->pass_count = kept;
+    if (found) return found;
+    if (!app->passes && !(app->passes = calloc(PASSES, sizeof(*app->passes)))) return NULL;
+    if (app->pass_count == PASSES) {
+        free_pass(&app->passes[0]);
+        memmove(app->passes, app->passes + 1, (PASSES - 1) * sizeof(*app->passes));
+        --app->pass_count;
+    }
+    struct PurePass *pass = &app->passes[app->pass_count++];
+    *pass = (struct PurePass){.module = m, .pc = pc, .list = id, .version = version};
+    return pass;
+}
+
+/* A key's bits as they order: -0 as 0, negative numbers below positive ones. */
+static uint64_t order_bits(double value) {
+    uint64_t bits;
+    value = value == 0 ? 0 : value;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits >> 63 ? ~bits : bits | (uint64_t)1 << 63;
+}
+
+static size_t group_slot(uint64_t bits, size_t capacity) {
+    bits ^= bits >> 33, bits *= 0xff51afd7ed558ccdu, bits ^= bits >> 33; /* a finalizer's mixing */
+    return (size_t)bits & (capacity - 1);
+}
+
+/* key's group, added when absent (with add); NULL when absent, or without room. */
+static Group *group_of(struct PurePass *pass, double key, unsigned how, bool add) {
+    key = key == 0 ? 0 : key;
+    if (pass->capacity) {
+        for (size_t at = group_slot(order_bits(key), pass->capacity);; at = (at + 1) & (pass->capacity - 1)) {
+            if (!pass->groups[at].used) break;
+            if (pass->groups[at].key == key) return &pass->groups[at];
+        }
+    }
+    if (!add) return NULL;
+    if (2 * (pass->count + 1) > pass->capacity) { /* grown to keep half the slots free */
+        size_t capacity = pass->capacity ? 2 * pass->capacity : 64;
+        Group *groups = calloc(capacity, sizeof(*groups));
+        if (!groups) return NULL;
+        for (size_t i = 0; i < pass->capacity; ++i) {
+            if (!pass->groups[i].used) continue;
+            size_t at = group_slot(order_bits(pass->groups[i].key), capacity);
+            while (groups[at].used) at = (at + 1) & (capacity - 1);
+            groups[at] = pass->groups[i];
+        }
+        free(pass->groups);
+        pass->groups = groups;
+        pass->capacity = capacity;
+    }
+    size_t at = group_slot(order_bits(key), pass->capacity);
+    while (pass->groups[at].used) at = (at + 1) & (pass->capacity - 1);
+    pass->groups[at] = (Group){key, {how, 0, false, false}, true};
+    ++pass->count;
+    return &pass->groups[at];
+}
+
+/* Every group's fold in one pass over the list, a leaf at a time. */
+static bool group_pass(const PureModule *m, double *values, PureBlock inner, const PureShape *shape, unsigned how,
+                       const PureList *list, Event *per, struct PurePass *pass) {
+    double store[PURE_MODULE_STACK][PURE_LIST_RUN], scratch[2][PURE_LIST_RUN];
+    bool one = how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST;
+    PureRun items;
+    Memo memo;
+    memo.known = 0;
+    for (bool more = pure_list_run(list, 0, &items); more; more = pure_list_next(list, &items)) {
+        Lanes out[2];
+        if (!run_lanes(m, values, inner, per, &items, out, store, &memo, shape)) return false;
+        const Lanes *counts = &out[one ? 0 : 1];
+        if (uniform(counts) && counts->value == 0) continue;
+        const double *c = lanes_of(counts, scratch[0], &items), *v = lanes_of(&out[0], scratch[1], &items);
+        const double *keys = items.column[shape->field].numbers;
+        for (unsigned i = 0; i < items.count; ++i) {
+            if (c[i] == 0) continue;
+            Group *group = group_of(pass, keys[i], how, true);
+            if (!group) return false;
+            if (!group->fold.done) fold_in(&group->fold, items.start + i, v[i], c[i]);
+        }
+    }
+    return true;
+}
+
+/* The field's values in order: a radix sort of their order_bits. */
+static bool rank_pass(const PureShape *shape, const PureList *list, struct PurePass *pass) {
+    size_t count = pure_list_count(list), at = 0;
+    uint64_t *keys = malloc((count ? count : 1) * sizeof(*keys)), *spare = malloc((count ? count : 1) * sizeof(*spare));
+    if (!keys || !spare) {
+        free(keys);
+        free(spare);
+        return false;
+    }
+    PureRun items;
+    for (bool more = pure_list_run(list, 0, &items); more; more = pure_list_next(list, &items))
+        for (unsigned i = 0; i < items.count; ++i) keys[at++] = order_bits(items.column[shape->field].numbers[i]);
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+        size_t start[257] = {0};
+        for (size_t i = 0; i < count; ++i) ++start[(keys[i] >> shift & 0xFF) + 1];
+        if (start[(keys[0] >> shift & 0xFF) + 1] == count) continue; /* one digit for all: in order already */
+        for (unsigned d = 0; d < 256; ++d) start[d + 1] += start[d];
+        for (size_t i = 0; i < count; ++i) spare[start[keys[i] >> shift & 0xFF]++] = keys[i];
+        uint64_t *swap = keys;
+        keys = spare, spare = swap;
+    }
+    free(spare);
+    pass->ordered = keys;
+    pass->items = count;
+    return true;
+}
+
+/* How many of the ordered values relate to key: the first not below key
+ * (or above it), counted from the start or the end. */
+static size_t ranked(const struct PurePass *pass, uint8_t relation, double key) {
+    uint64_t bits = order_bits(key);
+    bool above = relation == PURE_OP_GT || relation == PURE_OP_LE; /* the bound past key's equals */
+    size_t low = 0, high = pass->items;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (above ? pass->ordered[middle] <= bits : pass->ordered[middle] < bits) low = middle + 1;
+        else high = middle;
+    }
+    return relation == PURE_OP_GT || relation == PURE_OP_GE ? pass->items - low : low;
+}
+
+/* A shaped fold from its list's pass: false leaves it to run as written. */
+static bool fold_shaped(const PureModule *m, double *values, const PureOp *op, const PureList *list, Event *per,
+                        Fold *fold) {
+    PureApp *app = per->app;
+    const PureShape *shape = &m->shape[op->shape - 1];
+    struct PurePass *pass = pass_for(app, m, (uint32_t)(op - m->code), list);
+    if (!pass || pass->failed || (!pass->made && ++pass->asked < 2)) return false;
+    Slot key;
+    PureFault fault = app->fault;
+    uint32_t fault_pc = app->fault_pc;
+    size_t mark = per->arena->used;
+    PureResult status = run(m, values, shape->key, per, &key);
+    per->arena->used = mark;
+    app->fault = fault, app->fault_pc = fault_pc;
+    if (status != PURE_OK) return false;
+    if (!pass->made) {
+        PureBlock inner = {(uint32_t)(op - m->code) + 1, op->arg >> 16};
+        pass->made = shape->form == PURE_SHAPE_GROUP ? group_pass(m, values, inner, shape, fold->how, list, per, pass)
+                                                     : rank_pass(shape, list, pass);
+        if (!pass->made) {
+            free_pass(pass);
+            pass->groups = NULL, pass->ordered = NULL;
+            pass->failed = true;
+            return false;
+        }
+    }
+    if (shape->form == PURE_SHAPE_RANK) {
+        size_t count = ranked(pass, shape->relation, key.num);
+        fold->total = (double)count;
+        fold->any = count > 0;
+        return true;
+    }
+    const Group *group = group_of(pass, key.num, fold->how, false);
+    if (group) *fold = group->fold;
+    return true;
 }
 
 static PureResult run(const PureModule *m, double *values, PureBlock block, Event *ev, Slot *result) {
@@ -1538,9 +1895,11 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             Fold fold = {arg & 0xFF, 0, false, false};
             Event per = *ev;
             per.outer = ev->row;
-            status = op->plan ? fold_runs(m, values, inner, list, &per, &fold)
-                              : fold_rows(m, values, inner, &per, 0, pure_list_count(list), &fold);
-            if (status != PURE_OK) return status;
+            if (!op->shape || !fold_shaped(m, values, op, list, &per, &fold)) {
+                status = op->plan ? fold_runs(m, values, inner, list, &per, &fold)
+                                  : fold_rows(m, values, inner, &per, 0, pure_list_count(list), &fold);
+                if (status != PURE_OK) return status;
+            }
             if (!fold.any && fold.how >= PURE_FOLD_MAX) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
             if (!isfinite(fold.total)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
             stack[sp].num = fold.total;
@@ -1818,6 +2177,7 @@ void pure_app_stop(PureApp *app) {
     pure_undo_free(&app->undo);
     for (unsigned i = 0; i < app->row_tables; ++i) free(app->rows[i].items);
     free(app->rows);
+    drop_passes(app);
     free(app->arena.bytes);
     free(app->view_arena.bytes);
     memset(app, 0, sizeof(*app));
@@ -2173,7 +2533,7 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
         memo.known = 0;
         for (bool more = pure_list_run(list, 0, &run); more; more = pure_list_next(list, &run)) {
             Lanes keep;
-            if (run_lanes(m, app->values, m->view_code[table], &ev, &run, &keep, store, &memo)) {
+            if (run_lanes(m, app->values, m->view_code[table], &ev, &run, &keep, store, &memo, NULL)) {
                 const double *kept = lanes_of(&keep, scratch, &run);
                 for (unsigned i = 0; i < run.count; ++i)
                     if (kept[i] != 0 && !keep_row(rows, run.start + i)) return NULL;
@@ -2297,6 +2657,7 @@ PureSnapshot *pure_app_snapshot(PureApp *app) {
 }
 
 void pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
+    if (reader->module != snapshot->module) drop_passes(reader);
     reader->module = snapshot->module;
     reader->reading = true;
     reader->changes = snapshot->changes; /* what the row cache is fresh for */
@@ -2514,6 +2875,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     memcpy(app->list_drafts, list_drafts, sizeof(list_drafts));
     memcpy(app->saved, saved, sizeof(saved));
     if (old) remap_outputs(app, old, module, true);
+    drop_passes(app); /* kept by instruction of the module they were made for */
     app->module = module;
     ++app->changes;
     return PURE_OK;

@@ -2179,7 +2179,9 @@ static void filters(void) {
  * a handler storing them), filters and lists: a module whose folds run a
  * leaf at a time answers bit for bit as the same module run item by item,
  * faults included (their kind and instruction). */
-typedef struct { O code[8192]; size_t count; uint32_t seed; int fold_list, outer; } Gen;
+/* tree: no PICK or SLIDE (a shaped fold's block is a tree). A fold_list of
+ * -1 makes code that reads no fold's item. */
+typedef struct { O code[8192]; size_t count; uint32_t seed; int fold_list, outer; bool tree; } Gen;
 enum { LANE_K = 0, LANE_L = 4, LANE_M = 5 };
 
 static void put_op(Gen *g, uint8_t op, uint32_t arg, double value) {
@@ -2213,11 +2215,13 @@ static void gen_num(Gen *g, int depth) {
                                      PURE_OP_GT, PURE_OP_GE, PURE_OP_EQ, PURE_OP_NE, PURE_OP_AND, PURE_OP_OR,
                                      PURE_OP_MIN, PURE_OP_MAX, PURE_OP_MOD};
     static const uint8_t unary[] = {PURE_OP_NEG, PURE_OP_NOT, PURE_OP_FLOOR};
-    switch (roll(g, depth <= 0 ? 4 : 12)) {
+    unsigned choice = roll(g, depth <= 0 ? 4 : 12);
+    if (g->tree && (choice == 9 || choice == 10)) choice = 11;
+    switch (choice) {
     case 0: put_op(g, C, 0, pool[roll(g, LEN(pool))]); return;
     case 1: put_op(g, L, LANE_K, 0); return;
     case 2: case 3: { /* a field of an item */
-        int list = depth <= 0 || roll(g, 3) ? g->fold_list : roll(g, 2) ? LANE_L : LANE_M;
+        int list = g->fold_list >= 0 && (depth <= 0 || roll(g, 3)) ? g->fold_list : roll(g, 2) ? LANE_L : LANE_M;
         gen_index(g, list, depth - 1);
         put_op(g, PURE_OP_ITEM_GET, (uint32_t)list | (uint32_t)roll(g, list == LANE_L ? 3 : 2) << 16, 0);
         return;
@@ -2234,6 +2238,66 @@ static void gen_num(Gen *g, int depth) {
     case 10: gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, PURE_OP_SLIDE, 1, 0); return;
     default: gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, binary[roll(g, LEN(binary))], 0, 0); return;
     }
+}
+
+/* What reads only the fold's list, its item and constants (a shaped fold's own parts). */
+static void gen_own(Gen *g, int depth) {
+    static const double pool[] = {0, -0.0, 1, -1, 2, 0.5, 3, 5, 1e308};
+    static const uint8_t binary[] = {PURE_OP_ADD, PURE_OP_SUB, PURE_OP_MUL, PURE_OP_DIV, PURE_OP_LT, PURE_OP_GT,
+                                     PURE_OP_EQ, PURE_OP_NE, PURE_OP_AND, PURE_OP_OR, PURE_OP_MIN, PURE_OP_MOD};
+    int list = g->fold_list;
+    switch (roll(g, depth <= 0 ? 3 : 7)) {
+    case 0: put_op(g, C, 0, pool[roll(g, LEN(pool))]); return;
+    case 1: case 2:
+        if (roll(g, 4)) put_op(g, PURE_OP_ROW, (uint32_t)list, 0);
+        else put_op(g, roll(g, 2) ? PURE_OP_INDEX_FIRST : PURE_OP_INDEX_LAST, (uint32_t)list, 0);
+        put_op(g, PURE_OP_ITEM_GET, (uint32_t)list | (uint32_t)roll(g, list == LANE_L ? 3 : 2) << 16, 0);
+        return;
+    case 3: put_op(g, PURE_OP_LIST_COUNT, (uint32_t)list, 0); return;
+    case 4: gen_own(g, depth - 1); put_op(g, roll(g, 2) ? NEG : PURE_OP_NOT, 0, 0); return;
+    default: gen_own(g, depth - 1); gen_own(g, depth - 1); put_op(g, binary[roll(g, LEN(binary))], 0, 0); return;
+    }
+}
+
+/* A fold in a column of L with a shape's test: the item's field against a
+ * key the row gives, ANDed with the item's own tests, and an own value. */
+static void gen_shaped(Gen *g, int list) {
+    static const uint8_t relations[] = {PURE_OP_EQ, PURE_OP_EQ, PURE_OP_LT, PURE_OP_LE, PURE_OP_GT, PURE_OP_GE};
+    unsigned how = roll(g, 5) < 2 ? PURE_FOLD_COUNT : roll(g, 5), before = roll(g, 3) ? 0 : 1 + roll(g, 2),
+             after = roll(g, 3) ? 0 : 1;
+    size_t at = g->count;
+    put_op(g, PURE_OP_FOLD, 0, 0);
+    int fold_list = g->fold_list, fold_outer = g->outer;
+    g->fold_list = list, g->outer = LANE_L, g->tree = true;
+    if (how != PURE_FOLD_COUNT && how != PURE_FOLD_FIRST) gen_own(g, 2);
+    for (unsigned k = 0; k < before; ++k) {
+        gen_own(g, 2);
+        if (k) put_op(g, PURE_OP_AND, 0, 0);
+    }
+    bool field_first = roll(g, 2);
+    for (unsigned side = 0; side < 2; ++side) {
+        if (side == !field_first) { /* the item's field */
+            put_op(g, PURE_OP_ROW, (uint32_t)list, 0);
+            put_op(g, PURE_OP_ITEM_GET, (uint32_t)list | (uint32_t)roll(g, list == LANE_L ? 3 : 2) << 16, 0);
+        } else { /* the key: the column's row's field, mostly */
+            g->fold_list = -1;
+            if (roll(g, 5)) {
+                put_op(g, PURE_OP_OUTER_ROW, LANE_L, 0);
+                put_op(g, PURE_OP_ITEM_GET, LANE_L | (uint32_t)roll(g, 3) << 16, 0);
+            } else
+                gen_num(g, 2);
+            g->fold_list = list;
+        }
+    }
+    put_op(g, relations[roll(g, LEN(relations))], 0, 0);
+    if (before) put_op(g, PURE_OP_AND, 0, 0);
+    for (unsigned k = 0; k < after; ++k) {
+        gen_own(g, 2);
+        put_op(g, PURE_OP_AND, 0, 0);
+    }
+    g->fold_list = fold_list, g->outer = fold_outer, g->tree = false;
+    g->code[at].arg = FOLDING(how, list, g->count - at - 1);
+    if (how == PURE_FOLD_FIRST) put_op(g, PURE_OP_INDEX_NUM, 0, 0);
 }
 
 /* A fold over list leaving a number (first's index as one), in a column of L (outer) or not. */
@@ -2264,7 +2328,7 @@ static void lane_folds(void) {
     enum { VIEWS = 6, COLUMNS = 3, HANDLED = 3 };
     static Gen g;
     uint32_t seed = 0x1a2b3c4du;
-    unsigned planned = 0, folds = 0, faults = 0, cells = 0;
+    unsigned planned = 0, folds = 0, faults = 0, cells = 0, shaped[3] = {0}, passes = 0;
     for (unsigned round = 0; round < 300; ++round) {
         g = (Gen){.seed = next_random(&seed), .fold_list = -1, .outer = -1};
         V views[VIEWS];
@@ -2284,7 +2348,8 @@ static void lane_folds(void) {
         for (unsigned c = 0; c < COLUMNS; ++c) {
             snprintf(names[VIEWS + 1 + c], sizeof(names[0]), "c%u", c);
             tables[1 + c] = (W){names[VIEWS + 1 + c], 0, VIEWS + 1, (uint32_t)g.count, 0};
-            gen_fold(&g, roll(&g, 3) ? LANE_L : LANE_M, LANE_L);
+            if (roll(&g, 3)) gen_shaped(&g, roll(&g, 3) ? LANE_L : LANE_M);
+            else gen_fold(&g, roll(&g, 3) ? LANE_L : LANE_M, LANE_L);
             tables[1 + c].length = (uint32_t)(g.count - tables[1 + c].start);
         }
         H handler = {1, (uint32_t)g.count, 0};
@@ -2302,7 +2367,9 @@ static void lane_folds(void) {
         for (uint32_t i = 0; i < module_b.code_count; ++i) {
             folds += module_a.code[i].op == PURE_OP_FOLD;
             planned += module_a.code[i].plan;
-            module_b.code[i].plan = 0;
+            shaped[module_a.code[i].shape ? module_a.shape[module_a.code[i].shape - 1].form : 0] +=
+                module_a.code[i].op == PURE_OP_FOLD;
+            module_b.code[i].plan = module_b.code[i].shape = 0;
         }
         planned += module_a.view_plan[VIEWS];
         memset(module_b.view_plan, 0, sizeof(module_b.view_plan));
@@ -2341,6 +2408,7 @@ static void lane_folds(void) {
                 }
             }
         }
+        passes += pure_app_passes(&a);
         PureResult went_a = pure_app_input(&a, 0, PURE_EDGE_DOWN), went_b = pure_app_input(&b, 0, PURE_EDGE_DOWN);
         if (went_a != went_b || a.fault != b.fault || a.fault_pc != b.fault_pc || memcmp(a.values, b.values, 4 * sizeof(double))) {
             fprintf(stderr, "lane round %u handler: %d %d %u / %d %d %u\n", round, went_a, a.fault, a.fault_pc, went_b, b.fault,
@@ -2353,8 +2421,10 @@ static void lane_folds(void) {
         pure_module_release(&module_a);
         pure_module_release(&module_b);
     }
-    CHECK(planned > folds / 2 && faults > 100 && cells > 1000);
-    printf("{\"lane_folds\":%u,\"planned\":%u,\"faults_alike\":%u,\"cells\":%u}\n", folds, planned, faults, cells);
+    CHECK(planned > folds / 2 && faults > 100 && cells > 1000 && shaped[PURE_SHAPE_GROUP] > 150 &&
+          shaped[PURE_SHAPE_RANK] > 100 && passes > 60);
+    printf("{\"lane_folds\":%u,\"planned\":%u,\"groups\":%u,\"ranks\":%u,\"passes\":%u,\"faults_alike\":%u,"
+           "\"cells\":%u}\n", folds, planned, shaped[PURE_SHAPE_GROUP], shaped[PURE_SHAPE_RANK], passes, faults, cells);
 }
 
 /* Damaged fold and filter modules: whatever loads runs safely. */

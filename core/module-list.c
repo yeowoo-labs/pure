@@ -510,6 +510,11 @@ bool pure_list_current(const PureList *copy, const PureList *list) {
     return copy->id == list->id && copy->version == list->version;
 }
 
+void pure_list_stamp(const PureList *list, uint64_t *id, uint64_t *version) {
+    *id = list->id;
+    *version = list->version;
+}
+
 static bool log_change(PureUndo *undo, Entry entry) {
     if (undo->count == undo->capacity) {
         size_t capacity = undo->capacity ? 2 * undo->capacity : 16;

@@ -84,9 +84,11 @@ typedef enum {
     PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING, PURE_FAULT_EXISTS
 } PureFault;
 
-/* plan is the runtime's, set at load: a fold whose block has a form for
- * every instruction that works on a leaf of its list at once runs so. */
-typedef struct { double value; uint32_t arg; uint8_t op, plan; } PureOp;
+/* plan and shape are the runtime's, set at load: a fold whose block has a
+ * form for every instruction that works on a leaf of its list at once runs
+ * so (plan), and one in a column may be answered for every row from one
+ * pass over its list (shape: its PureShape + 1). */
+typedef struct { double value; uint32_t arg; uint8_t op, plan, shape; } PureOp;
 typedef struct { uint32_t start, length; } PureBlock;
 typedef struct { uint32_t event; PureBlock code; } PureHandler;
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint32_t offset; } PureField;
@@ -100,6 +102,15 @@ typedef struct {
 
 /* A record type: fields numbered from first, each a number or text. */
 typedef struct { uint16_t first, count; } PureRecord;
+
+/* A fold in a column whose test compares a field of its item with a key the
+ * row gives (key, a block reading no item; test, the comparison), the rest
+ * of it reading the item alone: a group (the field equals the key: one pass
+ * folds every group) or a rank (a count of items whose field orders against
+ * the key: one sort answers every key). relation is the comparison's
+ * opcode with the item on its left. */
+enum { PURE_SHAPE_GROUP = 1, PURE_SHAPE_RANK = 2, PURE_MODULE_SHAPES = 64 };
+typedef struct { uint8_t form, relation; uint16_t field; uint32_t test; PureBlock key; } PureShape;
 
 typedef struct {
     uint16_t states, inputs, views, handlers, fields, collections, constants, records, record_fields;
@@ -123,6 +134,8 @@ typedef struct {
     uint16_t view_list[PURE_MODULE_VIEWS];  /* the list of a table or column */
     PureBlock view_code[PURE_MODULE_VIEWS];
     uint8_t view_plan[PURE_MODULE_VIEWS]; /* a table's filter runs a leaf of its list at once (as a fold may) */
+    PureShape shape[PURE_MODULE_SHAPES];
+    uint8_t shapes;
     PureHandler handler[PURE_MODULE_HANDLERS];
     /* The code and the text constants, sized to the module in one block
      * (storage) that load takes and pure_module_release gives back. */
@@ -255,6 +268,9 @@ typedef struct {
     bool links_changed; /* since the last save */
     bool duplicate;     /* the last delivery was heard before and not applied */
     struct { const char *source; uint64_t seq; bool pending; } delivering;
+    /* Passes over lists that answer shaped folds, by the list's version. */
+    struct PurePass *passes;
+    unsigned pass_count;
     struct PureSnapshot *snapshot; /* the newest snapshot made, or NULL */
     PureRetired retired;           /* list items let go since it was made */
     bool reading;                  /* a reader: its states are a snapshot's */
@@ -304,6 +320,8 @@ PureResult pure_app_view_text(PureApp *, uint32_t view, bool (*visit)(void *, Pu
 /* The rows of a table view (its list's items, or those its filter keeps),
  * or 0 for another view. A host evaluates only the cells it shows. */
 size_t pure_app_rows(PureApp *, uint32_t table);
+/* How many passes the app keeps, made to answer shaped folds in columns. */
+unsigned pure_app_passes(const PureApp *);
 /* The item a row of a table shows, and the row that shows an item (false:
  * its filter leaves the item out). Without a filter both are the identity. */
 bool pure_app_row_item(PureApp *, uint32_t table, size_t row, size_t *item);
