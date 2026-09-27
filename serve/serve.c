@@ -288,23 +288,59 @@ static void close_connection(Connection *c) {
     --host->active;
 }
 
+/* An answer's head is written in place, part by part: printf's scanning of
+ * its format took a sixth of a small read's time. Clipped at the end of the
+ * buffer, which its parts, all short, never reach. */
+typedef struct { char *at, *end; } Head;
+
+static void put_text(Head *h, const char *text) {
+    size_t length = strlen(text), room = (size_t)(h->end - h->at);
+    if (length > room) length = room;
+    memcpy(h->at, text, length);
+    h->at += length;
+}
+
+static void put_decimal(Head *h, uint64_t value) {
+    char digits[20];
+    size_t count = 0;
+    do digits[count++] = (char)('0' + value % 10); while (value /= 10);
+    while (count && h->at < h->end) *h->at++ = digits[--count];
+}
+
 /* Answer with a body of `count` extents (`size` bytes in all); the ticket
  * keeps them alive. One writev sends as much as the socket takes. */
 static void respond_typed(Connection *c, int status, const char *reason, const char *error, int64_t revision,
                           const char *type, const struct iovec *extents, size_t count, size_t size) {
-    char tag[48] = "";
-    if (revision > 0) snprintf(tag, sizeof(tag), "ETag: \"%" PRId64 "\"\r\n", revision);
+    Head h = {c->head, c->head + sizeof(c->head)};
+    put_text(&h, "HTTP/1.1 ");
+    put_decimal(&h, (uint64_t)status);
+    put_text(&h, " ");
+    put_text(&h, reason);
+    put_text(&h, "\r\nContent-Length: ");
+    put_decimal(&h, size);
+    put_text(&h, c->keep_alive ? "\r\n" : "\r\nConnection: close\r\n");
+    put_text(&h, "Content-Type: ");
+    put_text(&h, type);
+    put_text(&h, "\r\nCache-Control: no-store\r\nX-Pure-Error: ");
+    put_text(&h, error);
+    put_text(&h, "\r\n");
+    if (revision > 0) {
+        put_text(&h, "ETag: \"");
+        put_decimal(&h, (uint64_t)revision);
+        put_text(&h, "\"\r\n");
+    }
     /* A delivery's answer tells how many numbered messages one request may carry. */
-    char batch[32] = "";
-    if (*c->source) snprintf(batch, sizeof(batch), "X-Pure-Batch: %d\r\n", BATCH);
-    int length = snprintf(c->head, sizeof(c->head),
-        "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\n%sContent-Type: %s\r\n"
-        "Cache-Control: no-store\r\nX-Pure-Error: %s\r\n%s%s\r\n",
-        status, reason, size, c->keep_alive ? "" : "Connection: close\r\n", type, error, tag, batch);
+    if (*c->source) {
+        put_text(&h, "X-Pure-Batch: ");
+        put_decimal(&h, BATCH);
+        put_text(&h, "\r\n");
+    }
+    put_text(&h, "\r\n");
+    size_t length = (size_t)(h.at - c->head);
     c->out = count < sizeof(c->small) / sizeof(*c->small) ? c->small : malloc((count + 1) * sizeof(*c->out));
     c->phase = WRITING;
     if (!c->out) { c->keep_alive = false; c->out = c->small; count = 0; } /* cannot send it: the close tells */
-    c->out[0] = (struct iovec){c->head, (size_t)length};
+    c->out[0] = (struct iovec){c->head, length};
     if (count) memcpy(c->out + 1, extents, count * sizeof(*extents));
     c->out_count = count + 1;
     c->out_at = 0;
