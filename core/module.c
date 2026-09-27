@@ -399,6 +399,40 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
     return why;
 }
 
+/* Whether an instruction has a form that works on the items of a run at
+ * once: numbers and indexes, with no branch and no text. */
+PURE_COLD static bool has_lanes(const PureModule *m, const PureOp *op) {
+    switch (op->op) {
+    case PURE_OP_CONST: case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_NEG:
+    case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE:
+    case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_NOT: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_CLAMP:
+    case PURE_OP_FLOOR: case PURE_OP_MOD: case PURE_OP_LOAD: case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_LOAD:
+    case PURE_OP_INDEX_MOVE: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_INDEX_NUM:
+    case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_PICK: case PURE_OP_SLIDE:
+        return true;
+    case PURE_OP_ITEM_GET: return field_type(m, list_of(op->arg), item_field(op->arg)) == T_NUM;
+    case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: return field_type(m, op->arg, m->state_key[op->arg] - 1u) == T_NUM;
+    default: return false;
+    }
+}
+
+PURE_COLD static bool block_has_lanes(const PureModule *m, PureBlock block) {
+    for (uint32_t pc = block.start; pc < block.start + block.length; ++pc)
+        if (!has_lanes(m, &m->code[pc])) return false;
+    return true;
+}
+
+/* A fold in a verified block whose own block has lane forms throughout runs
+ * a leaf of its list at a time. */
+PURE_COLD static void plan_folds(PureModule *m, PureBlock block) {
+    for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
+        PureOp *op = &m->code[pc];
+        if (op->op != PURE_OP_FOLD) continue;
+        op->plan = block_has_lanes(m, (PureBlock){pc + 1, op->arg >> 16});
+        pc += op->arg >> 16;
+    }
+}
+
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
     FILE *file = fopen(path, "rb");
     unsigned char *bytes = NULL;
@@ -668,6 +702,12 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         bad = i;
         if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event, &bad))) goto refused;
     }
+    for (uint32_t i = 0; i < out->views; ++i) {
+        plan_folds(out, out->view_code[i]);
+        out->view_plan[i] = out->view_type[i] == PURE_VIEW_TABLE && out->view_code[i].length &&
+                            block_has_lanes(out, out->view_code[i]);
+    }
+    for (uint32_t i = 0; i < out->handlers; ++i) plan_folds(out, out->handler[i].code);
     return PURE_OK;
 refused:
     if (error_size) snprintf(error, error_size, "%s (%u)", why, bad);
@@ -903,6 +943,339 @@ static PureResult send(PureApp *app, uint32_t output, const Slot *fields, const 
     }
     app->sent[app->sent_count++] = (struct PureSent){output, ++app->last_sent[output], payload, size, false};
     app->links_changed = true;
+    return PURE_OK;
+}
+
+static PureResult run(const PureModule *m, double *values, PureBlock block, Event *ev, Slot *result);
+
+/* ---- Folds and filters a leaf at a time ------------------------------
+ * A block whose instructions all have lane forms (has_lanes) runs for a run
+ * of its list's items at once: each value is one per item (a lane), the
+ * items' own positions, or one for all. An item for which run would fault
+ * makes the whole run go again item by item through run, so a fold faults,
+ * and a filter leaves an item out, exactly as they would have; the lanes
+ * only see what run would compute. */
+typedef struct {
+    const double *lane; /* a value per item, or NULL */
+    double value;       /* without lanes: the value for all */
+    bool rows;          /* without lanes: the items' own positions */
+    uint16_t owner;     /* an index's list */
+} Lanes;
+
+static bool uniform(const Lanes *v) { return !v->lane && !v->rows; }
+
+/* A lookup by a value for all items reads no item of the run: every run of
+ * a fold (or a filter) finds the same, so it is made once, by instruction. */
+enum { MEMO = 64 };
+typedef struct { double value[MEMO]; uint64_t known; } Memo;
+
+static bool recalled(const Memo *memo, uint32_t slot, double *value) {
+    if (slot >= MEMO || !(memo->known >> slot & 1)) return false;
+    *value = memo->value[slot];
+    return true;
+}
+
+static void remember(Memo *memo, uint32_t slot, double value) {
+    if (slot >= MEMO) return;
+    memo->value[slot] = value;
+    memo->known |= (uint64_t)1 << slot;
+}
+
+/* A value per item, in scratch when it is not one already. */
+static const double *lanes_of(const Lanes *v, double *scratch, const PureRun *items) {
+    if (v->lane) return v->lane;
+    for (unsigned i = 0; i < items->count; ++i) scratch[i] = v->rows ? (double)(items->start + i) : v->value;
+    return scratch;
+}
+
+/* a op b as run computes it; false where run faults. */
+static bool number_op(uint8_t op, double a, double b, double *out) {
+    double value;
+    switch (op) {
+    case PURE_OP_ADD: value = a + b; break;
+    case PURE_OP_SUB: value = a - b; break;
+    case PURE_OP_MUL: value = a * b; break;
+    case PURE_OP_DIV:
+        if (b == 0) return false;
+        value = a / b;
+        break;
+    case PURE_OP_LT: value = a < b; break;
+    case PURE_OP_LE: value = a <= b; break;
+    case PURE_OP_GT: value = a > b; break;
+    case PURE_OP_GE: value = a >= b; break;
+    case PURE_OP_EQ: value = a == b; break;
+    case PURE_OP_NE: value = a != b; break;
+    case PURE_OP_AND: value = a != 0 && b != 0; break;
+    case PURE_OP_OR: value = a != 0 || b != 0; break;
+    case PURE_OP_MIN: value = minimum(a, b); break;
+    case PURE_OP_MOD:
+        if (b == 0) return false;
+        value = fmod(a, b);
+        if (value != 0 && (value < 0) != (b < 0)) value += b;
+        else if (value == 0) value = copysign(0.0, b);
+        break;
+    default: value = maximum(a, b); break;
+    }
+    *out = value;
+    return isfinite(value);
+}
+
+/* a op b for every item into out: a loop per operation, reading a value for
+ * all with stride 0. false where run faults for some item. */
+static bool lanes_op(uint8_t op, const double *a, size_t sa, const double *b, size_t sb, double *out, unsigned n) {
+    bool bad = false;
+#define EACH(expr) for (unsigned i = 0; i < n; ++i) { double x = a[i * sa], y = b[i * sb]; out[i] = (expr); }
+    switch (op) {
+    case PURE_OP_ADD: EACH(x + y) break;
+    case PURE_OP_SUB: EACH(x - y) break;
+    case PURE_OP_MUL: EACH(x * y) break;
+    case PURE_OP_LT: EACH(x < y) return true;
+    case PURE_OP_LE: EACH(x <= y) return true;
+    case PURE_OP_GT: EACH(x > y) return true;
+    case PURE_OP_GE: EACH(x >= y) return true;
+    case PURE_OP_EQ: EACH(x == y) return true;
+    case PURE_OP_NE: EACH(x != y) return true;
+    case PURE_OP_AND: EACH(x != 0 && y != 0) return true;
+    case PURE_OP_OR: EACH(x != 0 || y != 0) return true;
+    case PURE_OP_MIN: EACH(minimum(x, y)) return true;
+    case PURE_OP_MAX: EACH(maximum(x, y)) return true;
+    default:
+        for (unsigned i = 0; i < n; ++i) bad |= !number_op(op, a[i * sa], b[i * sb], &out[i]);
+        return !bad;
+    }
+#undef EACH
+    for (unsigned i = 0; i < n; ++i) bad |= !isfinite(out[i]);
+    return !bad;
+}
+
+/* The block for the items of a run at once, as a column of their list:
+ * result holds what it leaves (lanes may point into store, a row of lanes
+ * per stack depth, or into the list's leaf). false when run would fault for
+ * some item. */
+static bool run_lanes(const PureModule *m, const double *values, PureBlock block, const Event *ev, const PureRun *items,
+                      Lanes *result, double (*store)[PURE_LIST_RUN], Memo *memo) {
+    PureApp *app = ev->app;
+    Lanes stack[PURE_MODULE_STACK];
+    double scratch[2][PURE_LIST_RUN];
+    size_t sp = 0;
+    unsigned n = items->count;
+    for (uint32_t pc = block.start, end = block.start + block.length; pc < end; ++pc) {
+        const PureOp *op = &m->code[pc];
+        uint32_t arg = op->arg;
+        Lanes *top = sp ? &stack[sp - 1] : stack;
+        double *out = store[sp ? sp - 1 : 0]; /* where the top's new lanes go */
+        switch (op->op) {
+        case PURE_OP_CONST: stack[sp++] = (Lanes){NULL, op->value, false, 0}; continue;
+        case PURE_OP_LOAD: stack[sp++] = (Lanes){NULL, values[arg], false, 0}; continue;
+        case PURE_OP_INDEX_LOAD: stack[sp++] = (Lanes){NULL, values[arg], false, m->state_ref[arg]}; continue;
+        case PURE_OP_ROW: stack[sp++] = (Lanes){NULL, 0, true, (uint16_t)arg}; continue;
+        case PURE_OP_OUTER_ROW: stack[sp++] = (Lanes){NULL, (double)ev->outer, false, (uint16_t)arg}; continue;
+        case PURE_OP_LIST_COUNT: stack[sp++] = (Lanes){NULL, (double)pure_list_count(app->lists[arg]), false, 0}; continue;
+        case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: {
+            size_t last = op->op == PURE_OP_INDEX_LAST ? pure_list_count(app->lists[arg]) : 0;
+            stack[sp++] = (Lanes){NULL, last ? (double)(last - 1) : 0, false, (uint16_t)arg};
+            continue;
+        }
+        case PURE_OP_INDEX_NUM: continue;
+        case PURE_OP_PICK: stack[sp] = stack[sp - 1 - arg]; ++sp; continue;
+        case PURE_OP_SLIDE: {
+            /* The top moves down: lanes kept in a depth it leaves come along. */
+            Lanes moved = stack[sp - 1];
+            size_t to = sp - 1 - arg;
+            if ((uintptr_t)moved.lane >= (uintptr_t)store[to + 1] && (uintptr_t)moved.lane < (uintptr_t)store[sp]) {
+                memcpy(store[to], moved.lane, n * sizeof(double));
+                moved.lane = store[to];
+            }
+            stack[to] = moved;
+            sp = to + 1;
+            continue;
+        }
+        case PURE_OP_ITEM_GET: {
+            uint32_t list = list_of(arg), field = item_field(arg);
+            const PureList *from = app->lists[list];
+            size_t count = pure_list_count(from);
+            if (top->rows) { /* the items themselves: the leaf's column */
+                *top = (Lanes){items->column[field].numbers, 0, false, 0};
+                continue;
+            }
+            if (!top->lane) {
+                top->owner = 0;
+                if (recalled(memo, pc - block.start, &top->value)) continue;
+                if (top->value >= (double)count) return false;
+                top->value = pure_list_get(from, (size_t)top->value, field).num;
+                remember(memo, pc - block.start, top->value);
+                continue;
+            }
+            for (unsigned i = 0; i < n; ++i) {
+                if (top->lane[i] >= (double)count) return false;
+                out[i] = pure_list_get(from, (size_t)top->lane[i], field).num;
+            }
+            *top = (Lanes){out, 0, false, 0};
+            continue;
+        }
+        case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: {
+            const PureList *keyed = app->lists[arg];
+            unsigned key = m->state_key[arg] - 1u;
+            bool find = op->op == PURE_OP_LIST_FIND, found;
+            if (uniform(top)) {
+                double value;
+                if (!recalled(memo, pc - block.start, &value)) {
+                    size_t at = pure_list_seek(keyed, key, (PureCell){top->value, NULL, 0}, &found);
+                    if (find && !found) return false;
+                    remember(memo, pc - block.start, value = find ? (double)at : found);
+                }
+                *top = (Lanes){NULL, value, false, find ? (uint16_t)arg : 0};
+                continue;
+            }
+            const double *keys = lanes_of(top, scratch[0], items);
+            for (unsigned i = 0; i < n; ++i) {
+                size_t at = pure_list_seek(keyed, key, (PureCell){keys[i], NULL, 0}, &found);
+                if (find && !found) return false;
+                out[i] = find ? (double)at : found;
+            }
+            *top = (Lanes){out, 0, false, find ? (uint16_t)arg : 0};
+            continue;
+        }
+        case PURE_OP_INDEX_MOVE: {
+            Lanes by = stack[--sp];
+            top = &stack[sp - 1];
+            out = store[sp - 1];
+            size_t count = pure_list_count(app->lists[top->owner]);
+            double last = count ? (double)(count - 1) : 0;
+            if (uniform(top) && uniform(&by)) {
+                if (by.value != floor(by.value)) return false;
+                top->value = maximum(0, minimum(top->value + by.value, last));
+                continue;
+            }
+            const double *at = lanes_of(top, scratch[0], items), *step = lanes_of(&by, scratch[1], items);
+            for (unsigned i = 0; i < n; ++i) {
+                if (step[i] != floor(step[i])) return false;
+                out[i] = maximum(0, minimum(at[i] + step[i], last));
+            }
+            *top = (Lanes){out, 0, false, top->owner};
+            continue;
+        }
+        case PURE_OP_NEG: case PURE_OP_NOT: case PURE_OP_FLOOR: {
+            if (uniform(top)) {
+                top->value = op->op == PURE_OP_NEG ? -top->value : op->op == PURE_OP_NOT ? top->value == 0 : floor(top->value);
+                top->owner = 0;
+                continue;
+            }
+            const double *a = lanes_of(top, scratch[0], items);
+            if (op->op == PURE_OP_NEG) for (unsigned i = 0; i < n; ++i) out[i] = -a[i];
+            else if (op->op == PURE_OP_NOT) for (unsigned i = 0; i < n; ++i) out[i] = a[i] == 0;
+            else for (unsigned i = 0; i < n; ++i) out[i] = floor(a[i]);
+            *top = (Lanes){out, 0, false, 0};
+            continue;
+        }
+        case PURE_OP_CLAMP: {
+            Lanes high = stack[--sp], low = stack[--sp];
+            top = &stack[sp - 1];
+            out = store[sp - 1];
+            if (uniform(top) && uniform(&low) && uniform(&high)) {
+                if (low.value > high.value) return false;
+                top->value = maximum(low.value, minimum(top->value, high.value));
+                continue;
+            }
+            double spare[PURE_LIST_RUN];
+            const double *x = lanes_of(top, scratch[0], items), *lo = lanes_of(&low, scratch[1], items),
+                         *hi = lanes_of(&high, spare, items);
+            for (unsigned i = 0; i < n; ++i) {
+                if (lo[i] > hi[i]) return false;
+                out[i] = maximum(lo[i], minimum(x[i], hi[i]));
+            }
+            *top = (Lanes){out, 0, false, 0};
+            continue;
+        }
+        default: { /* two numbers */
+            Lanes b = stack[--sp];
+            top = &stack[sp - 1];
+            out = store[sp - 1];
+            if (uniform(top) && uniform(&b)) {
+                if (!number_op(op->op, top->value, b.value, &top->value)) return false;
+                top->owner = 0;
+                continue;
+            }
+            const double *x = top->rows ? lanes_of(top, scratch[0], items) : top->lane ? top->lane : &top->value;
+            const double *y = b.rows ? lanes_of(&b, scratch[1], items) : b.lane ? b.lane : &b.value;
+            if (!lanes_op(op->op, x, uniform(top) ? 0 : 1, y, uniform(&b) ? 0 : 1, out, n)) return false;
+            *top = (Lanes){out, 0, false, 0};
+            continue;
+        }
+        }
+    }
+    memcpy(result, stack, sp * sizeof(*stack));
+    return true;
+}
+
+/* A fold's running value: what count, sum, max, min or first has so far. */
+typedef struct { unsigned how; double total; bool any, done; } Fold;
+
+/* One item: its value, and whether it counts (for count and first, the value is). */
+static void fold_in(Fold *fold, size_t row, double value, double counts) {
+    if (counts == 0) return;
+    unsigned how = fold->how;
+    if (how == PURE_FOLD_FIRST) {
+        fold->total = (double)row;
+        fold->any = fold->done = true;
+        return;
+    }
+    fold->total = how == PURE_FOLD_COUNT ? fold->total + 1 : how == PURE_FOLD_SUM ? fold->total + value :
+                  !fold->any ? value : how == PURE_FOLD_MAX ? maximum(fold->total, value) : minimum(fold->total, value);
+    fold->any = true;
+}
+
+/* The fold's block for its items from first to last, one at a time. */
+static PureResult fold_rows(const PureModule *m, double *values, PureBlock inner, Event *per, size_t first,
+                            size_t last, Fold *fold) {
+    bool one = fold->how == PURE_FOLD_COUNT || fold->how == PURE_FOLD_FIRST;
+    for (size_t row = first; row < last && !fold->done; ++row) {
+        Slot out[2];
+        size_t mark = per->arena->used;
+        per->row = row;
+        PureResult status = run(m, values, inner, per, out);
+        per->arena->used = mark;
+        if (status != PURE_OK) return status;
+        fold_in(fold, row, out[0].num, one ? out[0].num : out[1].num);
+    }
+    return PURE_OK;
+}
+
+/* The fold's block a leaf of its list at a time; a run where an item would
+ * fault goes item by item. The items join the fold in order, so a sum adds
+ * as it would one at a time. */
+static PureResult fold_runs(const PureModule *m, double *values, PureBlock inner, const PureList *list, Event *per,
+                            Fold *fold) {
+    double store[PURE_MODULE_STACK][PURE_LIST_RUN], scratch[2][PURE_LIST_RUN];
+    bool one = fold->how == PURE_FOLD_COUNT || fold->how == PURE_FOLD_FIRST;
+    PureRun items;
+    Memo memo;
+    memo.known = 0;
+    for (bool more = pure_list_run(list, 0, &items); more && !fold->done; more = pure_list_next(list, &items)) {
+        Lanes out[2];
+        if (!run_lanes(m, values, inner, per, &items, out, store, &memo)) {
+            PureResult status = fold_rows(m, values, inner, per, items.start, items.start + items.count, fold);
+            if (status != PURE_OK) return status;
+            continue;
+        }
+        const Lanes *counts = &out[one ? 0 : 1];
+        if (uniform(counts) && counts->value == 0) continue;
+        const double *c = lanes_of(counts, scratch[0], &items), *v = lanes_of(&out[0], scratch[1], &items);
+        if (fold->how == PURE_FOLD_COUNT) {
+            size_t counted = 0;
+            for (unsigned i = 0; i < items.count; ++i) counted += c[i] != 0;
+            fold->total += (double)counted;
+            fold->any = fold->any || counted;
+        } else if (fold->how == PURE_FOLD_SUM) {
+            double total = fold->total;
+            bool any = fold->any;
+            for (unsigned i = 0; i < items.count; ++i)
+                if (c[i] != 0) total += v[i], any = true;
+            fold->total = total;
+            fold->any = any;
+        } else
+            for (unsigned i = 0; i < items.count && !fold->done; ++i) fold_in(fold, items.start + i, v[i], c[i]);
+    }
     return PURE_OK;
 }
 
@@ -1157,32 +1530,20 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             continue;
         }
         case PURE_OP_FOLD: {
-            /* The block that follows runs once per item, as a column of the list. */
-            unsigned how = arg & 0xFF;
+            /* The block that follows runs once per item, as a column of the
+             * list: a leaf of it at a time when planned so. */
             PureBlock inner = {pc, arg >> 16};
             PureList *list = app->lists[arg >> 8 & 0xFF];
             pc += inner.length;
-            double total = 0;
-            bool any = false;
+            Fold fold = {arg & 0xFF, 0, false, false};
             Event per = *ev;
             per.outer = ev->row;
-            for (size_t row = 0, items = pure_list_count(list); row < items; ++row) {
-                Slot out[2];
-                size_t mark = arena->used;
-                per.row = row;
-                status = run(m, values, inner, &per, out);
-                arena->used = mark;
-                if (status != PURE_OK) return status;
-                double value = out[0].num;
-                if (how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? value == 0 : out[1].num == 0) continue;
-                if (how == PURE_FOLD_FIRST) { total = (double)row; any = true; break; }
-                total = how == PURE_FOLD_COUNT ? total + 1 : how == PURE_FOLD_SUM ? total + value :
-                        !any ? value : how == PURE_FOLD_MAX ? maximum(total, value) : minimum(total, value);
-                any = true;
-            }
-            if (!any && how >= PURE_FOLD_MAX) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
-            if (!isfinite(total)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
-            stack[sp].num = total;
+            status = op->plan ? fold_runs(m, values, inner, list, &per, &fold)
+                              : fold_rows(m, values, inner, &per, 0, pure_list_count(list), &fold);
+            if (status != PURE_OK) return status;
+            if (!fold.any && fold.how >= PURE_FOLD_MAX) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
+            if (!isfinite(fold.total)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
+            stack[sp].num = fold.total;
             stack[sp++].bytes.owner = (uint16_t)(arg >> 8 & 0xFF); /* first: the list the index is in */
             continue;
         }
@@ -1766,6 +2127,24 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     return result;
 }
 
+static bool keep_row(struct PureRows *rows, size_t item) {
+    if (rows->count == rows->capacity) {
+        size_t capacity = rows->capacity ? 2 * rows->capacity : 16;
+        size_t *grown = realloc(rows->items, capacity * sizeof(*grown));
+        if (!grown) return false;
+        rows->items = grown;
+        rows->capacity = capacity;
+    }
+    rows->items[rows->count++] = item;
+    return true;
+}
+
+/* The item kept when the filter, run for it alone, keeps it; false without room. */
+static bool keep_evaluated(PureApp *app, uint32_t table, struct PureRows *rows, size_t item) {
+    Slot kept;
+    return evaluate(app, table, item, &kept) != PURE_OK || kept.num == 0 || keep_row(rows, item);
+}
+
 /* A filtered table's items, as fresh as the app's states: the filter runs
  * once per item after each change (an item it fails on is left out), not
  * once per cell. NULL for a table without a filter, or without room. */
@@ -1783,18 +2162,28 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
     }
     if (rows->changes == app->changes) return rows;
     rows->count = 0;
-    for (size_t item = 0, items = pure_list_count(app->lists[m->view_list[table]]); item < items; ++item) {
-        Slot keep;
-        if (evaluate(app, table, item, &keep) != PURE_OK || keep.num == 0) continue;
-        if (rows->count == rows->capacity) {
-            size_t capacity = rows->capacity ? 2 * rows->capacity : 16;
-            size_t *grown = realloc(rows->items, capacity * sizeof(*grown));
-            if (!grown) return NULL;
-            rows->items = grown;
-            rows->capacity = capacity;
+    /* A leaf of the list at a time when the filter has lane forms; a leaf
+     * where an item would fault goes item by item, leaving that item out. */
+    const PureList *list = app->lists[m->view_list[table]];
+    PureRun run;
+    if (m->view_plan[table]) {
+        double store[PURE_MODULE_STACK][PURE_LIST_RUN], scratch[PURE_LIST_RUN];
+        Event ev = {.app = app, .arena = &app->view_arena};
+        Memo memo;
+        memo.known = 0;
+        for (bool more = pure_list_run(list, 0, &run); more; more = pure_list_next(list, &run)) {
+            Lanes keep;
+            if (run_lanes(m, app->values, m->view_code[table], &ev, &run, &keep, store, &memo)) {
+                const double *kept = lanes_of(&keep, scratch, &run);
+                for (unsigned i = 0; i < run.count; ++i)
+                    if (kept[i] != 0 && !keep_row(rows, run.start + i)) return NULL;
+            } else
+                for (size_t item = run.start; item < run.start + run.count; ++item)
+                    if (!keep_evaluated(app, table, rows, item)) return NULL;
         }
-        rows->items[rows->count++] = item;
-    }
+    } else
+        for (size_t item = 0, items = pure_list_count(list); item < items; ++item)
+            if (!keep_evaluated(app, table, rows, item)) return NULL;
     rows->changes = app->changes;
     return rows;
 }

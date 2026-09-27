@@ -37,9 +37,14 @@ typedef struct {
     size_t start;
     unsigned count;
     union { const double *numbers; const PureSpan *texts; } column[16];
+    /* Where the run is in the list's tree, for the next one. */
+    const void *path[16];
+    uint8_t taken[16];
+    unsigned depth;
 } PureRun;
 
-enum { PURE_LIST_ITEMS = 1 << 24 };
+/* A list holds up to PURE_LIST_ITEMS items, a run up to PURE_LIST_RUN. */
+enum { PURE_LIST_ITEMS = 1 << 24, PURE_LIST_RUN = 32 };
 
 PureList *pure_list_new(unsigned fields, const uint8_t *text_fields);
 void pure_list_free(PureList *);
@@ -63,9 +68,11 @@ PureResult pure_list_insert(PureList *, size_t at, const PureCell *cells, PureUn
 PureResult pure_list_remove(PureList *, size_t at, PureUndo *);
 PureResult pure_list_set(PureList *, size_t at, unsigned field, PureCell value, PureUndo *);
 PureCell pure_list_get(const PureList *, size_t at, unsigned field);
-/* The run holding position at (false past the end): for reading item after
- * item without finding each. Valid until the list changes. */
+/* The run holding position at (false past the end), and the run after
+ * run (false at the end): for reading item after item without finding each.
+ * Valid until the list changes. */
 bool pure_list_run(const PureList *, size_t at, PureRun *);
+bool pure_list_next(const PureList *, PureRun *);
 /* In a list ordered by field (a keyed list): the first position whose item's
  * field does not order below key (numbers by value, texts by bytes), and
  * whether that item's field is key. */

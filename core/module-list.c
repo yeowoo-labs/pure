@@ -23,7 +23,7 @@
  * (the path) and retires the ones it replaced, and retires a text it lets go
  * instead of freeing it. A share is then a root and a count, however long
  * the list. */
-enum { FANOUT = 32, DEPTH = 16, SPARE_NODES = 8 };
+enum { FANOUT = PURE_LIST_RUN, DEPTH = 16, SPARE_NODES = 8 };
 
 typedef struct Node {
     uint64_t made;            /* the list's share count when made: shared once below it */
@@ -720,16 +720,55 @@ PureCell pure_list_get(const PureList *list, size_t at, unsigned field) {
     return cell_at(&list->layout, leaf_of(list, at, &within), (unsigned)within, field);
 }
 
-bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
-    const Layout *l = &list->layout;
-    if (at >= list->count) return false;
-    size_t within;
-    const Node *leaf = leaf_of(list, at, &within);
-    run->start = at - within;
+static void open_run(const Layout *l, const Node *leaf, PureRun *run) {
     run->count = leaf->count;
     for (unsigned f = 0; f < l->fields; ++f)
         if (l->text_fields[f]) run->column[f].texts = texts(l, leaf, f);
         else run->column[f].numbers = numbers(l, leaf, f);
+}
+
+bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
+    if (at >= list->count) return false;
+    const Node *node = list->root;
+    size_t start = 0;
+    unsigned depth = 0;
+    while (!node->leaf) {
+        unsigned i = 0;
+        while (i + 1 < node->count && at - start >= child(node, i)->items) start += child(node, i)->items, ++i;
+        run->path[depth] = node;
+        run->taken[depth++] = (uint8_t)i;
+        node = child(node, i);
+    }
+    run->path[depth] = node;
+    run->depth = depth;
+    run->start = start;
+    open_run(&list->layout, node, run);
+    return true;
+}
+
+/* Up to the nearest node with a child after the one taken, then down its
+ * first children to a leaf. The leaf after it (a sibling) is fetched ahead:
+ * leaves copied at different times lie far apart in memory. */
+bool pure_list_next(const PureList *list, PureRun *run) {
+    size_t start = run->start + run->count;
+    unsigned depth = run->depth;
+    while (depth && run->taken[depth - 1] + 1u >= ((const Node *)run->path[depth - 1])->count) --depth;
+    if (!depth) return false;
+    const Node *parent = run->path[depth - 1], *node = child(parent, ++run->taken[depth - 1]);
+    while (!node->leaf) {
+        run->path[depth] = parent = node;
+        run->taken[depth++] = 0;
+        node = child(node, 0);
+    }
+    unsigned after = run->taken[depth - 1] + 1u;
+    if (after < parent->count) {
+        const char *leaf = (const char *)child(parent, after);
+        for (size_t at = 0; at < list->layout.leaf_size; at += 64) __builtin_prefetch(leaf + at);
+    }
+    run->path[depth] = node;
+    run->depth = depth;
+    run->start = start;
+    open_run(&list->layout, node, run);
     return true;
 }
 

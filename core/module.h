@@ -84,7 +84,9 @@ typedef enum {
     PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING, PURE_FAULT_EXISTS
 } PureFault;
 
-typedef struct { double value; uint32_t arg; uint8_t op; } PureOp;
+/* plan is the runtime's, set at load: a fold whose block has a form for
+ * every instruction that works on a leaf of its list at once runs so. */
+typedef struct { double value; uint32_t arg; uint8_t op, plan; } PureOp;
 typedef struct { uint32_t start, length; } PureBlock;
 typedef struct { uint32_t event; PureBlock code; } PureHandler;
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint32_t offset; } PureField;
@@ -120,6 +122,7 @@ typedef struct {
     uint16_t view_table[PURE_MODULE_VIEWS]; /* a column's table view + 1, or 0 */
     uint16_t view_list[PURE_MODULE_VIEWS];  /* the list of a table or column */
     PureBlock view_code[PURE_MODULE_VIEWS];
+    uint8_t view_plan[PURE_MODULE_VIEWS]; /* a table's filter runs a leaf of its list at once (as a fold may) */
     PureHandler handler[PURE_MODULE_HANDLERS];
     /* The code and the text constants, sized to the module in one block
      * (storage) that load takes and pure_module_release gives back. */

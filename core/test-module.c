@@ -950,15 +950,30 @@ static void model_copy(Model *to, const Model *from) {
     if (from->count) memcpy(to->items, from->items, from->count * sizeof(*to->items));
 }
 
+static bool same_item(const Model *m, size_t i, double key, PureSpan text) {
+    return key == m->items[i].key && text.size == m->items[i].size && (!text.size || !memcmp(text.data, m->items[i].text, text.size));
+}
+
+/* The items by position, and run after run from the first and from a middle one. */
 static bool same_items(const PureList *list, const Model *m) {
     if (pure_list_count(list) != m->count) return false;
     for (size_t i = 0; i < m->count; ++i) {
         PureCell key = pure_list_get(list, i, 0), text = pure_list_get(list, i, 1);
-        if (key.num != m->items[i].key || text.size != m->items[i].size ||
-            (text.size && memcmp(text.text, m->items[i].text, text.size)))
-            return false;
+        if (!same_item(m, i, key.num, (PureSpan){text.text, text.size})) return false;
     }
-    return true;
+    PureRun run;
+    for (size_t from = 0; from < m->count; from += m->count / 2 + 1) {
+        size_t at = 0;
+        bool more = pure_list_run(list, from, &run);
+        if (!more || from < run.start || from >= run.start + run.count) return false;
+        for (at = run.start; more; more = pure_list_next(list, &run)) {
+            if (run.start != at || !run.count || run.count > PURE_LIST_RUN) return false;
+            for (unsigned i = 0; i < run.count; ++i, ++at)
+                if (!same_item(m, at, run.column[0].numbers[i], run.column[1].texts[i])) return false;
+        }
+        if (at != m->count) return false;
+    }
+    return !pure_list_run(list, m->count, &run);
 }
 
 typedef struct { unsigned char *bytes; size_t size, capacity; } Grown;
@@ -2159,6 +2174,189 @@ static void filters(void) {
         }
 }
 
+/* ---- Folds and filters a leaf at a time --------------------------------
+ * Random well-typed folds (plain views, a table's columns reading their row,
+ * a handler storing them), filters and lists: a module whose folds run a
+ * leaf at a time answers bit for bit as the same module run item by item,
+ * faults included (their kind and instruction). */
+typedef struct { O code[8192]; size_t count; uint32_t seed; int fold_list, outer; } Gen;
+enum { LANE_K = 0, LANE_L = 4, LANE_M = 5 };
+
+static void put_op(Gen *g, uint8_t op, uint32_t arg, double value) {
+    CHECK(g->count < LEN(g->code));
+    g->code[g->count++] = (O){op, arg, value};
+}
+
+static unsigned roll(Gen *g, unsigned n) { return next_random(&g->seed) % n; }
+
+static void gen_num(Gen *g, int depth);
+
+/* An index of list: the fold's item, the column's row, a key found, an end, or one moved. */
+static void gen_index(Gen *g, int list, int depth) {
+    unsigned choice = roll(g, depth <= 0 ? 3 : 7);
+    if (choice == 0 && list == g->fold_list) put_op(g, PURE_OP_ROW, (uint32_t)list, 0);
+    else if (choice == 1 && list == LANE_L && g->outer >= 0) put_op(g, PURE_OP_OUTER_ROW, LANE_L, 0);
+    else if (choice >= 3 && choice <= 4 && list == LANE_L) {
+        gen_num(g, depth - 1);
+        put_op(g, PURE_OP_LIST_FIND, LANE_L, 0);
+    } else if (choice == 5) {
+        gen_index(g, list, depth - 1);
+        gen_num(g, depth - 1);
+        put_op(g, PURE_OP_INDEX_MOVE, 0, 0);
+    } else
+        put_op(g, roll(g, 2) ? PURE_OP_INDEX_FIRST : PURE_OP_INDEX_LAST, (uint32_t)list, 0);
+}
+
+static void gen_num(Gen *g, int depth) {
+    static const double pool[] = {0, -0.0, 1, -1, 2, 0.5, 3, 7, 100, -3.5, 1e308, -1e308, 4, 10};
+    static const uint8_t binary[] = {PURE_OP_ADD, PURE_OP_SUB, PURE_OP_MUL, PURE_OP_DIV, PURE_OP_LT, PURE_OP_LE,
+                                     PURE_OP_GT, PURE_OP_GE, PURE_OP_EQ, PURE_OP_NE, PURE_OP_AND, PURE_OP_OR,
+                                     PURE_OP_MIN, PURE_OP_MAX, PURE_OP_MOD};
+    static const uint8_t unary[] = {PURE_OP_NEG, PURE_OP_NOT, PURE_OP_FLOOR};
+    switch (roll(g, depth <= 0 ? 4 : 12)) {
+    case 0: put_op(g, C, 0, pool[roll(g, LEN(pool))]); return;
+    case 1: put_op(g, L, LANE_K, 0); return;
+    case 2: case 3: { /* a field of an item */
+        int list = depth <= 0 || roll(g, 3) ? g->fold_list : roll(g, 2) ? LANE_L : LANE_M;
+        gen_index(g, list, depth - 1);
+        put_op(g, PURE_OP_ITEM_GET, (uint32_t)list | (uint32_t)roll(g, list == LANE_L ? 3 : 2) << 16, 0);
+        return;
+    }
+    case 4: put_op(g, PURE_OP_LIST_COUNT, roll(g, 2) ? LANE_L : LANE_M, 0); return;
+    case 5:
+        gen_index(g, roll(g, 2) ? LANE_L : LANE_M, depth - 1);
+        put_op(g, PURE_OP_INDEX_NUM, 0, 0);
+        return;
+    case 6: gen_num(g, depth - 1); put_op(g, PURE_OP_LIST_HAS, LANE_L, 0); return;
+    case 7: gen_num(g, depth - 1); put_op(g, unary[roll(g, LEN(unary))], 0, 0); return;
+    case 8: gen_num(g, depth - 1); gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, CL, 0, 0); return;
+    case 9: gen_num(g, depth - 1); put_op(g, PURE_OP_PICK, 0, 0); put_op(g, binary[roll(g, LEN(binary))], 0, 0); return;
+    case 10: gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, PURE_OP_SLIDE, 1, 0); return;
+    default: gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, binary[roll(g, LEN(binary))], 0, 0); return;
+    }
+}
+
+/* A fold over list leaving a number (first's index as one), in a column of L (outer) or not. */
+static void gen_fold(Gen *g, int list, int outer) {
+    unsigned how = roll(g, 5);
+    size_t at = g->count;
+    put_op(g, PURE_OP_FOLD, 0, 0);
+    int fold_list = g->fold_list, fold_outer = g->outer;
+    g->fold_list = list, g->outer = outer;
+    if (how != PURE_FOLD_COUNT && how != PURE_FOLD_FIRST) gen_num(g, 3);
+    gen_num(g, 3);
+    g->fold_list = fold_list, g->outer = fold_outer;
+    g->code[at].arg = FOLDING(how, list, g->count - at - 1);
+    if (how == PURE_FOLD_FIRST) put_op(g, PURE_OP_INDEX_NUM, 0, 0);
+}
+
+static bool same_number(bool a_ok, double a, bool b_ok, double b) {
+    return a_ok == b_ok && (!a_ok || !memcmp(&a, &b, sizeof(a)));
+}
+
+static void lane_folds(void) {
+    static const S numbers[] = {{"k", 3}, {"h0", 0}, {"h1", 0}, {"h2", 0}};
+    static const T lists[] = {{"l", 3 | 1 << 8, 0}, {"m", 3, 1}};
+    static const RF l_fields[] = {{"key", 0, 0}, {"a", 0, 0}, {"b", 0, 0}}, m_fields[] = {{"x", 0, 0}, {"y", 0, 0}};
+    static const R records[] = {{"lrec", l_fields, 3}, {"mrec", m_fields, 2}};
+    static const I inputs[] = {KEY("go", "KeyG")};
+    static const double values[] = {0, -0.0, 1, -1, 2, 3, 0.5, -2.5, 5, 10, 1e308, -7};
+    enum { VIEWS = 6, COLUMNS = 3, HANDLED = 3 };
+    static Gen g;
+    uint32_t seed = 0x1a2b3c4du;
+    unsigned planned = 0, folds = 0, faults = 0, cells = 0;
+    for (unsigned round = 0; round < 300; ++round) {
+        g = (Gen){.seed = next_random(&seed), .fold_list = -1, .outer = -1};
+        V views[VIEWS];
+        char names[VIEWS + 1 + COLUMNS][4];
+        W tables[1 + COLUMNS];
+        for (unsigned v = 0; v < VIEWS; ++v) {
+            snprintf(names[v], sizeof(names[v]), "v%u", v);
+            views[v] = (V){names[v], (uint32_t)g.count, 0};
+            gen_fold(&g, roll(&g, 3) ? LANE_L : LANE_M, -1);
+            views[v].length = (uint32_t)(g.count - views[v].start);
+        }
+        tables[0] = (W){"t", 2 | (LANE_L + 1) << 8, 0, (uint32_t)g.count, 0};
+        g.fold_list = LANE_L;
+        gen_num(&g, 3);
+        g.fold_list = -1;
+        tables[0].length = (uint32_t)(g.count - tables[0].start);
+        for (unsigned c = 0; c < COLUMNS; ++c) {
+            snprintf(names[VIEWS + 1 + c], sizeof(names[0]), "c%u", c);
+            tables[1 + c] = (W){names[VIEWS + 1 + c], 0, VIEWS + 1, (uint32_t)g.count, 0};
+            gen_fold(&g, roll(&g, 3) ? LANE_L : LANE_M, LANE_L);
+            tables[1 + c].length = (uint32_t)(g.count - tables[1 + c].start);
+        }
+        H handler = {1, (uint32_t)g.count, 0};
+        for (unsigned h = 0; h < HANDLED; ++h) {
+            gen_fold(&g, roll(&g, 2) ? LANE_L : LANE_M, -1);
+            put_op(&g, ST, 1 + h, 0);
+        }
+        handler.length = (uint32_t)(g.count - handler.start);
+        Spec spec = {numbers, LEN(numbers), inputs, LEN(inputs), views, VIEWS, &handler, 1, g.code, g.count, NULL, 0,
+                     lists, LEN(lists), NULL, 0, NULL, 0, records, LEN(records), tables, LEN(tables)};
+        if (load(spec, &module_a) != PURE_OK || load(spec, &module_b) != PURE_OK) {
+            fprintf(stderr, "lane round %u: %s\n", round, error);
+            abort();
+        }
+        for (uint32_t i = 0; i < module_b.code_count; ++i) {
+            folds += module_a.code[i].op == PURE_OP_FOLD;
+            planned += module_a.code[i].plan;
+            module_b.code[i].plan = 0;
+        }
+        planned += module_a.view_plan[VIEWS];
+        memset(module_b.view_plan, 0, sizeof(module_b.view_plan));
+        PureApp a, b;
+        CHECK(pure_app_start(&a, &module_a, (PureData){0}) == PURE_OK && pure_app_start(&b, &module_b, (PureData){0}) == PURE_OK);
+        size_t l_items = roll(&g, 4) ? roll(&g, 200) : 0, m_items = roll(&g, 4) ? roll(&g, 100) : 0;
+        for (size_t i = 0; i < l_items + m_items; ++i) {
+            bool in_l = i < l_items;
+            PureCell cells_[3] = {{in_l ? 2.0 * (double)i : values[roll(&g, LEN(values))], NULL, 0},
+                                  {values[roll(&g, LEN(values))], NULL, 0}, {values[roll(&g, LEN(values))], NULL, 0}};
+            PureList *list_a = a.lists[in_l ? LANE_L : LANE_M], *list_b = b.lists[in_l ? LANE_L : LANE_M];
+            CHECK(pure_list_insert(list_a, pure_list_count(list_a), cells_, NULL) == PURE_OK &&
+                  pure_list_insert(list_b, pure_list_count(list_b), cells_, NULL) == PURE_OK);
+        }
+        for (unsigned v = 0; v < VIEWS; ++v) {
+            double x = 0, y = 0;
+            bool ok_a = pure_app_view(&a, v, &x), ok_b = pure_app_view(&b, v, &y);
+            faults += !ok_a;
+            if (!same_number(ok_a, x, ok_b, y)) {
+                fprintf(stderr, "lane round %u view %u: %d %g / %d %g\n", round, v, ok_a, x, ok_b, y);
+                abort();
+            }
+        }
+        size_t rows = pure_app_rows(&a, VIEWS);
+        CHECK(rows == pure_app_rows(&b, VIEWS));
+        for (size_t row = 0; row < rows; ++row) {
+            size_t item_a, item_b;
+            CHECK(pure_app_row_item(&a, VIEWS, row, &item_a) && pure_app_row_item(&b, VIEWS, row, &item_b) && item_a == item_b);
+            for (unsigned c = 0; c < COLUMNS; ++c) {
+                double x = 0, y = 0;
+                bool ok_a = pure_app_cell(&a, VIEWS + 1 + c, row, &x), ok_b = pure_app_cell(&b, VIEWS + 1 + c, row, &y);
+                ++cells;
+                if (!same_number(ok_a, x, ok_b, y)) {
+                    fprintf(stderr, "lane round %u column %u row %zu: %d %g / %d %g\n", round, c, row, ok_a, x, ok_b, y);
+                    abort();
+                }
+            }
+        }
+        PureResult went_a = pure_app_input(&a, 0, PURE_EDGE_DOWN), went_b = pure_app_input(&b, 0, PURE_EDGE_DOWN);
+        if (went_a != went_b || a.fault != b.fault || a.fault_pc != b.fault_pc || memcmp(a.values, b.values, 4 * sizeof(double))) {
+            fprintf(stderr, "lane round %u handler: %d %d %u / %d %d %u\n", round, went_a, a.fault, a.fault_pc, went_b, b.fault,
+                    b.fault_pc);
+            abort();
+        }
+        faults += went_a != PURE_OK;
+        pure_app_stop(&a);
+        pure_app_stop(&b);
+        pure_module_release(&module_a);
+        pure_module_release(&module_b);
+    }
+    CHECK(planned > folds / 2 && faults > 100 && cells > 1000);
+    printf("{\"lane_folds\":%u,\"planned\":%u,\"faults_alike\":%u,\"cells\":%u}\n", folds, planned, faults, cells);
+}
+
 /* Damaged fold and filter modules: whatever loads runs safely. */
 static void fold_mutations(void) {
     static unsigned char valid[65536], bytes[65536];
@@ -3079,6 +3277,7 @@ int main(void) {
     list_trees();
     folds();
     filters();
+    lane_folds();
     keyed();
     keyed_mutations();
     snapshots();
