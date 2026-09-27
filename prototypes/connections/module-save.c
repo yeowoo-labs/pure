@@ -10,6 +10,12 @@
  * field {u8 0 number | 1 text, u8 name length, name}, then its items
  * (module-list.h). A text state: its UTF-8 bytes. */
 static const unsigned char values_magic[4] = {'P', 'V', 'S', '1'}, list_magic[4] = {'P', 'L', 'S', '1'};
+/* links: "PLK1"; u8 outputs, each {u8 name length, name, u8 field count, the
+ * fields' types, u64le last number} (the module's outputs, then those it
+ * dropped, without fields); u16le sources, each {u8 length, the name, u64le
+ * last number heard}; then the sent messages to the end, each {u8 output (in
+ * the table), u64le number, u32le size, payload}. */
+static const unsigned char links_magic[4] = {'P', 'L', 'K', '1'};
 static const PureVersion unsaved = {UINT64_MAX, UINT64_MAX};
 
 bool pure_save_enabled(const PureApp *app) { return app->data.state && app->data.save; }
@@ -252,6 +258,154 @@ PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, do
 
 static bool same_version(PureVersion a, PureVersion b) { return a.ref == b.ref && a.bytes == b.bytes; }
 
+static unsigned char *put_le(unsigned char *at, uint64_t value, unsigned width) {
+    for (unsigned i = 0; i < width; ++i) *at++ = (unsigned char)(value >> (8 * i));
+    return at;
+}
+
+static uint64_t get_le(const unsigned char *at, unsigned width) {
+    uint64_t value = 0;
+    for (unsigned i = 0; i < width; ++i) value |= (uint64_t)at[i] << (8 * i);
+    return value;
+}
+
+/* The links as stored; NULL when memory runs out. */
+static unsigned char *encode_links(const PureApp *app, size_t *size) {
+    const PureModule *m = app->module;
+    unsigned outputs = 0;
+    uint8_t table[PURE_MODULE_INPUTS];
+    size_t total = 4 + 1 + 2;
+    for (uint32_t i = 0; i < m->inputs; ++i)
+        if (m->input[i].kind == PURE_KIND_OUTPUT) {
+            table[i] = (uint8_t)outputs++;
+            total += 2 + strlen(m->input_names[i]) + m->input[i].field_count + 8;
+        }
+    for (unsigned c = 0; c < app->carried_count; ++c) total += 2 + strlen(app->carried[c].name) + 8;
+    for (unsigned h = 0; h < app->heard_count; ++h) total += 1 + strlen(app->heard[h].source) + 8;
+    for (size_t s = 0; s < app->sent_count; ++s)
+        if (!app->sent[s].trimmed) total += 1 + 8 + 4 + app->sent[s].size;
+    unsigned char *bytes = malloc(total), *at = bytes;
+    if (!bytes) return NULL;
+    memcpy(at, links_magic, 4);
+    at += 4;
+    *at++ = (unsigned char)(outputs + app->carried_count);
+    for (uint32_t i = 0; i < m->inputs; ++i) {
+        if (m->input[i].kind != PURE_KIND_OUTPUT) continue;
+        size_t length = strlen(m->input_names[i]);
+        *at++ = (unsigned char)length;
+        memcpy(at, m->input_names[i], length);
+        at += length;
+        *at++ = (unsigned char)m->input[i].field_count;
+        for (uint32_t f = 0; f < m->input[i].field_count; ++f) *at++ = m->field[m->input[i].field_start + f].type;
+        at = put_le(at, app->last_sent[i], 8);
+    }
+    for (unsigned c = 0; c < app->carried_count; ++c) {
+        size_t length = strlen(app->carried[c].name);
+        *at++ = (unsigned char)length;
+        memcpy(at, app->carried[c].name, length);
+        at += length;
+        *at++ = 0;
+        at = put_le(at, app->carried[c].last, 8);
+    }
+    at = put_le(at, app->heard_count, 2);
+    for (unsigned h = 0; h < app->heard_count; ++h) {
+        size_t length = strlen(app->heard[h].source);
+        *at++ = (unsigned char)length;
+        memcpy(at, app->heard[h].source, length);
+        at = put_le(at + length, app->heard[h].seq, 8);
+    }
+    for (size_t s = 0; s < app->sent_count; ++s) {
+        const struct PureSent *sent = &app->sent[s];
+        if (sent->trimmed) continue;
+        *at++ = table[sent->output];
+        at = put_le(at, sent->seq, 8);
+        at = put_le(at, sent->size, 4);
+        if (sent->size) memcpy(at, sent->payload, sent->size);
+        at += sent->size;
+    }
+    *size = (size_t)(at - bytes);
+    return bytes;
+}
+
+/* The stored links of a starting app: outputs by name (an output whose
+ * fields changed or that the module lacks refuses the start while it has
+ * sends left: CONFLICT; one without sends keeps its number for later),
+ * sources and sent messages. */
+PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m) {
+    PureResult result = app->stored_links ? PURE_OK : open_state(app, "", "links", &app->stored_links);
+    if (result != PURE_OK || !pure_draft_revision(app->stored_links)) return result;
+    unsigned char *bytes;
+    size_t size;
+    if ((result = read_whole(app->stored_links, &bytes, &size)) != PURE_OK) return result;
+    int output[256];
+    bool fits[256];
+    size_t at = 5;
+    unsigned outputs = size >= 5 && !memcmp(bytes, links_magic, 4) ? bytes[4] : 0;
+    result = size >= 5 && !memcmp(bytes, links_magic, 4) ? PURE_OK : PURE_STORE_ERROR;
+    for (unsigned t = 0; t < outputs && result == PURE_OK; ++t) {
+        char name[PURE_MODULE_NAME];
+        size_t length = at < size ? bytes[at] : 0;
+        if (!length || length >= PURE_MODULE_NAME || size - at < 2 + length) { result = PURE_STORE_ERROR; break; }
+        memcpy(name, bytes + at + 1, length);
+        name[length] = 0;
+        unsigned fields = bytes[at + 1 + length];
+        at += 2 + length;
+        if (size - at < fields + 8) { result = PURE_STORE_ERROR; break; }
+        int i = pure_module_input(m, name);
+        output[t] = i >= 0 && m->input[i].kind == PURE_KIND_OUTPUT ? i : -1;
+        fits[t] = output[t] >= 0 && m->input[i].field_count == fields;
+        for (unsigned f = 0; fits[t] && f < fields; ++f) fits[t] = m->field[m->input[i].field_start + f].type == bytes[at + f];
+        uint64_t last = get_le(bytes + at + fields, 8);
+        at += fields + 8;
+        if (output[t] >= 0) app->last_sent[output[t]] = last;
+        else if (last) {
+            struct PureCarried *grown = realloc(app->carried, (app->carried_count + 1) * sizeof(*grown));
+            if (!grown) { result = PURE_ALLOCATION; break; }
+            app->carried = grown;
+            memcpy(grown[app->carried_count].name, name, length + 1);
+            grown[app->carried_count++].last = last;
+        }
+    }
+    unsigned sources = result == PURE_OK && size - at >= 2 ? (unsigned)get_le(bytes + at, 2) : 0;
+    if (result == PURE_OK && size - at < 2) result = PURE_STORE_ERROR;
+    at += 2;
+    if (result == PURE_OK && sources && !(app->heard = calloc(sources, sizeof(*app->heard)))) result = PURE_ALLOCATION;
+    app->heard_capacity = sources;
+    for (unsigned h = 0; h < sources && result == PURE_OK; ++h) {
+        size_t length = at < size ? bytes[at] : 0;
+        if (!length || length > PURE_SOURCE || size - at < 1 + length + 8) { result = PURE_STORE_ERROR; break; }
+        struct PureHeard *heard = &app->heard[app->heard_count++];
+        memcpy(heard->source, bytes + at + 1, length);
+        heard->seq = heard->saved = get_le(bytes + at + 1 + length, 8);
+        at += 1 + length + 8;
+    }
+    while (result == PURE_OK && at < size) {
+        if (size - at < 13 || bytes[at] >= outputs) { result = PURE_STORE_ERROR; break; }
+        unsigned t = bytes[at];
+        uint64_t seq = get_le(bytes + at + 1, 8);
+        size_t length = (size_t)get_le(bytes + at + 9, 4);
+        at += 13;
+        if (size - at < length) { result = PURE_STORE_ERROR; break; }
+        if (!fits[t]) { result = PURE_CONFLICT; break; }
+        if (app->sent_count == app->sent_capacity) {
+            size_t capacity = app->sent_capacity ? 2 * app->sent_capacity : 16;
+            struct PureSent *grown = realloc(app->sent, capacity * sizeof(*grown));
+            if (!grown) { result = PURE_ALLOCATION; break; }
+            app->sent = grown;
+            app->sent_capacity = capacity;
+        }
+        unsigned char *payload = malloc(length ? length : 1);
+        if (!payload) { result = PURE_ALLOCATION; break; }
+        if (length) memcpy(payload, bytes + at, length);
+        app->sent[app->sent_count++] = (struct PureSent){(uint32_t)output[t], seq, payload, length, false};
+        at += length;
+    }
+    free(bytes);
+    app->sent_durable = app->sent_count;
+    memcpy(app->saved_sent, app->last_sent, sizeof(app->saved_sent));
+    return result;
+}
+
 PureResult pure_save_commit(PureApp *app, const double *values, void *const *documents, size_t document_count,
                             int64_t *revisions) {
     if (!pure_save_enabled(app)) {
@@ -262,8 +416,8 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
         return result;
     }
     const PureModule *m = app->module;
-    PureDraft *drafts[2 * PURE_MODULE_STATES + 1];
-    uint32_t states[2 * PURE_MODULE_STATES + 1];
+    PureDraft *drafts[2 * PURE_MODULE_STATES + 2];
+    uint32_t states[2 * PURE_MODULE_STATES + 2];
     size_t count = 0;
     for (uint32_t i = 0; i < m->states; ++i) {
         PureDraft *draft = m->state_type[i] == PURE_STATE_TEXT ? app->texts[i] :
@@ -292,6 +446,32 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
             drafts[count++] = app->stored_values;
         }
     }
+    /* The links, written whole when they changed. */
+    PureVersion links_before = {0, 0};
+    bool links_written = false;
+    if (app->links_changed) {
+        PureResult result = app->stored_links ? PURE_OK : open_state(app, "", "links", &app->stored_links);
+        size_t length;
+        unsigned char *encoded = result == PURE_OK ? encode_links(app, &length) : NULL;
+        if (result == PURE_OK && !encoded) result = PURE_ALLOCATION;
+        if (result == PURE_OK) {
+            links_before = pure_draft_version(app->stored_links);
+            pure_draft_hold(app->stored_links, true);
+            result = pure_draft_splice(app->stored_links, 0, pure_draft_size(app->stored_links), (PureSpan){encoded, length});
+            if (result != PURE_OK) pure_draft_hold(app->stored_links, false);
+        }
+        free(encoded);
+        if (result != PURE_OK) {
+            if (values_changed) {
+                pure_draft_restore(app->stored_values, values_before);
+                pure_draft_hold(app->stored_values, false);
+            }
+            return result;
+        }
+        links_written = true;
+        states[count] = UINT32_MAX;
+        drafts[count++] = app->stored_links;
+    }
     if (!count && !document_count) return PURE_OK;
     PureResult result = app->data.save(app->data.context, documents, document_count, drafts, count, revisions);
     for (size_t k = 0; result == PURE_OK && k < count; ++k)
@@ -299,6 +479,10 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
     if (values_changed) {
         if (result != PURE_OK) pure_draft_restore(app->stored_values, values_before);
         pure_draft_hold(app->stored_values, false);
+    }
+    if (links_written) {
+        if (result != PURE_OK) pure_draft_restore(app->stored_links, links_before);
+        pure_draft_hold(app->stored_links, false);
     }
     return result;
 }

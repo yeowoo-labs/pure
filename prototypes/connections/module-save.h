@@ -21,6 +21,9 @@ PureResult pure_save_open_values(PureApp *, const PureModule *m, double *values,
                                  PureDraft *const *texts, PureList *const *lists);
 /* Store a list whose record changed in its draft, header and items anew. */
 PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, PureList *list, PureDraft *draft);
+/* The stored links of a starting app (module.h, PureApp); CONFLICT when an
+ * output with sends left is missing or has other fields. */
+PureResult pure_save_open_links(PureApp *, const PureModule *m);
 /* Publish the documents and every state changed since the last save
  * (values are the states' numbers); revisions are the documents'. */
 PureResult pure_save_commit(PureApp *, const double *values, void *const *documents, size_t document_count,

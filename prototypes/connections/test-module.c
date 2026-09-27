@@ -127,7 +127,7 @@ static size_t build(unsigned char *out, Spec spec) {
         *p++ = (unsigned char)(in->kind ? in->kind : 1); *p++ = in->keyed; *p++ = 0; *p++ = 0;
         bool timer = in->kind == PURE_KIND_TIMER;
         p = put32(p, timer ? (uint32_t)in->nfields : in->kind ? 0 : offset[n++]);
-        uint32_t first = in->kind == PURE_KIND_MESSAGE ? field_start : 0; /* only messages have fields */
+        uint32_t first = in->kind == PURE_KIND_MESSAGE || in->kind == PURE_KIND_OUTPUT ? field_start : 0; /* only messages and outputs have fields */
         *p++ = (unsigned char)first; *p++ = (unsigned char)(first >> 8);
         *p++ = (unsigned char)(timer ? 0 : in->nfields); *p++ = 0;
         for (size_t f = 0; !timer && f < in->nfields; ++f) field_offsets[nf++] = offset[n++];
@@ -2539,6 +2539,237 @@ static void message_fields(void) {
     CHECK(load(groups, &module_b) == PURE_INVALID && strstr(error, "field and group"));
 }
 
+/* ---- Connections between apps (docs/research/078-app-connections.md): a
+ * send is part of its event and is seen once saved; a receiver applies each
+ * numbered message once, counts a refused one as heard, and forgets what a
+ * failed save undid. */
+enum { SEND = PURE_OP_SEND };
+typedef struct { uint32_t output; uint64_t seq; unsigned char payload[64]; size_t size; } Sent;
+typedef struct { Sent items[16]; size_t count; } Outbox;
+
+static bool collect_sent(void *context, uint32_t output, uint64_t seq, PureSpan payload) {
+    Outbox *o = context;
+    CHECK(o->count < 16 && payload.size <= 64);
+    Sent *s = &o->items[o->count++];
+    *s = (Sent){output, seq, {0}, payload.size};
+    memcpy(s->payload, payload.data, payload.size);
+    return true;
+}
+
+static Outbox outbox_of(const PureApp *app) {
+    Outbox o = {.count = 0};
+    pure_app_outbox(app, collect_sent, &o);
+    return o;
+}
+
+/* buy/fail {item: text, count: u32}: the count at 0, then the item. */
+static PureResult buy(PureApp *app, uint32_t input, const char *item, uint32_t count) {
+    unsigned char payload[64];
+    size_t length = strlen(item);
+    memcpy(payload, &count, 4);
+    memcpy(payload + 4, item, length);
+    PureResult result = pure_app_message(app, input, NULL, -1, (PureSpan){payload, 4 + length});
+    pure_app_finish(app);
+    return result;
+}
+
+/* order {item: text, count: u32, total: number}: count, total, then item. */
+static PureResult deliver(PureApp *app, const char *source, uint64_t seq, const char *item, uint32_t count) {
+    unsigned char payload[64];
+    size_t length = strlen(item);
+    double total = 0;
+    memcpy(payload, &count, 4);
+    memcpy(payload + 4, &total, 8);
+    memcpy(payload + 12, item, length);
+    PureResult result = pure_app_deliver(app, 0, source, seq, (PureSpan){payload, 12 + length});
+    pure_app_finish(app);
+    return result;
+}
+
+static void links(void) {
+    static const S sender_nums[] = {{"n", 0}};
+    static const F order_fields[] = {{"item", PURE_FIELD_TEXT}, {"count", PURE_FIELD_U32}};
+    static const F ordered_fields[] = {{"item", PURE_FIELD_TEXT}, {"count", PURE_FIELD_U32}, {"total", PURE_FIELD_NUMBER}};
+    static const I sender_inputs[] = {{"buy", NULL, PURE_KIND_MESSAGE, false, order_fields, 2},
+                                      {"fail", NULL, PURE_KIND_MESSAGE, false, order_fields, 2},
+                                      {"ordered", NULL, PURE_KIND_OUTPUT, false, ordered_fields, 3}};
+    static const O sender_code[] = {{L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, {FIELD, 0, 0}, {FIELD, 1, 0},
+                                    {L, 0, 0}, {SEND, 2, 0},                                           /* buy */
+                                    {FIELD, 0, 0}, {FIELD, 1, 0}, {C, 0, 0}, {SEND, 2, 0}, {C, 0, 0}, {REQ, 0, 0}}; /* fail */
+    static const H sender_handlers[] = {{1, 0, 8}, {3, 8, 6}};
+    Spec sender = {sender_nums, 1, sender_inputs, 3, NULL, 0, sender_handlers, 2, sender_code, LEN(sender_code),
+                   NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
+    static const S receiver_nums[] = {{"stock", 0}};
+    static const T receiver_texts[] = {{"last", 1, 0}};
+    static const char *const receiver_constants[] = {""};
+    static const I receiver_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, ordered_fields, 3}};
+    static const O receiver_code[] = {{FIELD, 1, 0}, {L, 0, 0}, {ADD, 0, 0}, {ST, 0, 0}, {FIELD, 0, 0}, {TSET, 1, 0},
+                                      {FIELD, 1, 0}, {C, 0, 100}, {LT, 0, 0}, {REQ, 0, 0}}; /* refuses 100 or more */
+    static const H receiver_handlers[] = {{1, 0, 10}};
+    Spec receiver = {receiver_nums, 1, receiver_inputs, 1, NULL, 0, receiver_handlers, 1, receiver_code,
+                     LEN(receiver_code), NULL, 0, receiver_texts, 1, receiver_constants, 1, NULL, 0, NULL, 0, NULL, 0};
+    if (load(sender, &module_a) != PURE_OK || load(receiver, &module_b) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    CHECK(module_a.input[2].prefix == 12);
+
+    /* In memory: a send is its event's; the receiver applies it once per source. */
+    PureApp a, b;
+    CHECK(pure_app_start(&a, &module_a, (PureData){0}) == PURE_OK && pure_app_start(&b, &module_b, (PureData){0}) == PURE_OK);
+    CHECK(buy(&a, 0, "pen", 2) == PURE_OK && buy(&a, 1, "ink", 3) == PURE_LIMIT);
+    Outbox o = outbox_of(&a);
+    CHECK(o.count == 1 && o.items[0].output == 2 && o.items[0].seq == 1 && o.items[0].size == 15 && a.values[0] == 1);
+    PureSpan sent = {o.items[0].payload, o.items[0].size};
+    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent) == PURE_OK && !b.duplicate && b.values[0] == 2 &&
+          !strcmp(state_text(&b, 1), "pen"));
+    pure_app_finish(&b);
+    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent) == PURE_OK && b.duplicate && b.values[0] == 2);
+    CHECK(deliver(&b, "other", 1, "cup", 5) == PURE_OK && !b.duplicate && b.values[0] == 7);
+    CHECK(deliver(&b, "orders.ordered", 3, "hat", 1) == PURE_OK && b.values[0] == 8); /* numbers may skip */
+    CHECK(deliver(&b, "orders.ordered", 2, "old", 1) == PURE_OK && b.duplicate && b.values[0] == 8);
+    /* Refused (count 100): delivered all the same, never applied again. */
+    CHECK(deliver(&b, "other", 2, "big", 100) == PURE_LIMIT && b.values[0] == 7 + 1);
+    CHECK(deliver(&b, "other", 2, "big", 1) == PURE_OK && b.duplicate && b.values[0] == 8);
+    /* Bad deliveries change nothing. */
+    CHECK(deliver(&b, "", 4, "x", 1) == PURE_INVALID && deliver(&b, "a b", 4, "x", 1) == PURE_INVALID);
+    CHECK(deliver(&b, "other", 0, "x", 1) == PURE_INVALID && pure_app_deliver(&a, 2, "s", 1, sent) == PURE_INVALID);
+    CHECK(pure_app_message(&a, 2, NULL, -1, sent) == PURE_INVALID);
+    /* Trimmed, a send is gone at once for the host and from the store at the next save. */
+    pure_app_trim(&a, 2, 1);
+    CHECK(outbox_of(&a).count == 0 && pure_app_save(&a) == PURE_OK && a.sent_count == 0);
+    CHECK(buy(&a, 0, "cap", 1) == PURE_OK && outbox_of(&a).items[0].seq == 2);
+    pure_app_stop(&a);
+    pure_app_stop(&b);
+
+    /* Stored: sends and heard numbers survive restarts; a deferred burst's sends
+     * appear with its save, and a failed save takes them and their numbers back. */
+    char path_a[64], path_b[64];
+    snprintf(path_a, sizeof(path_a), "%s", new_store());
+    snprintf(path_b, sizeof(path_b), "%s", new_store());
+    CHECK(pure_app_start(&a, &module_a, pure_tree_data(path_a)) == PURE_OK);
+    CHECK(pure_app_start(&b, &module_b, pure_tree_data(path_b)) == PURE_OK);
+    CHECK(buy(&a, 0, "pen", 2) == PURE_OK && buy(&a, 0, "ink", 3) == PURE_OK);
+    pure_app_stop(&a);
+    CHECK(pure_app_start(&a, &module_a, pure_tree_data(path_a)) == PURE_OK);
+    o = outbox_of(&a);
+    CHECK(o.count == 2 && o.items[0].seq == 1 && o.items[1].seq == 2 && a.values[0] == 2);
+    CHECK(pure_app_defer(&a, true));
+    for (int i = 0; i < 3; ++i) CHECK(buy(&a, 0, "box", 1) == PURE_OK);
+    CHECK(outbox_of(&a).count == 2 && pure_app_save(&a) == PURE_OK);
+    o = outbox_of(&a);
+    CHECK(o.count == 5 && o.items[4].seq == 5);
+    CHECK(buy(&a, 0, "lost", 1) == PURE_OK);
+    pure_app_trim(&a, 2, 3);
+    fail_stage = PURE_AFTER_HEADER;
+    CHECK(pure_app_save(&a) == PURE_STORE_ERROR);
+    fail_stage = -1;
+    o = outbox_of(&a);
+    CHECK(o.count == 5 && o.items[0].seq == 1 && a.values[0] == 5);         /* the trim and the send undone */
+    CHECK(buy(&a, 0, "next", 1) == PURE_OK && pure_app_save(&a) == PURE_OK);
+    o = outbox_of(&a);
+    CHECK(o.count == 6 && o.items[5].seq == 6);                              /* numbered on from 5 */
+    pure_app_trim(&a, 2, 4);
+    CHECK(pure_app_save(&a) == PURE_OK);
+    pure_app_stop(&a);
+    CHECK(pure_app_start(&a, &module_a, pure_tree_data(path_a)) == PURE_OK);
+    o = outbox_of(&a);
+    CHECK(o.count == 2 && o.items[0].seq == 5 && o.items[1].seq == 6);
+    /* The receiver: heard numbers stay heard after a restart; a refused one too. */
+    CHECK(deliver(&b, "orders.ordered", 1, "pen", 2) == PURE_OK && deliver(&b, "x", 1, "big", 100) == PURE_LIMIT);
+    pure_app_stop(&b);
+    CHECK(pure_app_start(&b, &module_b, pure_tree_data(path_b)) == PURE_OK && b.values[0] == 2);
+    CHECK(deliver(&b, "orders.ordered", 1, "pen", 2) == PURE_OK && b.duplicate && b.values[0] == 2);
+    CHECK(deliver(&b, "x", 1, "big", 1) == PURE_OK && b.duplicate);
+    /* A save that fails forgets what it heard. */
+    CHECK(pure_app_defer(&b, true) && deliver(&b, "orders.ordered", 2, "ink", 3) == PURE_OK && b.values[0] == 5);
+    fail_stage = PURE_AFTER_HEADER;
+    CHECK(pure_app_save(&b) == PURE_STORE_ERROR && b.values[0] == 2);
+    fail_stage = -1;
+    CHECK(deliver(&b, "orders.ordered", 2, "ink", 3) == PURE_OK && !b.duplicate && b.values[0] == 5);
+    CHECK(pure_app_save(&b) == PURE_OK);
+    pure_app_stop(&b);
+
+    /* Replacing: a module without the output is refused while sends are left
+     * on it; once they are trimmed it replaces, and the output's number is
+     * kept for a module that has it again. */
+    static const I plain_inputs[] = {{"buy", NULL, PURE_KIND_MESSAGE, false, order_fields, 2}};
+    static const O plain_code[] = {{L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}};
+    static const H plain_handlers[] = {{1, 0, 4}};
+    Spec plain = {sender_nums, 1, plain_inputs, 1, NULL, 0, plain_handlers, 1, plain_code, LEN(plain_code),
+                  NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
+    CHECK(load(plain, &module_b) == PURE_OK);
+    CHECK(pure_app_replace(&a, &module_b) == PURE_CONFLICT && a.module == &module_a);
+    pure_app_trim(&a, 2, 6);
+    CHECK(pure_app_save(&a) == PURE_OK && pure_app_replace(&a, &module_b) == PURE_OK);
+    CHECK(buy(&a, 0, "plain", 1) == PURE_OK && pure_app_save(&a) == PURE_OK);
+    pure_app_stop(&a);
+    CHECK(pure_app_start(&a, &module_b, pure_tree_data(path_a)) == PURE_OK); /* the number kept in the store */
+    CHECK(pure_app_replace(&a, &module_a) == PURE_OK && buy(&a, 0, "back", 1) == PURE_OK && pure_app_save(&a) == PURE_OK);
+    o = outbox_of(&a);
+    CHECK(o.count == 1 && o.items[0].seq == 7);
+    /* A stored send whose output the module lacks refuses the start. */
+    pure_app_stop(&a);
+    CHECK(pure_app_start(&a, &module_b, pure_tree_data(path_a)) == PURE_CONFLICT);
+    remove_store(path_a);
+    remove_store(path_b);
+
+    /* A process that dies at each commit stage leaves an event and its send
+     * together or neither, and a delivery and its effect together or neither. */
+    snprintf(path_a, sizeof(path_a), "%s", new_store());
+    snprintf(path_b, sizeof(path_b), "%s", new_store());
+    CHECK(load(receiver, &module_b) == PURE_OK);
+    uint64_t heard = 0;
+    size_t kept[2] = {0, 0}; /* sends and deliveries a death left in place */
+    for (int round = 0; round < 2; ++round)
+    for (int stage = PURE_AFTER_HEADER; stage <= PURE_BEFORE_DIR_SYNC; ++stage) {
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (!child) {
+            PureApp doomed, taker;
+            if (pure_app_start(&doomed, &module_a, pure_tree_data(path_a)) != PURE_OK ||
+                pure_app_start(&taker, &module_b, pure_tree_data(path_b)) != PURE_OK) _exit(1);
+            crash = 1;
+            fail_stage = stage;
+            if (round) buy(&doomed, 0, "crash", 1);
+            else deliver(&taker, "orders.ordered", heard + 1, "crash", 1);
+            _exit(0);
+        }
+        int status;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 77);
+        CHECK(pure_app_start(&a, &module_a, pure_tree_data(path_a)) == PURE_OK);
+        CHECK(pure_app_start(&b, &module_b, pure_tree_data(path_b)) == PURE_OK);
+        o = outbox_of(&a);
+        CHECK(o.count == (size_t)a.values[0] && (!o.count || o.items[o.count - 1].seq == o.count));
+        heard = b.heard_count ? b.heard[0].seq : 0;
+        CHECK(b.values[0] == (double)heard);
+        kept[0] = (size_t)heard;
+        kept[1] = o.count;
+        pure_app_stop(&a);
+        pure_app_stop(&b);
+    }
+    CHECK(kept[0] == 1 && kept[1] == 1); /* only a death after the head was written keeps it */
+    remove_store(path_a);
+    remove_store(path_b);
+
+    /* What an output and SEND may not be. */
+    const struct { const O *code; size_t count; const char *reason; } refused[] = {
+        {(const O[]){{FIELD, 1, 0}, {FIELD, 0, 0}, {L, 0, 0}, {SEND, 2, 0}}, 4, "operand type"},
+        {(const O[]){{FIELD, 0, 0}, {FIELD, 1, 0}, {L, 0, 0}, {SEND, 1, 0}}, 4, "no such state"},
+        {(const O[]){{FIELD, 0, 0}, {FIELD, 1, 0}, {SEND, 2, 0}}, 3, "stack underflow"},
+    };
+    for (size_t i = 0; i < LEN(refused); ++i) {
+        Spec bad = sender;
+        H handler = {1, 0, (uint32_t)refused[i].count};
+        bad.o = refused[i].code; bad.no = refused[i].count; bad.h = &handler; bad.nh = 1;
+        if (load(bad, &module_b) != PURE_INVALID || !strstr(error, refused[i].reason)) {
+            fprintf(stderr, "links case %zu: expected '%s', got '%s'\n", i, refused[i].reason, error);
+            abort();
+        }
+    }
+    H on_output[] = {{1, 0, 8}, {5, 8, 6}};
+    Spec bad = sender;
+    bad.h = on_output;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "handler event"));
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -2608,6 +2839,7 @@ int main(void) {
     keyed();
     keyed_mutations();
     snapshots();
+    links();
     fold_mutations();
     pointing();
     list_mutations();
@@ -2616,6 +2848,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields-timers-now-snapshots\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields-timers-now-snapshots-links\"}");
     return 0;
 }

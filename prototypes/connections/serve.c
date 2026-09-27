@@ -501,6 +501,9 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
     if (route->kind == ROUTE_NONE || (route->kind == ROUTE_OBJECT && !host->documents)) return "route";
     if (route->kind == ROUTE_OBJECT) return NULL;
     int found = route->kind == ROUTE_VIEW ? pure_module_view(m, c->key) : pure_module_input(m, c->key);
+    /* An output is the app's to send and a timer ticks by itself: neither is posted. */
+    if (found >= 0 && route->kind == ROUTE_INPUT &&
+        (m->input[found].kind == PURE_KIND_OUTPUT || m->input[found].kind == PURE_KIND_TIMER)) found = -1;
     if (found < 0) return route->kind == ROUTE_VIEW ? "no_view" : "no_input";
     *status = 400;
     route->target = (uint32_t)found;

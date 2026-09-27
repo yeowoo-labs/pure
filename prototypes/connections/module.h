@@ -38,7 +38,7 @@ typedef enum {
     PURE_OP_ITEM_GET, PURE_OP_ITEM_SET, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE,
     PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_ROW,
     PURE_OP_PICK, PURE_OP_SLIDE, PURE_OP_FOLD, PURE_OP_TEXT_COMPARE, PURE_OP_LIST_FIND, PURE_OP_LIST_HAS,
-    PURE_OP_NOW, PURE_OP_FLOOR, PURE_OP_MOD,
+    PURE_OP_NOW, PURE_OP_FLOOR, PURE_OP_MOD, PURE_OP_SEND,
     PURE_OP_COUNT
 } PureOpcode;
 /* FOLD's argument: the kind (bits 0-7), the list state (8-15) and the length
@@ -51,9 +51,12 @@ typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PUR
  * comparisons (LT LE GT GE EQ NE); texts order by their bytes. */
 typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PURE_EQUAL, PURE_NOT_EQUAL } PureRelation;
 
-/* A timer ticks every `period` milliseconds while a host runs the app. */
-typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3, PURE_KIND_TIMER = 4 } PureInputKind;
-enum { PURE_TIMER_LONGEST = 86400000 };
+/* A timer ticks every `period` milliseconds while a host runs the app. An
+ * output is a message the app sends (SEND, in a handler; it has fields as a
+ * message has and no handler): what receives it is the host's wiring. */
+typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3, PURE_KIND_TIMER = 4,
+               PURE_KIND_OUTPUT = 5 } PureInputKind;
+enum { PURE_TIMER_LONGEST = 86400000, PURE_SOURCE = 64 };
 /* A message field: a u32le or a binary64 (fixed, at its offset in the
  * payload's prefix), or bytes or text of any length. The prefix also holds
  * each variable field's u32le length but the last one's (its offset is
@@ -228,6 +231,22 @@ typedef struct {
     unsigned char *copied;
     int64_t revision;
     PureArena arena, view_arena;
+    /* Links (runtime-owned, saved with the states): messages sent on outputs
+     * and not trimmed, in the order sent (the first sent_durable are saved;
+     * a trimmed one goes at the next save), each output's last number (and
+     * as saved), those of outputs a module dropped, and the last number
+     * delivered from each source (and as saved). */
+    struct PureSent { uint32_t output; uint64_t seq; unsigned char *payload; size_t size; bool trimmed; } *sent;
+    size_t sent_count, sent_capacity, sent_durable;
+    uint64_t last_sent[PURE_MODULE_INPUTS], saved_sent[PURE_MODULE_INPUTS];
+    struct PureCarried { char name[PURE_MODULE_NAME]; uint64_t last; } *carried;
+    unsigned carried_count;
+    struct PureHeard { char source[PURE_SOURCE + 1]; uint64_t seq, saved; } *heard;
+    unsigned heard_count, heard_capacity;
+    PureDraft *stored_links;
+    bool links_changed; /* since the last save */
+    bool duplicate;     /* the last delivery was heard before and not applied */
+    struct { const char *source; uint64_t seq; bool pending; } delivering;
     struct PureSnapshot *snapshot; /* the newest snapshot made, or NULL */
     PureRetired retired;           /* list items let go since it was made */
     bool reading;                  /* a reader: its states are a snapshot's */
@@ -284,6 +303,21 @@ PureResult pure_app_cell_text(PureApp *, uint32_t column, size_t row, bool (*vis
  * states keep their content, cursors their position in that text); new states
  * start at their initial value. The module must outlive the app. */
 PureResult pure_app_replace(PureApp *, const PureModule *);
+
+/* Connections between apps (docs/research/078-app-connections.md). A host
+ * sees only saved sends, delivers each at least once, in order per output,
+ * and trims what its receiver has saved; a receiver applies each once. */
+typedef bool (*PureSentVisit)(void *context, uint32_t output, uint64_t seq, PureSpan payload);
+void pure_app_outbox(const PureApp *, PureSentVisit visit, void *context);
+/* Forget output's saved sends numbered up to through (saved with the next save). */
+void pure_app_trim(PureApp *, uint32_t output, uint64_t through);
+/* Deliver a message event from source (a sender's name, 1 to 64 printable
+ * ASCII bytes) numbered seq (from 1, growing per source). A number heard
+ * before is not applied again: it succeeds with app->duplicate set. The
+ * number counts as heard with the event's changes, and also when the app
+ * refuses the message (a fault: it was delivered, and refused); not when a
+ * save fails. */
+PureResult pure_app_deliver(PureApp *, uint32_t input, const char *source, uint64_t seq, PureSpan payload);
 
 /* Readers on other threads. Right after a save an app can make a snapshot of
  * its saved states, for evaluating views anywhere while it keeps applying

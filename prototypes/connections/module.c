@@ -21,7 +21,7 @@ enum { READ = IN_VIEW | IN_HANDLER };
  * collection, a constant, a unit, the column's row, a branch target, a stack
  * depth, a fold, a relation or a keyed list. */
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_INDEX + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
-       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED };
+       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT };
 /* A fold's block is verified as a column that leaves one number (count) or
  * two (a value and whether to include it), a table's filter as a column that
  * leaves one: these stand for a view type. */
@@ -98,6 +98,7 @@ static const struct { unsigned char pops, in[3], out, where, arg, of; } signatur
     [PURE_OP_LIST_FIND] = {1, {T_KEY}, T_INDEX, READ, A_KEYED, O_ARG},
     [PURE_OP_LIST_HAS] = {1, {T_KEY}, T_NUM, READ, A_KEYED, O_ANY},
     [PURE_OP_NOW] = {0, {0}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
+    [PURE_OP_SEND] = {0, {0}, 0, IN_HANDLER, A_OUTPUT, O_ANY},
     [PURE_OP_FLOOR] = NUMS(1), [PURE_OP_MOD] = NUMS(2),
 };
 #undef NUMS
@@ -107,6 +108,10 @@ static uint32_t read16(const unsigned char *p) { return (uint32_t)p[0] | (uint32
 
 static uint32_t read32(const unsigned char *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static void write32(unsigned char *p, uint32_t value) {
+    for (unsigned i = 0; i < 4; ++i) p[i] = (unsigned char)(value >> (8 * i));
 }
 
 static double read_double(const unsigned char *p) {
@@ -187,6 +192,7 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_FIRST && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
     case A_RELATION: return arg <= PURE_NOT_EQUAL;
     case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
+    case A_OUTPUT: return arg < m->inputs && m->input[arg].kind == PURE_KIND_OUTPUT;
     case A_NONE: case A_TARGET: case A_DEPTH: return true;
     default: return state_of(m, arg, (uint8_t)(kind - A_STATE));
     }
@@ -296,10 +302,17 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             }
         }
         /* Operand types, bottom to top; record operations take their fields. */
-        unsigned char need[PURE_RECORD_FIELDS + 2];
+        unsigned char need[PURE_MODULE_FIELDS + 2];
         unsigned pops = signature[op->op].pops;
         memcpy(need, signature[op->op].in, sizeof(signature[op->op].in));
-        if (op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT) {
+        if (op->op == PURE_OP_SEND) {
+            const PureInputShape *output = &m->input[arg];
+            for (unsigned f = 0; f < output->field_count; ++f) {
+                uint8_t type = m->field[output->field_start + f].type;
+                need[f] = type == PURE_FIELD_TEXT ? T_TEXT : type == PURE_FIELD_BYTES ? T_BYTES : T_NUM;
+            }
+            pops = output->field_count;
+        } else if (op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT) {
             const PureRecord *record = &m->record[m->state_ref[arg]];
             for (unsigned f = 0; f < record->count; ++f) need[pops + f] = field_type(m, arg, f);
             pops += record->count;
@@ -516,7 +529,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                 shape->period > PURE_TIMER_LONGEST) REFUSE("timer input", i);
             continue;
         }
-        if (shape->kind != PURE_KIND_MESSAGE || read32(at + 8) || shape->field_start != next_field ||
+        if ((shape->kind != PURE_KIND_MESSAGE && shape->kind != PURE_KIND_OUTPUT) || read32(at + 8) ||
+            (shape->kind == PURE_KIND_OUTPUT && shape->keyed) || shape->field_start != next_field ||
             shape->field_count > out->fields - next_field) REFUSE("message shape", i);
         /* The prefix holds the fixed fields and the variable fields' lengths
          * in order, but the last variable field's: it takes the rest. */
@@ -609,7 +623,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         uint32_t event = read32(at);
         out->handler[i] = (PureHandler){event, {read32(at + 4), read32(at + 8)}};
         int input = event_input(event);
-        if (event > 2u * out->inputs || (input >= 0 && out->input[input].kind != PURE_KIND_KEY && !(event & 1)))
+        if (event > 2u * out->inputs || (input >= 0 && out->input[input].kind != PURE_KIND_KEY && !(event & 1)) ||
+            (input >= 0 && out->input[input].kind == PURE_KIND_OUTPUT))
             REFUSE("handler event", i);
     }
     for (uint32_t i = 0; i < out->code_count; ++i, at += OP_BYTES) {
@@ -838,6 +853,49 @@ static PureResult keep_bytes(PureArena *arena, const void *bytes, size_t length,
 /* Run a verified block. Types and stack bounds were proven at load. A change
  * the data refuses (a size limit, a missing item) fails the event with its
  * fault; other failures pass through. */
+typedef struct { unsigned char *at; } Copy;
+
+static bool copy_out(void *context, PureSpan span) {
+    Copy *copy = context;
+    if (span.size) memcpy(copy->at, span.data, span.size);
+    copy->at += span.size;
+    return true;
+}
+
+/* An output's message from its field values, laid out as a message's
+ * payload (size bytes), numbered and kept with the event's changes. */
+static PureResult send(PureApp *app, uint32_t output, const Slot *fields, const PureArena *arena, size_t size) {
+    const PureModule *m = app->module;
+    const PureInputShape *shape = &m->input[output];
+    if (app->sent_count == app->sent_capacity) {
+        size_t capacity = app->sent_capacity ? 2 * app->sent_capacity : 16;
+        struct PureSent *grown = realloc(app->sent, capacity * sizeof(*grown));
+        if (!grown) return PURE_ALLOCATION;
+        app->sent = grown;
+        app->sent_capacity = capacity;
+    }
+    unsigned char *payload = malloc(size ? size : 1);
+    if (!payload) return PURE_ALLOCATION;
+    Copy copy = {payload + shape->prefix};
+    for (uint32_t f = 0; f < shape->field_count; ++f) {
+        const PureField *field = &m->field[shape->field_start + f];
+        if (field->type == PURE_FIELD_U32) write32(payload + field->offset, (uint32_t)fields[f].num);
+        else if (field->type == PURE_FIELD_NUMBER) {
+            uint64_t bits;
+            memcpy(&bits, &fields[f].num, 8);
+            write32(payload + field->offset, (uint32_t)bits);
+            write32(payload + field->offset + 4, (uint32_t)(bits >> 32));
+        } else {
+            if (field->offset != PURE_FIELD_REST) write32(payload + field->offset, (uint32_t)fields[f].bytes.length);
+            PureResult result = visit_value(app, arena, fields[f].bytes, copy_out, &copy);
+            if (result != PURE_OK) { free(payload); return result; }
+        }
+    }
+    app->sent[app->sent_count++] = (struct PureSent){output, ++app->last_sent[output], payload, size, false};
+    app->links_changed = true;
+    return PURE_OK;
+}
+
 static PureResult run(const PureModule *m, double *values, PureBlock block, Event *ev, Slot *result) {
     Slot stack[PURE_MODULE_STACK];
     size_t sp = 0;
@@ -995,6 +1053,23 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         }
         case PURE_OP_BYTES_FROM: case PURE_OP_INDEX_NUM: continue; /* the same bytes or position, retyped */
         case PURE_OP_LIST_COUNT: stack[sp++].num = (double)pure_list_count(app->lists[arg]); continue;
+        case PURE_OP_SEND: {
+            const PureInputShape *output = &m->input[arg];
+            size_t base = sp - output->field_count, size = output->prefix;
+            sp = base;
+            for (uint32_t f = 0; f < output->field_count; ++f) {
+                uint8_t type = m->field[output->field_start + f].type;
+                double number = stack[base + f].num;
+                if (type == PURE_FIELD_BYTES || type == PURE_FIELD_TEXT) size += (size_t)stack[base + f].bytes.length;
+                else if (type == PURE_FIELD_U32 && !(number >= 0 && number <= UINT32_MAX && number == floor(number))) {
+                    kind = PURE_FAULT_LIMIT;
+                    goto failed;
+                }
+            }
+            if (size > UINT32_MAX) { kind = PURE_FAULT_LIMIT; goto failed; }
+            if ((status = send(app, arg, stack + base, arena, size)) != PURE_OK) return status;
+            continue;
+        }
         case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: {
             PureList *list = app->lists[arg];
             const PureRecord *record = &m->record[m->state_ref[arg]];
@@ -1253,6 +1328,37 @@ static void close_burst(PureApp *app, bool keep) {
     app->open = false;
 }
 
+static void drop_sent(PureApp *app, size_t count) {
+    while (app->sent_count > count) free(app->sent[--app->sent_count].payload);
+}
+
+/* After a save: what it stored is the links' saved state (trimmed sends go),
+ * or, when it failed, the links return to the last saved state. */
+static void settle_links(PureApp *app, bool saved) {
+    if (saved) {
+        size_t kept = 0;
+        for (size_t i = 0; i < app->sent_count; ++i) {
+            if (app->sent[i].trimmed) free(app->sent[i].payload);
+            else app->sent[kept++] = app->sent[i];
+        }
+        app->sent_count = app->sent_durable = kept;
+        memcpy(app->saved_sent, app->last_sent, sizeof(app->saved_sent));
+        for (unsigned i = 0; i < app->heard_count; ++i) app->heard[i].saved = app->heard[i].seq;
+    } else {
+        drop_sent(app, app->sent_durable);
+        for (size_t i = 0; i < app->sent_count; ++i) app->sent[i].trimmed = false;
+        memcpy(app->last_sent, app->saved_sent, sizeof(app->last_sent));
+        unsigned kept = 0;
+        for (unsigned i = 0; i < app->heard_count; ++i)
+            if (app->heard[i].saved) {
+                app->heard[kept] = app->heard[i];
+                app->heard[kept++].seq = app->heard[i].saved;
+            }
+        app->heard_count = kept;
+    }
+    app->links_changed = false;
+}
+
 PureResult pure_app_save(PureApp *app) {
     void *documents[PURE_APP_PENDING];
     int64_t revisions[PURE_APP_PENDING];
@@ -1260,6 +1366,7 @@ PureResult pure_app_save(PureApp *app) {
     for (unsigned i = 0; i < app->pending_count; ++i)
         if (app->pending[i].edited) documents[count++] = app->pending[i].document;
     PureResult result = pure_save_commit(app, app->values, documents, count, revisions);
+    settle_links(app, result == PURE_OK);
     close_burst(app, result == PURE_OK);
     return result;
 }
@@ -1315,6 +1422,11 @@ void pure_app_stop(PureApp *app) {
     } else
         pure_retired_free(&app->retired);
     pure_draft_close(app->stored_values);
+    drop_sent(app, 0);
+    free(app->sent);
+    free(app->heard);
+    free(app->carried);
+    pure_draft_close(app->stored_links);
     free(app->pending);
     pure_undo_free(&app->undo);
     for (unsigned i = 0; i < app->row_tables; ++i) free(app->rows[i].items);
@@ -1325,7 +1437,12 @@ void pure_app_stop(PureApp *app) {
 }
 
 /* Where one event began inside the burst: a failed event returns there. */
-typedef struct { PureVersion texts[PURE_MODULE_STATES], lists[PURE_MODULE_STATES]; size_t undo; bool opened; } Mark;
+typedef struct {
+    PureVersion texts[PURE_MODULE_STATES], lists[PURE_MODULE_STATES];
+    size_t undo, sent;
+    uint64_t last_sent[PURE_MODULE_INPUTS];
+    bool opened;
+} Mark;
 
 static void mark_event(PureApp *app, Mark *mark) {
     mark->opened = !app->open;
@@ -1335,6 +1452,8 @@ static void mark_event(PureApp *app, Mark *mark) {
         if (app->list_drafts[i]) mark->lists[i] = pure_draft_version(app->list_drafts[i]);
     }
     mark->undo = app->undo.count;
+    mark->sent = app->sent_count;
+    memcpy(mark->last_sent, app->last_sent, sizeof(mark->last_sent));
 }
 
 static void undo_event(PureApp *app, const Mark *mark) {
@@ -1343,7 +1462,28 @@ static void undo_event(PureApp *app, const Mark *mark) {
         if (app->list_drafts[i]) pure_draft_restore(app->list_drafts[i], mark->lists[i]);
     }
     pure_undo_rollback(&app->undo, mark->undo);
+    drop_sent(app, mark->sent);
+    memcpy(app->last_sent, mark->last_sent, sizeof(app->last_sent));
     if (mark->opened) close_burst(app, true); /* nothing happened: release the holds */
+}
+
+/* The last number heard from source, or NULL. */
+static struct PureHeard *heard_from(PureApp *app, const char *source) {
+    for (unsigned i = 0; i < app->heard_count; ++i)
+        if (!strcmp(app->heard[i].source, source)) return &app->heard[i];
+    return NULL;
+}
+
+/* Hear seq from source (room for a new source was made before). */
+static void hear(PureApp *app, const char *source, uint64_t seq) {
+    struct PureHeard *heard = heard_from(app, source);
+    if (!heard) {
+        heard = &app->heard[app->heard_count++];
+        *heard = (struct PureHeard){.saved = 0};
+        memcpy(heard->source, source, strlen(source) + 1);
+    }
+    heard->seq = seq;
+    app->links_changed = true;
 }
 
 static PureResult keep_reply(PureApp *app);
@@ -1383,6 +1523,10 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
         app->pending[app->pending_count].edited = ev->modified;
         memcpy(app->pending[app->pending_count++].key, ev->key, strlen(ev->key) + 1);
         app->revision += ev->modified; /* a save moves an edited document one revision */
+    }
+    if (app->delivering.pending) {
+        hear(app, app->delivering.source, app->delivering.seq);
+        app->delivering.pending = false;
     }
     return event && !app->deferred ? pure_app_save(app) : PURE_OK;
 }
@@ -1515,6 +1659,58 @@ PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64
 PureResult pure_app_message_fields(PureApp *app, uint32_t input, const char *key, int64_t base, PureSpan payload,
                                    const uint32_t *placed) {
     return message(app, input, key, base, payload, placed);
+}
+
+void pure_app_outbox(const PureApp *app, PureSentVisit visit, void *context) {
+    for (size_t i = 0; i < app->sent_durable; ++i) {
+        const struct PureSent *sent = &app->sent[i];
+        if (!sent->trimmed && !visit(context, sent->output, sent->seq, (PureSpan){sent->payload, sent->size})) return;
+    }
+}
+
+void pure_app_trim(PureApp *app, uint32_t output, uint64_t through) {
+    for (size_t i = 0; i < app->sent_durable; ++i)
+        if (app->sent[i].output == output && app->sent[i].seq <= through && !app->sent[i].trimmed) {
+            app->sent[i].trimmed = true;
+            app->links_changed = true;
+        }
+}
+
+PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, uint64_t seq, PureSpan payload) {
+    const PureModule *m = app->module;
+    size_t length = source ? strlen(source) : 0;
+    app->duplicate = false;
+    if (input >= m->inputs || m->input[input].kind != PURE_KIND_MESSAGE || m->input[input].keyed || !length ||
+        length > PURE_SOURCE || !seq) return PURE_INVALID;
+    for (size_t i = 0; i < length; ++i)
+        if (source[i] <= ' ' || source[i] > '~') return PURE_INVALID;
+    struct PureHeard *heard = heard_from(app, source);
+    if (heard && seq <= heard->seq) {
+        pure_app_finish(app);
+        app->duplicate = true;
+        return PURE_OK;
+    }
+    if (!heard && app->heard_count == app->heard_capacity) {
+        unsigned capacity = app->heard_capacity ? 2 * app->heard_capacity : 4;
+        struct PureHeard *grown = realloc(app->heard, capacity * sizeof(*grown));
+        if (!grown) return PURE_ALLOCATION;
+        app->heard = grown;
+        app->heard_capacity = capacity;
+    }
+    app->delivering.source = source;
+    app->delivering.seq = seq;
+    app->delivering.pending = true;
+    PureResult result = message(app, input, NULL, -1, payload, NULL);
+    if (!app->delivering.pending) return result;
+    /* Not applied. Refused by the app (a fault), the message was delivered
+     * all the same: its number is heard, saved like a key event's changes. */
+    app->delivering.pending = false;
+    if (app->fault == PURE_FAULT_NONE) return result;
+    Mark mark;
+    mark_event(app, &mark);
+    hear(app, source, seq);
+    PureResult saved = app->deferred ? PURE_OK : pure_app_save(app);
+    return saved == PURE_OK ? result : saved;
 }
 
 PureResult pure_app_reply(const PureApp *app, bool (*visit)(void *, PureSpan), void *context) {
@@ -1738,6 +1934,52 @@ PURE_COLD static PureResult keep_list(PureList **out, PureList *from, const Pure
  * again, and the next event or save publishes the module's states; a state
  * the module drops stays stored as it was. Starting an app opens its module
  * over none. */
+/* Outputs of old that module has by name and with the same fields keep their
+ * sends and numbers; one it lacks or changed refuses the module while sends
+ * are left on it (CONFLICT), and otherwise keeps its number for later. */
+PURE_COLD static PureResult remap_outputs(PureApp *app, const PureModule *old, const PureModule *module, bool apply) {
+    int map[PURE_MODULE_INPUTS];
+    for (uint32_t i = 0; i < old->inputs; ++i) {
+        map[i] = -1;
+        if (old->input[i].kind != PURE_KIND_OUTPUT) continue;
+        int to = pure_module_input(module, old->input_names[i]);
+        bool same = to >= 0 && module->input[to].kind == PURE_KIND_OUTPUT &&
+                    module->input[to].field_count == old->input[i].field_count;
+        for (uint32_t f = 0; same && f < old->input[i].field_count; ++f)
+            same = module->field[module->input[to].field_start + f].type == old->field[old->input[i].field_start + f].type;
+        map[i] = same ? to : -1;
+        for (size_t s = 0; !same && s < app->sent_count; ++s)
+            if (app->sent[s].output == i) return PURE_CONFLICT;
+    }
+    if (!apply) return PURE_OK;
+    uint64_t last[PURE_MODULE_INPUTS] = {0}, saved[PURE_MODULE_INPUTS] = {0};
+    for (uint32_t i = 0; i < old->inputs; ++i) {
+        if (old->input[i].kind != PURE_KIND_OUTPUT || !app->last_sent[i]) continue;
+        if (map[i] >= 0) {
+            last[map[i]] = app->last_sent[i];
+            saved[map[i]] = app->saved_sent[i];
+            continue;
+        }
+        struct PureCarried *grown = realloc(app->carried, (app->carried_count + 1) * sizeof(*grown));
+        if (!grown) continue; /* its numbers would start again: kept only while memory allows */
+        app->carried = grown;
+        memcpy(grown[app->carried_count].name, old->input_names[i], PURE_MODULE_NAME);
+        grown[app->carried_count++].last = app->last_sent[i];
+        app->links_changed = true;
+    }
+    for (unsigned c = 0; c < app->carried_count;) {
+        int to = pure_module_input(module, app->carried[c].name);
+        if (to < 0 || module->input[to].kind != PURE_KIND_OUTPUT || last[to]) { ++c; continue; }
+        last[to] = saved[to] = app->carried[c].last;
+        app->carried[c] = app->carried[--app->carried_count];
+        app->links_changed = true;
+    }
+    for (size_t s = 0; s < app->sent_count; ++s) app->sent[s].output = (uint32_t)map[app->sent[s].output];
+    memcpy(app->last_sent, last, sizeof(last));
+    memcpy(app->saved_sent, saved, sizeof(saved));
+    return PURE_OK;
+}
+
 PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) {
     const PureModule *old = app->module;
     bool stored = pure_save_enabled(app);
@@ -1797,6 +2039,8 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         values[i] = same ? app->values[kept[i]] : 0;
     }
     if (result == PURE_OK && stored) result = pure_save_open_values(app, module, values, kept, texts, lists);
+    /* Outputs keep their sends and numbers by name. */
+    if (result == PURE_OK) result = old ? remap_outputs(app, old, module, false) : stored ? pure_save_open_links(app, module) : PURE_OK;
     for (uint32_t i = 0; i < module->states; ++i) {
         uint32_t list = module->state_ref[i];
         if (module->state_type[i] == PURE_STATE_INDEX && moved[list] && values[i] < (double)pure_list_count(lists[list]))
@@ -1846,6 +2090,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     memcpy(app->lists, lists, sizeof(lists));
     memcpy(app->list_drafts, list_drafts, sizeof(list_drafts));
     memcpy(app->saved, saved, sizeof(saved));
+    if (old) remap_outputs(app, old, module, true);
     app->module = module;
     ++app->changes;
     return PURE_OK;
