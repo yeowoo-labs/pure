@@ -38,3 +38,14 @@ JSON 본문의 비용은 상태 없는 앱 [echo.aup](echo.aup)에 `load PORT �
 앱 벤치마크의 마지막 작업(`mixed`)은 내구성 점수 POST 8연결과 합계 GET 56연결을 부하 생성기 둘로 함께 보내, 쓰기가
 동기화하는 동안 읽기가 기다리는지 본다([080](../../docs/research/080-snapshot-reads.md)). 두 행(posts, reads)으로
 나오고, CPU 1초당 답은 두 행을 합친 것이다.
+
+어디에 시간을 쓰는지는 [sample.c](../sample.c)로 본다. perf가 없는 기기에서 `perf_event_open`으로 명령의 모든 스레드를 사용자
+시간 50 µs마다 표본으로 뜨고, 함수별로 모은다(커널 시간은 /proc의 합계만). arm64에서는 링크 레지스터도 받아, 공유
+라이브러리의 말단 함수(memcpy, strcmp)에 쓴 시간을 부른 함수별로 다시 보여 준다. 심볼을 뺀 libc는 같은 빌드의 디버그 파일을
+`SAMPLE_DEBUG` 아래 `.build-id/`에 두면 이름이 붙는다(데비안 `-dbg` 꾸러미를 `dpkg-deb -x`로 풀면 된다).
+
+```sh
+cc -O2 -std=c17 -o ../sample ../sample.c
+../sample 8 report.txt ../../build/pure-serve --module editor.pmod --store /var/tmp/sample --port 0 &
+# 서버가 알린 포트로 부하를 준다: ./load PORT 64 5 get 64 keep-alive
+```
