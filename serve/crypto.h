@@ -1,0 +1,31 @@
+#ifndef PURE_CRYPTO_H
+#define PURE_CRYPTO_H
+#include "seal.h"
+#include "tls.h"
+
+/* What pure-serve asks of OpenSSL, as the table pure-crypto.so exports
+ * (serve/crypto-openssl.c). pure-serve maps it, and OpenSSL with it, the
+ * first time a server seals, opens a seal or connects to an https receiver
+ * (serve/crypto.c): one that does none of these maps no OpenSSL, 2.3 MiB
+ * less resident and 0.6 MiB less of its own. */
+enum { PURE_CRYPTO_VERSION = 1 };
+
+typedef struct {
+    unsigned version;
+    /* TLS client: the context (verifying against ca_file, or the system's
+     * CAs when NULL), sessions over connected sockets, their reads and
+     * writes (as SSL_read and SSL_write: bytes, or <= 0), and their end. */
+    bool (*tls_start)(const char *ca_file);
+    PureTls *(*tls_open)(const char *host, int fd);
+    int (*tls_read)(PureTls *, void *bytes, int size);
+    int (*tls_write)(PureTls *, const void *bytes, int size);
+    void (*tls_close)(PureTls *);
+    /* Sealing, as serve/seal.h says, in the suite named. */
+    PureSealKey *(*seal_key)(const char *path, char public_hex[2 * PURE_SEAL_KEY + 1], char *error, size_t size);
+    void (*seal_key_free)(PureSealKey *);
+    bool (*seal)(const char *suite, const unsigned char peer[PURE_SEAL_KEY], const char *aad,
+                 const unsigned char *plain, size_t size, unsigned char *out);
+    bool (*unseal)(const PureSealKey *, const char *suite, const char *aad, const unsigned char *sealed, size_t size,
+                   unsigned char *plain);
+} PureCrypto;
+#endif

@@ -41,10 +41,11 @@ def build(work, name, patches):
     store.write_text(source)
     binary = work / f'pure-serve-{len(name)}'
     subprocess.run(['cc', '-O2', '-std=c17', f'-I{ROOT / "core"}', f'-I{ROOT / "serve"}', '-DPURE_ASYNC_EFFECTS', '-pthread',
-                    *[str(ROOT / s) for s in ('serve/serve.c', 'serve/deliver.c', 'serve/message-json.c', 'core/module.c',
+                    *[str(ROOT / s) for s in ('serve/serve.c', 'serve/deliver.c', 'serve/message-json.c', 'serve/crypto.c',
+                                              'core/module.c',
                                               'core/module-list.c', 'core/module-save.c', 'core/module-text.c',
                                               'core/module-store.c')], str(store), str(ROOT / 'core/runtime.c'),
-                    '-lssl', '-lcrypto', '-lm', '-o', str(binary)], check=True)
+                    '-lm', '-o', str(binary)], check=True)
     return binary
 
 

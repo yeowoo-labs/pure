@@ -1754,6 +1754,11 @@ static bool open_wires(Executor *ex, const PureModule *m, const char *const *sen
 
 /* --seal OUTPUT=KEY: that output's sends sealed to the receiver's public key (hex). */
 static bool wire_seals(Executor *ex, const PureModule *m, const char *const *seals, unsigned count) {
+    char error[512];
+    if (count && !pure_seal_ready(error, sizeof(error))) {
+        fprintf(stderr, "--seal: %s\n", error);
+        return false;
+    }
     for (unsigned i = 0; i < count; ++i) {
         const char *equals = strchr(seals[i], '=');
         unsigned char peer[PURE_SEAL_KEY];

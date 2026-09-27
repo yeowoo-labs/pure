@@ -10,7 +10,9 @@ BUILD ?= build
 #           states as drafts; state.h and store.h are what it asks of storage.
 #   store/  the tree store (one file; commits are one contiguous write and one
 #           sync; formats PURETRE3 and PUREREC1).
-#   serve/  pure-serve: the HTTP host, outbound delivery, JSON in place.
+#   serve/  pure-serve: the HTTP host, outbound delivery, JSON in place; with
+#           pure-crypto.so beside it, OpenSSL's part (TLS to https receivers,
+#           sealed sends), mapped only by a server that uses one.
 #   cli/    command-line hosts.
 # libpure.a is the app model with the tree store: what a host embeds (Vega's
 # surfaces link it). prototypes/ keeps the earlier document runtime (000-077).
@@ -19,12 +21,12 @@ BUILD ?= build
 INCLUDES = -Icore
 MODEL = core/module.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c
 STORE = store/store-tree.c
-SERVE = serve/serve.c serve/deliver.c serve/message-json.c serve/seal.c
+SERVE = serve/serve.c serve/deliver.c serve/message-json.c serve/crypto.c
 HEADERS = $(wildcard core/*.h) $(wildcard serve/*.h)
 OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(MODEL) $(STORE))
 
 .PHONY: all check
-all: $(BUILD)/libpure.a $(BUILD)/pure-serve $(BUILD)/pure-run $(BUILD)/pure-edit-module
+all: $(BUILD)/libpure.a $(BUILD)/pure-serve $(BUILD)/pure-crypto.so $(BUILD)/pure-run $(BUILD)/pure-edit-module
 
 $(BUILD)/obj/%.o: %.c $(HEADERS)
 	@mkdir -p $(dir $@)
@@ -38,7 +40,11 @@ $(BUILD)/libpure.a: $(OBJECTS)
 # It links after the library, last as it always was, so code keeps its place.
 $(BUILD)/pure-serve: $(SERVE) core/runtime.c $(BUILD)/libpure.a $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve -DPURE_ASYNC_EFFECTS $(SERVE) $(BUILD)/libpure.a core/runtime.c \
-		$(LDFLAGS) -lssl -lcrypto -lm -pthread $(LDLIBS) -o $@
+		$(LDFLAGS) -lm -pthread $(LDLIBS) -o $@
+
+$(BUILD)/pure-crypto.so: serve/crypto-openssl.c $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve -fPIC -shared serve/crypto-openssl.c $(LDFLAGS) -lssl -lcrypto \
+		$(LDLIBS) -o $@
 
 $(BUILD)/pure-run: cli/pure-run.c $(BUILD)/libpure.a $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) cli/pure-run.c $(BUILD)/libpure.a $(LDFLAGS) -lm $(LDLIBS) -o $@

@@ -7,9 +7,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <openssl/ssl.h>
-#include <openssl/x509v3.h>
-#include <arpa/inet.h>
+#include "tls.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,8 +42,8 @@ struct PureWire {
     void (*notify)(void *);
     void *context;
     int fd;   /* the connection kept for the next send, or -1; changed under the lock */
-    bool tls; /* https: the connection is TLS */
-    SSL *ssl; /* its TLS session */
+    bool tls;         /* https: the connection is TLS */
+    PureTls *session; /* its TLS session */
     int answer_input; /* the input answers become events of, or -1 */
     Answer *answers;  /* made, for the owner to take in order */
     size_t answer_head, answer_count, answer_capacity;
@@ -55,26 +53,11 @@ struct PureWire {
     unsigned char peer[PURE_SEAL_KEY];
 };
 
-/* ---- TLS: one client context, verifying the receiver's certificate against
- * the system's CAs or the file pure_wire_trust named, and its name. */
-static pthread_once_t tls_once = PTHREAD_ONCE_INIT;
-static SSL_CTX *tls_context;
+/* TLS verifies a receiver's certificate against the system's CAs or the
+ * file pure_wire_trust named (serve/tls.h). */
 static const char *tls_ca;
 
 void pure_wire_trust(const char *ca_file) { tls_ca = ca_file; }
-
-static void make_tls_context(void) {
-    SSL_CTX *context = SSL_CTX_new(TLS_client_method());
-    if (!context) return;
-    if (!SSL_CTX_set_min_proto_version(context, TLS1_2_VERSION) ||
-        !(tls_ca ? SSL_CTX_load_verify_locations(context, tls_ca, NULL) : SSL_CTX_set_default_verify_paths(context))) {
-        SSL_CTX_free(context);
-        return;
-    }
-    SSL_CTX_set_verify(context, SSL_VERIFY_PEER, NULL);
-    SSL_CTX_set_mode(context, SSL_MODE_AUTO_RETRY);
-    tls_context = context;
-}
 
 /* ---- A send as JSON: its fields in order, a group's fields as an object. */
 
@@ -213,13 +196,7 @@ PureWire *pure_wire_open(const PureModule *m, const char *output, const char *ur
         snprintf(error, size, "a URL is http[s]://host[:port]/path");
         return NULL;
     }
-    if (tls) {
-        pthread_once(&tls_once, make_tls_context);
-        if (!tls_context) {
-            snprintf(error, size, "no TLS context: %s cannot be read", tls_ca ? tls_ca : "the system's CAs");
-            return NULL;
-        }
-    }
+    if (tls && !pure_tls_start(tls_ca, error, size)) return NULL;
     const char *host = url + (tls ? 8 : 7), *slash = strchr(host, '/'), *colon = memchr(host, ':', slash ? (size_t)(slash - host) : strlen(host));
     const char *host_end = colon ? colon : slash ? slash : host + strlen(host);
     const char *port = colon ? colon + 1 : tls ? "443" : "80";
@@ -341,7 +318,7 @@ static bool fill(Reader *r) {
     if (r->end == sizeof(r->bytes)) return false;
     PureWire *w = r->wire;
     ssize_t n;
-    if (w->ssl) n = SSL_read(w->ssl, r->bytes + r->end, (int)(sizeof(r->bytes) - r->end));
+    if (w->session) n = pure_tls_read(w->session, r->bytes + r->end, (int)(sizeof(r->bytes) - r->end));
     else do n = recv(w->fd, r->bytes + r->end, sizeof(r->bytes) - r->end, 0); while (n < 0 && errno == EINTR);
     if (n <= 0) return false;
 #ifdef TCP_QUICKACK
@@ -392,30 +369,14 @@ static bool take(Reader *r, uint64_t size, Text *into) {
 
 static bool send_all(PureWire *w, const char *bytes, size_t size) {
     while (size) {
-        ssize_t n = w->ssl ? SSL_write(w->ssl, bytes, (int)(size < INT32_MAX ? size : INT32_MAX)) :
-                             send(w->fd, bytes, size, MSG_NOSIGNAL);
-        if (n < 0 && !w->ssl && errno == EINTR) continue;
+        ssize_t n = w->session ? pure_tls_write(w->session, bytes, (int)(size < INT32_MAX ? size : INT32_MAX)) :
+                                 send(w->fd, bytes, size, MSG_NOSIGNAL);
+        if (n < 0 && !w->session && errno == EINTR) continue;
         if (n <= 0) return false;
         bytes += n;
         size -= (size_t)n;
     }
     return true;
-}
-
-/* TLS over a connected socket: the receiver's certificate must name the host
- * (a DNS name, or an IP address written as one). */
-static SSL *start_tls(const PureWire *w, int fd) {
-    SSL *ssl = SSL_new(tls_context);
-    if (!ssl) return NULL;
-    unsigned char address[16];
-    bool literal = inet_pton(AF_INET, w->host, address) == 1 || inet_pton(AF_INET6, w->host, address) == 1;
-    bool named = literal ? X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), w->host) == 1 :
-                           SSL_set_tlsext_host_name(ssl, w->host) == 1 && SSL_set1_host(ssl, w->host) == 1;
-    if (!named || SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1 || SSL_get_verify_result(ssl) != X509_V_OK) {
-        SSL_free(ssl);
-        return NULL;
-    }
-    return ssl;
 }
 
 static int connect_to(const PureWire *w) {
@@ -441,9 +402,9 @@ static int connect_to(const PureWire *w) {
 
 static void drop_connection(PureWire *w) {
     pthread_mutex_lock(&w->lock);
-    if (w->ssl) SSL_free(w->ssl);
+    pure_tls_close(w->session);
     if (w->fd >= 0) close(w->fd);
-    w->ssl = NULL;
+    w->session = NULL;
     w->fd = -1;
     pthread_mutex_unlock(&w->lock);
 }
@@ -623,13 +584,14 @@ static int send_request(PureWire *w, const char *request, size_t size, const Pen
             bool stopping = w->stopping;
             pthread_mutex_unlock(&w->lock);
             if (stopping) return AGAIN;
-            SSL *ssl = w->tls ? start_tls(w, fd) : NULL;
-            if (w->tls && !ssl) {
+            /* The receiver's certificate must name the host. */
+            PureTls *session = w->tls ? pure_tls_open(w->host, fd) : NULL;
+            if (w->tls && !session) {
                 drop_connection(w);
                 return TLS_FAILED;
             }
             pthread_mutex_lock(&w->lock);
-            w->ssl = ssl;
+            w->session = session;
             pthread_mutex_unlock(&w->lock);
         }
         int status;
@@ -743,7 +705,7 @@ void pure_wire_close(PureWire *w) {
     pthread_cond_broadcast(&w->changed);
     pthread_mutex_unlock(&w->lock);
     if (w->started) pthread_join(w->thread, NULL);
-    if (w->ssl) SSL_free(w->ssl);
+    pure_tls_close(w->session);
     if (w->fd >= 0) close(w->fd);
     for (size_t i = 0; i < w->count; ++i) {
         free(w->queue[w->head + i].body);

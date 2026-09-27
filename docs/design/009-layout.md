@@ -29,9 +29,15 @@
 |---|---|---|
 | `core/` | 실행·소유권·한도·완료(`runtime.c`, `flow.c`), 앱 모델(`module*.c`: 실행 전에 검증한 모듈, 트랜잭션인 이벤트, draft인 상태), 코어가 저장소에 요구하는 것(`state.h`, `store.h`) | `build/libpure.a`(저장소와 함께) |
 | `store/` | 트리 저장소. 한 파일, 커밋은 한 연속 쓰기와 동기화 한 번 | `libpure.a` 안 |
-| `serve/` | `pure-serve`: HTTP 호스트, 나가는 전달, 제자리 JSON | `build/pure-serve` |
+| `serve/` | `pure-serve`: HTTP 호스트, 나가는 전달, 제자리 JSON. OpenSSL을 쓰는 부분(https 수신자로의 TLS, 봉인한 전달)은 따로 두어 쓰는 서버만 매핑한다 | `build/pure-serve`, `build/pure-crypto.so` |
 | `cli/` | 명령행 호스트 | `build/pure-run`, `build/pure-edit-module` |
 | `prototypes/` | 이전 문서 런타임. `core/`와 `store/`를 가져다 빌드한다 | `make -C prototypes/connections` |
+
+OpenSSL은 pure-serve가 쓰는 것 중 가장 크다. 링크만 해도 아무 일도 하지 않는 프로세스의 상주 메모리가 2.3 MiB 늘고,
+그중 0.66 MiB는 그 프로세스만의 것(재배치한 데이터)이다. 그래서 OpenSSL을 쓰는 코드(`serve/crypto-openssl.c`)는
+`pure-crypto.so`로 따로 빌드하고, pure-serve는 https 수신자나 봉인을 처음 쓸 때 실행 파일 옆의 그것을 연다
+(`serve/crypto.c`). 쓰지 않는 서버는 유휴 RSS가 4.5 → 2.3 MiB, 자기만의 메모리가 1.3 → 0.86 MiB다. 정적 링크는 RSS가 조금
+줄지만(3.8 MiB) 자기만의 메모리가 2.3 MiB로 는다. OpenSSL의 표를 모두 재배치하기 때문이다.
 
 검사도 부품을 따른다. 부품의 단위 검사는 그 옆에(`core/test-module.c`, `store/test-tree-store.c`), 저장소 전체를 끝에서
 끝까지 보는 검사는 `tests/check.py`에 둔다. aup와 Vega도 같다(aup `compiler/`, Vega `lib/`·`surfaces/`·`symbols/`, 둘 다

@@ -9,7 +9,8 @@
  * (RFC 9180) base mode: X25519, HKDF-SHA256, and AES-128-GCM where the CPU
  * has AES instructions, else ChaCha20-Poly1305. A private key lives in
  * OpenSSL's secure heap: locked in memory, out of core dumps, cleared when
- * freed. */
+ * freed. OpenSSL comes with pure-crypto.so (serve/crypto.c), mapped the
+ * first time a key is read or a send sealed. */
 enum { PURE_SEAL_KEY = 32, PURE_SEAL_OVERHEAD = 32 + 16 }; /* the encapsulated key, then the tag */
 
 typedef struct PureSealKey PureSealKey;
@@ -17,6 +18,8 @@ typedef struct PureSealKey PureSealKey;
  * is none; its public half in hex. NULL with why in error. */
 PureSealKey *pure_seal_key(const char *path, char public_hex[2 * PURE_SEAL_KEY + 1], char *error, size_t size);
 void pure_seal_key_free(PureSealKey *);
+/* Whether this machine can seal (pure-crypto.so maps), with why not in error. */
+bool pure_seal_ready(char *error, size_t size);
 /* A public key from its hex. */
 bool pure_seal_peer(const char *hex, unsigned char out[PURE_SEAL_KEY]);
 /* The suite this machine seals with, as the X-Pure-Seal header names it. */

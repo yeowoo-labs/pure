@@ -1,72 +1,80 @@
 #define _GNU_SOURCE
-#include "seal.h"
+/* pure-crypto.so: what pure-serve asks of OpenSSL (serve/crypto.h), mapped
+ * only when a server seals, opens a seal or reaches an https receiver. It
+ * exports one table, pure_crypto. */
+#include "crypto.h"
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hpke.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#if defined(__aarch64__) && defined(__linux__)
-#include <asm/hwcap.h>
-#include <sys/auxv.h>
-#endif
 
+/* ---- TLS: one client context, verifying the receiver's certificate against
+ * the system's CAs or the file given, and its name. */
+static SSL_CTX *tls_context;
+
+static bool tls_start(const char *ca_file) {
+    SSL_CTX *context = SSL_CTX_new(TLS_client_method());
+    if (!context) return false;
+    if (!SSL_CTX_set_min_proto_version(context, TLS1_2_VERSION) ||
+        !(ca_file ? SSL_CTX_load_verify_locations(context, ca_file, NULL) : SSL_CTX_set_default_verify_paths(context))) {
+        SSL_CTX_free(context);
+        return false;
+    }
+    SSL_CTX_set_verify(context, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_mode(context, SSL_MODE_AUTO_RETRY);
+    tls_context = context;
+    return true;
+}
+
+/* TLS over a connected socket: the receiver's certificate must name the host
+ * (a DNS name, or an IP address written as one). */
+static PureTls *tls_open(const char *host, int fd) {
+    SSL *ssl = SSL_new(tls_context);
+    if (!ssl) return NULL;
+    unsigned char address[16];
+    bool literal = inet_pton(AF_INET, host, address) == 1 || inet_pton(AF_INET6, host, address) == 1;
+    bool named = literal ? X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), host) == 1 :
+                           SSL_set_tlsext_host_name(ssl, host) == 1 && SSL_set1_host(ssl, host) == 1;
+    if (!named || SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1 || SSL_get_verify_result(ssl) != X509_V_OK) {
+        SSL_free(ssl);
+        return NULL;
+    }
+    return (PureTls *)ssl;
+}
+
+static int tls_read(PureTls *tls, void *bytes, int size) { return SSL_read((SSL *)tls, bytes, size); }
+static int tls_write(PureTls *tls, const void *bytes, int size) { return SSL_write((SSL *)tls, bytes, size); }
+static void tls_close(PureTls *tls) { SSL_free((SSL *)tls); }
+
+/* ---- Sealing: HPKE base mode (RFC 9180), X25519 and HKDF-SHA256, with the
+ * AEAD the suite names. */
 struct PureSealKey { EVP_PKEY *key; };
 
 static const unsigned char info[] = "pure sealed send 1";
-static const char aes_name[] = "x25519-sha256-aes128gcm", chacha_name[] = "x25519-sha256-chacha20poly1305";
-
-/* AES-GCM where AES is in the CPU (two to three times ChaCha20-Poly1305 from
- * a kilobyte up on a Cortex-A76, research 086); ChaCha20-Poly1305, fast in
- * plain code, elsewhere. */
-static bool has_aes(void) {
-#if defined(__aarch64__) && defined(__linux__)
-    return (getauxval(AT_HWCAP) & HWCAP_AES) && (getauxval(AT_HWCAP) & HWCAP_PMULL);
-#elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
-    return __builtin_cpu_supports("aes") && __builtin_cpu_supports("pclmul");
-#else
-    return false;
-#endif
-}
 
 static bool suite_named(const char *name, OSSL_HPKE_SUITE *out) {
     OSSL_HPKE_SUITE suite = {OSSL_HPKE_KEM_ID_X25519, OSSL_HPKE_KDF_ID_HKDF_SHA256, 0};
-    if (!strcmp(name, aes_name)) suite.aead_id = OSSL_HPKE_AEAD_ID_AES_GCM_128;
-    else if (!strcmp(name, chacha_name)) suite.aead_id = OSSL_HPKE_AEAD_ID_CHACHA_POLY1305;
+    if (!strcmp(name, "x25519-sha256-aes128gcm")) suite.aead_id = OSSL_HPKE_AEAD_ID_AES_GCM_128;
+    else if (!strcmp(name, "x25519-sha256-chacha20poly1305")) suite.aead_id = OSSL_HPKE_AEAD_ID_CHACHA_POLY1305;
     else return false;
     *out = suite;
     return true;
 }
 
-const char *pure_seal_suite(void) { return has_aes() ? aes_name : chacha_name; }
-
 static pthread_once_t secure_once = PTHREAD_ONCE_INIT;
 static void secure_heap(void) { CRYPTO_secure_malloc_init(16384, 32); }
 
-static bool hex_value(char c, unsigned *v) {
-    if (c >= '0' && c <= '9') *v = (unsigned)(c - '0');
-    else if (c >= 'a' && c <= 'f') *v = (unsigned)(c - 'a' + 10);
-    else if (c >= 'A' && c <= 'F') *v = (unsigned)(c - 'A' + 10);
-    else return false;
-    return true;
-}
-
-bool pure_seal_peer(const char *hex, unsigned char out[PURE_SEAL_KEY]) {
-    if (strlen(hex) != 2 * PURE_SEAL_KEY) return false;
-    for (size_t i = 0; i < PURE_SEAL_KEY; ++i) {
-        unsigned high, low;
-        if (!hex_value(hex[2 * i], &high) || !hex_value(hex[2 * i + 1], &low)) return false;
-        out[i] = (unsigned char)(high << 4 | low);
-    }
-    return true;
-}
-
-PureSealKey *pure_seal_key(const char *path, char public_hex[2 * PURE_SEAL_KEY + 1], char *error, size_t size) {
+static PureSealKey *seal_key(const char *path, char public_hex[2 * PURE_SEAL_KEY + 1], char *error, size_t size) {
     pthread_once(&secure_once, secure_heap);
     unsigned char *raw = OPENSSL_secure_malloc(PURE_SEAL_KEY), public_key[PURE_SEAL_KEY];
     PureSealKey *made = calloc(1, sizeof(*made));
@@ -106,16 +114,16 @@ fail:
     return NULL;
 }
 
-void pure_seal_key_free(PureSealKey *key) {
+static void seal_key_free(PureSealKey *key) {
     if (!key) return;
     EVP_PKEY_free(key->key);
     free(key);
 }
 
-bool pure_seal(const unsigned char peer[PURE_SEAL_KEY], const char *aad, const unsigned char *plain, size_t size,
-               unsigned char *out) {
+static bool seal(const char *suite_name, const unsigned char peer[PURE_SEAL_KEY], const char *aad,
+                 const unsigned char *plain, size_t size, unsigned char *out) {
     OSSL_HPKE_SUITE suite;
-    if (!suite_named(pure_seal_suite(), &suite)) return false;
+    if (!suite_named(suite_name, &suite)) return false;
     OSSL_HPKE_CTX *context = OSSL_HPKE_CTX_new(OSSL_HPKE_MODE_BASE, suite, OSSL_HPKE_ROLE_SENDER, NULL, NULL);
     size_t encapsulated = PURE_SEAL_KEY, sealed = size + 16;
     bool ok = context && OSSL_HPKE_encap(context, out, &encapsulated, peer, PURE_SEAL_KEY, info, sizeof(info) - 1) == 1 &&
@@ -126,8 +134,8 @@ bool pure_seal(const unsigned char peer[PURE_SEAL_KEY], const char *aad, const u
     return ok;
 }
 
-bool pure_unseal(const PureSealKey *key, const char *suite_name, const char *aad, const unsigned char *sealed, size_t size,
-                 unsigned char *plain) {
+static bool unseal(const PureSealKey *key, const char *suite_name, const char *aad, const unsigned char *sealed,
+                   size_t size, unsigned char *plain) {
     OSSL_HPKE_SUITE suite;
     if (!key || size < PURE_SEAL_OVERHEAD || !suite_named(suite_name, &suite)) return false;
     OSSL_HPKE_CTX *context = OSSL_HPKE_CTX_new(OSSL_HPKE_MODE_BASE, suite, OSSL_HPKE_ROLE_RECEIVER, NULL, NULL);
@@ -140,3 +148,6 @@ bool pure_unseal(const PureSealKey *key, const char *suite_name, const char *aad
     OSSL_HPKE_CTX_free(context);
     return ok;
 }
+
+const PureCrypto pure_crypto = {PURE_CRYPTO_VERSION, tls_start, tls_open, tls_read, tls_write, tls_close,
+                                seal_key, seal_key_free, seal, unseal};
