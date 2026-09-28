@@ -1,0 +1,18 @@
+[package]
+name = "idle-quic"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The QUIC side of M1 (../run.py, docs/design/011-pure-transport.md): quinn
+# 0.11 with rustls and ring, as a Rust service would use it.
+[dependencies]
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "sync", "io-util", "io-std"] }
+ring = "0.17"
+
+[profile.release]
+debug = 1
+
+[workspace]
