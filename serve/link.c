@@ -361,11 +361,10 @@ static void wake(int fd) {
 bool pure_link_queue(PureLink *l, uint64_t seq, PureSpan payload) {
     Record r = {.seq = seq, .size = (uint32_t)payload.size};
     r.pieces = payload.size ? (uint32_t)((payload.size + PIECE - 1) / PIECE) : 1;
-    if (payload.size > RECORD_MOST || !(r.bytes = malloc(payload.size ? payload.size : 1)) ||
-        !(r.piece = calloc(r.pieces, sizeof(*r.piece)))) {
-        free(r.bytes);
-        return false;
-    }
+    /* One allocation: its pieces' states, then its bytes. */
+    if (payload.size > RECORD_MOST || !(r.piece = malloc(r.pieces * sizeof(Piece) + payload.size))) return false;
+    memset(r.piece, 0, r.pieces * sizeof(Piece));
+    r.bytes = (unsigned char *)(r.piece + r.pieces);
     if (payload.size) memcpy(r.bytes, payload.data, payload.size);
     pthread_mutex_lock(&l->lock);
     bool ok = seq > l->queued && (!l->count || seq == l->queued + 1);
@@ -391,7 +390,6 @@ bool pure_link_queue(PureLink *l, uint64_t seq, PureSpan payload) {
     }
     pthread_mutex_unlock(&l->lock);
     if (!ok) {
-        free(r.bytes);
         free(r.piece);
         return false;
     }
@@ -539,8 +537,7 @@ static void on_stored(PureLink *l, const unsigned char *p, size_t size, uint64_t
         while (l->count && record_at(l, 0)->seq <= heard) {
             Record *r = record_at(l, 0);
             for (uint32_t i = 0; i < r->pieces; ++i) l->received -= r->piece[i].state == RECEIVED;
-            free(r->bytes);
-            free(r->piece);
+            free(r->piece); /* and its bytes */
             l->head = (l->head + 1) % l->capacity;
             --l->count;
         }
@@ -895,8 +892,7 @@ void pure_link_close(PureLink *l) {
         pthread_join(l->thread, NULL);
     }
     for (size_t k = 0; k < l->count; ++k) {
-        free(record_at(l, k)->bytes);
-        free(record_at(l, k)->piece);
+        free(record_at(l, k)->piece); /* and its bytes */
     }
     free(l->records);
     free(l->flights);
@@ -945,6 +941,15 @@ typedef struct Stream {
     uint32_t input;
     uint64_t heard;              /* the last number heard (stored), once known */
     bool known, out, stored_due, gap, ready;
+    /* The line: once the last heard is known, whole records from the one
+     * after it on, in order, as a delivery carries them (u32 size, bytes),
+     * from line_head: handed over as they are, let go by moving the head.
+     * Records that come early or in pieces, or before the last heard is
+     * known, wait in held until the line reaches them. */
+    unsigned char *line;
+    size_t line_head, line_size, line_capacity;
+    uint64_t line_first;
+    unsigned line_count;
     Held *held;                  /* records not yet stored, by number: held_count from held_first */
     size_t held_first, held_count, held_capacity, held_bytes;
     Run *run;                    /* the run that sent to it last: where STORED goes */
@@ -1122,6 +1127,60 @@ full:
 
 static Held *held_at(Stream *st, size_t k) { return &st->held[st->held_first + k]; }
 
+static uint64_t line_end(const Stream *st) { return st->line_first + st->line_count; }
+
+/* Room for more bytes at the line's end: its front let go given back
+ * first, else a longer line. */
+static bool line_room(Stream *st, size_t more) {
+    if (st->line_size + more <= st->line_capacity) return true;
+    if (st->line_head) {
+        memmove(st->line, st->line + st->line_head, st->line_size - st->line_head);
+        st->line_size -= st->line_head;
+        st->line_head = 0;
+        if (st->line_size + more <= st->line_capacity) return true;
+    }
+    size_t capacity = st->line_capacity ? st->line_capacity : 4096;
+    while (capacity < st->line_size + more) capacity *= 2;
+    unsigned char *grown = realloc(st->line, capacity);
+    if (!grown) return false;
+    st->line = grown;
+    st->line_capacity = capacity;
+    return true;
+}
+
+static bool line_append(Stream *st, const unsigned char *bytes, uint32_t size) {
+    if (!line_room(st, 4 + (size_t)size)) return false;
+    put32(st->line + st->line_size, size);
+    if (size) memcpy(st->line + st->line_size + 4, bytes, size);
+    st->line_size += 4 + (size_t)size;
+    ++st->line_count;
+    return true;
+}
+
+/* The line's records up to heard let go (all of them, when heard is past it). */
+static void line_drop(Stream *st, uint64_t heard) {
+    if (heard < st->line_first) return;
+    if (heard >= line_end(st)) {
+        st->line_head = st->line_size = 0;
+        st->line_count = 0;
+        st->line_first = heard + 1;
+        return;
+    }
+    for (uint64_t n = heard - st->line_first + 1; n; --n, --st->line_count, ++st->line_first)
+        st->line_head += 4 + (size_t)get32(st->line + st->line_head);
+}
+
+/* Records held that the line reached, moved onto it; ones behind it let go. */
+static void drop_first(Stream *st);
+static void line_pull(Stream *st) {
+    while (st->held_count) {
+        Held *h = held_at(st, 0);
+        if (h->seq < line_end(st)) drop_first(st);
+        else if (h->seq == line_end(st) && h->got == h->pieces && line_append(st, h->bytes, h->size)) drop_first(st);
+        else break;
+    }
+}
+
 /* The first record held let go: the ones after it stay where they are. */
 static void drop_first(Stream *st) {
     st->held_bytes -= held_at(st, 0)->size;
@@ -1210,6 +1269,7 @@ static void let_go(PureLinkListener *s, Active *a) {
     for (unsigned k = 0; k < a->stream_count; ++k) {
         while (a->streams[k]->held_count) drop_first(a->streams[k]);
         free(a->streams[k]->held);
+        free(a->streams[k]->line);
         free(a->streams[k]);
     }
     free(a->streams);
@@ -1223,7 +1283,7 @@ static void let_go(PureLinkListener *s, Active *a) {
 /* Whether any of a peer's records or answers waits here. */
 static bool busy(const Active *a) {
     for (unsigned k = 0; k < a->stream_count; ++k)
-        if (a->streams[k]->out || a->streams[k]->held_count || a->streams[k]->ready) return true;
+        if (a->streams[k]->out || a->streams[k]->held_count || a->streams[k]->line_count || a->streams[k]->ready) return true;
     for (unsigned i = 0; i < RUNS; ++i)
         if (a->runs[i].due) return true;
     return false;
@@ -1351,6 +1411,12 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
         return;
     }
     if ((st->known && seq > st->heard + CREDIT) || size > RECORD_MOST) return;
+    if (st->known && seq < line_end(st)) return; /* on the line already */
+    if (st->known && seq == line_end(st) && !offset && length == size && size <= PIECE) { /* the next, whole */
+        if (st->held_bytes + (st->line_size - st->line_head) + size <= HELD_MOST && line_append(st, bytes, size))
+            line_pull(st);
+        return;
+    }
     /* In order it goes last; out of order, its place is found by halving. */
     size_t k = st->held_count;
     if (k && held_at(st, k - 1)->seq >= seq) {
@@ -1394,7 +1460,18 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
  * False when the host could not take them now. */
 static bool hand_over(PureLinkListener *s, Stream *st) {
     if (st->out) return true;
-    while (st->known && st->held_count && held_at(st, 0)->seq <= st->heard) drop_first(st);
+    if (st->known) { /* the line as it is, up to BATCH records */
+        line_pull(st);
+        if (!st->line_count) return true;
+        unsigned n = 0;
+        size_t bytes = 0;
+        for (; n < st->line_count && n < BATCH; ++n) bytes += 4 + (size_t)get32(st->line + st->line_head + bytes);
+        PureLinkDelivery d = {st->input, st->source, st->line_first, n, st->line + st->line_head, bytes, st};
+        if (!s->deliver(s->context, &d)) return false;
+        st->out = true;
+        ++s->counts.deliveries;
+        return true;
+    }
     if (!st->held_count || (st->known && held_at(st, 0)->seq != st->heard + 1)) return true;
     size_t n = 0, bytes = 0;
     while (n < st->held_count && n < BATCH && held_at(st, n)->got == held_at(st, n)->pieces &&
@@ -1558,7 +1635,7 @@ static void answer(PureLinkListener *s, uint64_t now) {
             at += put_names(body + at, st->source, s->module->input_names[st->input]);
             put64(body + at, st->heard);
             body[at + 8] = st->gap ? STORED_GAP : 0;
-            size_t room = st->held_bytes < HELD_MOST ? CREDIT : 1;
+            size_t room = st->held_bytes + (st->line_size - st->line_head) < HELD_MOST ? CREDIT : 1;
             put32(body + at + 9, (uint32_t)room);
             at += 13;
             st->stored_due = st->gap = false;
@@ -1588,6 +1665,9 @@ static void take_done(PureLinkListener *s) {
         mark_ready(s, st);
         if (!done[k].stored) continue; /* not saved: handed over again */
         if (!st->known || done[k].heard > st->heard) st->heard = done[k].heard;
+        if (!st->known) st->line_first = st->heard + 1; /* the line begins */
+        line_drop(st, st->heard);
+        while (st->held_count && held_at(st, 0)->seq <= st->heard) drop_first(st);
         st->known = true;
         st->gap = done[k].gap;
         st->stored_due = true;
