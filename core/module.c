@@ -12,9 +12,10 @@ enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 
 /* T_FIELD and T_ITEM stand for the type of the message or record field
  * named, T_KEY for the type of the named keyed list's key. */
 enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8 };
-enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA };
+enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUMENTS };
 /* Where an opcode may appear. */
-enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64 };
+/* IN_ARGUMENTS: fields read where nothing is done with them (a view's arguments, a message's fields in a fold). */
+enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64, IN_ARGUMENTS = 128 };
 enum { READ = IN_VIEW | IN_HANDLER };
 /* What an argument names: nothing (it is 0), a state of one type (A_STATE +
  * the type), a list and one of its record's fields, a message field, the
@@ -51,7 +52,7 @@ static const struct { unsigned char pops, in[3], out, where, arg, of; } signatur
     [PURE_OP_STORE] = {1, {T_NUM}, 0, IN_HANDLER, STATE(NUM), O_ANY},
     [PURE_OP_JZ] = {1, {T_NUM}, 0, READ, A_TARGET, O_ANY},
     [PURE_OP_JMP] = {0, {0}, 0, READ, A_TARGET, O_ANY},
-    [PURE_OP_FIELD] = {0, {0}, T_FIELD, IN_MESSAGE, A_FIELD, O_ANY},
+    [PURE_OP_FIELD] = {0, {0}, T_FIELD, IN_MESSAGE | IN_ARGUMENTS, A_FIELD, O_ANY},
     [PURE_OP_DOC] = {0, {0}, T_BYTES, IN_KEYED, A_COLLECTION, O_ANY},
     [PURE_OP_DOC_SIZE] = {0, {0}, T_NUM, IN_KEYED, A_COLLECTION, O_ANY},
     [PURE_OP_LEN] = {1, {T_BYTES}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
@@ -235,12 +236,14 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
 #define REFUSE(why) do { *at = pc; return why; } while (0)
     bool handler = view < 0 || view == WALK, folding = view == FOLD_ONE || view == FOLD_TWO;
     if (!handler && !block.length) return "empty view";
-    int input = handler ? event_input(event) : -1;
+    /* A handler's message or text; a view's arguments, or the message of the handler a fold is in. */
+    int input = event_input(event);
     const PureInputShape *shape = input >= 0 ? &m->input[input] : NULL;
     unsigned where = !handler ? IN_VIEW | (row >= 0 ? IN_ROW : 0) | (folding && outer >= 0 ? IN_OUTER : 0)
                               : IN_HANDLER | (view == WALK ? IN_ROW : 0);
-    if (shape && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE | (shape->keyed ? IN_KEYED : 0);
-    if (shape && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
+    if (shape && handler && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE | (shape->keyed ? IN_KEYED : 0);
+    if (shape && handler && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
+    if (shape && !handler && (shape->kind == PURE_KIND_MESSAGE || shape->kind == PURE_KIND_ARGUMENTS)) where |= IN_ARGUMENTS;
     unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK];
     Join joins[PURE_MODULE_JOINS];
     unsigned open = 0;
@@ -316,7 +319,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
                                                             event, &inner)
                                              : verify_block(m, (PureBlock){pc + 1, skip},
                                                             how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? FOLD_ONE : FOLD_TWO,
-                                                            (int)(arg >> 8 & 0xFF), row, 0, &inner);
+                                                            (int)(arg >> 8 & 0xFF), row, event, &inner);
             if (why) { *at = inner; return why; }
             for (uint32_t k = i + 1; k <= i + skip; ++k) {
                 const char *into = kind == A_FOLD ? "branch into a fold" : "branch into an each";
@@ -415,8 +418,12 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
 
 /* Whether an instruction has a form that works on the items of a run at
  * once: numbers and indexes, with no branch and no text. */
-PURE_COLD static bool has_lanes(const PureModule *m, const PureOp *op) {
+PURE_COLD static bool has_lanes(const PureModule *m, const PureOp *op, int input) {
     switch (op->op) {
+    case PURE_OP_FIELD: { /* a number the message or the arguments give, the same for every item */
+        uint8_t type = input >= 0 ? m->field[m->input[input].field_start + op->arg].type : 0;
+        return type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER;
+    }
     case PURE_OP_CONST: case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_NEG:
     case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE:
     case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_NOT: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_CLAMP:
@@ -430,19 +437,19 @@ PURE_COLD static bool has_lanes(const PureModule *m, const PureOp *op) {
     }
 }
 
-PURE_COLD static bool block_has_lanes(const PureModule *m, PureBlock block) {
+PURE_COLD static bool block_has_lanes(const PureModule *m, PureBlock block, int input) {
     for (uint32_t pc = block.start; pc < block.start + block.length; ++pc)
-        if (!has_lanes(m, &m->code[pc])) return false;
+        if (!has_lanes(m, &m->code[pc], input)) return false;
     return true;
 }
 
 /* A fold in a verified block whose own block has lane forms throughout runs
  * a leaf of its list at a time. */
-PURE_COLD static void plan_folds(PureModule *m, PureBlock block) {
+PURE_COLD static void plan_folds(PureModule *m, PureBlock block, int input) {
     for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
         PureOp *op = &m->code[pc];
         if (op->op != PURE_OP_FOLD) continue;
-        op->plan = block_has_lanes(m, (PureBlock){pc + 1, op->arg >> 16});
+        op->plan = block_has_lanes(m, (PureBlock){pc + 1, op->arg >> 16}, input);
         pc += op->arg >> 16;
     }
 }
@@ -457,7 +464,7 @@ typedef struct { uint32_t first; int kid[3]; bool item, own; } Node;
 PURE_COLD static unsigned arity(uint8_t op) {
     switch (op) {
     case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_INDEX_LOAD: case PURE_OP_ROW: case PURE_OP_OUTER_ROW:
-    case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
+    case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_FIELD:
         return 0;
     case PURE_OP_ITEM_GET: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: case PURE_OP_NEG: case PURE_OP_NOT:
     case PURE_OP_FLOOR: case PURE_OP_INDEX_NUM:
@@ -490,7 +497,7 @@ PURE_COLD static bool block_tree(const PureModule *m, PureBlock block, int list,
         node->first = block.start + i;
         node->item = op->op == PURE_OP_ROW;
         node->own = op->op != PURE_OP_LOAD && op->op != PURE_OP_INDEX_LOAD && op->op != PURE_OP_OUTER_ROW &&
-                    (read < 0 || read == list);
+                    op->op != PURE_OP_FIELD && (read < 0 || read == list);
         for (unsigned k = 0; k < 3; ++k) node->kid[k] = -1;
         for (unsigned k = 0; k < pops; ++k) {
             int kid = stack[sp - pops + k];
@@ -690,7 +697,9 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         shape->keyed = at[5];
         shape->field_start = (uint16_t)read16(at + 12);
         shape->field_count = (uint16_t)read16(at + 14);
-        if (!name_at(text, strings, read32(at), NAME_IDENTIFIER, out->input_names[i])) REFUSE("input name", i);
+        /* Arguments bear their view's name (view.args); other inputs are identifiers. */
+        if (!name_at(text, strings, read32(at), shape->kind == PURE_KIND_ARGUMENTS ? NAME_PATH : NAME_IDENTIFIER,
+                     out->input_names[i])) REFUSE("input name", i);
         if (read16(at + 6) || at[5] > 1) REFUSE("input flags", i);
         if (shape->kind == PURE_KIND_KEY) {
             if (shape->keyed || shape->field_start || shape->field_count ||
@@ -712,9 +721,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                 shape->period > PURE_TIMER_LONGEST) REFUSE("timer input", i);
             continue;
         }
-        if ((shape->kind != PURE_KIND_MESSAGE && shape->kind != PURE_KIND_OUTPUT) || read32(at + 8) ||
-            (shape->kind == PURE_KIND_OUTPUT && shape->keyed) || shape->field_start != next_field ||
+        bool arguments = shape->kind == PURE_KIND_ARGUMENTS;
+        if ((shape->kind != PURE_KIND_MESSAGE && shape->kind != PURE_KIND_OUTPUT && !arguments) || (!arguments && read32(at + 8)) ||
+            ((shape->kind == PURE_KIND_OUTPUT || arguments) && shape->keyed) || shape->field_start != next_field ||
             shape->field_count > out->fields - next_field) REFUSE("message shape", i);
+        shape->view = arguments ? read32(at + 8) : 0;
         /* The prefix holds the fixed fields and the variable fields' lengths
          * in order, but the last variable field's: it takes the rest. */
         uint32_t last = UINT32_MAX;
@@ -735,7 +746,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             if (field->type == PURE_FIELD_ROWS) {
                 char path[2 * PURE_MODULE_NAME + 2];
                 snprintf(path, sizeof(path), "%s.%s", out->input_names[i], field->name);
-                if (shape->kind == PURE_KIND_OUTPUT || field->rows >= out->states ||
+                if (shape->kind != PURE_KIND_MESSAGE || field->rows >= out->states ||
                     out->state_type[field->rows] != PURE_STATE_LIST || !(out->state_flags[field->rows] & PURE_LIST_ROWS >> 8) ||
                     strcmp(out->state_names[field->rows], path))
                     REFUSE("rows field", next_field + f);
@@ -813,12 +824,25 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             out->view_list[i] = (uint16_t)list;
         } else if (table) out->view_list[i] = out->view_list[table - 1];
     }
+    /* Arguments are a view's (not a column's: a table's columns and filter
+     * read the table's), one set a view, bearing its name. */
+    for (uint32_t i = 0; i < out->inputs; ++i) {
+        const PureInputShape *shape = &out->input[i];
+        if (shape->kind != PURE_KIND_ARGUMENTS) continue;
+        char path[PURE_MODULE_NAME + 8];
+        if (shape->view >= out->views || out->view_table[shape->view] || out->view_arguments[shape->view]) REFUSE("arguments", i);
+        snprintf(path, sizeof(path), "%s.args", out->view_names[shape->view]);
+        if (strcmp(path, out->input_names[i])) REFUSE("arguments", i);
+        out->view_arguments[shape->view] = (uint8_t)(i + 1);
+    }
+    for (uint32_t i = 0; i < out->views; ++i)
+        if (out->view_table[i]) out->view_arguments[i] = out->view_arguments[out->view_table[i] - 1];
     for (uint32_t i = 0; i < out->handlers; ++i, at += HANDLER_BYTES) {
         uint32_t event = read32(at);
         out->handler[i] = (PureHandler){event, {read32(at + 4), read32(at + 8)}};
         int input = event_input(event);
         if (event > 2u * out->inputs || (input >= 0 && out->input[input].kind != PURE_KIND_KEY && !(event & 1)) ||
-            (input >= 0 && out->input[input].kind == PURE_KIND_OUTPUT))
+            (input >= 0 && (out->input[input].kind == PURE_KIND_OUTPUT || out->input[input].kind == PURE_KIND_ARGUMENTS)))
             REFUSE("handler event", i);
     }
     for (uint32_t i = 0; i < out->code_count; ++i, at += OP_BYTES) {
@@ -845,18 +869,20 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t i = 0; i < out->views; ++i) {
         bad = i;
         bool table = out->view_type[i] == PURE_VIEW_TABLE;
+        uint32_t event = out->view_arguments[i] ? 2u * out->view_arguments[i] - 1u : 0; /* the arguments' input, as an arrival */
         if ((!table || out->view_code[i].length) &&
             (why = verify_block(out, out->view_code[i], table ? FILTER : out->view_type[i],
-                                table || out->view_table[i] ? out->view_list[i] : -1, -1, 0, &bad))) goto refused;
+                                table || out->view_table[i] ? out->view_list[i] : -1, -1, event, &bad))) goto refused;
     }
     for (uint32_t i = 0; i < out->handlers; ++i) {
         bad = i;
         if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event, &bad))) goto refused;
     }
     for (uint32_t i = 0; i < out->views; ++i) {
-        plan_folds(out, out->view_code[i]);
+        int given = (int)out->view_arguments[i] - 1;
+        plan_folds(out, out->view_code[i], given);
         out->view_plan[i] = out->view_type[i] == PURE_VIEW_TABLE && out->view_code[i].length &&
-                            block_has_lanes(out, out->view_code[i]);
+                            block_has_lanes(out, out->view_code[i], given);
         /* A fold in a column runs for every row: one pass may answer them all. */
         for (uint32_t pc = out->view_code[i].start; out->view_table[i] && pc < out->view_code[i].start + out->view_code[i].length; ++pc)
             if (out->code[pc].op == PURE_OP_FOLD) {
@@ -864,7 +890,10 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                 pc += out->code[pc].arg >> 16;
             }
     }
-    for (uint32_t i = 0; i < out->handlers; ++i) plan_folds(out, out->handler[i].code);
+    for (uint32_t i = 0; i < out->handlers; ++i) {
+        int input = event_input(out->handler[i].event);
+        plan_folds(out, out->handler[i].code, input >= 0 && out->input[input].kind == PURE_KIND_MESSAGE ? input : -1);
+    }
     return PURE_OK;
 refused:
     if (error_size) snprintf(error, error_size, "%s (%u)", why, bad);
@@ -925,6 +954,7 @@ typedef struct {
     size_t row;   /* the row a column is evaluated for (in a fold, the fold's item) */
     size_t outer; /* in a fold, the row of the column it runs in */
     Walk *walk;   /* the walk the code runs in, or NULL */
+    bool arguments; /* FIELD reads the arguments given for a view, not the message */
     bool modified, exists;
     uint32_t (*spans)[2]; /* a message's variable fields: start and size in the payload */
 } Event;
@@ -957,6 +987,7 @@ static PureResult visit_value(const PureApp *app, const PureArena *arena, PureBy
     const unsigned char *direct = NULL;
     switch (v.source) {
     case FROM_PAYLOAD: direct = app->payload.data + v.offset; break;
+    case FROM_ARGUMENTS: direct = app->arguments.data + v.offset; break;
     case FROM_COPY: direct = app->copied + v.offset; break;
     case FROM_CONSTANT: direct = app->module->constant_data + v.offset; break;
     case FROM_ARENA: direct = arena->bytes + v.offset; break;
@@ -987,8 +1018,8 @@ static PureResult append_value(const PureApp *app, PureArena *arena, PureBytes v
 
 /* A contiguous span of a value, copying into the arena when it is spread out. */
 static PureResult contiguous(const PureApp *app, PureArena *arena, PureBytes v, PureSpan *out) {
-    if (v.source == FROM_PAYLOAD || v.source == FROM_COPY || v.source == FROM_CONSTANT) {
-        const unsigned char *base = v.source == FROM_PAYLOAD ? app->payload.data :
+    if (v.source == FROM_PAYLOAD || v.source == FROM_COPY || v.source == FROM_CONSTANT || v.source == FROM_ARGUMENTS) {
+        const unsigned char *base = v.source == FROM_PAYLOAD ? app->payload.data : v.source == FROM_ARGUMENTS ? app->arguments.data :
                                     v.source == FROM_COPY ? app->copied : app->module->constant_data;
         *out = (PureSpan){v.length ? base + v.offset : NULL, (size_t)v.length};
         return PURE_OK;
@@ -1244,6 +1275,13 @@ static bool run_lanes(const PureModule *m, const double *values, PureBlock block
         switch (op->op) {
         case PURE_OP_CONST: stack[sp++] = (Lanes){NULL, op->value, false, 0}; continue;
         case PURE_OP_LOAD: stack[sp++] = (Lanes){NULL, values[arg], false, 0}; continue;
+        case PURE_OP_FIELD: {
+            const PureField *field = &m->field[ev->shape->field_start + arg];
+            const unsigned char *given = ev->arguments ? app->arguments.data : app->payload.data;
+            double value = field->type == PURE_FIELD_U32 ? read32(given + field->offset) : read_double(given + field->offset);
+            stack[sp++] = (Lanes){NULL, value, false, 0};
+            continue;
+        }
         case PURE_OP_INDEX_LOAD: stack[sp++] = (Lanes){NULL, values[arg], false, m->state_ref[arg]}; continue;
         case PURE_OP_ROW: stack[sp++] = (Lanes){NULL, 0, true, (uint16_t)arg}; continue;
         case PURE_OP_OUTER_ROW: stack[sp++] = (Lanes){NULL, (double)ev->outer, false, (uint16_t)arg}; continue;
@@ -1706,9 +1744,11 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         }
         case PURE_OP_FIELD: {
             const PureField *field = &m->field[ev->shape->field_start + arg];
-            if (field->type == PURE_FIELD_U32) stack[sp++].num = read32(app->payload.data + field->offset);
-            else if (field->type == PURE_FIELD_NUMBER) stack[sp++].num = read_double(app->payload.data + field->offset);
-            else stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, ev->spans[arg][0], ev->spans[arg][1]};
+            const unsigned char *given = ev->arguments ? app->arguments.data : app->payload.data;
+            if (field->type == PURE_FIELD_U32) stack[sp++].num = read32(given + field->offset);
+            else if (field->type == PURE_FIELD_NUMBER) stack[sp++].num = read_double(given + field->offset);
+            else stack[sp++].bytes = (PureBytes){ev->arguments ? FROM_ARGUMENTS : FROM_PAYLOAD, 0, {0, 0}, ev->spans[arg][0],
+                                                 ev->spans[arg][1]};
             continue;
         }
         case PURE_OP_DOC: case PURE_OP_DOC_SIZE: {
@@ -2412,6 +2452,50 @@ static PureResult keep_reply(PureApp *app) {
     return PURE_OK;
 }
 
+/* Where each variable field of a payload of shape is: where placed says
+ * (start and size in the payload), or, without it, one after another after
+ * the prefix. A length past the payload, a text that is not UTF-8 or a
+ * number that is not finite is its fault (else NONE). */
+static PureFault place_fields(const PureModule *m, const PureInputShape *shape, PureSpan payload, const uint32_t *placed,
+                              uint32_t spans[][2]) {
+    if (payload.size < shape->prefix) return PURE_FAULT_LIMIT;
+    size_t at = shape->prefix;
+    for (uint32_t f = 0; f < shape->field_count; ++f) {
+        const PureField *field = &m->field[shape->field_start + f];
+        if (field->type == PURE_FIELD_NUMBER && !isfinite(read_double(payload.data + field->offset)))
+            return PURE_FAULT_NON_FINITE;
+        if (field->type != PURE_FIELD_BYTES && field->type != PURE_FIELD_TEXT && field->type != PURE_FIELD_ROWS) continue;
+        size_t start = placed ? placed[2 * f] : at;
+        if (start > payload.size) return PURE_FAULT_LIMIT;
+        size_t size = placed ? placed[2 * f + 1] : field->offset == PURE_FIELD_REST ? payload.size - at :
+                      read32(payload.data + field->offset);
+        if (size > payload.size - start) return PURE_FAULT_LIMIT;
+        if (field->type == PURE_FIELD_TEXT && !pure_utf8_valid((PureSpan){size ? payload.data + start : NULL, size}))
+            return PURE_FAULT_ENCODING;
+        spans[f][0] = (uint32_t)start;
+        spans[f][1] = (uint32_t)size;
+        at = start + size;
+    }
+    return PURE_FAULT_NONE;
+}
+
+int pure_module_arguments(const PureModule *m, uint32_t view) {
+    return view < m->views && m->view_arguments[view] ? m->view_arguments[view] - 1 : -1;
+}
+
+PureResult pure_app_arguments(PureApp *app, uint32_t view, PureSpan payload, const uint32_t *placed) {
+    const PureModule *m = app->module;
+    int input = pure_module_arguments(m, view);
+    if (input < 0 || (payload.size && !payload.data)) return PURE_INVALID;
+    app->argued = 0;
+    ++app->arguments_given; /* rows a filter kept are for other arguments */
+    PureFault wrong = place_fields(m, &m->input[input], payload, placed, app->argument_spans);
+    if (wrong != PURE_FAULT_NONE) return wrong == PURE_FAULT_LIMIT ? PURE_LIMIT : PURE_INVALID;
+    app->arguments = payload;
+    app->argued = (unsigned)input + 1;
+    return PURE_OK;
+}
+
 /* A message whose variable fields are where placed says (start and size in
  * the payload), or, without it, one after another after the prefix. */
 static PureResult message(PureApp *app, uint32_t input, const char *key, int64_t base, PureSpan payload,
@@ -2425,27 +2509,9 @@ static PureResult message(PureApp *app, uint32_t input, const char *key, int64_t
         (payload.size && !payload.data) || (m->input[input].keyed ? !document_key(key) : key != NULL))
         return PURE_INVALID;
     const PureInputShape *shape = &m->input[input];
-    if (payload.size < shape->prefix) return fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
-    /* Where each variable field is; a length past the payload, a text that
-     * is not UTF-8 or a number that is not finite fails the message. */
     uint32_t spans[PURE_MODULE_FIELDS][2];
-    size_t at = shape->prefix;
-    for (uint32_t f = 0; f < shape->field_count; ++f) {
-        const PureField *field = &m->field[shape->field_start + f];
-        if (field->type == PURE_FIELD_NUMBER && !isfinite(read_double(payload.data + field->offset)))
-            return fault(app, PURE_FAULT_NON_FINITE, UINT32_MAX);
-        if (field->type != PURE_FIELD_BYTES && field->type != PURE_FIELD_TEXT && field->type != PURE_FIELD_ROWS) continue;
-        size_t start = placed ? placed[2 * f] : at;
-        if (start > payload.size) return fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
-        size_t size = placed ? placed[2 * f + 1] : field->offset == PURE_FIELD_REST ? payload.size - at :
-                      read32(payload.data + field->offset);
-        if (size > payload.size - start) return fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
-        if (field->type == PURE_FIELD_TEXT && !pure_utf8_valid((PureSpan){size ? payload.data + start : NULL, size}))
-            return fault(app, PURE_FAULT_ENCODING, UINT32_MAX);
-        spans[f][0] = (uint32_t)start;
-        spans[f][1] = (uint32_t)size;
-        at = start + size;
-    }
+    PureFault wrong = place_fields(m, shape, payload, placed, spans);
+    if (wrong != PURE_FAULT_NONE) return fault(app, wrong, UINT32_MAX);
     if (shape->keyed && m->collections) {
         if (!app->data.open) return PURE_INVALID;
         /* A key joins a burst once, so its revision moves once per save. */
@@ -2557,11 +2623,23 @@ PureResult pure_app_reply(const PureApp *app, bool (*visit)(void *, PureSpan), v
 }
 
 /* A view that fails reports it by its result; the fault stays the last event's. */
+/* The arguments a view reads, set in its event; false when it takes some and they were not given. */
+static bool argue(const PureApp *app, uint32_t view, Event *ev) {
+    unsigned given = app->module->view_arguments[view];
+    if (!given) return true;
+    if (app->argued != given) return false;
+    ev->shape = &app->module->input[given - 1];
+    ev->spans = (uint32_t (*)[2])app->argument_spans;
+    ev->arguments = true;
+    return true;
+}
+
 static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     double values[PURE_MODULE_STATES];
     memcpy(values, app->values, sizeof(values));
     app->view_arena.used = 0;
     Event ev = {.app = app, .arena = &app->view_arena, .row = row};
+    if (!argue(app, view, &ev)) return PURE_INVALID;
     PureFault fault = app->fault;
     uint32_t fault_pc = app->fault_pc;
     PureResult result = run(app->module, values, app->module->view_code[view], &ev, out);
@@ -2603,7 +2681,7 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
         rows = &app->rows[app->row_tables++];
         *rows = (struct PureRows){.table = table, .changes = UINT64_MAX};
     }
-    if (rows->changes == app->changes) return rows;
+    if (rows->changes == app->changes && (!m->view_arguments[table] || rows->given == app->arguments_given)) return rows;
     rows->count = 0;
     /* A leaf of the list at a time when the filter has lane forms; a leaf
      * where an item would fault goes item by item, leaving that item out. */
@@ -2614,6 +2692,7 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
         Event ev = {.app = app, .arena = &app->view_arena};
         Memo memo;
         memo.known = 0;
+        if (!argue(app, table, &ev)) return NULL;
         for (bool more = pure_list_run(list, 0, &run); more; more = pure_list_next(list, &run)) {
             Lanes keep;
             if (run_lanes(m, app->values, m->view_code[table], &ev, &run, &keep, store, &memo, NULL)) {
@@ -2628,6 +2707,7 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
         for (size_t item = 0, items = pure_list_count(list); item < items; ++item)
             if (!keep_evaluated(app, table, rows, item)) return NULL;
     rows->changes = app->changes;
+    rows->given = app->arguments_given;
     return rows;
 }
 

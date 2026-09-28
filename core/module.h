@@ -58,9 +58,13 @@ typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PUR
 
 /* A timer ticks every `period` milliseconds while a host runs the app. An
  * output is a message the app sends (SEND, in a handler; it has fields as a
- * message has and no handler): what receives it is the host's wiring. */
+ * message has and no handler): what receives it is the host's wiring.
+ * Arguments are the fields a view takes (a view with arguments, its
+ * columns and its filter read them as a message handler reads its message);
+ * such an input has no handler and names its view, whose name it bears
+ * with .arguments after it. */
 typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3, PURE_KIND_TIMER = 4,
-               PURE_KIND_OUTPUT = 5 } PureInputKind;
+               PURE_KIND_OUTPUT = 5, PURE_KIND_ARGUMENTS = 6 } PureInputKind;
 enum { PURE_TIMER_LONGEST = 86400000, PURE_SOURCE = 64 };
 /* A message field: a u32le or a binary64 (fixed, at its offset in the
  * payload's prefix), or bytes, text or rows of any length. The prefix also
@@ -109,6 +113,7 @@ typedef struct {
     uint16_t field_start, field_count;
     uint32_t prefix; /* fixed payload bytes before the variable fields */
     uint32_t period; /* a timer's, in milliseconds */
+    uint32_t view;   /* arguments: the view they are for */
 } PureInputShape;
 
 /* A record type: fields numbered from first, each a number or text. */
@@ -145,6 +150,7 @@ typedef struct {
     uint16_t view_list[PURE_MODULE_VIEWS];  /* the list of a table or column */
     PureBlock view_code[PURE_MODULE_VIEWS];
     uint8_t view_plan[PURE_MODULE_VIEWS]; /* a table's filter runs a leaf of its list at once (as a fold may) */
+    uint8_t view_arguments[PURE_MODULE_VIEWS]; /* the input of a view's arguments + 1 (a column's: its table's), or 0 */
     PureShape shape[PURE_MODULE_SHAPES];
     uint8_t shapes;
     PureHandler handler[PURE_MODULE_HANDLERS];
@@ -253,7 +259,7 @@ typedef struct {
      * sets it, so a script can replay any time; views never see it. */
     double now;
     uint64_t changes; /* counts every change of states, never back: what a filter's rows are fresh for */
-    struct PureRows { uint32_t table; uint64_t changes; size_t *items, count, capacity; } *rows; /* a filtered table's items */
+    struct PureRows { uint32_t table; uint64_t changes, given; size_t *items, count, capacity; } *rows; /* a filtered table's items */
     unsigned row_tables;
     /* Current message or text event, kept until pure_app_finish. */
     void *document;
@@ -279,6 +285,12 @@ typedef struct {
     bool links_changed; /* since the last save */
     bool duplicate;     /* the last delivery was heard before and not applied */
     struct { const char *source; uint64_t seq; bool pending; } delivering;
+    /* The arguments given for a view (pure_app_arguments): its input + 1 (0:
+     * none), where their fields are, and a count of the times they were given. */
+    unsigned argued;
+    PureSpan arguments;
+    uint32_t argument_spans[PURE_MODULE_FIELDS][2];
+    uint64_t arguments_given;
     /* Passes over lists that answer shaped folds, by the list's version. */
     struct PurePass *passes;
     unsigned pass_count;
@@ -331,6 +343,15 @@ PureResult pure_app_view_text(PureApp *, uint32_t view, bool (*visit)(void *, Pu
 /* The rows of a table view (its list's items, or those its filter keeps),
  * or 0 for another view. A host evaluates only the cells it shows. */
 size_t pure_app_rows(PureApp *, uint32_t table);
+/* A view that takes arguments (a column: its table's): the input whose
+ * fields they are, or -1. */
+int pure_module_arguments(const PureModule *, uint32_t view);
+/* The arguments of view, as a message payload of their input's shape (its
+ * variable fields where placed says, or after the prefix in order): the
+ * view, its columns and its rows read them until they are given again. The
+ * payload stays the caller's and must outlive what it shows. INVALID when
+ * the view takes none, LIMIT, NON_FINITE or ENCODING as a message fails. */
+PureResult pure_app_arguments(PureApp *, uint32_t view, PureSpan payload, const uint32_t *placed);
 /* How many passes the app keeps, made to answer shaped folds in columns. */
 unsigned pure_app_passes(const PureApp *);
 /* The item a row of a table shows, and the row that shows an item (false:

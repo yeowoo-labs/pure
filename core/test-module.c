@@ -25,7 +25,8 @@ int pure_store_test_fault(PureStoreStage stage) {
 
 typedef struct { const char *name; double initial; } S;
 typedef struct { const char *name; uint32_t type; } F;
-/* kind 0 is a key input; otherwise PURE_KIND_MESSAGE with fields. */
+/* kind 0 is a key input; otherwise PURE_KIND_MESSAGE with fields. Arguments
+ * name their view by its number in key. */
 typedef struct { const char *name, *key; int kind; bool keyed; const F *fields; size_t nfields; } I;
 #define KEY(name, key) {name, key, 0, false, NULL, 0}
 /* A timer's period (milliseconds) rides in nfields. */
@@ -126,8 +127,10 @@ static size_t build(unsigned char *out, Spec spec) {
         p = put32(p, offset[n++]);
         *p++ = (unsigned char)(in->kind ? in->kind : 1); *p++ = in->keyed; *p++ = 0; *p++ = 0;
         bool timer = in->kind == PURE_KIND_TIMER;
-        p = put32(p, timer ? (uint32_t)in->nfields : in->kind ? 0 : offset[n++]);
-        uint32_t first = in->kind == PURE_KIND_MESSAGE || in->kind == PURE_KIND_OUTPUT ? field_start : 0; /* only messages and outputs have fields */
+        p = put32(p, timer ? (uint32_t)in->nfields : in->kind == PURE_KIND_ARGUMENTS ? (uint32_t)strtoul(in->key, NULL, 10) :
+                     in->kind ? 0 : offset[n++]);
+        uint32_t first = in->kind == PURE_KIND_MESSAGE || in->kind == PURE_KIND_OUTPUT || in->kind == PURE_KIND_ARGUMENTS
+                             ? field_start : 0; /* only messages, outputs and arguments have fields */
         *p++ = (unsigned char)first; *p++ = (unsigned char)(first >> 8);
         *p++ = (unsigned char)(timer ? 0 : in->nfields); *p++ = 0;
         for (size_t f = 0; !timer && f < in->nfields; ++f) field_offsets[nf++] = offset[n++];
@@ -2667,6 +2670,135 @@ static void walk_mutations(void) {
     printf("{\"walk_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
 }
 
+/* ---- Views that take arguments -----------------------------------------
+ * balance(aid) finds an account by key, rich(min) counts accounts above an
+ * argument (a leaf at a time), echo(name) shows a text argument as it is,
+ * branch(b) is a table filtered by an argument whose column folds with it;
+ * a handler's fold reads its message. Given again, arguments are read
+ * anew: a filter's rows are kept for the arguments they were made for. */
+enum { A_N = 0, A_ACCOUNTS = 1 };
+static const S argued_numbers[] = {{"n", 0}};
+static const T argued_lists[] = {{"accounts", 3 | 1 << 8, 0}};
+static const RF account_fields[] = {{"aid", 0, 0}, {"bid", 0, 0}, {"balance", 0, 0}};
+static const R argued_records[] = {{"Account", account_fields, 3}};
+static const F pay_fields[] = {{"b", 1}}, add_fields[] = {{"aid", 1}, {"bid", 1}, {"balance", 3}},
+               aid_fields[] = {{"aid", 1}}, min_fields[] = {{"min", 3}}, name_fields[] = {{"name", 4}}, b_fields[] = {{"b", 1}};
+static const I argued_inputs[] = {
+    {"pay", NULL, PURE_KIND_MESSAGE, false, pay_fields, 1}, {"add", NULL, PURE_KIND_MESSAGE, false, add_fields, 3},
+    {"balance.args", "0", PURE_KIND_ARGUMENTS, false, aid_fields, 1},
+    {"rich.args", "1", PURE_KIND_ARGUMENTS, false, min_fields, 1},
+    {"echo.args", "2", PURE_KIND_ARGUMENTS, false, name_fields, 1},
+    {"branch.args", "3", PURE_KIND_ARGUMENTS, false, b_fields, 1}};
+static const O argued_code[] = {
+    /* 0 balance(aid) = accounts[aid].balance */
+    {FIELD, 0, 0}, {PURE_OP_LIST_FIND, A_ACCOUNTS, 0}, {IG, ITEM(A_ACCOUNTS, 2), 0},
+    /* 3 rich(min) = count(a in accounts where a.balance > min) */
+    {FOLD, FOLDING(PURE_FOLD_COUNT, A_ACCOUNTS, 4), 0}, {ROW, A_ACCOUNTS, 0}, {IG, ITEM(A_ACCOUNTS, 2), 0}, {FIELD, 0, 0},
+    {GT, 0, 0},
+    /* 8 echo(name) = name */
+    {FIELD, 0, 0},
+    /* 9 branch(b): each a in accounts where a.bid == b */
+    {ROW, A_ACCOUNTS, 0}, {IG, ITEM(A_ACCOUNTS, 1), 0}, {FIELD, 0, 0}, {EQ, 0, 0},
+    /* 13 aid = a.aid */
+    {ROW, A_ACCOUNTS, 0}, {IG, ITEM(A_ACCOUNTS, 0), 0},
+    /* 15 share = a.balance / sum(x.balance for x in accounts where x.bid == b) */
+    {ROW, A_ACCOUNTS, 0}, {IG, ITEM(A_ACCOUNTS, 2), 0}, {FOLD, FOLDING(PURE_FOLD_SUM, A_ACCOUNTS, 6), 0}, {ROW, A_ACCOUNTS, 0},
+    {IG, ITEM(A_ACCOUNTS, 2), 0}, {ROW, A_ACCOUNTS, 0}, {IG, ITEM(A_ACCOUNTS, 1), 0}, {FIELD, 0, 0}, {EQ, 0, 0},
+    {DIV, 0, 0},
+    /* 25 on pay: n = count(a in accounts where a.bid == pay.b) */
+    {FOLD, FOLDING(PURE_FOLD_COUNT, A_ACCOUNTS, 4), 0}, {ROW, A_ACCOUNTS, 0}, {IG, ITEM(A_ACCOUNTS, 1), 0}, {FIELD, 0, 0},
+    {EQ, 0, 0}, {ST, A_N, 0},
+    /* 31 on add: accounts.add(Account { aid, bid, balance }) */
+    {FIELD, 0, 0}, {FIELD, 1, 0}, {FIELD, 2, 0}, {LA, A_ACCOUNTS, 0},
+};
+static const V argued_views[] = {{"balance", 0, 3}, {"rich", 3, 5}};
+static const V argued_texts[] = {{"echo", 8, 1}};
+static const W argued_tables[] = {{"branch", 2 | (A_ACCOUNTS + 1) << 8, 0, 9, 4}, {"aid", 0, 4, 13, 2}, {"share", 0, 4, 15, 10}};
+static const H argued_handlers[] = {{1, 25, 6}, {3, 31, 4}};
+
+static Spec argued_spec(const I *inputs, size_t ninputs, const H *handlers, size_t nhandlers) {
+    return (Spec){argued_numbers, 1, inputs, ninputs, argued_views, 2, handlers, nhandlers, argued_code, LEN(argued_code), NULL, 0,
+                  argued_lists, 1, NULL, 0, argued_texts, 1, argued_records, 1, argued_tables, 3};
+}
+
+static PureResult give(PureApp *app, uint32_t view, const unsigned char *payload, size_t size) {
+    return pure_app_arguments(app, view, (PureSpan){payload, size}, NULL);
+}
+
+static void view_arguments(void) {
+    CHECK(load(argued_spec(argued_inputs, LEN(argued_inputs), argued_handlers, 2), &module_a) == PURE_OK);
+    CHECK(pure_module_arguments(&module_a, 0) == 2 && pure_module_arguments(&module_a, 5) == 5 &&
+          pure_module_arguments(&module_a, 3) == 5 && module_a.code[3].plan && module_a.code[25].plan);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    for (uint32_t aid = 1; aid <= 30; ++aid) {
+        unsigned char payload[16];
+        put32(payload, aid);
+        put32(payload + 4, aid % 3);
+        put_double(payload + 8, aid * 10.0);
+        CHECK(pure_app_message(&app, 1, NULL, -1, (PureSpan){payload, 16}) == PURE_OK);
+    }
+    double value;
+    unsigned char four[8];
+    CHECK(!pure_app_view(&app, 0, &value)); /* no arguments given */
+    put32(four, 7);
+    CHECK(give(&app, 0, four, 4) == PURE_OK && pure_app_view(&app, 0, &value) && value == 70);
+    put32(four, 99);
+    CHECK(give(&app, 0, four, 4) == PURE_OK && !pure_app_view(&app, 0, &value)); /* no such account */
+    CHECK(give(&app, 0, four, 3) == PURE_LIMIT && !pure_app_view(&app, 0, &value));
+    for (double min = -1; min <= 310; min += 7.5) {
+        put_double(four, min);
+        size_t above = 0;
+        for (uint32_t aid = 1; aid <= 30; ++aid) above += aid * 10.0 > min;
+        CHECK(give(&app, 1, four, 8) == PURE_OK && pure_app_view(&app, 1, &value) && value == (double)above);
+    }
+    put_double(four, NAN);
+    CHECK(give(&app, 1, four, 8) == PURE_INVALID);
+    const char *name = "argument: 한글 ✓";
+    CHECK(give(&app, 2, (const unsigned char *)name, strlen(name)) == PURE_OK);
+    Text shown = {{0}, 0};
+    CHECK(pure_app_view_text(&app, 2, text_span, &shown) == PURE_OK && shown.size == strlen(name) &&
+          !memcmp(shown.text, name, shown.size));
+    CHECK(give(&app, 2, (const unsigned char *)"\xff", 1) == PURE_INVALID);
+    for (uint32_t b = 0; b < 3; ++b) {
+        put32(four, b);
+        CHECK(give(&app, 3, four, 4) == PURE_OK && pure_app_rows(&app, 3) == 10);
+        double total = 0;
+        for (uint32_t aid = 1; aid <= 30; ++aid) if (aid % 3 == b) total += aid * 10.0;
+        for (size_t row = 0; row < 10; ++row) {
+            double aid, share;
+            CHECK(pure_app_cell(&app, 4, row, &aid) && (uint32_t)aid % 3 == b && pure_app_cell(&app, 5, row, &share) &&
+                  share == aid * 10.0 / total);
+        }
+    }
+    put32(four, 2);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){four, 4}) == PURE_OK && app.values[A_N] == 10);
+    pure_app_stop(&app);
+
+    /* What arguments may not be. */
+    static const I on_column[] = {{"pay", NULL, PURE_KIND_MESSAGE, false, pay_fields, 1},
+                                  {"aid.args", "4", PURE_KIND_ARGUMENTS, false, aid_fields, 1}};
+    static const I misnamed[] = {{"pay", NULL, PURE_KIND_MESSAGE, false, pay_fields, 1},
+                                 {"balance.argz", "0", PURE_KIND_ARGUMENTS, false, aid_fields, 1}};
+    static const I twice[] = {{"pay", NULL, PURE_KIND_MESSAGE, false, pay_fields, 1},
+                              {"balance.args", "0", PURE_KIND_ARGUMENTS, false, aid_fields, 1},
+                              {"balance.args", "0", PURE_KIND_ARGUMENTS, false, aid_fields, 1}};
+    static const H handled[] = {{5, 31, 4}};
+    const struct { Spec spec; const char *reason; } refused[] = {
+        {argued_spec(on_column, 2, NULL, 0), "arguments"},
+        {argued_spec(misnamed, 2, NULL, 0), "arguments"},
+        {argued_spec(twice, 3, NULL, 0), "arguments"},
+        {argued_spec(argued_inputs, LEN(argued_inputs), handled, 1), "handler event"},
+        {argued_spec(argued_inputs, 2, NULL, 0), "view with an effect"}, /* FIELD without arguments */
+    };
+    for (size_t i = 0; i < LEN(refused); ++i)
+        if (load(refused[i].spec, &module_b) != PURE_INVALID || !strstr(error, refused[i].reason)) {
+            fprintf(stderr, "arguments case %zu: expected '%s', got '%s'\n", i, refused[i].reason, error);
+            abort();
+        }
+    printf("{\"view_arguments\":{\"accounts\":30,\"branches\":3}}\n");
+}
+
 /* Damaged fold and filter modules: whatever loads runs safely. */
 static void fold_mutations(void) {
     static unsigned char valid[65536], bytes[65536];
@@ -3590,6 +3722,7 @@ int main(void) {
     lane_folds();
     walks();
     walk_mutations();
+    view_arguments();
     keyed();
     keyed_mutations();
     snapshots();
