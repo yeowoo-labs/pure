@@ -1,0 +1,266 @@
+# TPC-C (revision 5.11): its tables and its five transactions, the clause 2
+# profiles, each composite key packed into one number: a district is
+# w * 10 + d, a customer district * 3000 + c, an order district * 10^7 + o,
+# an order line order * 16 + number, a stock item w * 100000 + i.
+#
+# Where this departs from the specification: a customer is always chosen by
+# number (never by last name), texts the transactions only carry along
+# (names, addresses, data) are left out, a customer keeps its last order,
+# and Delivery is an event a district (clause 2.7.4 lets the ten districts
+# be separate transactions).
+
+record Warehouse {
+  id = 0
+  tax = 0
+  ytd = 0
+}
+record District {
+  id = 0
+  tax = 0
+  ytd = 0
+  next_order = 3001
+  next_delivery = 2101
+}
+record Customer {
+  id = 0
+  discount = 0
+  credit = 1
+  balance = -10
+  ytd_payment = 10
+  payments = 1
+  deliveries = 0
+  last_order = 0
+}
+record Item {
+  id = 0
+  price = 0
+}
+record Stock {
+  id = 0
+  quantity = 0
+  ytd = 0
+  orders = 0
+  remote = 0
+}
+record Order {
+  id = 0
+  customer = 0
+  entry = 0
+  carrier = 0
+  lines = 0
+  local = 1
+}
+record NewOrder {
+  id = 0
+}
+record Line {
+  id = 0
+  item = 0
+  supply = 0
+  delivery = 0
+  quantity = 0
+  amount = 0
+}
+record History {
+  customer = 0
+  district = 0
+  date = 0
+  amount = 0
+}
+record Ordered {
+  item = 0
+  supply = 0
+  quantity = 0
+}
+
+state warehouses: list of Warehouse by id
+state districts: list of District by id
+state customers: list of Customer by id
+state items: list of Item by id
+state stock: list of Stock by id
+state orders: list of Order by id
+state new_orders: list of NewOrder by id
+state lines: list of Line by id
+state history: list of History
+
+# Loading: a table's rows in bulk.
+input load_warehouses = message {
+  rows: list of Warehouse
+}
+input load_districts = message {
+  rows: list of District
+}
+input load_customers = message {
+  rows: list of Customer
+}
+input load_items = message {
+  rows: list of Item
+}
+input load_stock = message {
+  rows: list of Stock
+}
+input load_orders = message {
+  rows: list of Order
+}
+input load_new_orders = message {
+  rows: list of NewOrder
+}
+input load_lines = message {
+  rows: list of Line
+}
+on load_warehouses {
+  for r in load_warehouses.rows {
+    warehouses.add(Warehouse { id: r.id, tax: r.tax, ytd: r.ytd })
+  }
+}
+on load_districts {
+  for r in load_districts.rows {
+    districts.add(District { id: r.id, tax: r.tax, ytd: r.ytd, next_order: r.next_order, next_delivery: r.next_delivery })
+  }
+}
+on load_customers {
+  for r in load_customers.rows {
+    customers.add(Customer { id: r.id, discount: r.discount, credit: r.credit, balance: r.balance,
+                             ytd_payment: r.ytd_payment, payments: r.payments, deliveries: r.deliveries,
+                             last_order: r.last_order })
+  }
+}
+on load_items {
+  for r in load_items.rows {
+    items.add(Item { id: r.id, price: r.price })
+  }
+}
+on load_stock {
+  for r in load_stock.rows {
+    stock.add(Stock { id: r.id, quantity: r.quantity, ytd: r.ytd, orders: r.orders, remote: r.remote })
+  }
+}
+on load_orders {
+  for r in load_orders.rows {
+    orders.add(Order { id: r.id, customer: r.customer, entry: r.entry, carrier: r.carrier, lines: r.lines, local: r.local })
+  }
+}
+on load_new_orders {
+  for r in load_new_orders.rows {
+    new_orders.add(NewOrder { id: r.id })
+  }
+}
+on load_lines {
+  for r in load_lines.rows {
+    lines.add(Line { id: r.id, item: r.item, supply: r.supply, delivery: r.delivery, quantity: r.quantity,
+                     amount: r.amount })
+  }
+}
+
+# New-Order (2.4): an order of 5 to 15 lines, each taking stock; an unused
+# item (1% of orders) fails the whole order, which is then undone.
+input new_order = message {
+  w: u32
+  d: u32
+  c: u32
+  lines: list of Ordered
+}
+on new_order {
+  let district = districts[new_order.w * 10 + new_order.d]
+  let customer = customers[district.id * 3000 + new_order.c]
+  let order = district.id * 10000000 + district.next_order
+  district.next_order = district.next_order + 1
+  let local = 1
+  let count = 0
+  for l in new_order.lines {
+    let price = items[l.item].price
+    let s = stock[l.supply * 100000 + l.item]
+    if s.quantity >= l.quantity + 10 {
+      s.quantity = s.quantity - l.quantity
+    } else {
+      s.quantity = s.quantity - l.quantity + 91
+    }
+    s.ytd = s.ytd + l.quantity
+    s.orders = s.orders + 1
+    if l.supply != new_order.w {
+      s.remote = s.remote + 1
+      local = 0
+    }
+    count = count + 1
+    lines.add(Line { id: order * 16 + count, item: l.item, supply: l.supply, quantity: l.quantity,
+                     amount: l.quantity * price })
+  }
+  orders.add(Order { id: order, customer: customer.id, entry: now, lines: count, local: local })
+  new_orders.add(NewOrder { id: order })
+  customer.last_order = order
+}
+
+# Payment (2.5): a payment to a district, from one of its customers or
+# another warehouse's.
+input payment = message {
+  w: u32
+  d: u32
+  cw: u32
+  cd: u32
+  c: u32
+  amount: number
+}
+on payment {
+  let warehouse = warehouses[payment.w]
+  warehouse.ytd = warehouse.ytd + payment.amount
+  let district = districts[payment.w * 10 + payment.d]
+  district.ytd = district.ytd + payment.amount
+  let customer = customers[(payment.cw * 10 + payment.cd) * 3000 + payment.c]
+  customer.balance = customer.balance - payment.amount
+  customer.ytd_payment = customer.ytd_payment + payment.amount
+  customer.payments = customer.payments + 1
+  history.append(History { customer: customer.id, district: district.id, date: now, amount: payment.amount })
+}
+
+# Delivery (2.7), a district an event: its oldest undelivered order is
+# delivered, its lines dated, and their amount charged to its customer.
+input delivery = message {
+  w: u32
+  d: u32
+  carrier: u32
+}
+on delivery {
+  let district = districts[delivery.w * 10 + delivery.d]
+  if district.next_delivery < district.next_order {
+    let order = district.id * 10000000 + district.next_delivery
+    district.next_delivery = district.next_delivery + 1
+    new_orders.remove(new_orders[order])
+    let o = orders[order]
+    o.carrier = delivery.carrier
+    let total = 0
+    for l in lines[order * 16 .. order * 16 + 16] {
+      l.delivery = now
+      total = total + l.amount
+    }
+    let customer = customers[o.customer]
+    customer.balance = customer.balance + total
+    customer.deliveries = customer.deliveries + 1
+  }
+}
+
+# Order-Status (2.6): a customer's balance, and the lines of its last order.
+view order_status(customer: u32) = each l in lines where l.id >= customers[customer].last_order * 16 && l.id < customers[customer].last_order * 16 + 16 {
+  balance = customers[customer].balance
+  item = l.item
+  supply = l.supply
+  quantity = l.quantity
+  amount = l.amount
+  delivery = l.delivery
+}
+
+# Stock-Level (2.8): how many of the items of a district's last 20 orders
+# are below a threshold.
+view stock_level(w: u32, d: u32, threshold: number) = distinct(l.item for l in lines[
+    (districts[w * 10 + d].id * 10000000 + districts[w * 10 + d].next_order - 20) * 16 ..
+    (districts[w * 10 + d].id * 10000000 + districts[w * 10 + d].next_order) * 16]
+  where stock[w * 100000 + l.item].quantity < threshold)
+
+# Consistency (3.3.2): each view has its twin in SQL.
+view warehouse_ytd = sum(w.ytd for w in warehouses)
+view district_ytd = sum(d.ytd for d in districts)
+view order_count = orders.count
+view new_order_count = new_orders.count
+view line_count = lines.count
+view ordered_lines = sum(o.lines for o in orders)
+view delivered = count(o in orders where o.carrier > 0)
+view history_count = history.count
