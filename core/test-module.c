@@ -2799,6 +2799,83 @@ static void view_arguments(void) {
     printf("{\"view_arguments\":{\"accounts\":30,\"branches\":3}}\n");
 }
 
+/* ---- Locals ----------------------------------------------------------
+ * A handler's locals start at 0 each event, are shared by its walks and the
+ * folds in them, and are never saved: total sums the items in a walk, a fold
+ * counts the items below it, an index local finds the last item, and every
+ * event begins again. */
+enum { LOCAL_L = PURE_OP_LOCAL_LOAD, LOCAL_S = PURE_OP_LOCAL_STORE, L_N = 0, L_M = 1, L_XS = 2 };
+#define LOCAL(slot, list) ((uint32_t)(slot) | ((list) >= 0 ? 1u << 8 | (uint32_t)(list) << 16 : 0))
+static const S local_numbers[] = {{"n", 0}, {"m", 0}};
+static const T local_lists[] = {{"xs", 3, 0}};
+static const RF local_fields[] = {{"a", 0, 0}};
+static const R local_records[] = {{"X", local_fields, 1}};
+static const F local_add_fields[] = {{"a", 3}};
+static const I local_inputs[] = {KEY("sum", "KeyS"), {"add", NULL, PURE_KIND_MESSAGE, false, local_add_fields, 1}};
+static const O local_code[] = {
+    /* 0 on sum: total = total + x.a for each x (total starts at 0); n = count(x in xs where x.a < total);
+     *   last = xs.last; m = total + last.a (every event: total is 0 again) */
+    {LOCAL_L, LOCAL(0, -1), 0}, {C, 0, 1}, {ADD, 0, 0}, {LOCAL_S, LOCAL(0, -1), 0}, /* starts at 0 each event: 1 */
+    {EACH, WALKING(L_XS, 5), 0}, {LOCAL_L, LOCAL(0, -1), 0}, {ROW, L_XS, 0}, {IG, ITEM(L_XS, 0), 0}, {ADD, 0, 0},
+    {LOCAL_S, LOCAL(0, -1), 0},
+    {FOLD, FOLDING(PURE_FOLD_COUNT, L_XS, 4), 0}, {ROW, L_XS, 0}, {IG, ITEM(L_XS, 0), 0}, {LOCAL_L, LOCAL(0, -1), 0},
+    {PURE_OP_LT, 0, 0}, {ST, L_N, 0},
+    {XE, L_XS, 0}, {LOCAL_S, LOCAL(1, L_XS), 0},
+    {LOCAL_L, LOCAL(0, -1), 0}, {LOCAL_L, LOCAL(1, L_XS), 0}, {IG, ITEM(L_XS, 0), 0}, {ADD, 0, 0}, {ST, L_M, 0},
+    /* 23 on add: xs.append(X { a }) */
+    {FIELD, 0, 0}, {LA, L_XS, 0},
+};
+static const H local_handlers[] = {{1, 0, 23}, {3, 23, 2}};
+
+static Spec local_spec(const O *code, size_t count, const H *handlers, size_t nhandlers, const V *views, size_t nviews) {
+    return (Spec){local_numbers, 2, local_inputs, 2, views, nviews, handlers, nhandlers, code, count, NULL, 0, local_lists, 1,
+                  NULL, 0, NULL, 0, local_records, 1, NULL, 0};
+}
+
+static void locals(void) {
+    CHECK(load(local_spec(local_code, LEN(local_code), local_handlers, 2, NULL, 0), &module_a) == PURE_OK && module_a.code[10].plan);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    double items[64];
+    size_t count = 0;
+    uint32_t seed = 0x10ca15u;
+    for (unsigned round = 0; round < 40; ++round) {
+        unsigned char payload[8];
+        items[count] = (double)(next_random(&seed) % 20) - 5;
+        put_double(payload, items[count++]);
+        CHECK(pure_app_message(&app, 1, NULL, -1, (PureSpan){payload, 8}) == PURE_OK);
+        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+        double total = 1, below = 0;
+        for (size_t i = 0; i < count; ++i) total += items[i];
+        for (size_t i = 0; i < count; ++i) below += items[i] < total;
+        CHECK(app.values[L_N] == below && app.values[L_M] == total + items[count - 1]);
+    }
+    pure_app_stop(&app);
+
+    /* What a local may not be. */
+    static const O view_local[] = {{LOCAL_L, LOCAL(0, -1), 0}};
+    static const V local_view[] = {{"v", 0, 1}};
+    static const O fold_store[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, L_XS, 3), 0}, {C, 0, 1}, {LOCAL_S, LOCAL(0, -1), 0}, {C, 0, 1},
+                                   {ST, L_N, 0}};
+    static const O two_things[] = {{C, 0, 1}, {LOCAL_S, LOCAL(0, -1), 0}, {XF, L_XS, 0}, {LOCAL_S, LOCAL(0, L_XS), 0}};
+    static const O other_list[] = {{XF, L_XS, 0}, {LOCAL_S, LOCAL(0, 3), 0}};
+    static const O far_slot[] = {{C, 0, 1}, {LOCAL_S, LOCAL(64, -1), 0}};
+    static const H first2[] = {{1, 0, 2}}, first4[] = {{1, 0, 4}}, first5[] = {{1, 0, 5}};
+    const struct { Spec spec; const char *reason; } refused[] = {
+        {local_spec(view_local, 1, NULL, 0, local_view, 1), "local outside a handler"},
+        {local_spec(fold_store, LEN(fold_store), first5, 1, NULL, 0), "fold with an effect"},
+        {local_spec(two_things, LEN(two_things), first4, 1, NULL, 0), "local used as two things"},
+        {local_spec(other_list, LEN(other_list), first2, 1, NULL, 0), "no such state"},
+        {local_spec(far_slot, LEN(far_slot), first2, 1, NULL, 0), "no such state"},
+    };
+    for (size_t i = 0; i < LEN(refused); ++i)
+        if (load(refused[i].spec, &module_b) != PURE_INVALID || !strstr(error, refused[i].reason)) {
+            fprintf(stderr, "local case %zu: expected '%s', got '%s'\n", i, refused[i].reason, error);
+            abort();
+        }
+    printf("{\"locals\":{\"events\":80}}\n");
+}
+
 /* Damaged fold and filter modules: whatever loads runs safely. */
 static void fold_mutations(void) {
     static unsigned char valid[65536], bytes[65536];
@@ -3723,6 +3800,7 @@ int main(void) {
     walks();
     walk_mutations();
     view_arguments();
+    locals();
     keyed();
     keyed_mutations();
     snapshots();

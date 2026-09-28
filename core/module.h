@@ -39,8 +39,16 @@ typedef enum {
     PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_ROW,
     PURE_OP_PICK, PURE_OP_SLIDE, PURE_OP_FOLD, PURE_OP_TEXT_COMPARE, PURE_OP_LIST_FIND, PURE_OP_LIST_HAS,
     PURE_OP_NOW, PURE_OP_FLOOR, PURE_OP_MOD, PURE_OP_SEND, PURE_OP_OUTER_ROW, PURE_OP_EACH,
+    PURE_OP_LOCAL_LOAD, PURE_OP_LOCAL_STORE,
     PURE_OP_COUNT
 } PureOpcode;
+/* A local: one of an event's PURE_MODULE_LOCALS slots, 0 when the event
+ * begins and never saved. LOCAL_LOAD and LOCAL_STORE name the slot (bits
+ * 0-7), what it holds (bits 8-15: 0 a number, 1 an index) and an index's
+ * list (bits 16-31); a handler uses a slot for one of them. A handler, the
+ * walks in it and the folds in those read locals; the handler and its walks
+ * store them. */
+enum { PURE_MODULE_LOCALS = 64 };
 /* EACH's argument: the list state (bits 8-15) and the length of the block
  * that follows (16-31), run in a handler once for every item the list had
  * when it began, in order, with ROW the item; the block may change states,

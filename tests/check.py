@@ -1059,12 +1059,15 @@ on restock {
   }
 }
 on order {
+  let taken = 0
   for l in order.lines {
-    stock[l.item].left = stock[l.item].left - l.qty
-    require stock[l.item].left >= 0
+    let s = stock[l.item]
+    s.left = s.left - l.qty
+    require s.left >= 0
     log.append(Entry { item: l.item, qty: l.qty, note: l.note })
+    taken = taken + 1
   }
-  orders = orders + order.lines.count
+  orders = orders + taken
 }
 on clean {
   for s in stock where s.left < clean.below {

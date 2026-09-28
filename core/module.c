@@ -10,12 +10,15 @@ enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 
        CONSTANT_BYTES = 8, RECORD_BYTES = 8, RECORD_FIELD_BYTES = 16, VIEW_BYTES = 16,
        HANDLER_BYTES = 12, OP_BYTES = 16 };
 /* T_FIELD and T_ITEM stand for the type of the message or record field
- * named, T_KEY for the type of the named keyed list's key. */
-enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8 };
+ * named, T_KEY for the type of the named keyed list's key, T_LOCAL for what
+ * the named local holds. */
+enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8, T_LOCAL = 9 };
 enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUMENTS };
 /* Where an opcode may appear. */
 /* IN_ARGUMENTS: fields read where nothing is done with them (a view's arguments, a message's fields in a fold). */
-enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64, IN_ARGUMENTS = 128 };
+/* IN_LOCALS: a handler's locals, read in its walks and the folds in them. */
+enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64, IN_ARGUMENTS = 128,
+       IN_LOCALS = 256 };
 enum { READ = IN_VIEW | IN_HANDLER };
 /* What an argument names: nothing (it is 0), a state of one type (A_STATE +
  * the type), a list and one of its record's fields, a message field, the
@@ -23,7 +26,7 @@ enum { READ = IN_VIEW | IN_HANDLER };
  * depth, a fold, a relation, a keyed list, an output, or the row of the
  * column a fold runs in. */
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_INDEX + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
-       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH };
+       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL };
 /* A fold's block is verified as a column that leaves one number (count) or
  * two (a value and whether to include it), a table's filter as a column that
  * leaves one: these stand for a view type. A walk's block (EACH) is verified
@@ -41,7 +44,7 @@ static const unsigned char magic[8] = {'P','U','R','E','M','O','D','5'};
  * the argument names and the text or list worked on. */
 #define NUMS(pops) {pops, {T_NUM, T_NUM, T_NUM}, T_NUM, READ, A_NONE, O_ANY}
 #define STATE(type) A_STATE + PURE_STATE_##type
-static const struct { unsigned char pops, in[3], out, where, arg, of; } signature[PURE_OP_COUNT] = {
+static const struct { unsigned char pops, in[3], out; unsigned short where; unsigned char arg, of; } signature[PURE_OP_COUNT] = {
     [PURE_OP_CONST] = NUMS(0), [PURE_OP_ADD] = NUMS(2), [PURE_OP_SUB] = NUMS(2), [PURE_OP_MUL] = NUMS(2),
     [PURE_OP_DIV] = NUMS(2), [PURE_OP_NEG] = NUMS(1), [PURE_OP_LT] = NUMS(2), [PURE_OP_LE] = NUMS(2),
     [PURE_OP_GT] = NUMS(2), [PURE_OP_GE] = NUMS(2), [PURE_OP_EQ] = NUMS(2), [PURE_OP_NE] = NUMS(2),
@@ -105,6 +108,8 @@ static const struct { unsigned char pops, in[3], out, where, arg, of; } signatur
     [PURE_OP_NOW] = {0, {0}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
     [PURE_OP_SEND] = {0, {0}, 0, IN_HANDLER, A_OUTPUT, O_ANY},
     [PURE_OP_EACH] = {0, {0}, 0, IN_HANDLER, A_EACH, O_ANY},
+    [PURE_OP_LOCAL_LOAD] = {0, {0}, T_LOCAL, IN_LOCALS, A_LOCAL, O_ANY},
+    [PURE_OP_LOCAL_STORE] = {1, {T_LOCAL}, 0, IN_HANDLER, A_LOCAL, O_ANY},
     [PURE_OP_FLOOR] = NUMS(1), [PURE_OP_MOD] = NUMS(2),
 };
 #undef NUMS
@@ -199,6 +204,9 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_OUTER: return outer >= 0 && (int)arg == outer;
     case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_FIRST && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
     case A_EACH: return !(arg & 0xFF) && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
+    case A_LOCAL: /* a slot, and a number or an index of a list */
+        return (arg & 0xFF) < PURE_MODULE_LOCALS && (arg >> 8 & 0xFF) <= 1 &&
+               ((arg >> 8 & 0xFF) ? state_of(m, arg >> 16, PURE_STATE_LIST) : !(arg >> 16));
     case A_RELATION: return arg <= PURE_NOT_EQUAL;
     case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
     case A_OUTPUT: return arg < m->inputs && m->input[arg].kind == PURE_KIND_OUTPUT;
@@ -227,12 +235,13 @@ static bool same_stack(const Join *join, int height, const unsigned char *types,
  * into it. Returns why the block is refused, with at moved to the
  * instruction when one is at fault, or NULL. */
 PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int view, int row, int outer, uint32_t event,
-                                          uint32_t *at);
+                                          bool locals, uint32_t *at);
 
 /* target marks, per instruction of the block, a branch into it with an empty stack. */
 /* outer: the row of the column a fold's block runs in (-1: none). */
+/* locals: the block is a handler's, or runs in one (a walk, a fold): it reads the handler's locals. */
 PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, int view, int row, int outer,
-                                         uint32_t event, uint32_t *at, unsigned char *target) {
+                                         uint32_t event, bool locals, uint32_t *at, unsigned char *target) {
 #define REFUSE(why) do { *at = pc; return why; } while (0)
     bool handler = view < 0 || view == WALK, folding = view == FOLD_ONE || view == FOLD_TWO;
     if (!handler && !block.length) return "empty view";
@@ -244,6 +253,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
     if (shape && handler && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE | (shape->keyed ? IN_KEYED : 0);
     if (shape && handler && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
     if (shape && !handler && (shape->kind == PURE_KIND_MESSAGE || shape->kind == PURE_KIND_ARGUMENTS)) where |= IN_ARGUMENTS;
+    if (locals) where |= IN_LOCALS;
     unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK];
     Join joins[PURE_MODULE_JOINS];
     unsigned open = 0;
@@ -275,6 +285,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (!(allowed & where)) {
             if (allowed & IN_ROW) REFUSE("row outside a column");
             if (allowed & IN_OUTER) REFUSE("outer row outside a fold in a column");
+            if (allowed & IN_LOCALS) REFUSE("local outside a handler");
             if (view == FILTER) REFUSE("filter with an effect");
             if (folding) REFUSE("fold with an effect");
             if (!handler) REFUSE("view with an effect");
@@ -316,10 +327,10 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             unsigned how = arg & 0xFF;
             /* A fold in a walk reads the walk's item as a fold in a column reads its row. */
             const char *why = kind == A_EACH ? verify_block(m, (PureBlock){pc + 1, skip}, WALK, (int)(arg >> 8 & 0xFF), -1,
-                                                            event, &inner)
+                                                            event, locals, &inner)
                                              : verify_block(m, (PureBlock){pc + 1, skip},
                                                             how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? FOLD_ONE : FOLD_TWO,
-                                                            (int)(arg >> 8 & 0xFF), row, event, &inner);
+                                                            (int)(arg >> 8 & 0xFF), row, event, locals, &inner);
             if (why) { *at = inner; return why; }
             for (uint32_t k = i + 1; k <= i + skip; ++k) {
                 const char *into = kind == A_FOLD ? "branch into a fold" : "branch into an each";
@@ -346,12 +357,18 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             need[pops++] = field_type(m, list_of(arg), item_field(arg));
         } else if (need[0] == T_KEY) {
             need[0] = field_type(m, arg, m->state_key[arg] - 1u);
+        } else if (need[0] == T_LOCAL) {
+            need[0] = arg >> 8 & 0xFF ? T_INDEX : T_NUM;
         }
         if (height < (int)pops) REFUSE("stack underflow");
         height -= (int)pops;
         for (unsigned k = 0; k < pops; ++k)
             if (types[height + (int)k] != need[k]) REFUSE("operand type");
         unsigned owner = of == O_ARG ? arg : of == O_REF ? m->state_ref[arg] : of == O_LIST ? list_of(arg) : 0;
+        if (kind == A_LOCAL && arg >> 8 & 0xFF) { /* an index local belongs to its list */
+            owner = arg >> 16;
+            of = O_ARG;
+        }
         for (unsigned k = 0; of >= O_ARG && k < pops; ++k) {
             unsigned char type = types[height + (int)k];
             if ((type == T_CURSOR || type == T_INDEX) && owners[height + (int)k] != owner)
@@ -368,6 +385,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             out = type == PURE_FIELD_TEXT ? T_TEXT : type == PURE_FIELD_BYTES ? T_BYTES : T_NUM;
         }
         if (out == T_ITEM) out = field_type(m, list_of(arg), item_field(arg));
+        if (out == T_LOCAL) out = arg >> 8 & 0xFF ? T_INDEX : T_NUM;
         if (out) {
             if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
             owners[height] = (unsigned char)(out != T_CURSOR && out != T_INDEX ? 0 : of == O_OPERAND ? owners[height] : owner);
@@ -407,11 +425,11 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
 }
 
 PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, int view, int row, int outer,
-                                          uint32_t event, uint32_t *at) {
+                                          uint32_t event, bool locals, uint32_t *at) {
     if (block.start > m->code_count || block.length > m->code_count - block.start) return "code range outside module";
     unsigned char *target = calloc((size_t)block.length + 1, 1);
     if (!target) return "out of memory";
-    const char *why = verify_code(m, block, view, row, outer, event, at, target);
+    const char *why = verify_code(m, block, view, row, outer, event, locals, at, target);
     free(target);
     return why;
 }
@@ -429,7 +447,7 @@ PURE_COLD static bool has_lanes(const PureModule *m, const PureOp *op, int input
     case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_NOT: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_CLAMP:
     case PURE_OP_FLOOR: case PURE_OP_MOD: case PURE_OP_LOAD: case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_LOAD:
     case PURE_OP_INDEX_MOVE: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_INDEX_NUM:
-    case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_PICK: case PURE_OP_SLIDE:
+    case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_PICK: case PURE_OP_SLIDE: case PURE_OP_LOCAL_LOAD:
         return true;
     case PURE_OP_ITEM_GET: return field_type(m, list_of(op->arg), item_field(op->arg)) == T_NUM;
     case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: return field_type(m, op->arg, m->state_key[op->arg] - 1u) == T_NUM;
@@ -464,7 +482,7 @@ typedef struct { uint32_t first; int kid[3]; bool item, own; } Node;
 PURE_COLD static unsigned arity(uint8_t op) {
     switch (op) {
     case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_INDEX_LOAD: case PURE_OP_ROW: case PURE_OP_OUTER_ROW:
-    case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_FIELD:
+    case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_FIELD: case PURE_OP_LOCAL_LOAD:
         return 0;
     case PURE_OP_ITEM_GET: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: case PURE_OP_NEG: case PURE_OP_NOT:
     case PURE_OP_FLOOR: case PURE_OP_INDEX_NUM:
@@ -497,7 +515,7 @@ PURE_COLD static bool block_tree(const PureModule *m, PureBlock block, int list,
         node->first = block.start + i;
         node->item = op->op == PURE_OP_ROW;
         node->own = op->op != PURE_OP_LOAD && op->op != PURE_OP_INDEX_LOAD && op->op != PURE_OP_OUTER_ROW &&
-                    op->op != PURE_OP_FIELD && (read < 0 || read == list);
+                    op->op != PURE_OP_FIELD && op->op != PURE_OP_LOCAL_LOAD && (read < 0 || read == list);
         for (unsigned k = 0; k < 3; ++k) node->kid[k] = -1;
         for (unsigned k = 0; k < pops; ++k) {
             int kid = stack[sp - pops + k];
@@ -574,6 +592,20 @@ PURE_COLD static void shape_fold(PureModule *m, uint32_t pc) {
         fold->shape = m->shapes;
     }
     free(nodes);
+}
+
+/* A handler (its walks and folds within) uses each local for one thing: a
+ * number, or an index of one list. */
+PURE_COLD static bool locals_agree(const PureModule *m, PureBlock block) {
+    uint32_t used[PURE_MODULE_LOCALS] = {0}; /* what a slot holds + 1 */
+    for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
+        const PureOp *op = &m->code[pc];
+        if (op->op != PURE_OP_LOCAL_LOAD && op->op != PURE_OP_LOCAL_STORE) continue;
+        uint32_t slot = op->arg & 0xFF, what = (op->arg >> 8) + 1;
+        if (used[slot] && used[slot] != what) return false;
+        used[slot] = what;
+    }
+    return true;
 }
 
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
@@ -872,11 +904,12 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         uint32_t event = out->view_arguments[i] ? 2u * out->view_arguments[i] - 1u : 0; /* the arguments' input, as an arrival */
         if ((!table || out->view_code[i].length) &&
             (why = verify_block(out, out->view_code[i], table ? FILTER : out->view_type[i],
-                                table || out->view_table[i] ? out->view_list[i] : -1, -1, event, &bad))) goto refused;
+                                table || out->view_table[i] ? out->view_list[i] : -1, -1, event, false, &bad))) goto refused;
     }
     for (uint32_t i = 0; i < out->handlers; ++i) {
         bad = i;
-        if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event, &bad))) goto refused;
+        if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event, true, &bad))) goto refused;
+        if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
     }
     for (uint32_t i = 0; i < out->views; ++i) {
         int given = (int)out->view_arguments[i] - 1;
@@ -954,6 +987,7 @@ typedef struct {
     size_t row;   /* the row a column is evaluated for (in a fold, the fold's item) */
     size_t outer; /* in a fold, the row of the column it runs in */
     Walk *walk;   /* the walk the code runs in, or NULL */
+    double *locals; /* the event's locals (a handler's, and what runs in it), or NULL */
     bool arguments; /* FIELD reads the arguments given for a view, not the message */
     bool modified, exists;
     uint32_t (*spans)[2]; /* a message's variable fields: start and size in the payload */
@@ -1284,6 +1318,7 @@ static bool run_lanes(const PureModule *m, const double *values, PureBlock block
         }
         case PURE_OP_INDEX_LOAD: stack[sp++] = (Lanes){NULL, values[arg], false, m->state_ref[arg]}; continue;
         case PURE_OP_ROW: stack[sp++] = (Lanes){NULL, 0, true, (uint16_t)arg}; continue;
+        case PURE_OP_LOCAL_LOAD: stack[sp++] = (Lanes){NULL, ev->locals[arg & 0xFF], false, (uint16_t)(arg >> 16)}; continue;
         case PURE_OP_OUTER_ROW: stack[sp++] = (Lanes){NULL, (double)ev->outer, false, (uint16_t)arg}; continue;
         case PURE_OP_LIST_COUNT: stack[sp++] = (Lanes){NULL, (double)pure_list_count(app->lists[arg]), false, 0}; continue;
         case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: {
@@ -1823,6 +1858,11 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             stack[sp].num = (double)ev->outer;
             stack[sp++].bytes.owner = (uint16_t)arg;
             continue;
+        case PURE_OP_LOCAL_LOAD:
+            stack[sp].num = ev->locals[arg & 0xFF];
+            stack[sp++].bytes.owner = (uint16_t)(arg >> 16); /* an index's list */
+            continue;
+        case PURE_OP_LOCAL_STORE: ev->locals[arg & 0xFF] = stack[--sp].num; continue;
         case PURE_OP_CUR_MOVE: case PURE_OP_INDEX_MOVE: {
             double count = stack[--sp].num;
             Slot *at = &stack[sp - 1];
@@ -2352,7 +2392,8 @@ static void clear_rows(PureApp *app) {
  * (frames come 60 times a second). A message's document joins the burst. */
 static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     const PureModule *m = app->module;
-    double pending[PURE_MODULE_STATES];
+    double pending[PURE_MODULE_STATES], locals[PURE_MODULE_LOCALS] = {0};
+    ev->locals = locals;
     Mark mark;
     mark_event(app, &mark);
     memcpy(pending, app->values, sizeof(app->values));
