@@ -23,7 +23,7 @@ INCLUDES = -Icore
 MODEL = core/module.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c
 STORE = store/store-tree.c
 SERVE = serve/serve.c serve/deliver.c serve/message-json.c serve/crypto.c
-HEADERS = $(wildcard core/*.h) $(wildcard serve/*.h)
+HEADERS = $(wildcard core/*.h) $(wildcard serve/*.h) $(wildcard store/*.h)
 OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(MODEL) $(STORE))
 
 .PHONY: all check
