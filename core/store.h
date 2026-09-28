@@ -51,7 +51,7 @@ PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *k
 /* Fault hooks exist only in the separately built unit-test binary. */
 typedef enum {
     PURE_AFTER_HEADER, PURE_BEFORE_FILE_SYNC, PURE_BEFORE_RENAME, PURE_BEFORE_DIR_SYNC,
-    PURE_COPY_RANGE_UNSUPPORTED_AFTER_PARTIAL
+    PURE_COPY_RANGE_UNSUPPORTED_AFTER_PARTIAL, PURE_LOG_BEFORE_WRITE, PURE_LOG_BEFORE_SYNC, PURE_IMAGE_BEFORE_RENAME
 } PureStoreStage;
 #ifdef PURE_STORE_TEST
 int pure_store_test_fault(PureStoreStage stage);
