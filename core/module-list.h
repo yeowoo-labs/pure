@@ -96,6 +96,10 @@ PureResult pure_list_sorted(const PureList *, unsigned field, PureList **out, si
  * pure_list_encode writes them to out. */
 size_t pure_list_size(const PureList *);
 void pure_list_encode(const PureList *, unsigned char *out);
+/* The items from position *at on, as many whole ones as capacity holds,
+ * into out: their bytes (0 at the end, or with *needed the bytes of the one
+ * item that does not fit), *at moved past them. */
+size_t pure_list_encode_part(const PureList *, size_t *at, unsigned char *out, size_t capacity, size_t *needed);
 /* Append the items stored in bytes; each field is checked. */
 PureResult pure_list_read(PureList *, const unsigned char *bytes, size_t size);
 /* A stored list journals its changes (from pure_list_journal(list, true)

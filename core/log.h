@@ -37,10 +37,11 @@ uint64_t pure_log_bytes(const PureLog *);
 
 /* A list's image: a file of directory named after the list, replaced whole
  * (written beside it, synced, renamed over it): pure_image_write writes the
- * bytes of parts one after another, pure_image_read gives them back (malloc'd;
+ * chunks next gives, one after another, until an empty one (next false:
+ * ALLOCATION, nothing replaced); pure_image_read gives them back (malloc'd;
  * NOT_FOUND when there is none, STORE_ERROR when damaged). The bytes of the
  * image are digested: a file cut short or changed is refused. */
-PureResult pure_image_write(const char *directory, const char *name, const PureSpan *parts, size_t count);
+PureResult pure_image_write(const char *directory, const char *name, bool (*next)(void *, PureSpan *chunk), void *context);
 PureResult pure_image_read(const char *directory, const char *name, unsigned char **bytes, size_t *size);
 PureResult pure_image_remove(const char *directory, const char *name);
 #endif

@@ -478,7 +478,7 @@ static bool image_name(char out[64], const char *name, const char *prefix) {
     return true;
 }
 
-PureResult pure_image_write(const char *directory, const char *name, const PureSpan *parts, size_t count) {
+PureResult pure_image_write(const char *directory, const char *name, bool (*next)(void *, PureSpan *chunk), void *context) {
     char final[64], temporary[96];
     if (!image_name(final, name, "")) return PURE_INVALID;
     static uint64_t sequence;
@@ -488,19 +488,17 @@ PureResult pure_image_write(const char *directory, const char *name, const PureS
     if (dir < 0) return PURE_STORE_ERROR;
     int fd = openat(dir, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) { close(dir); return PURE_STORE_ERROR; }
-    uint64_t length = 0;
-    for (size_t i = 0; i < count; ++i) length += parts[i].size;
     unsigned char head[16];
     memcpy(head, image_magic, 8);
-    put64(head + 8, length);
+    put64(head + 8, 0); /* its length, once known */
     Digest digest = {0};
-    bool ok = write_all(fd, head, sizeof(head), 0);
+    bool ok = write_all(fd, head, sizeof(head), 0), produced = true;
     uint64_t at = sizeof(head), started = 0;
-    for (size_t i = 0; ok && i < count; ++i)
-        for (size_t done = 0; ok && done < parts[i].size;) {
-            size_t take = parts[i].size - done < STEP ? parts[i].size - done : STEP;
-            digest_add(&digest, parts[i].data + done, take);
-            ok = write_all(fd, parts[i].data + done, take, at);
+    for (PureSpan chunk; ok && (produced = next(context, &chunk)) && chunk.size;)
+        for (size_t done = 0; ok && done < chunk.size;) {
+            size_t take = chunk.size - done < STEP ? chunk.size - done : STEP;
+            digest_add(&digest, chunk.data + done, take);
+            ok = write_all(fd, chunk.data + done, take, at);
             done += take;
             at += take;
 #if defined(__linux__)
@@ -517,13 +515,15 @@ PureResult pure_image_write(const char *directory, const char *name, const PureS
         }
     unsigned char tail[8];
     put64(tail, digest_end(&digest));
-    ok = ok && write_all(fd, tail, sizeof(tail), at) && !fault(PURE_IMAGE_BEFORE_RENAME) && sync_data(fd);
+    put64(head + 8, at - sizeof(head));
+    ok = ok && produced && write_all(fd, tail, sizeof(tail), at) && write_all(fd, head, sizeof(head), 0) &&
+         !fault(PURE_IMAGE_BEFORE_RENAME) && sync_data(fd);
     if (close(fd)) ok = false;
     ok = ok && !renameat(dir, temporary, dir, final);
     if (!ok) unlinkat(dir, temporary, 0);
     ok = ok && sync_whole(dir);
     close(dir);
-    return ok ? PURE_OK : PURE_STORE_ERROR;
+    return ok ? PURE_OK : produced ? PURE_STORE_ERROR : PURE_ALLOCATION;
 }
 
 PureResult pure_image_read(const char *directory, const char *name, unsigned char **bytes, size_t *size) {

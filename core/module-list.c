@@ -708,6 +708,29 @@ void pure_list_encode(const PureList *list, unsigned char *out) {
     visit_leaves(list->root, encode_leaf, &encoding);
 }
 
+size_t pure_list_encode_part(const PureList *list, size_t *at, unsigned char *out, size_t capacity, size_t *needed) {
+    const Layout *l = &list->layout;
+    PureRun run;
+    size_t used = 0;
+    *needed = 0;
+    if (!pure_list_run(list, *at, &run)) return 0;
+    do {
+        const Node *leaf = run.path[run.depth];
+        for (unsigned i = (unsigned)(*at - run.start); i < leaf->count; ++i) {
+            size_t size = item_bytes(l, leaf, i);
+            if (size > capacity - used) {
+                if (!used) *needed = size;
+                return used;
+            }
+            unsigned char *end = out + used;
+            for (unsigned f = 0; f < l->fields; ++f) end = encode_cell(l, f, cell_at(l, leaf, i, f), end);
+            used += size;
+            ++*at;
+        }
+    } while (pure_list_next(list, &run));
+    return used;
+}
+
 /* An item's cells in stored form at *at in bytes. */
 static bool decode_item(const Layout *l, const unsigned char *bytes, size_t size, size_t *at, PureCell *cells) {
     for (unsigned f = 0; f < l->fields; ++f)

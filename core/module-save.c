@@ -32,7 +32,8 @@ static const unsigned char values_magic[4] = {'P', 'V', 'S', '1'}, image_magic[4
                            list_magic[4] = {'P', 'L', 'S', '2'}, list_magic_1[4] = {'P', 'L', 'S', '1'};
 /* Logged changes a list keeps before its image is written again: at least
  * JOURNAL_MIN, else as many bytes as its items; and whatever the lists, the
- * log is kept within LOG_KEPT by writing the image that holds it back. */
+ * log is kept within as many bytes as all their items (and LOG_KEPT) by
+ * writing the image that holds it back. */
 #ifdef PURE_STORE_TEST
 enum { JOURNAL_MIN = 256 };
 #define LOG_KEPT (UINT64_C(64) << 10)
@@ -261,15 +262,48 @@ void pure_save_release(PureApp *app) {
     pure_log_release(app->log, kept - 1);
 }
 
-PureResult pure_save_image(PureApp *app, const PureModule *m, uint32_t state, const PureList *list) {
-    size_t items = pure_list_size(list);
-    unsigned char header[IMAGE_HEADER], *bytes = malloc(items ? items : 1);
-    if (!bytes) return PURE_ALLOCATION;
-    pure_list_encode(list, bytes);
-    PureSpan parts[2] = {{header, image_header(m, m->state_ref[state], app->seq, header)}, {bytes, items}};
-    PureResult result = pure_image_write(directory_of(app), m->state_names[state], parts, 2);
-    free(bytes);
+/* An image's bytes as the store writes them: its header, then its items a
+ * chunk at a time (one item at least, whatever its size). */
+typedef struct {
+    const PureList *list;
+    size_t at, capacity;
+    const unsigned char *header;
+    size_t header_size;
+    bool started;
+    unsigned char *buffer;
+} Imaging;
+
+static bool image_chunk(void *context, PureSpan *chunk) {
+    Imaging *i = context;
+    if (!i->started) {
+        i->started = true;
+        *chunk = (PureSpan){i->header, i->header_size};
+        return true;
+    }
+    size_t needed, length = pure_list_encode_part(i->list, &i->at, i->buffer, i->capacity, &needed);
+    if (!length && needed) {
+        unsigned char *grown = realloc(i->buffer, needed);
+        if (!grown) return false;
+        i->buffer = grown;
+        i->capacity = needed;
+        length = pure_list_encode_part(i->list, &i->at, i->buffer, i->capacity, &needed);
+    }
+    *chunk = (PureSpan){i->buffer, length};
+    return true;
+}
+
+static PureResult write_image(const char *directory, const char *name, const unsigned char *header, size_t header_size,
+                              const PureList *list) {
+    Imaging imaging = {list, 0, 256 << 10, header, header_size, false, malloc(256 << 10)};
+    PureResult result = imaging.buffer ? pure_image_write(directory, name, image_chunk, &imaging) : PURE_ALLOCATION;
+    free(imaging.buffer);
     return result;
+}
+
+PureResult pure_save_image(PureApp *app, const PureModule *m, uint32_t state, const PureList *list) {
+    unsigned char header[IMAGE_HEADER];
+    size_t header_size = image_header(m, m->state_ref[state], app->seq, header);
+    return write_image(directory_of(app), m->state_names[state], header, header_size, list);
 }
 
 PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint32_t state, PureList **out,
@@ -399,7 +433,10 @@ PureCheckpoint *pure_app_checkpoint(PureApp *app) {
         if (app->logged[i] > (items > JOURNAL_MIN ? items : JOURNAL_MIN)) due = (int)i;
         else if (oldest < 0 || app->logged_since[i] < app->logged_since[oldest]) oldest = (int)i;
     }
-    int pick = due >= 0 ? due : pure_log_bytes(app->log) > LOG_KEPT ? oldest : -1;
+    uint64_t items = 0;
+    for (uint32_t i = 0; due < 0 && i < m->states; ++i)
+        if (m->state_type[i] == PURE_STATE_LIST && app->lists[i]) items += pure_list_size(app->lists[i]);
+    int pick = due >= 0 ? due : pure_log_bytes(app->log) > (items > LOG_KEPT ? items : LOG_KEPT) ? oldest : -1;
     if (pick < 0) return NULL;
     PureCheckpoint *c = calloc(1, sizeof(*c));
     const char *directory = directory_of(app);
@@ -421,15 +458,7 @@ PureCheckpoint *pure_app_checkpoint(PureApp *app) {
 }
 
 PureResult pure_checkpoint_write(PureCheckpoint *c) {
-    const PureList *list = pure_snapshot_list(c->snapshot, c->state);
-    size_t items = pure_list_size(list);
-    unsigned char *bytes = malloc(items ? items : 1);
-    if (!bytes) return PURE_ALLOCATION;
-    pure_list_encode(list, bytes);
-    PureSpan parts[2] = {{c->header, c->header_size}, {bytes, items}};
-    PureResult result = pure_image_write(c->directory, c->name, parts, 2);
-    free(bytes);
-    return result;
+    return write_image(c->directory, c->name, c->header, c->header_size, pure_snapshot_list(c->snapshot, c->state));
 }
 
 void pure_app_checkpointed(PureApp *app, PureCheckpoint *c, PureResult result) {

@@ -191,6 +191,25 @@ static void logs(void) {
            retracted, ended, most_files);
 }
 
+typedef struct { const PureSpan *parts; size_t count, at; } Parts;
+
+static bool next_part(void *context, PureSpan *chunk) {
+    Parts *p = context;
+    *chunk = p->at < p->count ? p->parts[p->at++] : (PureSpan){0};
+    if (chunk->data && !chunk->size) return next_part(context, chunk); /* an empty part is not the end */
+    return true;
+}
+
+static PureResult write_parts(const char *path, const char *name, const PureSpan *parts, size_t count) {
+    Parts p = {parts, count, 0};
+    return pure_image_write(path, name, next_part, &p);
+}
+
+static bool refuse(void *context, PureSpan *chunk) {
+    (void)context, (void)chunk;
+    return false;
+}
+
 static void images(void) {
     char *path = new_directory();
     unsigned char *bytes;
@@ -200,18 +219,18 @@ static void images(void) {
     CHECK(big);
     for (size_t i = 0; i < (3u << 20); ++i) big[i] = (unsigned char)(i * 131 + (i >> 11));
     PureSpan parts[3] = {{(const unsigned char *)"head", 4}, {big, 3u << 20}, {(const unsigned char *)"", 0}};
-    CHECK(pure_image_write(path, "tasks", parts, 3) == PURE_OK);
+    CHECK(write_parts(path, "tasks", parts, 3) == PURE_OK);
     CHECK(pure_image_read(path, "tasks", &bytes, &size) == PURE_OK && size == 4 + (3u << 20));
     CHECK(!memcmp(bytes, "head", 4) && !memcmp(bytes + 4, big, 3u << 20));
     free(bytes);
     /* A failure before the rename leaves the image as it was, and no temporary file. */
     fail_stage = PURE_IMAGE_BEFORE_RENAME;
     PureSpan other = {(const unsigned char *)"other", 5};
-    CHECK(pure_image_write(path, "tasks", &other, 1) == PURE_STORE_ERROR);
+    CHECK(write_parts(path, "tasks", &other, 1) == PURE_STORE_ERROR);
     fail_stage = -1;
     CHECK(pure_image_read(path, "tasks", &bytes, &size) == PURE_OK && size == 4 + (3u << 20));
     free(bytes);
-    CHECK(pure_image_write(path, "tasks", &other, 1) == PURE_OK);
+    CHECK(write_parts(path, "tasks", &other, 1) == PURE_OK);
     CHECK(pure_image_read(path, "tasks", &bytes, &size) == PURE_OK && size == 5 && !memcmp(bytes, "other", 5));
     free(bytes);
     /* Damaged: refused. */
@@ -221,7 +240,10 @@ static void images(void) {
     CHECK(fd >= 0 && pwrite(fd, "X", 1, 17) == 1);
     close(fd);
     CHECK(pure_image_read(path, "tasks", &bytes, &size) == PURE_STORE_ERROR);
-    CHECK(pure_image_write(path, "bad/name", &other, 1) == PURE_INVALID);
+    CHECK(write_parts(path, "bad/name", &other, 1) == PURE_INVALID);
+    /* A producer that fails replaces nothing. */
+    CHECK(pure_image_write(path, "tasks", refuse, NULL) == PURE_ALLOCATION);
+    CHECK(pure_image_read(path, "tasks", &bytes, &size) == PURE_STORE_ERROR); /* still the damaged one */
     CHECK(pure_image_remove(path, "tasks") == PURE_OK && pure_image_read(path, "tasks", &bytes, &size) == PURE_NOT_FOUND);
     free(big);
     remove_directory(path);
