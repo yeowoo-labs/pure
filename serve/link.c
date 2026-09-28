@@ -7,6 +7,7 @@
 #include <malloc.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/udp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -21,7 +22,13 @@
 #include <unistd.h>
 
 enum { VERSION = 0x70, HEADER = 21, DATAGRAM = 1200, BODY = DATAGRAM - HEADER - PURE_AEAD_TAG, PIECE = 1000 };
-enum { F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, STORED_GAP = 1 };
+enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, STORED_GAP = 1 };
+/* Packets sent at once with UDP GSO: each but the last is a whole datagram
+ * (a full one padded), and 54 of them fit a UDP datagram's 65,507 bytes. */
+enum { BURST = 54 };
+#ifndef UDP_SEGMENT
+#define UDP_SEGMENT 103
+#endif
 enum { RANGES = 32, RUNS = 2, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
 enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
 #define MS UINT64_C(1000000)
@@ -142,6 +149,26 @@ static size_t get_names(const unsigned char *p, size_t size, char source[PURE_SO
     return 2 + a + b;
 }
 
+/* Datagrams taken from a socket at once (recvmmsg). */
+enum { TAKE = 64, SLOT = DATAGRAM + 64 };
+typedef struct {
+    unsigned char bytes[TAKE][SLOT];
+    struct sockaddr_storage from[TAKE];
+    struct iovec parts[TAKE];
+    struct mmsghdr messages[TAKE];
+} Taking;
+
+/* Up to TAKE datagrams from fd: how many (0 when none waits). */
+static int take_datagrams(int fd, Taking *t) {
+    for (unsigned k = 0; k < TAKE; ++k) {
+        t->parts[k] = (struct iovec){t->bytes[k], SLOT};
+        t->messages[k] = (struct mmsghdr){.msg_hdr = {.msg_name = &t->from[k], .msg_namelen = sizeof(t->from[k]),
+                                                      .msg_iov = &t->parts[k], .msg_iovlen = 1}};
+    }
+    int n = recvmmsg(fd, t->messages, TAKE, MSG_DONTWAIT, NULL);
+    return n > 0 ? n : 0;
+}
+
 /* ---- The sending side */
 
 enum { UNSENT, FLYING, RECEIVED };
@@ -182,6 +209,14 @@ struct PureLink {
     uint64_t largest_acked, latest_rtt, smoothed_rtt, rtt_var, min_rtt;
     bool acked_any, sampled;
     uint64_t loss_time, last_eliciting, credit, stored_changed;
+    uint64_t received;    /* pieces received and not yet stored */
+    uint64_t unsent_from; /* no record before this number has a piece unsent */
+    Taking *taking;       /* answers, received at once */
+    unsigned char *burst; /* packets sealed and not yet sent (BURST datagrams) */
+    size_t burst_size;
+    unsigned burst_count;
+    uint64_t burst_pn[BURST];
+    bool gso;
     unsigned pto_count, probes;
     PureLinkCounts counts;
 };
@@ -240,6 +275,17 @@ static Record *record_at(PureLink *l, size_t k) { return &l->records[(l->head + 
 static Record *record_of(PureLink *l, uint64_t seq) {
     if (!l->count || seq < record_at(l, 0)->seq || seq - record_at(l, 0)->seq >= l->count) return NULL;
     return record_at(l, (size_t)(seq - record_at(l, 0)->seq));
+}
+
+/* Every change of a piece's state goes through here: the link knows at once
+ * how many pieces wait to be stored, and where the unsent ones begin. */
+static void set_piece(PureLink *l, Record *r, uint32_t i, uint8_t state) {
+    uint8_t was = r->piece[i].state;
+    if (was == state) return;
+    if (was == RECEIVED) --l->received;
+    if (state == RECEIVED) ++l->received;
+    if (state == UNSENT && r->seq < l->unsent_from) l->unsent_from = r->seq;
+    r->piece[i].state = state;
 }
 
 static void wake(int fd) {
@@ -336,7 +382,7 @@ static void lose(PureLink *l, Flight *f, uint64_t now) {
         Record *r = record_of(l, f->units[u].seq);
         Piece *p = r ? &r->piece[f->units[u].piece] : NULL;
         if (p && p->state == FLYING && p->pn == f->pn) {
-            p->state = UNSENT;
+            set_piece(l, r, f->units[u].piece, UNSENT);
             ++l->counts.resent;
         }
     }
@@ -393,7 +439,7 @@ static void on_ack(PureLink *l, const unsigned char *p, size_t size, uint64_t no
             for (uint16_t u = 0; u < f->count; ++u) {
                 Record *r = record_of(l, f->units[u].seq);
                 if (r && r->piece[f->units[u].piece].state != RECEIVED) {
-                    r->piece[f->units[u].piece].state = RECEIVED;
+                    set_piece(l, r, f->units[u].piece, RECEIVED);
                     l->stored_changed = now; /* waits for its save from now */
                 }
             }
@@ -423,6 +469,7 @@ static void on_stored(PureLink *l, const unsigned char *p, size_t size, uint64_t
     if (heard > l->stored) {
         while (l->count && record_at(l, 0)->seq <= heard) {
             Record *r = record_at(l, 0);
+            for (uint32_t i = 0; i < r->pieces; ++i) l->received -= r->piece[i].state == RECEIVED;
             free(r->bytes);
             free(r->piece);
             l->head = (l->head + 1) % l->capacity;
@@ -432,49 +479,51 @@ static void on_stored(PureLink *l, const unsigned char *p, size_t size, uint64_t
         l->stored_changed = now;
     }
     if (flags & STORED_GAP) /* it did not keep what came after a gap: send it again */
-        for (size_t k = 0; k < l->count; ++k) {
+        for (size_t k = 0; k < l->count && l->received; ++k) {
             Record *r = record_at(l, k);
             for (uint32_t i = 0; i < r->pieces; ++i)
-                if (r->piece[i].state == RECEIVED) r->piece[i].state = UNSENT;
+                if (r->piece[i].state == RECEIVED) set_piece(l, r, i, UNSENT);
         }
     l->credit = credit ? least(credit, 65536) : 1;
 }
 
+static void take_answer(PureLink *l, unsigned char *packet, ssize_t n, uint64_t now);
+
 static void take_answers(PureLink *l, uint64_t now) {
-    unsigned char packet[DATAGRAM + 64], plain[DATAGRAM];
-    for (unsigned tries = 0; tries < 256; ++tries) {
-        ssize_t n = recv(l->fd, packet, sizeof(packet), MSG_DONTWAIT);
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-        if (n < HEADER + PURE_AEAD_TAG || (size_t)n > DATAGRAM || packet[0] != VERSION || get32(packet + 1) != l->peer_id)
-            continue; /* not ours, or an error from an earlier send (nobody listening) */
-        uint64_t run = get64(packet + 5), pn = get64(packet + 13);
-        if (!l->in || l->in_run != run) {
-            pure_aead_free(l->in);
-            l->in = aead_of(l->secret, l->peer, l->own_public, run, l->run, l->in_base);
-            l->in_run = run;
-            if (!l->in) continue;
-        }
-        unsigned char nonce[PURE_AEAD_NONCE];
-        nonce_of(nonce, l->in_base, pn);
-        size_t size = (size_t)n - HEADER - PURE_AEAD_TAG;
-        if (!pure_aead_open(l->in, NULL, nonce, packet, HEADER, packet + HEADER, (size_t)n - HEADER, plain)) continue;
-        ++l->counts.received;
-        for (size_t at = 0; at < size;) {
-            unsigned type = plain[at++];
-            if (type == F_ACK && at + 13 <= size && at + 13 + 16u * plain[at + 12] <= size) {
-                on_ack(l, plain + at, size - at, now);
-                at += 13 + 16u * plain[at + 12];
-            } else if (type == F_STORED) {
-                char source[PURE_SOURCE + 1], input[PURE_MODULE_NAME];
-                size_t names = get_names(plain + at, size - at, source, input);
-                if (!names || at + names + 13 > size) break;
-                on_stored(l, plain + at, size - at, now);
-                at += names + 13;
-            } else if (type == F_PING)
-                continue;
-            else
-                break;
-        }
+    for (unsigned rounds = 0, n = TAKE; rounds < 4 && n == TAKE; ++rounds) {
+        n = (unsigned)take_datagrams(l->fd, l->taking);
+        for (unsigned k = 0; k < n; ++k) take_answer(l, l->taking->bytes[k], l->taking->messages[k].msg_len, now);
+    }
+}
+
+static void take_answer(PureLink *l, unsigned char *packet, ssize_t n, uint64_t now) {
+    unsigned char plain[DATAGRAM], nonce[PURE_AEAD_NONCE];
+    if (n < HEADER + PURE_AEAD_TAG || (size_t)n > DATAGRAM || packet[0] != VERSION || get32(packet + 1) != l->peer_id)
+        return; /* not ours, or an error from an earlier send (nobody listening) */
+    uint64_t run = get64(packet + 5), pn = get64(packet + 13);
+    if (!l->in || l->in_run != run) {
+        pure_aead_free(l->in);
+        l->in = aead_of(l->secret, l->peer, l->own_public, run, l->run, l->in_base);
+        l->in_run = run;
+        if (!l->in) return;
+    }
+    nonce_of(nonce, l->in_base, pn);
+    size_t size = (size_t)n - HEADER - PURE_AEAD_TAG;
+    if (!pure_aead_open(l->in, NULL, nonce, packet, HEADER, packet + HEADER, (size_t)n - HEADER, plain)) return;
+    ++l->counts.received;
+    for (size_t at = 0; at < size;) {
+        unsigned type = plain[at++];
+        if (type == F_ACK && at + 13 <= size && at + 13 + 16u * plain[at + 12] <= size) {
+            on_ack(l, plain + at, size - at, now);
+            at += 13 + 16u * plain[at + 12];
+        } else if (type == F_STORED) {
+            char source[PURE_SOURCE + 1], input[PURE_MODULE_NAME];
+            size_t names = get_names(plain + at, size - at, source, input);
+            if (!names || at + names + 13 > size) break;
+            on_stored(l, plain + at, size - at, now);
+            at += names + 13;
+        } else if (type != F_PING)
+            break; /* padding, or what this side does not know: the rest */
     }
 }
 
@@ -489,13 +538,21 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
     /* The credit counts from the oldest record not stored: after a restart
      * the sender does not know yet how far the receiver stored. */
     uint64_t base = l->count ? record_at(l, 0)->seq - 1 : l->stored;
-    for (size_t k = 0; k < l->count && f->count < UNITS; ++k) {
+    /* From the first record that may have an unsent piece: the ones before
+     * it are sent, and every one found sent moves that mark on. */
+    size_t k = l->count && l->unsent_from > base + 1 ? (size_t)(l->unsent_from - base - 1) : 0;
+    bool before = true;
+    for (; k < l->count && f->count < UNITS; ++k) {
         Record *r = record_at(l, k);
         if (r->seq > base + l->credit) break;
-        for (uint32_t i = 0; i < r->pieces && f->count < UNITS; ++i) {
+        bool unsent = false;
+        for (uint32_t i = 0; i < r->pieces; ++i) {
             if (r->piece[i].state != UNSENT) continue;
             uint32_t offset = i * PIECE, length = (uint32_t)least(PIECE, r->size - offset);
-            if (at + RECORD_HEAD + length > BODY) return f->count ? at : 0;
+            if (f->count == UNITS || at + RECORD_HEAD + length > BODY) {
+                unsent = true;
+                break;
+            }
             body[at] = F_RECORD;
             put64(body + at + 1, r->seq);
             put32(body + at + 9, r->size);
@@ -503,10 +560,19 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
             put16(body + at + 17, length);
             if (length) memcpy(body + at + RECORD_HEAD, r->bytes + offset, length);
             at += RECORD_HEAD + length;
-            r->piece[i].state = FLYING;
+            set_piece(l, r, i, FLYING);
             r->piece[i].pn = f->pn;
             f->units[f->count++] = (Unit){r->seq, i};
             ++l->counts.records;
+        }
+        if (before && !unsent) l->unsent_from = r->seq + 1;
+        before = before && !unsent;
+        if (unsent) { /* the packet is full: whole, so it can go in a burst */
+            if (l->gso && f->count) {
+                memset(body + at, F_PADDING, BODY - at);
+                at = BODY;
+            }
+            break;
         }
     }
     return f->count ? at : 0;
@@ -514,31 +580,69 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
 
 /* Seal and send f with body; its number is spent even when the socket
  * refuses it (what it carried is then marked unsent again). */
+/* A packet the socket refused: what it carried is unsent again, and it
+ * counts as never sent. Its number is spent all the same. */
+static void refused(PureLink *l, uint64_t pn) {
+    Flight *f = flight_of(l, pn);
+    if (!f || f->done) return;
+    for (uint16_t u = 0; u < f->count; ++u) {
+        Record *r = record_of(l, f->units[u].seq);
+        if (r && r->piece[f->units[u].piece].pn == pn) set_piece(l, r, f->units[u].piece, UNSENT);
+    }
+    settle(l, f);
+    f->eliciting = false;
+    f->count = 0;
+    --l->counts.packets;
+}
+
+static bool transient(void) { return errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS || errno == EINTR; }
+
+/* The packets of the burst to the socket (each but the last a whole
+ * datagram): with GSO in one call, else one by one. */
+static void flush(PureLink *l) {
+    unsigned n = l->burst_count, sent = 0;
+    bool whole = n > 1 && l->gso;
+    if (whole && send(l->fd, l->burst, l->burst_size, 0) >= 0) sent = n;
+    else if (whole && !transient()) l->gso = false, whole = false; /* no GSO here: one by one from now on */
+    for (size_t at = 0; !whole && sent < n; ++sent) {
+        size_t size = sent + 1 < n ? DATAGRAM : l->burst_size - at;
+        if (send(l->fd, l->burst + at, size, 0) < 0 && transient()) break;
+        at += size;
+    }
+    for (unsigned k = sent; k < n; ++k) refused(l, l->burst_pn[k]);
+    l->burst_count = 0;
+    l->burst_size = 0;
+}
+
+/* Seal f with body into the burst (a whole datagram each but the last), and
+ * count it sent; its number is spent even when the socket then refuses it. */
 static bool transmit(PureLink *l, Flight *f, const unsigned char *body, size_t size, uint64_t now) {
-    unsigned char packet[DATAGRAM];
-    size_t total = seal_packet(l->out, NULL, l->out_base, l->own_id, l->run, f->pn, body, size, packet);
+    if (l->burst_count && l->burst_size != (size_t)l->burst_count * DATAGRAM) flush(l); /* the last was short */
+    size_t total = seal_packet(l->out, NULL, l->out_base, l->own_id, l->run, f->pn, body, size, l->burst + l->burst_size);
     ++l->next_pn;
-    bool sent = total && (send(l->fd, packet, total, 0) >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK &&
-                                                                  errno != ENOBUFS && errno != EINTR));
     f->sent = now;
     f->bytes = (uint32_t)total;
-    if (!sent) {
+    if (!total) { /* not sealed: what it carried is unsent again */
         for (uint16_t u = 0; u < f->count; ++u) {
             Record *r = record_of(l, f->units[u].seq);
-            if (r && r->piece[f->units[u].piece].pn == f->pn) r->piece[f->units[u].piece].state = UNSENT;
+            if (r && r->piece[f->units[u].piece].pn == f->pn) set_piece(l, r, f->units[u].piece, UNSENT);
         }
         f->done = true;
         f->eliciting = false;
         f->count = 0;
+        push_flight(l, f);
+        return false;
     }
     if (!push_flight(l, f)) return false;
-    if (!sent) return false;
+    l->burst_pn[l->burst_count++] = f->pn;
+    l->burst_size += total;
     ++l->counts.packets;
     if (f->eliciting) {
         ++l->eliciting;
         l->in_flight += f->bytes;
         l->last_eliciting = now;
     }
+    if (l->burst_count == BURST) flush(l);
     return true;
 }
 
@@ -557,6 +661,7 @@ static void send_packets(PureLink *l, uint64_t now) {
         if (!transmit(l, &f, body, size, now)) break;
         if (probe) --l->probes;
     }
+    flush(l);
 }
 
 static uint64_t pto_period(const PureLink *l) {
@@ -566,14 +671,7 @@ static uint64_t pto_period(const PureLink *l) {
     return least(period, PTO_MOST);
 }
 
-static bool waiting_for_save(PureLink *l) {
-    for (size_t k = 0; k < l->count; ++k) {
-        Record *r = record_at(l, k);
-        for (uint32_t i = 0; i < r->pieces; ++i)
-            if (r->piece[i].state == RECEIVED) return true;
-    }
-    return false;
-}
+static bool waiting_for_save(PureLink *l) { return l->received > 0; }
 
 /* The next time a timer is due (ns), or 0. */
 static uint64_t next_timer(PureLink *l) {
@@ -600,7 +698,7 @@ static void run_timers(PureLink *l, uint64_t now) {
             uint32_t i = 0;
             while (i < r->pieces && r->piece[i].state != FLYING) ++i;
             if (i < r->pieces) {
-                r->piece[i].state = UNSENT;
+                set_piece(l, r, i, UNSENT);
                 ++l->counts.resent;
                 break;
             }
@@ -609,10 +707,10 @@ static void run_timers(PureLink *l, uint64_t now) {
     if (waiting_for_save(l) && l->stored_changed + STORED_WAIT <= now) {
         /* Received long ago and still not stored: the receiver lost them (it
          * restarted) or its word got lost. Sent again: it takes a number once. */
-        for (size_t k = 0; k < l->count; ++k) {
+        for (size_t k = 0; k < l->count && l->received; ++k) {
             Record *r = record_at(l, k);
             for (uint32_t i = 0; i < r->pieces; ++i)
-                if (r->piece[i].state == RECEIVED) r->piece[i].state = UNSENT, ++l->counts.resent;
+                if (r->piece[i].state == RECEIVED) set_piece(l, r, i, UNSENT), ++l->counts.resent;
         }
         l->stored_changed = now;
     }
@@ -665,6 +763,9 @@ bool pure_link_start(PureLink *l, void (*notify)(void *), void *context, char *e
         setsockopt(l->fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer));
         setsockopt(l->fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
     }
+    int segment = DATAGRAM;
+    l->gso = ok && !setsockopt(l->fd, SOL_UDP, UDP_SEGMENT, &segment, sizeof(segment));
+    ok = ok && (l->burst = malloc((size_t)BURST * DATAGRAM)) && (l->taking = malloc(sizeof(*l->taking)));
     l->run = random64();
     l->window = WINDOW_FIRST;
     l->threshold = UINT64_MAX;
@@ -705,6 +806,8 @@ void pure_link_close(PureLink *l) {
     }
     free(l->records);
     free(l->flights);
+    free(l->burst);
+    free(l->taking);
     pure_aead_free(l->out);
     pure_aead_free(l->in);
     explicit_bzero(l->secret, sizeof(l->secret));
@@ -739,10 +842,8 @@ typedef struct {
 } Run;
 typedef struct {
     uint64_t seq;
-    unsigned char *bytes;
+    unsigned char *bytes; /* its size, then a byte a piece: had */
     uint32_t size, pieces, got;
-    uint8_t *have;
-    bool handed;
 } Held;
 typedef struct Stream {
     Active *active;
@@ -750,8 +851,8 @@ typedef struct Stream {
     uint32_t input;
     uint64_t heard;              /* the last number heard (stored), once known */
     bool known, out, stored_due, gap, ready;
-    Held *held;                  /* records not yet stored, by number */
-    size_t held_count, held_capacity, held_bytes;
+    Held *held;                  /* records not yet stored, by number: held_count from held_first */
+    size_t held_first, held_count, held_capacity, held_bytes;
     Run *run;                    /* the run that sent to it last: where STORED goes */
     uint64_t run_id;
 } Stream;
@@ -923,12 +1024,14 @@ full:
     return false;
 }
 
-static void drop_held(Stream *st, size_t k) {
-    st->held_bytes -= st->held[k].size;
-    free(st->held[k].bytes);
-    free(st->held[k].have);
-    memmove(&st->held[k], &st->held[k + 1], (st->held_count - k - 1) * sizeof(Held));
-    --st->held_count;
+static Held *held_at(Stream *st, size_t k) { return &st->held[st->held_first + k]; }
+
+/* The first record held let go: the ones after it stay where they are. */
+static void drop_first(Stream *st) {
+    st->held_bytes -= held_at(st, 0)->size;
+    free(held_at(st, 0)->bytes);
+    ++st->held_first;
+    if (!--st->held_count) st->held_first = 0;
 }
 
 /* The memo of secrets (pure_link_remember): a header, then a place a peer
@@ -1009,7 +1112,7 @@ static Active *activate(PureLinkListener *s, Peer *peer, uint64_t now) {
 
 static void let_go(PureLinkListener *s, Active *a) {
     for (unsigned k = 0; k < a->stream_count; ++k) {
-        while (a->streams[k]->held_count) drop_held(a->streams[k], 0);
+        while (a->streams[k]->held_count) drop_first(a->streams[k]);
         free(a->streams[k]->held);
         free(a->streams[k]);
     }
@@ -1152,29 +1255,40 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
         return;
     }
     if ((st->known && seq > st->heard + CREDIT) || size > RECORD_MOST) return;
-    size_t k = 0;
-    while (k < st->held_count && st->held[k].seq < seq) ++k;
-    if (k == st->held_count || st->held[k].seq != seq) {
+    /* In order it goes last; out of order, its place is found by halving. */
+    size_t k = st->held_count;
+    if (k && held_at(st, k - 1)->seq >= seq) {
+        size_t low = 0;
+        while (low < k) {
+            size_t middle = low + (k - low) / 2;
+            if (held_at(st, middle)->seq < seq) low = middle + 1;
+            else k = middle;
+        }
+    }
+    if (k == st->held_count || held_at(st, k)->seq != seq) {
         if (st->held_bytes + size > HELD_MOST) return;
-        Held *kept = room(st->held, &st->held_capacity, st->held_count, sizeof(Held), 16);
+        if (st->held_first && st->held_first + st->held_count == st->held_capacity) { /* the front is free: used again */
+            memmove(st->held, held_at(st, 0), st->held_count * sizeof(Held));
+            st->held_first = 0;
+        }
+        Held *kept = room(st->held, &st->held_capacity, st->held_first + st->held_count, sizeof(Held), 16);
         if (!kept) return;
         st->held = kept;
         Held h = {.seq = seq, .size = size, .pieces = size ? (size + PIECE - 1) / PIECE : 1};
-        if (!(h.bytes = malloc(size ? size : 1)) || !(h.have = calloc(h.pieces, 1))) {
-            free(h.bytes);
-            return;
-        }
-        memmove(&st->held[k + 1], &st->held[k], (st->held_count - k) * sizeof(Held));
-        st->held[k] = h;
+        if (!(h.bytes = malloc(size + h.pieces))) return;
+        memset(h.bytes + size, 0, h.pieces);
+        memmove(held_at(st, k + 1), held_at(st, k), (st->held_count - k) * sizeof(Held));
+        *held_at(st, k) = h;
         ++st->held_count;
         st->held_bytes += size;
     }
-    Held *h = &st->held[k];
+    Held *h = held_at(st, k);
     uint32_t piece = offset / PIECE;
-    if (h->size != size || offset % PIECE || piece >= h->pieces || length != least(PIECE, size - offset) || h->have[piece])
+    if (h->size != size || offset % PIECE || piece >= h->pieces || length != least(PIECE, size - offset) ||
+        h->bytes[size + piece])
         return;
     if (length) memcpy(h->bytes + offset, bytes, length);
-    h->have[piece] = 1;
+    h->bytes[size + piece] = 1;
     ++h->got;
 }
 
@@ -1184,12 +1298,12 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
  * False when the host could not take them now. */
 static bool hand_over(PureLinkListener *s, Stream *st) {
     if (st->out) return true;
-    while (st->known && st->held_count && st->held[0].seq <= st->heard) drop_held(st, 0);
-    if (!st->held_count || (st->known && st->held[0].seq != st->heard + 1)) return true;
+    while (st->known && st->held_count && held_at(st, 0)->seq <= st->heard) drop_first(st);
+    if (!st->held_count || (st->known && held_at(st, 0)->seq != st->heard + 1)) return true;
     size_t n = 0, bytes = 0;
-    while (n < st->held_count && n < BATCH && st->held[n].got == st->held[n].pieces &&
-           st->held[n].seq == st->held[0].seq + n)
-        bytes += 4 + st->held[n++].size;
+    while (n < st->held_count && n < BATCH && held_at(st, n)->got == held_at(st, n)->pieces &&
+           held_at(st, n)->seq == held_at(st, 0)->seq + n)
+        bytes += 4 + held_at(st, n++)->size;
     if (!n) return true;
     if (bytes > s->batch_capacity) {
         unsigned char *grown = realloc(s->batch, bytes);
@@ -1199,14 +1313,13 @@ static bool hand_over(PureLinkListener *s, Stream *st) {
     }
     size_t at = 0;
     for (size_t k = 0; k < n; ++k) {
-        put32(s->batch + at, st->held[k].size);
-        memcpy(s->batch + at + 4, st->held[k].bytes, st->held[k].size);
-        at += 4 + st->held[k].size;
+        put32(s->batch + at, held_at(st, k)->size);
+        memcpy(s->batch + at + 4, held_at(st, k)->bytes, held_at(st, k)->size);
+        at += 4 + held_at(st, k)->size;
     }
-    PureLinkDelivery d = {st->input, st->source, st->held[0].seq, (unsigned)n, s->batch, bytes, st};
+    PureLinkDelivery d = {st->input, st->source, held_at(st, 0)->seq, (unsigned)n, s->batch, bytes, st};
     if (!s->deliver(s->context, &d)) return false;
     st->out = true;
-    for (size_t k = 0; k < n; ++k) st->held[k].handed = true;
     ++s->counts.deliveries;
     return true;
 }
@@ -1272,7 +1385,7 @@ static bool take_from(PureLinkListener *s, Peer *peer, unsigned char *packet, si
         } else if (type == F_PING) {
             eliciting = true;
         } else
-            break;
+            break; /* padding, or what this side does not know: the rest */
     }
     if (eliciting) {
         r->ack_due = true;
@@ -1357,7 +1470,6 @@ static void take_done(PureLinkListener *s) {
     for (size_t k = 0; k < count; ++k) {
         Stream *st = done[k].stream;
         st->out = false;
-        for (size_t h = 0; h < st->held_count; ++h) st->held[h].handed = false;
         mark_ready(s, st);
         if (!done[k].stored) continue; /* not saved: handed over again */
         if (!st->known || done[k].heard > st->heard) st->heard = done[k].heard;
@@ -1385,7 +1497,8 @@ static void hand_over_ready(PureLinkListener *s) {
 
 static void *run_listener(void *context) {
     PureLinkListener *s = context;
-    unsigned char packet[DATAGRAM + 64];
+    Taking *taking = malloc(sizeof(*taking));
+    if (!taking) return NULL;
     for (;;) {
         struct pollfd waits[2] = {{s->fd, POLLIN, 0}, {s->wake, POLLIN, 0}};
         int timeout = s->active_count || s->ready_count ? (int)(SWEEP_EVERY / MS) : -1;
@@ -1399,18 +1512,18 @@ static void *run_listener(void *context) {
             if (read(s->wake, &signals, sizeof(signals)) < 0) { /* cleared already */ }
         }
         uint64_t now = now_ns();
-        for (unsigned k = 0; k < 256; ++k) {
-            struct sockaddr_storage from;
-            socklen_t from_size = sizeof(from);
-            ssize_t n = recvfrom(s->fd, packet, sizeof(packet), MSG_DONTWAIT, (struct sockaddr *)&from, &from_size);
-            if (n < 0) break;
-            take_packet(s, packet, (size_t)n, &from, from_size, now);
+        for (unsigned rounds = 0, n = TAKE; rounds < 4 && n == TAKE; ++rounds) {
+            n = (unsigned)take_datagrams(s->fd, taking);
+            for (unsigned k = 0; k < n; ++k)
+                take_packet(s, taking->bytes[k], taking->messages[k].msg_len, &taking->from[k],
+                            taking->messages[k].msg_hdr.msg_namelen, now);
         }
         take_done(s);
         hand_over_ready(s);
         answer(s, now);
         sweep(s, now);
     }
+    free(taking);
     return NULL;
 }
 
