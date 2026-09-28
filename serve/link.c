@@ -30,6 +30,9 @@ enum { BURST = 54 };
 #ifndef UDP_SEGMENT
 #define UDP_SEGMENT 103
 #endif
+#ifndef UDP_GRO
+#define UDP_GRO 104
+#endif
 enum { RANGES = 32, RUNS = 2, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
 enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
 #define MS UINT64_C(1000000)
@@ -180,6 +183,42 @@ typedef struct {
     struct iovec parts[TAKE];
     struct mmsghdr messages[TAKE];
 } Taking;
+
+/* With UDP GRO the kernel hands a listener the datagrams of one sender that
+ * came one after another as one buffer, each the segment's size but the
+ * last (a burst sent with GSO comes whole, not cut up): up to GATHER such
+ * buffers at once. */
+enum { GATHER = 8, GATHERED = 65536 };
+typedef struct {
+    unsigned char bytes[GATHER][GATHERED];
+    struct sockaddr_storage from[GATHER];
+    struct iovec parts[GATHER];
+    struct mmsghdr messages[GATHER];
+    _Alignas(8) unsigned char control[GATHER][64]; /* a cmsghdr's alignment */
+} Gathering;
+
+static int gather(int fd, Gathering *g) {
+    for (unsigned k = 0; k < GATHER; ++k) {
+        g->parts[k] = (struct iovec){g->bytes[k], GATHERED};
+        g->messages[k] = (struct mmsghdr){.msg_hdr = {.msg_name = &g->from[k], .msg_namelen = sizeof(g->from[k]),
+                                                      .msg_iov = &g->parts[k], .msg_iovlen = 1,
+                                                      .msg_control = g->control[k],
+                                                      .msg_controllen = sizeof(g->control[k])}};
+    }
+    int n = recvmmsg(fd, g->messages, GATHER, MSG_DONTWAIT, NULL);
+    return n > 0 ? n : 0;
+}
+
+/* The size of each datagram in a buffer gathered (all of it when one). */
+static size_t segment_of(struct msghdr *m, size_t length) {
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(m); c; c = CMSG_NXTHDR(m, c))
+        if (c->cmsg_level == SOL_UDP && c->cmsg_type == UDP_GRO) {
+            int size;
+            memcpy(&size, CMSG_DATA(c), sizeof(size));
+            if (size > 0) return (size_t)size;
+        }
+    return length ? length : 1;
+}
 
 /* Up to TAKE datagrams from fd: how many (0 when none waits). */
 static int take_datagrams(int fd, Taking *t) {
@@ -942,6 +981,8 @@ struct PureLinkListener {
     unsigned port;
     uint64_t run, idle, swept, trimmed, untrimmed;
     PureAead *aead; /* keyed by each packet's run */
+    unsigned char open_key[PURE_AEAD_KEY], seal_key[PURE_AEAD_KEY]; /* the keys it has now */
+    bool open_keyed, seal_keyed;
     unsigned char *memo; /* the secrets remembered (pure_link_remember), mapped */
     size_t memo_size;
     int fd, wake;
@@ -1399,8 +1440,10 @@ static bool take_from(PureLinkListener *s, Peer *peer, unsigned char *packet, si
     unsigned char plain[DATAGRAM], nonce[PURE_AEAD_NONCE];
     nonce_of(nonce, r ? r->in_base : made.in_base, pn);
     size_t size = n - HEADER - PURE_AEAD_TAG;
-    if (!keyed || !pure_aead_open(s->aead, r ? r->in_key : made.in_key, nonce, packet, HEADER, packet + HEADER,
-                                  n - HEADER, plain)) {
+    const unsigned char *key = r ? r->in_key : made.in_key, *give = key;
+    if (s->open_keyed && !memcmp(s->open_key, key, PURE_AEAD_KEY)) give = NULL; /* the key it has */
+    else if (keyed) memcpy(s->open_key, key, PURE_AEAD_KEY), s->open_keyed = true;
+    if (!keyed || !pure_aead_open(s->aead, give, nonce, packet, HEADER, packet + HEADER, n - HEADER, plain)) {
         explicit_bzero(&made, sizeof(made));
         if (woke) let_go(s, a);
         return false;
@@ -1522,7 +1565,10 @@ static void answer(PureLinkListener *s, uint64_t now) {
         }
         r->ack_due = false;
         if (!at) continue;
-        size_t total = seal_packet(s->aead, r->out_key, r->out_base, s->own_id, s->run, r->next_pn++, body, at, packet);
+        const unsigned char *give = r->out_key;
+        if (s->seal_keyed && !memcmp(s->seal_key, r->out_key, PURE_AEAD_KEY)) give = NULL; /* the key it has */
+        else memcpy(s->seal_key, r->out_key, PURE_AEAD_KEY), s->seal_keyed = true;
+        size_t total = seal_packet(s->aead, give, r->out_base, s->own_id, s->run, r->next_pn++, body, at, packet);
         if (total && sendto(s->fd, packet, total, 0, (const struct sockaddr *)&r->address, r->address_size) >= 0)
             ++s->counts.packets;
     }
@@ -1566,8 +1612,8 @@ static void hand_over_ready(PureLinkListener *s) {
 
 static void *run_listener(void *context) {
     PureLinkListener *s = context;
-    Taking *taking = malloc(sizeof(*taking));
-    if (!taking) return NULL;
+    Gathering *gathering = malloc(sizeof(*gathering));
+    if (!gathering) return NULL;
     for (;;) {
         struct pollfd waits[2] = {{s->fd, POLLIN, 0}, {s->wake, POLLIN, 0}};
         int timeout = s->active_count || s->ready_count ? (int)(SWEEP_EVERY / MS) : -1;
@@ -1581,18 +1627,22 @@ static void *run_listener(void *context) {
             if (read(s->wake, &signals, sizeof(signals)) < 0) { /* cleared already */ }
         }
         uint64_t now = now_ns();
-        for (unsigned rounds = 0, n = TAKE; rounds < 4 && n == TAKE; ++rounds) {
-            n = (unsigned)take_datagrams(s->fd, taking);
-            for (unsigned k = 0; k < n; ++k)
-                take_packet(s, taking->bytes[k], taking->messages[k].msg_len, &taking->from[k],
-                            taking->messages[k].msg_hdr.msg_namelen, now);
+        for (unsigned rounds = 0, n = GATHER; rounds < 8 && n == GATHER; ++rounds) {
+            n = (unsigned)gather(s->fd, gathering);
+            for (unsigned k = 0; k < n; ++k) {
+                struct mmsghdr *m = &gathering->messages[k];
+                size_t length = m->msg_len, step = segment_of(&m->msg_hdr, length);
+                for (size_t at = 0; at < length; at += step)
+                    take_packet(s, gathering->bytes[k] + at, least(step, length - at), &gathering->from[k],
+                                m->msg_hdr.msg_namelen, now);
+            }
         }
         take_done(s);
         hand_over_ready(s);
         answer(s, now);
         sweep(s, now);
     }
-    free(taking);
+    free(gathering);
     return NULL;
 }
 
@@ -1614,6 +1664,8 @@ bool pure_link_serve(PureLinkListener *s, char *error, size_t size) {
     }
     setsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
     setsockopt(s->fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer));
+    int one = 1; /* without GRO, a buffer is a datagram */
+    setsockopt(s->fd, SOL_UDP, UDP_GRO, &one, sizeof(one));
     s->run = random64();
     s->swept = s->trimmed = now_ns();
     s->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
