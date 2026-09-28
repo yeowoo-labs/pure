@@ -1163,11 +1163,19 @@ static void list_trees(void) {
     pure_list_free(list);
     pure_undo_free(&undo);
 
-    /* A keyed list: items kept in key order, found by key. */
+    /* A keyed list: items kept in key order, found by key; from halfway on
+     * keyed, so found through each node's guide (made for the items there
+     * then, beside a share that keeps reading its own). */
     PureList *keyed = pure_list_new(2, text_fields);
+    PureRetired keyed_retired = {0};
     Model keys = {0};
     CHECK(keyed);
     for (unsigned round = 0; round < 40000; ++round) {
+        if (round == 20000) {
+            PureList *copy = pure_list_share(keyed, &keyed_retired);
+            CHECK(copy && pure_list_keyed(keyed, 0) == PURE_OK && same_items(copy, &keys) && same_items(keyed, &keys));
+            pure_list_free(copy);
+        }
         double key = (double)(next_random(&seed) % 20000);
         bool found;
         size_t at = pure_list_seek(keyed, 0, (PureCell){key, NULL, 0}, &found);
@@ -1180,6 +1188,12 @@ static void list_trees(void) {
         CHECK(at == low && found == (low < keys.count && keys.items[low].key == key));
         if (!found) {
             PureCell cells[2] = {{key, NULL, 0}, {0, (unsigned char *)"k", 1}};
+            if (round % 7 == 0) { /* an insert undone first: the guides as they were */
+                PureUndo undone_insert = {0};
+                CHECK(pure_list_insert(keyed, at, cells, &undone_insert) == PURE_OK);
+                pure_undo_rollback(&undone_insert, 0);
+                pure_undo_free(&undone_insert);
+            }
             CHECK(pure_list_insert(keyed, at, cells, NULL) == PURE_OK);
             model_insert(&keys, at, (ModelItem){key, "k", 1});
         } else if (next_random(&seed) % 3 == 0) {
@@ -1191,8 +1205,9 @@ static void list_trees(void) {
             --keys.count;
         }
     }
-    CHECK(same_items(keyed, &keys) && keys.count > 5000);
+    CHECK(same_items(keyed, &keys) && keys.count > 5000 && pure_list_size(keyed) == keys.count * 13);
     pure_list_free(keyed);
+    pure_retired_free(&keyed_retired);
     free(model.items);
     free(before.items);
     free(keys.items);

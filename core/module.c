@@ -3342,8 +3342,12 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     memcpy(app->list_drafts, list_drafts, sizeof(list_drafts));
     memcpy(app->journaled, journaled, sizeof(journaled));
     memcpy(app->saved, saved, sizeof(saved));
-    for (uint32_t i = 0; i < module->states; ++i)
+    for (uint32_t i = 0; i < module->states; ++i) {
         if (list_drafts[i]) pure_list_journal(lists[i], true); /* a stored list's changes are recorded from now on */
+        /* Without memory for its keys a keyed list is still searched, only slower. */
+        if (module->state_type[i] == PURE_STATE_LIST)
+            (void)pure_list_keyed(lists[i], module->state_key[i] ? (int)module->state_key[i] - 1 : -1);
+    }
     if (old) remap_outputs(app, old, module, true);
     drop_passes(app); /* kept by instruction of the module they were made for */
     app->module = module;

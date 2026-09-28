@@ -81,6 +81,10 @@ bool pure_list_next(const PureList *, PureRun *);
  * field does not order below key (numbers by value, texts by bytes), and
  * whether that item's field is key. */
 size_t pure_list_seek(const PureList *, unsigned field, PureCell key, bool *found);
+/* The field a keyed list keeps its items in order of: when it is a number
+ * field, seek by it reads each level's keys from one node (field -1, or a
+ * text field: none). ALLOCATION leaves the list searched as if it had none. */
+PureResult pure_list_keyed(PureList *, int field);
 /* The list's items ordered by field, as a keyed list keeps them: *out is NULL
  * when they already are, or a new list in that order with moved[position
  * before] = position after for every item. CONFLICT when two items have the

@@ -6,11 +6,13 @@
 
 /* A list's items live in a persistent B+tree: leaves hold up to FANOUT
  * items, inner nodes up to FANOUT children, and every node knows how many
- * items lie below it, their stored bytes and the leaf holding the first of
- * them. So an item is found by position, a keyed list is searched by key and
- * an item's place in the stored form is computed in O(log n), whatever the
- * list's length; a run of positions is read through a finger (the last leaf
- * a thread read) or a leaf at a time (pure_list_run).
+ * items lie below it and the leaf holding the first of them. An inner node
+ * also keeps, beside its children, how many items lie below each and (in a
+ * list keyed by a number field) each one's first key: its guide. So an item
+ * is found by position, and a keyed list searched by key, reading one node a
+ * level, in O(log n) whatever the list's length; a run of positions is read
+ * through a finger (the last leaf a thread read) or a leaf at a time
+ * (pure_list_run).
  *
  * A leaf keeps its items field by field: each field's cells side by side,
  * numbers as binary64 values and texts as spans of bytes the list owns. So
@@ -23,18 +25,26 @@
  * (the path) and retires the ones it replaced, and retires a text it lets go
  * instead of freeing it. A share is then a root and a count, however long
  * the list. */
-enum { FANOUT = PURE_LIST_RUN, DEPTH = 16, SPARE_NODES = 8 };
+enum { FANOUT = PURE_LIST_RUN, DEPTH = 16, SPARE_NODES = 8, PREFETCHED = 1 << 17 };
 
 typedef struct Node {
     uint64_t made;            /* the list's share count when made: shared once below it */
     uint32_t count;           /* items (a leaf) or children */
     bool leaf;
-    size_t items, bytes;      /* items below, and their stored bytes */
+    size_t items;             /* items below */
     const struct Node *first; /* the leaf holding the first item below; NULL when there is none */
-    struct Node *child[];     /* an inner node's children; a leaf's columns are here instead */
+    double lead;              /* the first item's key, in a list keyed by a number field (else 0) */
+    struct Node *child[];     /* an inner node's children, then its guide; a leaf's columns are here instead */
 } Node;
 
-enum { INNER_SIZE = sizeof(Node) + FANOUT * sizeof(Node *) };
+/* An inner node's guide, after its children: the items before each child
+ * and each child's lead, kept by sum; past the last child the counts and
+ * keys are above any position and key. So a level is searched in one node,
+ * by a binary search of fixed length whose steps are selections, not
+ * branches (upper). */
+typedef struct { uint32_t before[FANOUT]; double keys[FANOUT]; } Guide;
+
+enum { INNER_SIZE = sizeof(Node) + FANOUT * sizeof(Node *) + sizeof(Guide) };
 
 /* Where a leaf keeps each field's cells, and what an item stores. */
 typedef struct {
@@ -44,12 +54,13 @@ typedef struct {
     uint32_t column[16];    /* where each field's cells start in a leaf */
     size_t leaf_size;
     size_t number_bytes;    /* an item's numbers, stored */
+    int key;                /* the number field whose order the list keeps (its leads), or -1 */
 } Layout;
 
 struct PureList {
     Layout layout;
     Node *root;           /* NULL when the list has no item */
-    size_t count;
+    size_t count, bytes;  /* items, and their stored bytes */
     /* A stored list's changes since they were last taken, as records
      * (pure_list_replay); none are kept while journaled is false. */
     bool journaled;
@@ -87,6 +98,26 @@ static uint64_t lists_made;
 static _Thread_local struct { uint64_t id, version; const Node *leaf; size_t start; } finger;
 
 static Node *child(const Node *node, unsigned i) { return node->child[i]; }
+static Guide *guide(const Node *node) { return (Guide *)((char *)node + sizeof(Node) + FANOUT * sizeof(Node *)); }
+
+/* How many of n (at least one) ascending values are at or below key (upper)
+ * or below it (lower). */
+static unsigned upper(const double *values, unsigned n, double key) {
+    const double *base = values;
+    for (; n > 1; n -= n / 2) base = base[n / 2] <= key ? base + n / 2 : base;
+    return (unsigned)(base - values) + (*base <= key);
+}
+static unsigned lower(const double *values, unsigned n, double key) {
+    const double *base = values;
+    for (; n > 1; n -= n / 2) base = base[n / 2] < key ? base + n / 2 : base;
+    return (unsigned)(base - values) + (*base < key);
+}
+/* The child of an inner node holding its item at (counted from the node's first). */
+static unsigned child_at(const Node *node, size_t at) {
+    const uint32_t *before = guide(node)->before + 1, *base = before;
+    for (unsigned n = FANOUT - 1; n > 1; n -= n / 2) base = base[n / 2] <= at ? base + n / 2 : base;
+    return (unsigned)(base - before) + (*base <= at);
+}
 static double *numbers(const Layout *l, const Node *leaf, unsigned f) { return (double *)((char *)leaf + l->column[f]); }
 static PureSpan *texts(const Layout *l, const Node *leaf, unsigned f) { return (PureSpan *)((char *)leaf + l->column[f]); }
 
@@ -174,8 +205,9 @@ static Node *new_node(PureList *list, bool leaf) {
     node->made = list->shares;
     node->count = 0;
     node->leaf = leaf;
-    node->items = node->bytes = 0;
+    node->items = 0;
     node->first = NULL;
+    node->lead = 0;
     return node;
 }
 
@@ -196,22 +228,39 @@ static void drop_node(PureList *list, Node *node) {
 
 static size_t cell_bytes(const Layout *l, unsigned field, PureCell cell) { return l->text_fields[field] ? 4 + cell.size : 8; }
 
-/* A node's summary, from its items or children. */
+static size_t cells_bytes(const Layout *l, const PureCell *cells) {
+    size_t size = l->number_bytes;
+    for (unsigned t = 0; t < l->texts; ++t) size += 4 + cells[l->text_field[t]].size;
+    return size;
+}
+
+static size_t item_bytes(const Layout *l, const Node *leaf, unsigned i) {
+    size_t size = l->number_bytes;
+    for (unsigned t = 0; t < l->texts; ++t) size += 4 + texts(l, leaf, l->text_field[t])[i].size;
+    return size;
+}
+
+/* A node's summary, from its items or all its children. */
 static void sum(const PureList *list, Node *node) {
     const Layout *l = &list->layout;
-    size_t items = 0, bytes = 0;
     if (node->leaf) {
-        items = node->count;
-        bytes = items * l->number_bytes;
-        for (unsigned t = 0; t < l->texts; ++t) {
-            const PureSpan *column = texts(l, node, l->text_field[t]);
-            for (unsigned i = 0; i < node->count; ++i) bytes += 4 + column[i].size;
-        }
-    } else
-        for (unsigned i = 0; i < node->count; ++i) items += child(node, i)->items, bytes += child(node, i)->bytes;
+        node->items = node->count;
+        node->first = node->count ? node : NULL;
+        node->lead = l->key >= 0 && node->count ? numbers(l, node, (unsigned)l->key)[0] : 0;
+        return;
+    }
+    Guide *g = guide(node);
+    size_t items = 0;
+    for (unsigned i = 0; i < node->count; ++i) {
+        const Node *below = child(node, i);
+        g->before[i] = (uint32_t)items;
+        g->keys[i] = below->lead;
+        items += below->items;
+    }
+    for (unsigned i = node->count; i < FANOUT; ++i) g->before[i] = UINT32_MAX, g->keys[i] = INFINITY;
     node->items = items;
-    node->bytes = bytes;
-    node->first = !node->count ? NULL : node->leaf ? node : child(node, 0)->first;
+    node->first = node->count ? child(node, 0)->first : NULL;
+    node->lead = node->count ? g->keys[0] : 0;
 }
 
 /* ---- Finding positions */
@@ -229,8 +278,8 @@ static const Node *leaf_of(const PureList *list, size_t at, size_t *within) {
     const Node *node = list->root;
     size_t start = 0;
     while (!node->leaf) {
-        unsigned i = 0;
-        while (i + 1 < node->count && at - start >= child(node, i)->items) start += child(node, i)->items, ++i;
+        unsigned i = child_at(node, at - start);
+        start += guide(node)->before[i];
         node = child(node, i);
     }
     finger.id = list->id, finger.version = list->version, finger.leaf = node, finger.start = start;
@@ -274,16 +323,35 @@ static unsigned descend(PureList *list, size_t at, Step path[DEPTH], unsigned *w
             for (unsigned d = depth; d-- > 0;) path[d].node->first = child(path[d].node, 0)->first;
             return depth + 1;
         }
-        unsigned i = 0;
-        while (i + 1 < node->count && at >= child(node, i)->items) at -= child(node, i)->items, ++i;
+        unsigned i = child_at(node, at);
+        at -= guide(node)->before[i];
         path[depth] = (Step){node, i};
         place = &node->child[i];
     }
     return 0;
 }
 
+/* After a change below the path's last node: that node summed whole, and
+ * each above it through the one child on the path (the others are as they
+ * were). */
 static void sum_path(const PureList *list, const Step *path, unsigned depth) {
-    for (unsigned d = depth; d-- > 0;) sum(list, path[d].node);
+    if (!depth) return;
+    sum(list, path[depth - 1].node);
+    for (unsigned d = depth - 1; d-- > 0;) {
+        Node *node = path[d].node;
+        unsigned i = path[d].index;
+        const Node *below = child(node, i);
+        Guide *g = guide(node);
+        size_t was = (i + 1 < node->count ? g->before[i + 1] : node->items) - g->before[i];
+        if (below->items != was) {
+            uint32_t moved = (uint32_t)(below->items - was); /* modulo 2^32: an item fewer is all ones */
+            for (unsigned j = i + 1; j < node->count; ++j) g->before[j] += moved;
+            node->items += below->items - was;
+        }
+        g->keys[i] = below->lead;
+        node->first = child(node, 0)->first;
+        node->lead = g->keys[0];
+    }
 }
 
 /* ---- Placing and removing */
@@ -436,8 +504,31 @@ PureList *pure_list_new(unsigned fields, const uint8_t *text_fields) {
         else l->number_bytes += 8;
     }
     l->leaf_size = at;
+    l->key = -1;
     list->id = __atomic_add_fetch(&lists_made, 1, __ATOMIC_RELAXED);
     return list;
+}
+
+/* Every node below *place the list's own, summed again. */
+static bool rekey(PureList *list, Node **place) {
+    Node *node = own(list, place);
+    if (!node) return false;
+    for (unsigned i = 0; !node->leaf && i < node->count; ++i)
+        if (!rekey(list, &node->child[i])) return false;
+    sum(list, node);
+    return true;
+}
+
+PureResult pure_list_keyed(PureList *list, int field) {
+    Layout *l = &list->layout;
+    int key = field >= 0 && (unsigned)field < l->fields && !l->text_fields[field] ? field : -1;
+    if (key == l->key) return PURE_OK;
+    l->key = key;
+    if (list->root && !rekey(list, &list->root)) {
+        l->key = -1; /* searched without leads, which some nodes lack */
+        return PURE_ALLOCATION;
+    }
+    return PURE_OK;
 }
 
 /* Every node and text below node let go (retired where a copy may read them). */
@@ -473,7 +564,7 @@ void pure_list_clear(PureList *list) {
     if (!list->count) return;
     let_go_tree(list, list->root);
     list->root = NULL;
-    list->count = 0;
+    list->count = list->bytes = 0;
     ++list->version;
 }
 
@@ -482,8 +573,8 @@ size_t pure_list_count(const PureList *list) { return list->count; }
 PureList *pure_list_share(PureList *list, PureRetired *retired) {
     PureList *copy = malloc(sizeof(*copy));
     if (!copy) return NULL;
-    *copy = (PureList){.layout = list->layout, .root = list->root, .count = list->count, .id = list->id,
-                       .version = list->version, .refs = 1, .copy = true};
+    *copy = (PureList){.layout = list->layout, .root = list->root, .count = list->count, .bytes = list->bytes,
+                       .id = list->id, .version = list->version, .refs = 1, .copy = true};
     list->retired = retired;
     ++list->shares;
     return copy;
@@ -610,7 +701,7 @@ static bool encode_leaf(void *context, const Node *leaf) {
     return true;
 }
 
-size_t pure_list_size(const PureList *list) { return list->root ? list->root->bytes : 0; }
+size_t pure_list_size(const PureList *list) { return list->bytes; }
 
 void pure_list_encode(const PureList *list, unsigned char *out) {
     Encoding encoding = {&list->layout, out};
@@ -687,6 +778,7 @@ PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, Pu
         for (unsigned f = 0; f < l->fields; ++f) end = encode_cell(l, f, item[f], end);
         list->journal_size += size;
     }
+    list->bytes += cells_bytes(l, item);
     place(list, &p, item);
     return PURE_OK;
 }
@@ -723,19 +815,33 @@ PureResult pure_list_remove(PureList *list, size_t at, PureUndo *undo) {
         list->journal_size += RECORD_HEAD;
     }
     if (undo) undo->cell_count += l->fields;
-    else let_go_cells(list, cells);
+    list->bytes -= cells_bytes(l, cells);
+    if (!undo) let_go_cells(list, cells);
     take_out(list, path, depth, within);
     return PURE_OK;
 }
 
+/* A field no summary follows (any but the key) changes in its leaf alone:
+ * the leaf the thread read last, when the list alone has it, else the leaf
+ * at the end of the list's own path to the item. The thread's finger keeps
+ * the leaf, so the item's other fields are read and changed there too. */
 PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell value, PureUndo *undo) {
     const Layout *l = &list->layout;
     if (at >= list->count) return PURE_NOT_FOUND;
     Step path[DEPTH];
-    unsigned within, depth = descend(list, at, path, &within);
+    unsigned within, depth = 0;
+    bool keyed = (int)field == l->key;
+    Node *leaf;
+    if (!keyed && finger.leaf && finger.id == list->id && finger.version == list->version && at >= finger.start &&
+        at < finger.start + finger.leaf->count && !shared_node(list, finger.leaf)) {
+        leaf = (Node *)finger.leaf;
+        within = (unsigned)(at - finger.start);
+    } else {
+        if (!(depth = descend(list, at, path, &within))) return PURE_ALLOCATION;
+        leaf = path[depth - 1].node;
+    }
     PureCell copy;
-    if (!depth || !own_cell(list, field, value, &copy)) return PURE_ALLOCATION;
-    Node *leaf = path[depth - 1].node;
+    if (!own_cell(list, field, value, &copy)) return PURE_ALLOCATION;
     PureCell old = cell_at(l, leaf, within, field);
     size_t size = RECORD_HEAD + 1 + cell_bytes(l, field, copy);
     unsigned char *record = list->journaled ? journal_room(list, size) : NULL;
@@ -750,11 +856,13 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
         encode_cell(l, field, copy, end);
         list->journal_size += size;
     }
+    list->bytes += cell_bytes(l, field, copy) - cell_bytes(l, field, old);
     if (l->text_fields[field]) texts(l, leaf, field)[within] = (PureSpan){copy.text, copy.size};
     else numbers(l, leaf, field)[within] = copy.num;
     if (!undo) let_go_text(list, old.text);
-    sum_path(list, path, depth);
+    if (keyed) sum_path(list, path, depth);
     ++list->version;
+    finger.id = list->id, finger.version = list->version, finger.leaf = leaf, finger.start = at - within;
     return PURE_OK;
 }
 
@@ -776,8 +884,8 @@ bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
     size_t start = 0;
     unsigned depth = 0;
     while (!node->leaf) {
-        unsigned i = 0;
-        while (i + 1 < node->count && at - start >= child(node, i)->items) start += child(node, i)->items, ++i;
+        unsigned i = child_at(node, at - start);
+        start += guide(node)->before[i];
         run->path[depth] = node;
         run->taken[depth++] = (uint8_t)i;
         node = child(node, i);
@@ -825,21 +933,40 @@ static int order(const Layout *l, unsigned field, PureCell a, PureCell b) {
 }
 
 /* Down the child whose first item's key is the last at or below key (the
- * first child when none is), then the leaf's first item not below it. */
+ * first child when none is), then the leaf's first item not below it. The
+ * list's own key field is read from each node's guide; another field from
+ * the children's first leaves. */
 size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *found) {
     const Layout *l = &list->layout;
     const Node *node = list->root;
     size_t start = 0;
     *found = false;
     if (!node || !list->count) return 0;
+    if ((int)field == l->key) {
+        /* Each level: the last child whose lead is at or below key (the
+         * first when none is); then the leaf's items below key. */
+        while (!node->leaf) {
+            const Guide *g = guide(node);
+            unsigned taken = upper(g->keys + 1, FANOUT - 1, key.num);
+            start += g->before[taken];
+            node = child(node, taken);
+        }
+        const double *keys = numbers(l, node, field);
+        if (list->count > PREFETCHED) /* leaves past the caches: the leaf's keys fetched at once, not probe by probe */
+            for (unsigned i = 0; i < node->count; i += 8) __builtin_prefetch(keys + i);
+        unsigned low = lower(keys, node->count, key.num);
+        *found = low < node->count && keys[low] == key.num;
+        return start + low;
+    }
     while (!node->leaf) {
+        const Guide *g = guide(node);
         unsigned low = 1, high = node->count;
         while (low < high) {
             unsigned middle = low + (high - low) / 2;
             if (order(l, field, cell_at(l, child(node, middle)->first, 0, field), key) <= 0) low = middle + 1;
             else high = middle;
         }
-        for (unsigned i = 0; i + 1 < low; ++i) start += child(node, i)->items;
+        start += g->before[low - 1];
         node = child(node, low - 1);
     }
     unsigned low = 0, high = node->count;
@@ -936,6 +1063,7 @@ void pure_undo_rollback(PureUndo *undo, size_t mark) {
         if (e->change == REMOVED) {
             Place p;
             if (!prepare(list, e->at, &p)) abort();
+            list->bytes += cells_bytes(l, undo->cells + e->cells);
             place(list, &p, undo->cells + e->cells);
             undo->cell_count = e->cells;
             continue;
@@ -943,10 +1071,12 @@ void pure_undo_rollback(PureUndo *undo, size_t mark) {
         if (!(depth = descend(list, e->at, path, &within))) abort();
         Node *leaf = path[depth - 1].node;
         if (e->change == INSERTED) {
+            list->bytes -= item_bytes(l, leaf, within);
             for (unsigned t = 0; t < l->texts; ++t) free_text(texts(l, leaf, l->text_field[t])[within].data);
             take_out(list, path, depth, within);
             continue;
         }
+        list->bytes += cell_bytes(l, e->field, e->old) - cell_bytes(l, e->field, cell_at(l, leaf, within, e->field));
         if (l->text_fields[e->field]) {
             PureSpan *text = &texts(l, leaf, e->field)[within];
             free_text(text->data);
