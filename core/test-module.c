@@ -632,7 +632,7 @@ static void messages(void) {
     static const H note_handler[] = {{1, 0, 2}};
     bad = (Spec){states, 1, unkeyed, 1, views, 0, note_handler, 1, doc_read, 2, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "document operation outside"));
-    static const F unknown_type[] = {{"insert", 5}, {"start", 1}};
+    static const F unknown_type[] = {{"insert", 6}, {"start", 1}};
     static const I misplaced[] = {{"edit", NULL, PURE_KIND_MESSAGE, true, unknown_type, 2}};
     bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "message field"));
@@ -2427,6 +2427,246 @@ static void lane_folds(void) {
            "\"cells\":%u}\n", folds, planned, shaped[PURE_SHAPE_GROUP], shaped[PURE_SHAPE_RANK], passes, faults, cells);
 }
 
+/* ---- Walks and a message's rows ----------------------------------------
+ * A shop: stock is keyed by item; an order's rows (a message's rows field,
+ * filling the list order.lines) each take their quantity from the item's
+ * stock and are logged, all or nothing (an item not stocked, or not enough of
+ * it, fails the order); clean walks the stock, removing an item with none
+ * left, removing the first item for one with one left, and adding one to
+ * the others. Random events against a model: the walk visits every item
+ * still there when it comes, once, in order, and the rows are gone after
+ * every event. */
+enum { EACH = PURE_OP_EACH, W_N = 0, W_SUM = 1, W_STOCK = 2, W_LINES = 3, W_LOG = 4 };
+#define WALKING(list, length) ((uint32_t)(list) << 8 | (uint32_t)(length) << 16)
+#define ITEM(list, field) ((uint32_t)(list) | (uint32_t)(field) << 16)
+static const S walk_numbers[] = {{"n", 0}, {"sum", 0}};
+static const T walk_lists[] = {{"stock", 3 | 1 << 8, 0}, {"order.lines", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}, {"log", 3, 2}};
+static const RF stock_fields[] = {{"item", 0, 0}, {"left", 0, 0}}, line_fields[] = {{"item", 0, 0}, {"qty", 0, 0}},
+                entry_fields[] = {{"item", 0, 0}, {"qty", 0, 0}};
+static const R walk_records[] = {{"Stock", stock_fields, 2}, {"Line", line_fields, 2}, {"Entry", entry_fields, 2}};
+static const F order_fields[] = {{"lines", PURE_FIELD_ROWS | W_LINES << 8}}, restock_fields[] = {{"item", 1}, {"left", 1}};
+static const I walk_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, order_fields, 1}, KEY("clean", "KeyC"),
+                                {"restock", NULL, PURE_KIND_MESSAGE, false, restock_fields, 2}};
+static const O walk_code[] = {
+    /* 0 order: for l in order.lines { stock[l.item].left -= l.qty (not below 0); log.append(l) } */
+    {EACH, WALKING(W_LINES, 20), 0},
+    {ROW, W_LINES, 0}, {IG, ITEM(W_LINES, 0), 0}, {PURE_OP_LIST_FIND, W_STOCK, 0},
+    {ROW, W_LINES, 0}, {IG, ITEM(W_LINES, 0), 0}, {PURE_OP_LIST_FIND, W_STOCK, 0}, {IG, ITEM(W_STOCK, 1), 0},
+    {ROW, W_LINES, 0}, {IG, ITEM(W_LINES, 1), 0}, {PURE_OP_SUB, 0, 0},
+    {PICK, 0, 0}, {C, 0, 0}, {PURE_OP_GE, 0, 0}, {REQ, 0, 0},
+    {IS, ITEM(W_STOCK, 1), 0},
+    {ROW, W_LINES, 0}, {IG, ITEM(W_LINES, 0), 0}, {ROW, W_LINES, 0}, {IG, ITEM(W_LINES, 1), 0}, {LA, W_LOG, 0},
+    /* 21: n += 1; sum += sum(l.qty for l in order.lines) */
+    {L, W_N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, W_N, 0},
+    {L, W_SUM, 0}, {FOLD, FOLDING(PURE_FOLD_SUM, W_LINES, 3), 0}, {ROW, W_LINES, 0}, {IG, ITEM(W_LINES, 1), 0},
+    {C, 0, 1}, {ADD, 0, 0}, {ST, W_SUM, 0},
+    /* 32 clean: for s in stock { if s.left == 0 { stock.remove(s) } else if s.left == 1 { stock.remove(stock.first) }
+     *                             else { s.left = s.left + 1 } } */
+    {EACH, WALKING(W_STOCK, 22), 0},
+    {ROW, W_STOCK, 0}, {IG, ITEM(W_STOCK, 1), 0}, {C, 0, 0}, {EQ, 0, 0}, {JZ, 41, 0},
+    {ROW, W_STOCK, 0}, {LR, W_STOCK, 0}, {JMP, 55, 0},
+    {ROW, W_STOCK, 0}, {IG, ITEM(W_STOCK, 1), 0}, {C, 0, 1}, {EQ, 0, 0}, {JZ, 49, 0},
+    {XF, W_STOCK, 0}, {LR, W_STOCK, 0}, {JMP, 55, 0},
+    {ROW, W_STOCK, 0}, {ROW, W_STOCK, 0}, {IG, ITEM(W_STOCK, 1), 0}, {C, 0, 1}, {ADD, 0, 0}, {IS, ITEM(W_STOCK, 1), 0},
+    /* 55 restock: stock.add(Stock { item, left }) */
+    {FIELD, 0, 0}, {FIELD, 1, 0}, {LA, W_STOCK, 0},
+};
+static const H walk_handlers[] = {{1, 0, 32}, {3, 32, 23}, {5, 55, 3}};
+
+static Spec walk_spec(const O *code, size_t count, const I *inputs, size_t ninputs, const H *handlers, size_t nhandlers,
+                      const T *lists, const V *views, size_t nviews) {
+    return (Spec){walk_numbers, LEN(walk_numbers), inputs, ninputs, views, nviews, handlers, nhandlers, code, count, NULL, 0,
+                  lists, 3, NULL, 0, NULL, 0, walk_records, LEN(walk_records), NULL, 0};
+}
+
+typedef struct { double item, left; } StockItem;
+typedef struct { StockItem stock[64]; size_t stocked; double log[4096][2]; size_t logged; double n, sum; } Shop;
+
+static bool same_shop(const PureApp *app, const Shop *shop) {
+    const PureList *stock = app->lists[W_STOCK], *log = app->lists[W_LOG];
+    if (pure_list_count(stock) != shop->stocked || pure_list_count(log) != shop->logged ||
+        pure_list_count(app->lists[W_LINES]) || app->values[W_N] != shop->n || app->values[W_SUM] != shop->sum)
+        return false;
+    for (size_t i = 0; i < shop->stocked; ++i)
+        if (pure_list_get(stock, i, 0).num != shop->stock[i].item || pure_list_get(stock, i, 1).num != shop->stock[i].left)
+            return false;
+    for (size_t i = 0; i < shop->logged; ++i)
+        if (pure_list_get(log, i, 0).num != shop->log[i][0] || pure_list_get(log, i, 1).num != shop->log[i][1]) return false;
+    return true;
+}
+
+static size_t put_row(unsigned char *out, double item, double qty) {
+    put_double(out, item);
+    put_double(out + 8, qty);
+    return 16;
+}
+
+static void walks(void) {
+    CHECK(load(walk_spec(walk_code, LEN(walk_code), walk_inputs, 3, walk_handlers, 3, walk_lists, NULL, 0), &module_a) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    static Shop shop, before;
+    shop = (Shop){.stocked = 0};
+    uint32_t seed = 0x5a1e5eedu;
+    unsigned orders = 0, failed = 0, cleaned = 0, removed = 0, earlier = 0;
+    for (unsigned round = 0; round < 3000; ++round) {
+        before = shop;
+        unsigned roll_ = next_random(&seed) % 10;
+        PureResult result;
+        bool ok = true;
+        if (roll_ < 3) { /* restock an item, maybe one there already */
+            double item = (double)(next_random(&seed) % 12), left = (double)(next_random(&seed) % 4);
+            unsigned char payload[8];
+            put32(payload, (uint32_t)item);
+            put32(payload + 4, (uint32_t)left);
+            result = pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8});
+            size_t at = 0;
+            while (at < shop.stocked && shop.stock[at].item < item) ++at;
+            if (at < shop.stocked && shop.stock[at].item == item) ok = false;
+            else {
+                memmove(&shop.stock[at + 1], &shop.stock[at], (shop.stocked - at) * sizeof(*shop.stock));
+                shop.stock[at] = (StockItem){item, left};
+                ++shop.stocked;
+            }
+        } else if (roll_ < 8) { /* an order of up to 6 lines */
+            unsigned char payload[6 * 16];
+            size_t size = 0, lines = next_random(&seed) % 7;
+            double qty_total = 0;
+            for (size_t k = 0; k < lines && ok; ++k) {
+                double item = (double)(next_random(&seed) % 13), qty = (double)(next_random(&seed) % 3);
+                size += put_row(payload + size, item, qty);
+                size_t at = 0;
+                while (at < shop.stocked && shop.stock[at].item != item) ++at;
+                if (at == shop.stocked || shop.stock[at].left - qty < 0) { ok = false; break; }
+                shop.stock[at].left -= qty;
+                shop.log[shop.logged][0] = item;
+                shop.log[shop.logged++][1] = qty;
+                qty_total += qty;
+            }
+            for (size_t k = 0; !ok && k < lines; ++k) /* the rest of the rows, for the payload */
+                if (size < (k + 1) * 16) size += put_row(payload + size, (double)(next_random(&seed) % 13), 1);
+            result = pure_app_message(&app, 0, NULL, -1, (PureSpan){size ? payload : NULL, size});
+            if (ok) {
+                shop.n += 1;
+                shop.sum += qty_total;
+                ++orders;
+            }
+        } else { /* clean */
+            result = pure_app_input(&app, 1, PURE_EDGE_DOWN);
+            size_t at = 0;
+            while (at < shop.stocked) {
+                bool gone = false;
+                if (shop.stock[at].left == 0) {
+                    memmove(&shop.stock[at], &shop.stock[at + 1], (shop.stocked - at - 1) * sizeof(*shop.stock));
+                    --shop.stocked;
+                    gone = true;
+                    ++removed;
+                } else if (shop.stock[at].left == 1) {
+                    memmove(&shop.stock[0], &shop.stock[1], (shop.stocked - 1) * sizeof(*shop.stock));
+                    --shop.stocked;
+                    if (at == 0) gone = true;
+                    else --at, ++earlier;
+                    ++removed;
+                } else
+                    shop.stock[at].left += 1;
+                if (!gone) ++at;
+            }
+            ++cleaned;
+            pure_app_input(&app, 1, PURE_EDGE_UP);
+        }
+        if (!ok) {
+            shop = before;
+            ++failed;
+        }
+        if ((result == PURE_OK) != ok || !same_shop(&app, &shop)) {
+            fprintf(stderr, "walk round %u: result %d, expected %s\n", round, result, ok ? "ok" : "a fault");
+            abort();
+        }
+        if (shop.logged > 4000) { /* start over before the model's log fills */
+            pure_app_stop(&app);
+            CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+            shop = (Shop){.stocked = 0};
+        }
+    }
+    /* Rows that are not whole fail the message and change nothing. */
+    before = shop;
+    unsigned char short_row[12] = {0}, not_finite[16];
+    put_double(not_finite, 1);
+    put_double(not_finite + 8, NAN);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){short_row, 12}) == PURE_LIMIT && same_shop(&app, &before));
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){not_finite, 16}) == PURE_LIMIT && same_shop(&app, &before));
+    pure_app_stop(&app);
+
+    /* What a walk and a rows field may not be. */
+    static const F note_fields[] = {{"lines", PURE_FIELD_ROWS | W_LINES << 8}, {"text", 4}};
+    static const I note_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, note_fields, 2}};
+    static const O into_walked[] = {{EACH, WALKING(W_STOCK, 3), 0}, {C, 0, 1}, {C, 0, 2}, {LA, W_STOCK, 0}};
+    static const O nested[] = {{EACH, WALKING(W_STOCK, 3), 0}, {EACH, WALKING(W_LOG, 2), 0}, {C, 0, 1}, {ST, W_N, 0}};
+    static const O replied[] = {{EACH, WALKING(W_STOCK, 2), 0}, {FIELD, 1, 0}, {REPLY, 0, 0}};
+    static const O rows_read[] = {{FIELD, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {REPLY, 0, 0}};
+    static const O into_each[] = {{C, 0, 1}, {JZ, 3, 0}, {EACH, WALKING(W_STOCK, 2), 0}, {C, 0, 1}, {ST, W_N, 0}};
+    static const O view_each[] = {{EACH, WALKING(W_STOCK, 2), 0}, {C, 0, 1}, {ST, W_N, 0}, {C, 0, 1}};
+    static const H first3[] = {{1, 0, 4}}, first3b[] = {{1, 0, 3}}, first5[] = {{1, 0, 5}};
+    static const V walk_view[] = {{"v", 0, 4}};
+    static const T unnamed[] = {{"stock", 3 | 1 << 8, 0}, {"lines", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}, {"log", 3, 2}};
+    static const F logged_rows[] = {{"lines", PURE_FIELD_ROWS | W_LOG << 8}};
+    static const I logged_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, logged_rows, 1}};
+    static const I sent_rows[] = {{"order", NULL, PURE_KIND_OUTPUT, false, order_fields, 1}};
+    const struct { Spec spec; const char *reason; } refused[] = {
+        {walk_spec(into_walked, LEN(into_walked), note_inputs, 1, first3, 1, walk_lists, NULL, 0), "insert into the list walked"},
+        {walk_spec(nested, LEN(nested), note_inputs, 1, first3, 1, walk_lists, NULL, 0), "each inside each"},
+        {walk_spec(replied, LEN(replied), note_inputs, 1, first3b, 1, walk_lists, NULL, 0), "reply inside each"},
+        {walk_spec(rows_read, LEN(rows_read), note_inputs, 1, first3b, 1, walk_lists, NULL, 0), "no such state, field"},
+        {walk_spec(into_each, LEN(into_each), note_inputs, 1, first5, 1, walk_lists, NULL, 0), "branch into an each"},
+        {walk_spec(view_each, LEN(view_each), note_inputs, 1, NULL, 0, walk_lists, walk_view, 1), "view with an effect"},
+        {walk_spec(NULL, 0, note_inputs, 1, NULL, 0, unnamed, NULL, 0), "state name"},
+        {walk_spec(NULL, 0, logged_inputs, 1, NULL, 0, walk_lists, NULL, 0), "rows field"},
+        {walk_spec(NULL, 0, sent_rows, 1, NULL, 0, walk_lists, NULL, 0), "rows field"},
+    };
+    for (size_t i = 0; i < LEN(refused); ++i)
+        if (load(refused[i].spec, &module_b) != PURE_INVALID || !strstr(error, refused[i].reason)) {
+            fprintf(stderr, "walk case %zu: expected '%s', got '%s'\n", i, refused[i].reason, error);
+            abort();
+        }
+    CHECK(orders > 300 && failed > 300 && cleaned > 200 && removed > 50 && earlier > 10);
+    printf("{\"walks\":{\"orders\":%u,\"failed\":%u,\"cleaned\":%u,\"removed_while_walking\":%u,\"removed_before\":%u}}\n",
+           orders, failed, cleaned, removed, earlier);
+}
+
+/* Damaged walk modules: whatever loads runs safely, rows and all. */
+static void walk_mutations(void) {
+    static unsigned char valid[65536], bytes[65536];
+    size_t size = build(valid, walk_spec(walk_code, LEN(walk_code), walk_inputs, 3, walk_handlers, 3, walk_lists, NULL, 0));
+    uint32_t state = 0x2f6b1c3du;
+    unsigned accepted = 0;
+    for (unsigned round = 0; round < 20000; ++round) {
+        memcpy(bytes, valid, size);
+        for (unsigned f = 0, flips = 1 + next_random(&state) % 3; f < flips; ++f)
+            bytes[next_random(&state) % size] ^= (unsigned char)(1u << (next_random(&state) % 8));
+        if (pure_module_load(bytes, size, &module_b, error, sizeof(error)) != PURE_OK) continue;
+        ++accepted;
+        PureApp app;
+        if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
+        unsigned char payload[96];
+        for (unsigned e = 0; e < 24; ++e) {
+            uint32_t input = next_random(&state) % module_b.inputs;
+            size_t length = next_random(&state) % sizeof(payload);
+            for (size_t k = 0; k < length; ++k) payload[k] = (unsigned char)next_random(&state);
+            for (size_t k = 0; k + 16 <= length && next_random(&state) % 2; k += 16)
+                put_row(payload + k, (double)(next_random(&state) % 8), (double)(next_random(&state) % 3));
+            if (module_b.input[input].kind == PURE_KIND_MESSAGE)
+                pure_app_message(&app, input, NULL, -1, (PureSpan){payload, length});
+            else if (module_b.input[input].kind == PURE_KIND_KEY)
+                pure_app_input(&app, input, PURE_EDGE_DOWN);
+            for (uint32_t s_ = 0; s_ < module_b.states; ++s_)
+                if (module_b.state_type[s_] == PURE_STATE_LIST && module_b.state_flags[s_] & PURE_LIST_ROWS >> 8)
+                    CHECK(!pure_list_count(app.lists[s_])); /* rows go with their event */
+        }
+        pure_app_stop(&app);
+    }
+    printf("{\"walk_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
+}
+
 /* Damaged fold and filter modules: whatever loads runs safely. */
 static void fold_mutations(void) {
     static unsigned char valid[65536], bytes[65536];
@@ -3348,6 +3588,8 @@ int main(void) {
     folds();
     filters();
     lane_folds();
+    walks();
+    walk_mutations();
     keyed();
     keyed_mutations();
     snapshots();

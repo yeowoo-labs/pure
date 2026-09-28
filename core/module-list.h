@@ -48,6 +48,8 @@ enum { PURE_LIST_ITEMS = 1 << 24, PURE_LIST_RUN = 32 };
 
 PureList *pure_list_new(unsigned fields, const uint8_t *text_fields);
 void pure_list_free(PureList *);
+/* Let every item go (retired where a shared copy may read it). */
+void pure_list_clear(PureList *);
 size_t pure_list_count(const PureList *);
 /* Share the items as they are with a read-only copy (for readers on other
  * threads), without copying them: from then on the list copies the nodes it

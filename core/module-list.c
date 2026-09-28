@@ -492,6 +492,14 @@ void pure_list_free(PureList *list) {
     free(list);
 }
 
+void pure_list_clear(PureList *list) {
+    if (!list->count) return;
+    let_go_tree(list, list->root);
+    list->root = NULL;
+    list->count = 0;
+    ++list->version;
+}
+
 size_t pure_list_count(const PureList *list) { return list->count; }
 
 PureList *pure_list_share(PureList *list, PureRetired *retired) {

@@ -38,9 +38,14 @@ typedef enum {
     PURE_OP_ITEM_GET, PURE_OP_ITEM_SET, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE,
     PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_ROW,
     PURE_OP_PICK, PURE_OP_SLIDE, PURE_OP_FOLD, PURE_OP_TEXT_COMPARE, PURE_OP_LIST_FIND, PURE_OP_LIST_HAS,
-    PURE_OP_NOW, PURE_OP_FLOOR, PURE_OP_MOD, PURE_OP_SEND, PURE_OP_OUTER_ROW,
+    PURE_OP_NOW, PURE_OP_FLOOR, PURE_OP_MOD, PURE_OP_SEND, PURE_OP_OUTER_ROW, PURE_OP_EACH,
     PURE_OP_COUNT
 } PureOpcode;
+/* EACH's argument: the list state (bits 8-15) and the length of the block
+ * that follows (16-31), run in a handler once for every item the list had
+ * when it began, in order, with ROW the item; the block may change states,
+ * the list's items and other lists, but not insert into the list it walks
+ * (an item it removes, or one before it, moves the walk with it). */
 /* FOLD's argument: the kind (bits 0-7), the list state (8-15) and the length
  * of the block that follows (16-31), run once per item as a column of that
  * list. count counts the items whose block leaves a non-zero number; sum,
@@ -58,19 +63,25 @@ typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3, PUR
                PURE_KIND_OUTPUT = 5 } PureInputKind;
 enum { PURE_TIMER_LONGEST = 86400000, PURE_SOURCE = 64 };
 /* A message field: a u32le or a binary64 (fixed, at its offset in the
- * payload's prefix), or bytes or text of any length. The prefix also holds
- * each variable field's u32le length but the last one's (its offset is
+ * payload's prefix), or bytes, text or rows of any length. The prefix also
+ * holds each variable field's u32le length but the last one's (its offset is
  * PURE_FIELD_REST), which takes what follows the others; the variable
  * fields' bytes follow the prefix in declaration order. A text is UTF-8 and
- * a number finite, or the message fails. */
-typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2, PURE_FIELD_NUMBER = 3, PURE_FIELD_TEXT = 4 } PureFieldType;
+ * a number finite, or the message fails. Rows are records of a list of a
+ * message's rows (rows, a list state), laid out as a list's stored form: a
+ * message fills that list with them, and fails when they are not whole. */
+typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2, PURE_FIELD_NUMBER = 3, PURE_FIELD_TEXT = 4,
+               PURE_FIELD_ROWS = 5 } PureFieldType;
 enum { PURE_FIELD_REST = UINT32_MAX };
 typedef enum {
     PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4
 } PureStateType;
 /* A cursor that stays before text inserted at it (a mark); other cursors go
- * after it (a caret). */
-enum { PURE_CURSOR_STAYS = 1 };
+ * after it (a caret). A list of a message's rows (its state's flags hold
+ * PURE_LIST_ROWS beside the key byte; its name is the field's path): a
+ * message's rows field fills it as the message arrives, it is emptied when
+ * every event ends, and it is never saved nor logged for undoing. */
+enum { PURE_CURSOR_STAYS = 1, PURE_LIST_ROWS = 256 };
 /* A table view has one row per item of a list, or per item its filter
  * keeps; its columns are number or text views evaluated for one row at a
  * time. */
@@ -91,7 +102,7 @@ typedef enum {
 typedef struct { double value; uint32_t arg; uint8_t op, plan, shape; } PureOp;
 typedef struct { uint32_t start, length; } PureBlock;
 typedef struct { uint32_t event; PureBlock code; } PureHandler;
-typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint32_t offset; } PureField;
+typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint16_t rows; uint32_t offset; } PureField;
 typedef struct {
     uint8_t kind;
     bool keyed;
@@ -122,7 +133,7 @@ typedef struct {
     char input_keys[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
     uint8_t state_type[PURE_MODULE_STATES];
     uint16_t state_ref[PURE_MODULE_STATES]; /* text: constant; cursor: text; list: record; index: list */
-    uint8_t state_flags[PURE_MODULE_STATES]; /* cursor: PURE_CURSOR_STAYS */
+    uint8_t state_flags[PURE_MODULE_STATES]; /* cursor: PURE_CURSOR_STAYS; list: PURE_LIST_ROWS >> 8 */
     /* A keyed list: its key field + 1 (0: none). Its items stay in key order
      * (numbers by value, texts by bytes), each key once, and keys do not change. */
     uint8_t state_key[PURE_MODULE_STATES];
