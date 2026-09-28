@@ -89,6 +89,12 @@ bool pure_link_allow(PureLinkListener *, const char *source, const unsigned char
  * keys, addresses and streams go: an idle link costs the listener only its
  * allowing, and the sender's next packet makes them again (one X25519). */
 void pure_link_idle(PureLinkListener *, uint64_t ms);
+/* Remember the secret each sender's key shares with the node's in a file
+ * (path, 0600; begun again for another node's key): a place a sender in
+ * the order allowed, mapped, so a sender at rest takes no memory for it.
+ * A node that starts again then makes no X25519 for a sender it heard from
+ * before. After the senders are allowed, before serving. */
+bool pure_link_remember(PureLinkListener *, const char *path, char *error, size_t size);
 bool pure_link_serve(PureLinkListener *, char *error, size_t size);
 /* stored: the delivery's save succeeded; gap: it stopped at a gap. */
 void pure_link_done(PureLinkListener *, void *token, uint64_t heard, bool stored, bool gap);
@@ -96,10 +102,10 @@ void pure_link_done(PureLinkListener *, void *token, uint64_t heard, bool stored
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,
  * the last number stored; a listener's senders woken (their active state
- * made), let go when idle, and active when it closed. A listener's are
- * given when it closes. */
+ * made), of them with a secret remembered (no X25519), let go when idle,
+ * and active when it closed. A listener's are given when it closes. */
 typedef struct {
-    uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, woken, swept, active;
+    uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, woken, remembered, swept, active;
 } PureLinkCounts;
 void pure_link_counts(PureLink *, PureLinkCounts *);
 void pure_link_listener_close(PureLinkListener *, PureLinkCounts *counts);

@@ -13,8 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -783,6 +785,8 @@ struct PureLinkListener {
     unsigned port;
     uint64_t run, idle, swept, trimmed, untrimmed;
     PureAead *aead; /* keyed by each packet's run */
+    unsigned char *memo; /* the secrets remembered (pure_link_remember), mapped */
+    size_t memo_size;
     int fd, wake;
     pthread_t thread;
     bool started;
@@ -926,12 +930,71 @@ static void drop_held(Stream *st, size_t k) {
     --st->held_count;
 }
 
-/* A peer's active state, made at its first packet: the secret its key shares with ours. */
+/* The memo of secrets (pure_link_remember): a header, then a place a peer
+ * in the order allowed, each the first 28 bytes of its key, a check (FNV-1a
+ * of its whole key and the secret) and the secret. A place whose check
+ * fails (never made, another key, cut short by a crash) is made again. */
+enum { MEMO_HEAD = 64, MEMO_PLACE = 64 };
+static const unsigned char memo_magic[8] = {'P', 'L', 'M', '1', 0, 0, 0, 0};
+
+static uint32_t memo_check(const unsigned char key[PURE_SEAL_KEY], const unsigned char secret[32]) {
+    return fnv(fnv(2166136261u, key, PURE_SEAL_KEY), secret, 32);
+}
+
+bool pure_link_remember(PureLinkListener *s, const char *path, char *error, size_t size) {
+    int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    struct stat info;
+    unsigned char head[MEMO_HEAD];
+    size_t needed = MEMO_HEAD + (s->peer_count ? s->peer_count : 1) * MEMO_PLACE;
+    bool ok = fd >= 0 && !fstat(fd, &info) && S_ISREG(info.st_mode) && !(info.st_mode & 077);
+    /* Another node's key, or none yet: begun again. */
+    bool ours = ok && pread(fd, head, MEMO_HEAD, 0) == MEMO_HEAD && !memcmp(head, memo_magic, 8) &&
+                !memcmp(head + 8, s->own_public, PURE_SEAL_KEY);
+    if (ok && !ours) {
+        memset(head, 0, MEMO_HEAD);
+        memcpy(head, memo_magic, 8);
+        memcpy(head + 8, s->own_public, PURE_SEAL_KEY);
+        ok = !ftruncate(fd, 0) && pwrite(fd, head, MEMO_HEAD, 0) == MEMO_HEAD;
+    }
+    ok = ok && (ours && (size_t)info.st_size >= needed ? true : !ftruncate(fd, (off_t)needed));
+    void *map = ok ? mmap(NULL, needed, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    if (fd >= 0) close(fd);
+    if (map == MAP_FAILED) {
+        snprintf(error, size, "%s: cannot keep secrets there (a file only its owner may read)", path);
+        return false;
+    }
+    s->memo = map;
+    s->memo_size = needed;
+    return true;
+}
+
+/* A peer's active state, made at its first packet: the secret its key
+ * shares with ours, remembered or made (one X25519, then remembered: the
+ * secret first, the key that makes the place its own last). */
 static Active *activate(PureLinkListener *s, Peer *peer, uint64_t now) {
     Active *a = calloc(1, sizeof(*a)), **actives = room(s->actives, &s->active_capacity, s->active_count, sizeof(*actives), 64);
     if (actives) s->actives = actives;
-    if (!a || !actives || !pure_link_secret(s->own, peer->key, a->secret)) {
-        if (a) explicit_bzero(a->secret, sizeof(a->secret));
+    if (!a || !actives) {
+        free(a);
+        return NULL;
+    }
+    size_t index = (size_t)(peer - s->peers);
+    unsigned char *place = s->memo && MEMO_HEAD + (index + 1) * MEMO_PLACE <= s->memo_size ?
+                           s->memo + MEMO_HEAD + index * MEMO_PLACE : NULL;
+    if (place && !memcmp(place, peer->key, 28) && get32(place + 28) == memo_check(peer->key, place + 32)) {
+        memcpy(a->secret, place + 32, 32);
+        ++s->counts.remembered;
+    } else if (pure_link_secret(s->own, peer->key, a->secret)) {
+        if (place) {
+            memset(place, 0, 28);
+            __atomic_thread_fence(__ATOMIC_RELEASE);
+            memcpy(place + 32, a->secret, 32);
+            put32(place + 28, memo_check(peer->key, a->secret));
+            __atomic_thread_fence(__ATOMIC_RELEASE);
+            memcpy(place, peer->key, 28);
+        }
+    } else {
+        explicit_bzero(a, sizeof(*a));
         free(a);
         return NULL;
     }
@@ -1409,6 +1472,7 @@ void pure_link_listener_close(PureLinkListener *s, PureLinkCounts *counts) {
     }
     while (s->active_count) let_go(s, s->actives[0]);
     pure_aead_free(s->aead);
+    if (s->memo) munmap(s->memo, s->memo_size);
     free(s->actives);
     free(s->peers);
     free(s->index);

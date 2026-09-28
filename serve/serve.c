@@ -2662,6 +2662,9 @@ int main(int argc, char **argv) {
         for (unsigned i = 0; allowed && i < sender_count; ++i)
             allowed = pure_link_allow(link_listener, senders[i].name, senders[i].key, error, sizeof(error));
         if (allowed && link_idle_ms) pure_link_idle(link_listener, link_idle_ms);
+        char memo[4096];
+        snprintf(memo, sizeof(memo), "%s.links", key_path); /* beside the key the secrets come from */
+        allowed = allowed && pure_link_remember(link_listener, memo, error, sizeof(error));
         if (!allowed || !pure_link_serve(link_listener, error, sizeof(error))) {
             fprintf(stderr, "--link-port: %s\n", error);
             return 2;
@@ -2736,11 +2739,12 @@ int main(int argc, char **argv) {
             ",\"link_packets\":%" PRIu64 ",\"link_records\":%" PRIu64 ",\"link_resent\":%" PRIu64
             ",\"link_lost\":%" PRIu64 ",\"link_acknowledged\":%" PRIu64 ",\"link_stored\":%" PRIu64
             ",\"listener_packets\":%" PRIu64 ",\"listener_received\":%" PRIu64 ",\"listener_deliveries\":%" PRIu64
-            ",\"listener_woken\":%" PRIu64 ",\"listener_swept\":%" PRIu64 ",\"listener_active\":%" PRIu64 "}\n",
+            ",\"listener_woken\":%" PRIu64 ",\"listener_remembered\":%" PRIu64 ",\"listener_swept\":%" PRIu64
+            ",\"listener_active\":%" PRIu64 "}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
             owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
-            heard.packets, heard.received, heard.deliveries, heard.woken, heard.swept, heard.active);
+            heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept, heard.active);
     free(hosts);
     free(thread);
     return 0;

@@ -784,7 +784,9 @@ def server_links_udp(aup, pure, work, netem=None):
     delays, loses and reorders packets meanwhile. The receiver takes its
     senders from a file (--senders, the sender among a thousand others) and
     lets a sender's keys and streams go after 400 ms of quiet
-    (--link-idle-ms): the order after a longer pause arrives all the same."""
+    (--link-idle-ms): the order after a longer pause arrives all the same.
+    Started again, it makes no X25519: the secret is remembered beside its
+    key (KEY.links)."""
     import select
     import signal
     import socket
@@ -903,11 +905,14 @@ def server_links_udp(aup, pure, work, netem=None):
             _, error = process.communicate(timeout=30)
             assert process.returncode == 0, error[-1000:]
             stats[name] = [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
+    # The receiver, started again, remembered the sender's secret: no X25519 for it.
     assert stats['b']['listener_swept'] >= 1 and stats['b']['listener_woken'] >= 2, stats['b']
+    assert stats['b']['listener_remembered'] == stats['b']['listener_woken'], stats['b']
     return {'orders': sent, 'acknowledged_total': sum(acknowledged),
             'packets_after_restart': stats['a']['link_packets'], 'resent_after_restart': stats['a']['link_resent'],
             'lost_after_restart': stats['a']['link_lost'], 'received_after_restart': stats['b']['listener_received'],
-            'woken_after_restart': stats['b']['listener_woken'], 'swept_after_restart': stats['b']['listener_swept']}
+            'woken_after_restart': stats['b']['listener_woken'], 'swept_after_restart': stats['b']['listener_swept'],
+            'remembered_after_restart': stats['b']['listener_remembered']}
 
 
 def server_links_udp_lossy(aup, pure, work):
