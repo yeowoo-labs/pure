@@ -10,13 +10,17 @@ reads never wait for a sync. What an app sends is saved with its event and deliv
 batches, and a receiving app applies each message once; sealed to the receiver's key (HPKE, one session a wire,
 authenticated by the sender's key), no relay between them can read or change it, at the speed of unsealed sends.
 People use a node through surfaces it runs, reading its states where they are (Vega's display: a two-node messenger
-shows a line on the other node's screen in about a millisecond). Measurements against axum and drogon on a Raspberry Pi 5
+shows a line on the other node's screen in about a millisecond). Queries are modules too: the app's states with views of
+their own (`aup query`), verified when registered and shown from snapshots. Folds run a leaf of a list at a time and a
+fold in a table's column is answered for every row from one pass over its list, so on pgbench's tables of 100,000
+accounts a group-by, a join and a correlated rank run 3–420x faster than on SQLite, and faster than SQLite given a
+DBA's indexes but for one count, with no index declared. Measurements against axum and drogon on a Raspberry Pi 5
 are in [075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md),
 [080](docs/research/080-snapshot-reads.md), [081](docs/research/081-tail-records.md),
 [082](docs/research/082-json-in-place.md), [083](docs/research/083-delivery-over-http.md),
 [086](docs/research/086-sealed-sends.md), [087](docs/research/087-small-reads-and-idle-memory.md),
-[088](docs/research/088-sealed-sessions.md), [089](docs/research/089-messenger.md) and
-[090](docs/research/090-tables.md); the status table is
+[088](docs/research/088-sealed-sessions.md), [089](docs/research/089-messenger.md),
+[090](docs/research/090-tables.md) and [091](docs/research/091-queries.md); the status table is
 [CHECKPOINT.md](CHECKPOINT.md).
 
 The source follows the principle below, a small core with the rest selected around it
