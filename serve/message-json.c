@@ -46,6 +46,36 @@ static size_t json_number(const unsigned char *p, size_t size, bool *integer) {
 static bool json_double(const unsigned char *text, size_t size, double *value) {
     bool integer;
     if (!size || json_number(text, size, &integer) != size || size > 40) return false;
+    /* Digits m < 2^53 and a power of ten 10^e, |e| <= 22, are exact, so one
+     * multiplication or division rounds m * 10^e correctly (Clinger's fast
+     * path); other numbers go to strtod. */
+    static const double tens[] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
+                                  1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22};
+    const unsigned char *p = text, *end = text + size;
+    bool negative = *p == '-', exact = true;
+    uint64_t m = 0;
+    int exponent = 0;
+    p += negative;
+    for (; p < end && *p >= '0' && *p <= '9'; ++p) {
+        exact = exact && m < UINT64_C(900719925474099);
+        m = m * 10 + (uint64_t)(*p - '0');
+    }
+    if (p < end && *p == '.')
+        for (++p; p < end && *p >= '0' && *p <= '9'; ++p, --exponent) {
+            exact = exact && m < UINT64_C(900719925474099);
+            m = m * 10 + (uint64_t)(*p - '0');
+        }
+    if (p < end) { /* an exponent */
+        bool below = *++p == '-';
+        int e = 0;
+        for (p += *p == '-' || *p == '+'; p < end; ++p) e = e < 1000 ? e * 10 + (*p - '0') : e;
+        exponent += below ? -e : e;
+    }
+    if (exact && exponent >= -22 && exponent <= 22) {
+        double v = exponent < 0 ? (double)m / tens[-exponent] : (double)m * tens[exponent];
+        *value = negative ? -v : v;
+        return true;
+    }
     char digits[48];
     memcpy(digits, text, size);
     digits[size] = 0;

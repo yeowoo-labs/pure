@@ -72,6 +72,35 @@ size_t pure_format_number(double value, char out[32]) {
         out[length] = 0;
         return length;
     }
+    /* The fewest decimals k whose digits, the value * 10^k rounded to the
+     * nearest integer m, read back as the value: %g's digits. m and 10^k are
+     * exact (m < 2^53, k <= 22), so m / 10^k is the correctly rounded value of
+     * those digits, as reading them is; the product's rounding error (fma)
+     * tells the nearest m, and a half between two goes to %g. Else, and for
+     * what %g would write with an exponent, the fewest %g digits that do. */
+    static const double tens[] = {1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11,
+                                  1e12, 1e13, 1e14, 1e15, 1e16};
+    double magnitude = fabs(value);
+    if (magnitude >= 1e-4 && magnitude < 1e15)
+        for (int k = 1; k <= 16; ++k) {
+            double scaled = magnitude * tens[k];
+            if (scaled >= 9007199254740992.0) break;
+            uint64_t m = (uint64_t)scaled;
+            double beyond = (scaled - (double)m) + fma(magnitude, tens[k], -scaled);
+            if (beyond == 0.5) break;
+            m += beyond > 0.5;
+            if ((double)m / tens[k] != magnitude) continue;
+            char digits[24];
+            size_t count = 0, length = 0;
+            do { digits[count++] = (char)('0' + m % 10); m /= 10; } while (m);
+            while (count <= (size_t)k) digits[count++] = '0'; /* a leading zero before the point */
+            if (value < 0) out[length++] = '-';
+            while (count > (size_t)k) out[length++] = digits[--count];
+            out[length++] = '.';
+            while (count) out[length++] = digits[--count];
+            out[length] = 0;
+            return length;
+        }
     for (int precision = 1; precision <= 17; ++precision) {
         snprintf(out, 32, "%.*g", precision, value);
         if (strtod(out, NULL) == value) break;

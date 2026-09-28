@@ -3987,7 +3987,43 @@ static void timers(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view with an effect"));
 }
 
+/* A number is written with the fewest digits that read back as it, the
+ * digits %g gives (with its exponent's leading zeros dropped): the same
+ * text as that search over precisions, for values of every kind. */
+static void number_texts(void) {
+    uint32_t seed = 0x6e756d73u;
+    size_t checked = 0;
+    for (unsigned i = 0; i < 300000; ++i) {
+        double value;
+        uint64_t bits = (uint64_t)next_random(&seed) << 32 | next_random(&seed);
+        switch (i % 5) {
+        case 0: value = (double)((int64_t)(bits % 2000001) - 1000000) / 100.0; break;         /* money */
+        case 1: value = (double)(bits % 20000001) / pow(10, (double)(bits >> 40 & 7)); break; /* decimals */
+        case 2: memcpy(&value, &bits, sizeof(value)); if (!isfinite(value)) value = 0.75; break;
+        case 3: value = (double)(bits % 100000) / 7.0; break;
+        default: value = ldexp((double)(bits >> 11), (int)(bits % 80) - 60); break;
+        }
+        char got[32], want[32];
+        pure_format_number(value, got);
+        if (value == 0) strcpy(want, "0");
+        else if (value == floor(value) && fabs(value) < 1e15) snprintf(want, sizeof(want), "%.0f", value);
+        else {
+            for (int precision = 1; precision <= 17; ++precision) {
+                snprintf(want, sizeof(want), "%.*g", precision, value);
+                if (strtod(want, NULL) == value) break;
+            }
+            char *exponent = strchr(want, 'e');
+            if (exponent)
+                while (exponent[2] == '0' && exponent[3]) memmove(exponent + 2, exponent + 3, strlen(exponent + 2));
+        }
+        CHECK(!strcmp(got, want) && strtod(got, NULL) == value);
+        ++checked;
+    }
+    printf("{\"number_texts\":%zu}\n", checked);
+}
+
 int main(void) {
+    number_texts();
     behaviour();
     faults();
     rejections();
