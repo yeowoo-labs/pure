@@ -1180,6 +1180,107 @@ def server_rows(aup, pure, work):
             'orders_applied': applied, 'orders_refused': refused, 'logged': len(log)}
 
 
+ARGUED = '''
+record Account {
+  aid = 0
+  bid = 0
+  balance = 0
+  owner: text
+}
+state accounts: list of Account by aid
+input open = message {
+  aid: u32
+  bid: u32
+  balance: number
+  owner: text
+}
+on open { accounts.add(Account { aid: open.aid, bid: open.bid, balance: open.balance, owner: open.owner }) }
+
+view balance(aid: u32) = accounts[aid].balance
+view richer(low: number) = count(a in accounts where a.balance > low)
+view hello(name: text, times: u32) = "{name} x{times}"
+view branch(b: u32, over: number) = each a in accounts where a.bid == b && a.balance > over {
+  aid = a.aid
+  share = a.balance / sum(x.balance for x in accounts where x.bid == b)
+  owner = a.owner
+}
+view owned(who: text) = count(a in accounts where a.owner == who)
+'''
+
+
+def server_arguments(aup, pure, work):
+    """Views that take arguments, given as the request's query (values %XX
+    decoded): a keyed lookup, a count above an argument, texts shown back,
+    a table filtered by two arguments whose column folds with one of them,
+    paged; a registered query that takes one. Every answer against a model;
+    an argument missing, unknown or not of its type is 400 invalid."""
+    import http.client
+    import random
+    import urllib.parse
+    source, module = work / 'argued.aup', work / 'argued.pmod'
+    source.write_text(ARGUED)
+    compile_module(aup, source, module)
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'argued-store'])
+
+    def call(method, path, body=None):
+        connection = http.client.HTTPConnection('127.0.0.1', host.port, timeout=30)
+        try:
+            connection.request(method, path, body, {'Content-Type': 'application/json'} if body is not None else {})
+            answer = connection.getresponse()
+            return answer.status, answer.getheader('X-Pure-Error'), answer.read()
+        finally:
+            connection.close()
+
+    rng = random.Random(5)
+    owners = ['김철수', 'bob', 'ann marie', 'a&b=c', '100%']
+    accounts = {}
+    asked = 0
+    try:
+        for aid in range(1, 201):
+            account = (aid % 7, rng.randrange(-500, 5000), rng.choice(owners))
+            accounts[aid] = account
+            body = json.dumps({'aid': aid, 'bid': account[0], 'balance': account[1], 'owner': account[2]}).encode()
+            assert call('POST', '/inputs/open', body)[0] == 200
+        for aid in rng.sample(range(1, 260), 60):
+            status, error, data = call('GET', f'/views/balance?aid={aid}')
+            assert (status, float(data)) == (200, accounts[aid][1]) if aid in accounts else (status, error) == (404, 'no_value')
+            asked += 1
+        for low in [-1000, -1, 0, 0.5, 1000, 2500.25, 6000]:
+            assert float(call('GET', f'/views/richer?low={low}')[2]) == sum(1 for _, b, _ in accounts.values() if b > low)
+            asked += 1
+        for name in ['세계 world', 'a&b=c', '100% sure', '😀']:
+            status, _, data = call('GET', f'/views/hello?name={urllib.parse.quote(name)}&times=3')
+            assert (status, data.decode()) == (200, f'{name} x3')
+            asked += 1
+        for who in owners:
+            data = call('GET', f'/views/owned?who={urllib.parse.quote(who)}')[2]
+            assert float(data) == sum(1 for _, _, o in accounts.values() if o == who)
+            asked += 1
+        for b in range(7):
+            over = rng.choice([-1000, 0, 1500])
+            rows = [(aid, balance, owner) for aid, (bid, balance, owner) in sorted(accounts.items()) if bid == b and balance > over]
+            total = sum(balance for bid, balance, _ in accounts.values() if bid == b)
+            page = json.loads(call('GET', f'/views/branch?b={b}&over={over}&from=2&count=5')[2])
+            assert page['rows'] == len(rows) and page['from'] == min(2, len(rows))
+            assert [(r['aid'], r['share'], r['owner']) for r in page['items']] == \
+                [(aid, balance / total, owner) for aid, balance, owner in rows[2:7]]
+            asked += 1
+        # Arguments missing, unknown, not of their type, or badly escaped.
+        for path in ['/views/balance', '/views/balance?aid=x', '/views/balance?aid=1&zz=2', '/views/balance?aid=-1',
+                     '/views/hello?times=1&name=%zz', '/views/richer?low=1&low=2']:
+            assert call('GET', path)[:2] == (400, 'invalid'), path
+        assert call('GET', '/views/branch?b=1&from=x')[:2] == (400, 'query')
+        # A registered query takes arguments as a view does.
+        (work / 'top.aup').write_text('view top(k: u32) = each a in accounts where a.aid <= k {\n  aid = a.aid\n}\n')
+        run(aup, 'query', source, work / 'top.aup', '-o', work / 'top.pmod')
+        assert call('PUT', '/queries/top', (work / 'top.pmod').read_bytes())[0] == 200
+        assert [r['aid'] for r in json.loads(call('GET', '/queries/top?k=4')[2])['items']] == [1, 2, 3, 4]
+        assert call('GET', '/queries/top')[:2] == (400, 'invalid')
+    finally:
+        host.stop()
+    return {'accounts': len(accounts), 'asked': asked}
+
+
 def server_queries(aup, pure, work):
     """Queries as verified programs over a snapshot (PUT and GET /queries/NAME):
     aup query compiles a bank's declarations with views of its own; the node
@@ -1766,6 +1867,7 @@ def main():
         report['server_surface'] = server_surface(aup, pure, work)
         report['server_queries'] = server_queries(aup, pure, work)
         report['server_rows'] = server_rows(aup, pure, work)
+        report['server_arguments'] = server_arguments(aup, pure, work)
         report['server_answers'] = server_answers(aup, pure, work)
     print(json.dumps(report))
 

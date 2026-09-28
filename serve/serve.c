@@ -70,7 +70,9 @@ typedef struct Host Host;
  * an input. Kept per work slot, so an accepted event runs even if its
  * connection is gone before the burst. */
 typedef enum { ROUTE_NONE, ROUTE_OBJECT, ROUTE_VIEW, ROUTE_INPUT, ROUTE_QUERY } RouteKind;
-typedef struct { RouteKind kind; uint32_t target; size_t from, count; } Route;
+/* A view's (or a query's) arguments come as the request's query: argued
+ * says so, and given is its text, kept on the request's work slot. */
+typedef struct { RouteKind kind; uint32_t target; size_t from, count; bool argued; const char *given; } Route;
 
 /* This node's key, for deliveries sealed to it (--key), and whether it
  * takes only those (--sealed-only), or only those from the senders named,
@@ -223,6 +225,7 @@ struct Host {
     size_t views_capacity;
     uint64_t shown; /* views shown from snapshots */
     Route *routes;  /* by work slot */
+    struct Given { char *text; size_t capacity; } *given; /* a view's arguments as asked, by work slot */
     PureRuntime runtime;
     PureWork *work;
     Connection **table;   /* open connections by index */
@@ -620,9 +623,10 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
             uint64_t n;
             if (!value || (end && value > end)) return "query";
             *value++ = 0;
-            bool from = !strcmp(pair, "from");
-            if (!number(value, SIZE_MAX, &n) || (!from && strcmp(pair, "count"))) return "query";
-            if (from) route->from = (size_t)n;
+            bool from = !strcmp(pair, "from"), paging = from || !strcmp(pair, "count");
+            if (paging && !number(value, SIZE_MAX, &n)) return "query";
+            if (!paging) route->argued = true; /* the query's view reads it, if it takes arguments */
+            else if (from) route->from = (size_t)n;
             else route->count = (size_t)n;
             pair = end ? end + 1 : NULL;
         }
@@ -631,7 +635,8 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
     int found = route->kind == ROUTE_VIEW ? pure_module_view(m, c->key) : pure_module_input(m, c->key);
     /* An output is the app's to send and a timer ticks by itself: neither is posted. */
     if (found >= 0 && route->kind == ROUTE_INPUT &&
-        (m->input[found].kind == PURE_KIND_OUTPUT || m->input[found].kind == PURE_KIND_TIMER)) found = -1;
+        (m->input[found].kind == PURE_KIND_OUTPUT || m->input[found].kind == PURE_KIND_TIMER ||
+         m->input[found].kind == PURE_KIND_ARGUMENTS)) found = -1;
     if (found < 0) return route->kind == ROUTE_VIEW ? "no_view" : "no_input";
     *status = 400;
     route->target = (uint32_t)found;
@@ -665,10 +670,10 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
         *value++ = 0;
         if (route->kind == ROUTE_VIEW) {
             uint64_t n;
-            bool from = !strcmp(pair, "from");
-            if (!number(value, SIZE_MAX, &n) || m->view_type[found] != PURE_VIEW_TABLE || (!from && strcmp(pair, "count")))
-                return "query";
-            if (from) route->from = (size_t)n;
+            bool from = !strcmp(pair, "from"), paging = from || !strcmp(pair, "count");
+            if (!paging && m->view_arguments[found]) route->argued = true; /* an argument, read when shown */
+            else if (!number(value, SIZE_MAX, &n) || m->view_type[found] != PURE_VIEW_TABLE || !paging) return "query";
+            else if (from) route->from = (size_t)n;
             else route->count = (size_t)n;
         } else {
             uint32_t f = 0;
@@ -818,6 +823,10 @@ static void start_request(Connection *c, size_t head_size) {
     memmove(c->in, c->in + head_size, extra);
     c->in_used = extra;
     if (!parse_head(c, head, head_size, &query)) { refuse(c, 400, "Bad Request", "request"); return; }
+    /* The query as it came: resolving takes it apart, and a view's arguments are read from it when shown. */
+    char raw[HEADER_LIMIT];
+    size_t raw_size = query ? strlen(query) : 0;
+    if (raw_size) memcpy(raw, query, raw_size + 1);
     /* A node that keeps its deliveries sealed refuses the others, and one
      * that names its senders refuses any other sender; a seal needs this
      * node's key, and binds the delivery's source, number and count. */
@@ -852,6 +861,17 @@ static void start_request(Connection *c, size_t head_size) {
         return;
     }
     host->by_slot[c->ticket.slot] = c;
+    if (route.argued) {
+        struct Given *given = &host->given[c->ticket.slot];
+        if (given->capacity <= raw_size) {
+            char *grown = realloc(given->text, raw_size + 1);
+            if (!grown) abort();
+            given->text = grown;
+            given->capacity = raw_size + 1;
+        }
+        memcpy(given->text, raw, raw_size + 1);
+        route.given = given->text;
+    }
     host->routes[c->ticket.slot] = route;
     if (!write) { c->phase = WAITING; return; }
     unsigned char *ingress = c->ingress = pure_runtime_ingress(c->ticket, NULL); /* NULL for no bytes */
@@ -1068,7 +1088,89 @@ static void put_number(Output *o, double value) {
 /* A view's value: a number in Pure's shortest form or a text, as text; a
  * table as {"rows":N,"from":F,"items":[{column: value}...]} for the rows
  * asked, each cell computed only for them (a cell without a value is null). */
+static int hex_value(char c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+/* %XX decoded in place (never longer): the length after, or -1 for a bad escape. */
+static long percent_decoded(char *text, size_t length) {
+    size_t o = 0;
+    for (size_t i = 0; i < length; ++i) {
+        if (text[i] != '%') { text[o++] = text[i]; continue; }
+        int high = i + 2 < length ? hex_value(text[i + 1]) : -1, low = high >= 0 ? hex_value(text[i + 2]) : -1;
+        if (low < 0) return -1;
+        text[o++] = (char)(high << 4 | low);
+        i += 2;
+    }
+    return (long)o;
+}
+
+/* A view's arguments from a query's name=value pairs (values %XX decoded;
+ * from and count page a table): a payload of their input's shape, the
+ * fixed fields in its prefix, the texts and bytes after it in order, each's
+ * length in the prefix but the last's. NULL for a pair naming no field or
+ * given twice, a fixed field missing or not of its type, or no memory. */
+static unsigned char *arguments_payload(const PureModule *m, int input, const char *given, size_t *size) {
+    const PureInputShape *shape = &m->input[input];
+    size_t length = given ? strlen(given) : 0;
+    char *copy = malloc(length + 1);
+    unsigned char *payload = malloc(shape->prefix + length + 1);
+    const char *values[PURE_MODULE_FIELDS] = {0};
+    long lengths[PURE_MODULE_FIELDS] = {0};
+    bool ok = copy && payload;
+    if (ok) {
+        memcpy(copy, given ? given : "", length + 1);
+        memset(payload, 0, shape->prefix);
+    }
+    for (char *pair = copy; ok && pair && *pair;) {
+        char *end = strchr(pair, '&'), *value = strchr(pair, '=');
+        if (end) *end = 0;
+        if (!value || (end && value > end)) { ok = false; break; }
+        *value++ = 0;
+        uint32_t f = 0;
+        while (f < shape->field_count && strcmp(m->field[shape->field_start + f].name, pair)) ++f;
+        if (f == shape->field_count) ok = !strcmp(pair, "from") || !strcmp(pair, "count");
+        else if (values[f]) ok = false;
+        else if ((lengths[f] = percent_decoded(value, strlen(value))) < 0) ok = false;
+        else values[f] = value;
+        pair = end ? end + 1 : NULL;
+    }
+    size_t at = shape->prefix;
+    for (uint32_t f = 0; ok && f < shape->field_count; ++f) {
+        const PureField *field = &m->field[shape->field_start + f];
+        if (field->type == PURE_FIELD_U32 || field->type == PURE_FIELD_NUMBER) {
+            ok = values[f] && pure_json_fixed(field, (const unsigned char *)values[f], (size_t)lengths[f], payload);
+            continue;
+        }
+        if (field->offset != PURE_FIELD_REST) put_u32(payload + field->offset, (uint32_t)lengths[f]);
+        if (lengths[f]) memcpy(payload + at, values[f], (size_t)lengths[f]);
+        at += (size_t)lengths[f];
+    }
+    free(copy);
+    if (!ok) {
+        free(payload);
+        return NULL;
+    }
+    *size = at;
+    return payload;
+}
+
+static PureResult show_given(PureApp *app, const Route *route, size_t available, Applied *answer);
+
+/* A view shown with its arguments, when it takes some (they are the request's to give). */
 static PureResult show_view(PureApp *app, const Route *route, size_t available, Applied *answer) {
+    int input = pure_module_arguments(app->module, route->target);
+    if (input < 0) return route->argued ? PURE_INVALID : show_given(app, route, available, answer);
+    size_t size;
+    unsigned char *payload = arguments_payload(app->module, input, route->given, &size);
+    if (!payload) return PURE_INVALID;
+    PureResult given = pure_app_arguments(app, route->target, (PureSpan){payload, size}, NULL);
+    PureResult status = given == PURE_OK ? show_given(app, route, available, answer) : PURE_INVALID;
+    free(payload);
+    return status;
+}
+
+static PureResult show_given(PureApp *app, const Route *route, size_t available, Applied *answer) {
     const PureModule *m = app->module;
     uint32_t view = route->target;
     PureResource *out = &answer->resource;
@@ -1952,7 +2054,8 @@ static bool start_shard(Host *host, const PureModule *module, bool documents, ui
     host->by_slot = calloc(host->capacity, sizeof(*host->by_slot));
     host->jobs = calloc(host->capacity, sizeof(*host->jobs));
     host->routes = calloc(host->capacity, sizeof(*host->routes));
-    if (!host->work || !host->table || !host->by_slot || !host->jobs || !host->routes) {
+    host->given = calloc(host->capacity, sizeof(*host->given));
+    if (!host->work || !host->table || !host->by_slot || !host->jobs || !host->routes || !host->given) {
         fputs("Cannot allocate connections\n", stderr);
         return false;
     }
@@ -2058,6 +2161,8 @@ static void stop_shard(Host *host) {
     free(host->by_slot);
     free(host->jobs);
     free(host->routes);
+    for (size_t i = 0; host->given && i < host->capacity; ++i) free(host->given[i].text);
+    free(host->given);
     free(host->done);
     free(host->answering);
     free(host->views);
