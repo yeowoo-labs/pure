@@ -428,6 +428,9 @@ void pure_app_trim(PureApp *, uint32_t output, uint64_t through);
  * save fails. placed is as for pure_app_message_fields, or NULL. */
 PureResult pure_app_deliver(PureApp *, uint32_t input, const char *source, uint64_t seq, PureSpan payload,
                             const uint32_t *placed);
+/* The last number heard from source (0 when none): a host that gets
+ * numbered messages out of order hands them over from the one after it. */
+uint64_t pure_app_heard(const PureApp *, const char *source);
 
 /* Readers on other threads. Right after a save an app can make a snapshot of
  * its saved states, for evaluating views anywhere while it keeps applying

@@ -2922,6 +2922,12 @@ PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, ui
     return saved == PURE_OK ? result : saved;
 }
 
+uint64_t pure_app_heard(const PureApp *app, const char *source) {
+    for (unsigned i = 0; i < app->heard_count; ++i)
+        if (!strcmp(app->heard[i].source, source)) return app->heard[i].seq;
+    return 0;
+}
+
 PureResult pure_app_reply(const PureApp *app, bool (*visit)(void *, PureSpan), void *context) {
     if (!app->has_reply) return PURE_OK;
     return visit_value(app, &app->arena, app->reply, visit, context);

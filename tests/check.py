@@ -20,7 +20,10 @@ tests are core/test-module.c and store/test-tree-store.c.
 6. Links: sends are saved with their event and delivered in order and in
    batches to another app, which applies each once, across kill -9 of either
    side; webhooks receive them over HTTPS only from a trusted receiver; an
-   API's answers become the app's events (--reply).
+   API's answers become the app's events (--reply). Linked without a
+   connection (pure://, UDP, docs/design/011), the same holds across kill -9
+   of either side or both with no handshake, also with the link's packets
+   delayed, lost and reordered (netem, in a namespace of its own).
 7. Sealed sends: sealed to the receiver's key, they pass a relay unread and
    unchanged (a changed byte is refused, a replay applies nothing), and a
    node that keeps its deliveries sealed refuses unsealed ones.
@@ -766,6 +769,161 @@ def server_links(aup, pure, work):
             stats[name] = [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
     return {'orders': sent, 'acknowledged_total': sum(acknowledged), 'delivered_after_restart': stats['a']['delivered'],
             'attempts_after_restart': stats['a']['delivery_attempts']}
+
+
+def server_links_udp(aup, pure, work, netem=None):
+    """The same two apps linked without a connection (--send
+    OUTPUT=pure://host:port/INPUT to the receiver's --link-port, sealed with
+    the two nodes' keys, docs/design/011-pure-transport.md). While four
+    clients buy from the sender, the receiver, then the sender, then both
+    are killed (-9) and started again on their stores: neither side makes a
+    handshake, and in the end the receiver has applied every order the
+    sender saved exactly once, the refused order (count 150) did not hold
+    back the one after it, and every acknowledged order is among the saved
+    ones. With netem (in a network namespace of its own), the loopback
+    delays, loses and reorders packets meanwhile."""
+    import select
+    import signal
+    import socket
+    import threading
+    import time
+    sender_module, receiver_module = work / 'udp-sender.pmod', work / 'udp-receiver.pmod'
+    for module, text in ((sender_module, LINK_SENDER), (receiver_module, LINK_RECEIVER)):
+        source = module.with_suffix('.aup')
+        source.write_text(text)
+        compile_module(aup, source, module)
+
+    def free_port(kind=socket.SOCK_STREAM):
+        with socket.socket(socket.AF_INET, kind) as probe:
+            probe.bind(('127.0.0.1', 0))
+            return probe.getsockname()[1]
+
+    def start(args, port):
+        process = subprocess.Popen([str(a) for a in args] + ['--port', str(port)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        line = process.stdout.readline() if ready else b''
+        assert line, f'host did not start: {process.stderr.read(2000) if process.poll() is not None else ""}'
+        return process, json.loads(line)
+
+    def post(port, path, body):
+        import http.client
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+        try:
+            data = json.dumps(body).encode()
+            connection.request('POST', path, data, {'Content-Length': str(len(data)), 'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            response.read()
+            return response.status
+        finally:
+            connection.close()
+
+    def number(port, view):
+        return int(http(port, 'GET', f'/views/{view}')[3])
+
+    tag = 'udp-lossy' if netem else 'udp'
+    keys = {}
+    for name in ('sender', 'receiver'):  # each node's key, made by the node itself
+        process, info = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / f'{tag}-key',
+                               '--key', work / f'{tag}-{name}.key'], 0)
+        keys[name] = info['public_key']
+        process.terminate()
+        process.communicate(timeout=30)
+    port_a, port_b, link_port = free_port(), free_port(), free_port(socket.SOCK_DGRAM)
+    receiver = [pure / 'build/pure-serve', '--module', receiver_module, '--store', work / f'{tag}-b', '--threads', '2',
+                '--key', work / f'{tag}-receiver.key', '--link-port', link_port,
+                '--sender', f'udp-sender.ordered={keys["sender"]}']
+    sender = [pure / 'build/pure-serve', '--module', sender_module, '--store', work / f'{tag}-a',
+              '--key', work / f'{tag}-sender.key', '--send', f'ordered=pure://127.0.0.1:{link_port}/order',
+              '--seal', f'ordered={keys["receiver"]}']
+    hosts = {'b': start(receiver, port_b)[0], 'a': start(sender, port_a)[0]}
+    acknowledged = [0] * 4
+    stop = threading.Event()
+
+    def client(which):
+        rng = random.Random(which + 9900)
+        while not stop.is_set():
+            count = rng.randint(1, 20)
+            try:
+                status = post(port_a, '/inputs/buy', {'item': f'c{which}', 'count': count})
+            except OSError:
+                time.sleep(0.02)
+                continue
+            if status == 200:
+                acknowledged[which] += count
+            else:
+                time.sleep(0.02)
+
+    clients = [threading.Thread(target=client, args=(n,)) for n in range(len(acknowledged))]
+    for thread in clients:
+        thread.start()
+    try:
+        for names in (('b',), ('a',), ('a', 'b')):
+            time.sleep(0.6)
+            for name in names:
+                hosts[name].send_signal(signal.SIGKILL)
+                hosts[name].wait()
+            time.sleep(0.3)
+            for name in names:
+                hosts[name] = start(receiver if name == 'b' else sender, port_b if name == 'b' else port_a)[0]
+        time.sleep(0.6)
+    finally:
+        stop.set()
+        for thread in clients:
+            thread.join()
+    try:
+        assert post(port_a, '/inputs/buy', {'item': 'big', 'count': 150}) == 200
+        assert post(port_a, '/inputs/buy', {'item': 'after', 'count': 7}) == 200
+        deadline = time.time() + 60
+        while True:
+            sent, sent_total = number(port_a, 'sent'), number(port_a, 'sent_total')
+            count, total = number(port_b, 'count'), number(port_b, 'total')
+            if (count, total) == (sent - 1, sent_total - 150) or time.time() > deadline:
+                break
+            time.sleep(0.1)
+        assert (count, total) == (sent - 1, sent_total - 150), (count, total, sent, sent_total)
+        assert sent_total >= sum(acknowledged) + 157 and sum(acknowledged) > 0, (sent_total, acknowledged)
+    finally:
+        stats = {}
+        for name, process in hosts.items():
+            process.terminate()
+            _, error = process.communicate(timeout=30)
+            assert process.returncode == 0, error[-1000:]
+            stats[name] = [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
+    return {'orders': sent, 'acknowledged_total': sum(acknowledged),
+            'packets_after_restart': stats['a']['link_packets'], 'resent_after_restart': stats['a']['link_resent'],
+            'lost_after_restart': stats['a']['link_lost'], 'received_after_restart': stats['b']['listener_received']}
+
+
+def server_links_udp_lossy(aup, pure, work):
+    """server_links_udp in a network namespace of its own (unshare -rn, no
+    privileges), its loopback delaying (5 ms, 2 ms jitter), losing (3 %) and
+    reordering (10 %) the link's packets (UDP; the clients' HTTP goes
+    straight). None where there is no unshare or tc."""
+    import shutil
+    unshare = shutil.which('unshare')
+    tc = shutil.which('tc') or next((path for path in ('/usr/sbin/tc', '/sbin/tc') if Path(path).exists()), None)
+    ip = shutil.which('ip') or next((path for path in ('/usr/sbin/ip', '/sbin/ip', '/bin/ip') if Path(path).exists()), None)
+    if not unshare or not tc or not ip or subprocess.run([unshare, '-rn', 'true'], capture_output=True).returncode:
+        return None
+    script = f"""
+import json, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, {str(HERE)!r})
+import check
+subprocess.run([{ip!r}, 'link', 'set', 'lo', 'up'], check=True)
+# UDP alone through netem (the clients' HTTP stays quick): a prio qdisc, its third band netem, a filter
+for rule in (['qdisc', 'add', 'dev', 'lo', 'root', 'handle', '1:', 'prio'],
+             ['qdisc', 'add', 'dev', 'lo', 'parent', '1:3', 'handle', '30:', 'netem', 'delay', '5ms', '2ms',
+              'loss', '3%', 'reorder', '10%'],
+             ['filter', 'add', 'dev', 'lo', 'protocol', 'ip', 'parent', '1:0', 'prio', '3', 'u32', 'match', 'ip',
+              'protocol', '17', '0xff', 'flowid', '1:3']):
+    subprocess.run([{tc!r}] + rule, check=True)
+print(json.dumps(check.server_links_udp(Path({str(aup)!r}), Path({str(pure)!r}), Path({str(work)!r}), netem=True)))
+"""
+    done = subprocess.run([unshare, '-rn', sys.executable, '-c', script], capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stderr[-3000:]
+    return json.loads(done.stdout.strip().splitlines()[-1])
 
 
 def server_sealed(aup, pure, work):
@@ -1865,6 +2023,8 @@ def main():
         report['server_json_requests'] = server_json(aup, pure, work)
         report['server_timer_beats'] = server_timers(aup, pure, work)
         report['server_links'] = server_links(aup, pure, work)
+        report['server_links_udp'] = server_links_udp(aup, pure, work)
+        report['server_links_udp_lossy'] = server_links_udp_lossy(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)
         report['server_sealed'] = server_sealed(aup, pure, work)
         report['server_surface'] = server_surface(aup, pure, work)

@@ -30,6 +30,7 @@
  * threads hand it their ready requests and answer what it hands back. Its
  * bursts take the requests of every thread, one save each. */
 #include "deliver.h"
+#include "link.h"
 #include "seal.h"
 #include "surface.h"
 #include "message-json.h"
@@ -161,6 +162,9 @@ typedef struct {
     RouteKind route;
     PureFault fault;  /* a failed event's */
     const char *type; /* a view's content type */
+    struct LinkJob *link; /* records a link delivered (serve/link.h) */
+    uint64_t heard;       /* then the source's last number heard after them */
+    bool gap;             /* and whether they stopped at a gap */
 } Applied;
 
 /* The app and its store. A connection thread runs it itself (an app of
@@ -193,6 +197,10 @@ typedef struct {
     unsigned wire_count;
     uint64_t trimmed[PURE_MODULE_INPUTS], answers;
     bool held[PURE_MODULE_INPUTS]; /* an answer failed to apply: the wire's sends stay until a restart */
+    /* The owner's: outputs linked to Pure receivers (pure://), and how far each was trimmed. */
+    PureLink *links[PURE_MODULE_INPUTS];
+    unsigned link_count;
+    uint64_t link_trimmed[PURE_MODULE_INPUTS];
     struct Writer *writer; /* the thread writing the app's checkpoints, once one was due */
     uint64_t checkpoints;  /* images it wrote */
 } Executor;
@@ -280,7 +288,8 @@ static void stop_writer(Executor *ex) {
 
 /* A request made ready: its effect, what it names, and the thread that
  * answers it (or, for a surface's event, the waiter it wakes). */
-typedef struct { Host *host; PureEffect effect; Route route; Waiter *waiter; } Job;
+typedef struct LinkJob { PureLinkListener *listener; void *token; unsigned char *ingress; } LinkJob;
+typedef struct { Host *host; PureEffect effect; Route route; Waiter *waiter; LinkJob *link; } Job;
 
 /* The owner of an app with states served by several connection threads:
  * their requests wait here, and it runs them in bursts, one save each
@@ -788,6 +797,10 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
  * bytes before the tables; then a table for each message, a prefix for each
  * and the JSON. */
 #define DELIVERED (UINT32_C(1) << 30)
+/* With DELIVERED: the batch's messages are records a link delivered, each
+ * as stored (u32le size, then its bytes), applied in order from the one
+ * after the source's last heard number, stopping at a gap. */
+#define STORED_RECORDS (UINT32_C(1) << 29)
 enum { DELIVERY = 80 };
 /* An app input's JSON body becomes its message: an object with a member for
  * each field the query did not give (a u32, a number, or a string for bytes
@@ -1337,6 +1350,31 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
     const PureInputShape *shape = &app->module->input[route->target];
     uint32_t header = get_u32(effect->value.data);
     const unsigned char *delivery = effect->value.data + 4;
+    if (header & STORED_RECORDS) {
+        char source[PURE_SOURCE + 1];
+        memcpy(source, delivery + 13, delivery[12]);
+        source[delivery[12]] = 0;
+        uint64_t first = get_u64(delivery), heard = pure_app_heard(app, source);
+        unsigned count = get_u32(delivery + 8);
+        const unsigned char *at = effect->value.data + 4 + DELIVERY;
+        out->gap = false;
+        for (unsigned i = 0; i < count; ++i) {
+            uint32_t size = get_u32(at);
+            PureSpan record = {at + 4, size};
+            at += 4 + size;
+            if (first + i <= heard) continue;
+            if (first + i > heard + 1) { /* one before it is missing: the sender sends from there again */
+                out->gap = true;
+                break;
+            }
+            PureResult status = pure_app_deliver(app, route->target, source, first + i, record, NULL);
+            if (status != PURE_OK && app->fault == PURE_FAULT_NONE) break; /* not applied: sent again */
+            heard = first + i;
+        }
+        out->heard = pure_app_heard(app, source);
+        out->fault = PURE_FAULT_NONE;
+        return PURE_OK; /* the save says whether they are stored */
+    }
     unsigned batch = header & DELIVERED ? get_u32(delivery + 8) : 1;
     size_t lead = 4 + (header & DELIVERED ? DELIVERY : 0), table = header & PLACED ? 8 * (size_t)shape->field_count : 0;
     PureSpan payload = {effect->value.data + lead + batch * table, header & ~(PLACED | DELIVERED)};
@@ -1379,7 +1417,7 @@ static void apply_effect(Executor *ex, const Job *job, Applied *out) {
     PureApp *app = &ex->app;
     const PureEffect *effect = &job->effect;
     *out = (Applied){.host = job->host, .waiter = job->waiter, .ticket = effect->ticket, .input = effect->input,
-                     .route = job->route.kind};
+                     .route = job->route.kind, .link = job->link};
     memcpy(out->key, effect->key, strlen(effect->key) + 1);
     if (job->route.kind == ROUTE_VIEW) {
         out->status = show_view(app, &job->route, effect->available, out);
@@ -1459,15 +1497,24 @@ static void publish(Executor *ex) {
  * outbox is looked at newest first, only as far back as the new sends go,
  * however many older ones wait for their receivers. */
 typedef struct { uint32_t wire; uint64_t seq; PureSpan payload; } Fresh;
-typedef struct { Executor *executor; Fresh *fresh; size_t count, capacity; unsigned done; bool failed; } Queueing;
+typedef struct { Executor *executor; Fresh *fresh; size_t count, capacity; uint64_t done; bool failed; } Queueing;
+
+/* An output's outlet: its wires first, then its links. */
+static uint32_t outlet_output(Executor *ex, unsigned i) {
+    return i < ex->wire_count ? pure_wire_output(ex->wires[i]) : pure_link_output(ex->links[i - ex->wire_count]);
+}
+static uint64_t outlet_queued(Executor *ex, unsigned i) {
+    return i < ex->wire_count ? pure_wire_queued(ex->wires[i]) : pure_link_queued(ex->links[i - ex->wire_count]);
+}
 
 static bool find_fresh(void *context, uint32_t output, uint64_t seq, PureSpan payload) {
     Queueing *q = context;
     Executor *ex = q->executor;
-    for (unsigned i = 0; i < ex->wire_count; ++i) {
-        if (pure_wire_output(ex->wires[i]) != output || (q->done >> i & 1)) continue;
-        if (seq <= pure_wire_queued(ex->wires[i])) {
-            q->done |= 1u << i; /* older ones were queued before */
+    unsigned outlets = ex->wire_count + ex->link_count;
+    for (unsigned i = 0; i < outlets; ++i) {
+        if (outlet_output(ex, i) != output || (q->done >> i & 1)) continue;
+        if (seq <= outlet_queued(ex, i)) {
+            q->done |= UINT64_C(1) << i; /* older ones were queued before */
             break;
         }
         if (q->count == q->capacity) {
@@ -1480,19 +1527,21 @@ static bool find_fresh(void *context, uint32_t output, uint64_t seq, PureSpan pa
         q->fresh[q->count++] = (Fresh){i, seq, payload};
         break;
     }
-    return q->done != (ex->wire_count >= 32 ? UINT32_MAX : (1u << ex->wire_count) - 1);
+    return q->done != (outlets >= 64 ? UINT64_MAX : (UINT64_C(1) << outlets) - 1);
 }
 
 static void after_save(Executor *ex) {
     publish(ex);
     checkpoint_round(ex);
-    if (!ex->wire_count) return;
+    if (!ex->wire_count && !ex->link_count) return;
     Queueing q = {.executor = ex};
     pure_app_outbox_newest(&ex->app, find_fresh, &q);
-    bool blocked[PURE_MODULE_INPUTS] = {false};
+    bool blocked[2 * PURE_MODULE_INPUTS] = {false};
     for (size_t k = q.failed ? 0 : q.count; k-- > 0;) {
         const Fresh *f = &q.fresh[k];
-        if (!blocked[f->wire]) blocked[f->wire] = !pure_wire_queue(ex->wires[f->wire], f->seq, f->payload);
+        if (blocked[f->wire]) continue;
+        blocked[f->wire] = f->wire < ex->wire_count ? !pure_wire_queue(ex->wires[f->wire], f->seq, f->payload)
+                                                    : !pure_link_queue(ex->links[f->wire - ex->wire_count], f->seq, f->payload);
     }
     free(q.fresh);
 }
@@ -1521,6 +1570,12 @@ static bool take_deliveries(Executor *ex) {
         if (delivered <= ex->trimmed[i] || ex->held[i]) continue;
         pure_app_trim(&ex->app, pure_wire_output(ex->wires[i]), delivered);
         ex->trimmed[i] = delivered;
+    }
+    for (unsigned i = 0; i < ex->link_count; ++i) {
+        uint64_t stored = pure_link_delivered(ex->links[i]);
+        if (stored <= ex->link_trimmed[i]) continue;
+        pure_app_trim(&ex->app, pure_link_output(ex->links[i]), stored);
+        ex->link_trimmed[i] = stored;
     }
     return answered;
 }
@@ -1643,11 +1698,18 @@ static void hand_back(void *context, Applied *applied, size_t count) {
     Owner *owner = context;
     PureSurfaceHost *surface = owner->executor.surface;
     bool events = false;
-    for (size_t i = 0; i < count; ++i) events = events || !applied[i].host;
+    for (size_t i = 0; i < count; ++i) {
+        events = events || applied[i].waiter;
+        LinkJob *link = applied[i].link;
+        if (!link) continue; /* records a link delivered: stored now, or not */
+        pure_link_done(link->listener, link->token, applied[i].heard, applied[i].status == PURE_OK, applied[i].gap);
+        free(link->ingress);
+        free(link);
+    }
     if (events) { /* a surface's: its waiter wakes */
         pthread_mutex_lock(&surface->lock);
         for (size_t i = 0; i < count; ++i)
-            if (!applied[i].host) applied[i].waiter->status = applied[i].status, applied[i].waiter->done = true;
+            if (applied[i].waiter) applied[i].waiter->status = applied[i].status, applied[i].waiter->done = true;
         pthread_cond_broadcast(&surface->applied);
         pthread_mutex_unlock(&surface->lock);
     }
@@ -1802,7 +1864,7 @@ static void serve_bursts(Host *host) {
         size_t count = 0;
         PureEffect effect;
         while (pure_runtime_take(&host->runtime, &effect) == PURE_TAKE_EFFECT)
-            host->jobs[count++] = (Job){host, effect, host->routes[effect.ticket.slot], NULL};
+            host->jobs[count++] = (Job){host, effect, host->routes[effect.ticket.slot], NULL, NULL};
         if (!count) return;
         if (!host->owner) {
             execute(&host->local, host->jobs, count, answer_burst, NULL);
@@ -2269,6 +2331,44 @@ static void stop_shard(Host *host) {
     free(host->views);
 }
 
+/* Records a link delivered, queued at the owner as a request is: applied
+ * with the next burst and done (pure_link_done) once its save is over. */
+static PureLinkListener *link_listener;
+static bool link_deliver(void *context, const PureLinkDelivery *d) {
+    Owner *owner = context;
+    size_t size = 4 + DELIVERY + d->size, length = strlen(d->source);
+    unsigned char *ingress = malloc(size);
+    LinkJob *link = malloc(sizeof(*link));
+    if (!ingress || !link || d->size > (STORED_RECORDS - 1) || length > PURE_SOURCE) {
+        free(ingress);
+        free(link);
+        return false;
+    }
+    memset(ingress, 0, 4 + DELIVERY);
+    put_u32(ingress, (uint32_t)d->size | DELIVERED | STORED_RECORDS);
+    put_u64(ingress + 4, d->first);
+    put_u32(ingress + 12, d->count);
+    ingress[16] = (unsigned char)length;
+    memcpy(ingress + 17, d->source, length);
+    memcpy(ingress + 4 + DELIVERY, d->records, d->size);
+    *link = (LinkJob){link_listener, d->token, ingress};
+    Job job = {.route = {.kind = ROUTE_INPUT, .target = d->input}, .link = link,
+               .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {ingress, size}}};
+    pthread_mutex_lock(&owner->lock);
+    bool queued = !owner->stopping && grow(&owner->jobs, &owner->capacity, owner->count + 1, sizeof(*owner->jobs));
+    if (queued) {
+        owner->jobs[owner->count++] = job;
+        ++owner->arrivals;
+        pthread_cond_signal(&owner->waiting);
+    }
+    pthread_mutex_unlock(&owner->lock);
+    if (!queued) {
+        free(ingress);
+        free(link);
+    }
+    return queued;
+}
+
 /* A wire delivered a send: the owner trims it. */
 static void wire_delivered(void *context) {
     Owner *owner = context;
@@ -2279,6 +2379,7 @@ static void wire_delivered(void *context) {
 }
 
 /* --send OUTPUT=URL: that output's saved sends go to url, from NAME.OUTPUT. */
+static unsigned char own_public[PURE_SEAL_KEY]; /* this node's key's public half, when it has one */
 static bool open_wires(Executor *ex, const PureModule *m, const char *const *sends, unsigned count, const char *name) {
     for (unsigned i = 0; i < count; ++i) {
         const char *equals = strchr(sends[i], '=');
@@ -2291,6 +2392,17 @@ static bool open_wires(Executor *ex, const PureModule *m, const char *const *sen
         memcpy(output, sends[i], length);
         output[length] = 0;
         int written = snprintf(source, sizeof(source), "%s.%s", name, output);
+        if (!strncmp(equals + 1, "pure://", 7)) { /* a link: no connection, sealed with the node's key */
+            PureLink *link = written > 0 && written <= PURE_SOURCE
+                                 ? pure_link_open(m, output, equals + 1, source, seal_key, own_public, error, sizeof(error))
+                                 : NULL;
+            if (!link) {
+                fprintf(stderr, "--send %s: %s\n", sends[i], written > PURE_SOURCE ? "the name and output are longer than 64 bytes" : error);
+                return false;
+            }
+            ex->links[ex->link_count++] = link;
+            continue;
+        }
         PureWire *wire = written > 0 && written <= PURE_SOURCE ? pure_wire_open(m, output, equals + 1, source, error, sizeof(error)) : NULL;
         if (!wire) {
             fprintf(stderr, "--send %s: %s\n", sends[i], written > PURE_SOURCE ? "the name and output are longer than 64 bytes" : error);
@@ -2309,7 +2421,7 @@ static bool open_wires(Executor *ex, const PureModule *m, const char *const *sen
 
 /* --seal OUTPUT=KEY: that output's sends sealed to the receiver's public key (hex). */
 static bool wire_seals(Executor *ex, const PureModule *m, const char *const *seals, unsigned count,
-                       const unsigned char *own_public) {
+                       const unsigned char *own_key) {
     char error[512];
     if (count && !pure_seal_ready(error, sizeof(error))) {
         fprintf(stderr, "--seal: %s\n", error);
@@ -2321,17 +2433,24 @@ static bool wire_seals(Executor *ex, const PureModule *m, const char *const *sea
         char output[PURE_MODULE_NAME];
         size_t length = equals ? (size_t)(equals - seals[i]) : 0;
         PureWire *wire = NULL;
+        PureLink *link = NULL;
         if (length && length < sizeof(output)) {
             memcpy(output, seals[i], length);
             output[length] = 0;
             for (unsigned k = 0; k < ex->wire_count; ++k)
                 if (!strcmp(m->input_names[pure_wire_output(ex->wires[k])], output)) wire = ex->wires[k];
+            for (unsigned k = 0; k < ex->link_count; ++k)
+                if (!strcmp(m->input_names[pure_link_output(ex->links[k])], output)) link = ex->links[k];
+        }
+        if (link && pure_seal_peer(equals + 1, peer)) { /* the link's receiver */
+            pure_link_peer(link, peer);
+            continue;
         }
         if (!wire || !pure_seal_peer(equals + 1, peer)) {
             fprintf(stderr, "--seal takes OUTPUT=KEY for an output given to --send, the key as 64 hex digits: %s\n", seals[i]);
             return false;
         }
-        pure_wire_seal(wire, peer, seal_key, own_public); /* sealed with this node's key when it has one */
+        pure_wire_seal(wire, peer, seal_key, own_key); /* sealed with this node's key when it has one */
     }
     return true;
 }
@@ -2403,7 +2522,7 @@ int main(int argc, char **argv) {
     const char *surface_path = NULL, *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
     const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL;
     unsigned send_count = 0, reply_count = 0, seal_count = 0, named_count = 0;
-    unsigned port = 8767, threads = 1;
+    unsigned port = 8767, threads = 1, link_port = 0;
     size_t budget = 64u << 20, capacity = 1024;
     uint64_t timeout_ms = 10000;
     for (int i = 1; i < options; i += 2) {
@@ -2421,6 +2540,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--reply") && reply_count < PURE_MODULE_INPUTS) replies[reply_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--sender") && named_count < PURE_MODULE_INPUTS) named[named_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
+        else if (!strcmp(argv[i], "--link-port") && number(argv[i + 1], 65535, &value) && value) link_port = (unsigned)value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
         else if (!strcmp(argv[i], "--threads") && !strcmp(argv[i + 1], "auto")) threads = 0;
@@ -2443,7 +2563,6 @@ int main(int argc, char **argv) {
     }
     if ((sealed_only || named_count) && !seal_key) { fputs("--sealed-only and --sender need --key\n", stderr); return 2; }
     if (!name_senders(named, named_count)) return 2;
-    unsigned char own_public[PURE_SEAL_KEY];
     if (seal_key && !pure_seal_peer(public_key, own_public)) return 2;
     if (pure_store_init(store) != PURE_OK) { fputs("Cannot initialize the store directory\n", stderr); return 1; }
     signal(SIGPIPE, SIG_IGN);
@@ -2480,6 +2599,13 @@ int main(int argc, char **argv) {
         after_save(&owner.executor); /* the snapshot, and the sends stored before */
         for (unsigned i = 0; i < owner.executor.wire_count; ++i)
             if (!pure_wire_start(owner.executor.wires[i], wire_delivered, &owner)) { fputs("Cannot start a wire\n", stderr); return 1; }
+        for (unsigned i = 0; i < owner.executor.link_count; ++i) {
+            char error[256];
+            if (!pure_link_start(owner.executor.links[i], wire_delivered, &owner, error, sizeof(error))) {
+                fprintf(stderr, "--send %s\n", error);
+                return 2;
+            }
+        }
         owner.hosts = hosts;
         owner.host_count = threads;
     }
@@ -2491,6 +2617,21 @@ int main(int argc, char **argv) {
         if (!start_shard(&hosts[i], &module, documents, show, edit, store, budget, &port)) return 1;
     }
     if (owned && pthread_create(&owner_thread, NULL, run_owner, &owner)) { fputs("Cannot start the owner\n", stderr); return 1; }
+    if (link_port) { /* records from the senders named, over UDP */
+        char error[256];
+        if (!owned || !seal_key) {
+            fputs("--link-port needs an app with states and the node's --key\n", stderr);
+            return 2;
+        }
+        link_listener = pure_link_listen(&module, link_port, seal_key, own_public, link_deliver, &owner, error, sizeof(error));
+        bool allowed = link_listener != NULL;
+        for (unsigned i = 0; allowed && i < sender_count; ++i)
+            allowed = pure_link_allow(link_listener, senders[i].name, senders[i].key, error, sizeof(error));
+        if (!allowed || !pure_link_serve(link_listener, error, sizeof(error))) {
+            fprintf(stderr, "--link-port: %s\n", error);
+            return 2;
+        }
+    }
     if (*public_key) printf("{\"port\":%u,\"threads\":%u,\"public_key\":\"%s\"}\n", port, threads, public_key);
     else printf("{\"port\":%u,\"threads\":%u}\n", port, threads);
     fflush(stdout);
@@ -2512,6 +2653,8 @@ int main(int argc, char **argv) {
         pthread_mutex_unlock(&owner.lock);
         pthread_join(owner_thread, NULL);
     }
+    PureLinkCounts sent = {0}, heard = {0}; /* what links sent, and what the listener took */
+    pure_link_listener_close(link_listener, &heard); /* after the owner, which tells it what it stored */
     size_t active = 0, retained = 0;
     uint64_t accepted = 0, requests = 0, bursts = owner.executor.bursts, events = owner.executor.burst_events, expired = 0,
              ticks = owner.executor.ticks, shown = 0, checkpoints = 0;
@@ -2535,6 +2678,13 @@ int main(int argc, char **argv) {
         attempts += a;
         pure_wire_close(owner.executor.wires[i]); /* what was not delivered stays in the outbox */
     }
+    for (unsigned i = 0; i < owner.executor.link_count; ++i) {
+        PureLinkCounts c;
+        pure_link_counts(owner.executor.links[i], &c);
+        sent.packets += c.packets, sent.records += c.records, sent.resent += c.resent, sent.lost += c.lost;
+        sent.acknowledged += c.acknowledged, sent.received += c.received, sent.stored += c.stored;
+        pure_link_close(owner.executor.links[i]); /* what was not stored stays in the outbox */
+    }
     if (owned) {
         checkpoints = owner.executor.checkpoints;
         stop_executor(&owner.executor);
@@ -2547,10 +2697,14 @@ int main(int argc, char **argv) {
             ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"ticks\":%" PRIu64 ",\"expired\":%" PRIu64
             ",\"threads\":%u,\"owner\":%s,\"snapshots\":%" PRIu64 ",\"views_from_snapshots\":%" PRIu64
             ",\"delivered\":%" PRIu64 ",\"delivery_attempts\":%" PRIu64 ",\"answers\":%" PRIu64
-            ",\"commit_groups\":%lu,\"grouped_commits\":%lu,\"checkpoints\":%" PRIu64 "}\n",
+            ",\"commit_groups\":%lu,\"grouped_commits\":%lu,\"checkpoints\":%" PRIu64
+            ",\"link_packets\":%" PRIu64 ",\"link_records\":%" PRIu64 ",\"link_resent\":%" PRIu64
+            ",\"link_lost\":%" PRIu64 ",\"link_acknowledged\":%" PRIu64 ",\"link_stored\":%" PRIu64
+            ",\"listener_packets\":%" PRIu64 ",\"listener_received\":%" PRIu64 ",\"listener_deliveries\":%" PRIu64 "}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
             owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped,
-            checkpoints);
+            checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
+            heard.packets, heard.received, heard.deliveries);
     free(hosts);
     free(thread);
     return 0;
@@ -2558,6 +2712,7 @@ usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
           "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=http[s]://host:port/path ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
-          "[--sender NAME=KEY ...] [--surface LIBRARY [-- ARGUMENTS]]\n", stderr);
+          "[--sender NAME=KEY ...] [--link-port PORT] [--surface LIBRARY [-- ARGUMENTS]]\n"
+          "  --send OUTPUT=pure://host:port/INPUT links to a Pure node's --link-port (UDP; its key by --seal OUTPUT=KEY)\n", stderr);
     return 2;
 }

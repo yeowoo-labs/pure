@@ -53,4 +53,23 @@ PureOpener *pure_opener(const PureSealKey *key, const char *suite, const unsigne
 bool pure_unseal(PureOpener *, uint64_t n, const char *aad, const unsigned char *sealed, size_t size,
                  unsigned char *plain);
 void pure_opener_free(PureOpener *);
+
+/* Links (serve/link.h): the secret two nodes share (X25519 of this node's
+ * private key and the other's public key: the same on both sides, and
+ * never all zeros), keys from it (HKDF-SHA256 with the info given), and
+ * AES-128-GCM under such a key with the nonce the caller gives (sealing may
+ * be in place: out may be plain). A context is used by one thread at a time. */
+typedef struct PureAead PureAead;
+enum { PURE_AEAD_KEY = 16, PURE_AEAD_NONCE = 12, PURE_AEAD_TAG = 16 };
+bool pure_link_secret(const PureSealKey *own, const unsigned char peer[PURE_SEAL_KEY], unsigned char out[32]);
+bool pure_link_derive(const unsigned char secret[32], const unsigned char *info, size_t info_size, unsigned char *out,
+                      size_t out_size);
+PureAead *pure_aead(const unsigned char key[PURE_AEAD_KEY]);
+/* size + PURE_AEAD_TAG bytes into out. */
+bool pure_aead_seal(PureAead *, const unsigned char nonce[PURE_AEAD_NONCE], const unsigned char *aad, size_t aad_size,
+                    const unsigned char *plain, size_t size, unsigned char *out);
+/* size - PURE_AEAD_TAG bytes into plain; false when it does not open. */
+bool pure_aead_open(PureAead *, const unsigned char nonce[PURE_AEAD_NONCE], const unsigned char *aad,
+                    size_t aad_size, const unsigned char *sealed, size_t size, unsigned char *plain);
+void pure_aead_free(PureAead *);
 #endif
