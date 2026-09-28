@@ -2889,7 +2889,7 @@ static const RF range_fields[] = {{"key", 0, 0}, {"a", 0, 0}, {"b", 0, 0}};
 static const R range_records[] = {{"K", range_fields, 3}};
 static const F bounds_fields[] = {{"lo", 3}, {"hi", 3}};
 static const I range_inputs[] = {{"bounds", NULL, PURE_KIND_MESSAGE, false, bounds_fields, 2}, KEY("walk", "KeyW"),
-                                 KEY("drift", "KeyD")};
+                                 KEY("drift", "KeyD"), KEY("slice", "KeyS")};
 #define KEYED(field) {IG, ITEM(R_L, field), 0}
 static const O range_code[] = {
     /* 0 v0 = count(x in l where x.key >= lo && x.key < hi) */
@@ -2925,11 +2925,18 @@ static const O range_code[] = {
     {EACH, WALKING(R_L, 13), 0},
     {ROW, R_L, 0}, KEYED(0), {L, R_HI, 0}, {PURE_OP_LT, 0, 0}, {JZ, 116, 0},
     {L, R_HI, 0}, {C, 0, 1}, {PURE_OP_SUB, 0, 0}, {ST, R_HI, 0}, {L, R_N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, R_N, 0},
+    /* 116 v5 = count(x in l[lo .. hi] where x.a / x.b > 0): a slice, whose items alone may fault */
+    {L, R_LO, 0}, {L, R_HI, 0}, {FOLD, FOLDING(PURE_FOLD_COUNT | PURE_FOLD_SLICED, R_L, 7), 0}, {ROW, R_L, 0}, KEYED(1),
+    {ROW, R_L, 0}, KEYED(2), {DIV, 0, 0}, {C, 0, 0}, {GT, 0, 0},
+    /* 126 on slice: for x in l[lo .. hi] { x.b = x.b * 2 } */
+    {L, R_LO, 0}, {L, R_HI, 0}, {EACH, WALKING(R_L, 6) | PURE_EACH_SLICED, 0}, {ROW, R_L, 0}, {ROW, R_L, 0}, KEYED(2),
+    {C, 0, 2}, {MUL, 0, 0}, {IS, ITEM(R_L, 2), 0},
 };
 #undef KEYED
-static const V range_views[] = {{"v0", 0, 10}, {"v1", 10, 17}, {"v2", 27, 6}, {"v3", 33, 12}, {"v4", 45, 13}};
-static const W range_tables[] = {{"t", 2 | (R_L + 1) << 8, 0, 58, 14}, {"c", 0, 6, 72, 2}};
-static const H range_handlers[] = {{1, 74, 4}, {3, 78, 24}, {5, 102, 14}};
+static const V range_views[] = {{"v0", 0, 10}, {"v1", 10, 17}, {"v2", 27, 6}, {"v3", 33, 12}, {"v4", 45, 13},
+                                 {"v5", 116, 10}};
+static const W range_tables[] = {{"t", 2 | (R_L + 1) << 8, 0, 58, 14}, {"c", 0, 7, 72, 2}};
+static const H range_handlers[] = {{1, 74, 4}, {3, 78, 24}, {5, 102, 14}, {7, 126, 9}};
 
 static bool same_lists(const PureApp *a, const PureApp *b) {
     const PureList *x = a->lists[R_L], *y = b->lists[R_L];
@@ -2941,11 +2948,12 @@ static bool same_lists(const PureApp *a, const PureApp *b) {
 }
 
 static void ranges(void) {
-    Spec spec = {range_numbers, 3, range_inputs, 3, range_views, 5, range_handlers, 3, range_code, LEN(range_code), NULL, 0,
+    Spec spec = {range_numbers, 3, range_inputs, 4, range_views, 6, range_handlers, 4, range_code, LEN(range_code), NULL, 0,
                  range_lists, 1, NULL, 0, NULL, 0, range_records, 1, range_tables, 2};
     CHECK(load(spec, &module_a) == PURE_OK && load(spec, &module_b) == PURE_OK);
     CHECK(module_a.code[0].range && module_a.code[10].range && module_a.code[27].range && module_a.code[33].range &&
-          !module_a.code[45].range && module_a.view_range[5] && module_a.code[78].range && !module_a.code[102].range);
+          !module_a.code[45].range && module_a.view_range[6] && module_a.code[78].range && !module_a.code[102].range &&
+          !module_a.code[118].range && module_a.code[118].plan);
     for (uint32_t i = 0; i < module_b.code_count; ++i) module_b.code[i].range = 0;
     memset(module_b.view_range, 0, sizeof(module_b.view_range));
     uint32_t seed = 0x7a45e11u;
@@ -2967,7 +2975,19 @@ static void ranges(void) {
             put_double(payload + 8, hi);
             CHECK(pure_app_message(&a, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_OK &&
                   pure_app_message(&b, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_OK);
-            for (uint32_t v = 0; v < 5; ++v) {
+            /* The slice: its items alone, a division by zero among them failing it. */
+            size_t sliced = 0;
+            bool divided = true;
+            for (size_t i = 0; i < pure_list_count(a.lists[R_L]); ++i) {
+                double k = pure_list_get(a.lists[R_L], i, 0).num, x = pure_list_get(a.lists[R_L], i, 1).num,
+                       y = pure_list_get(a.lists[R_L], i, 2).num;
+                if (k < lo || k >= hi) continue;
+                if (y == 0) divided = false;
+                else sliced += x / y > 0;
+            }
+            double shown;
+            CHECK(pure_app_view(&a, 5, &shown) == divided && (!divided || shown == (double)sliced));
+            for (uint32_t v = 0; v < 6; ++v) {
                 double x = 0, y = 0;
                 bool ok_a = pure_app_view(&a, v, &x), ok_b = pure_app_view(&b, v, &y);
                 if (!same_number(ok_a, x, ok_b, y)) {
@@ -2976,13 +2996,13 @@ static void ranges(void) {
                 }
                 ++compared;
             }
-            size_t rows = pure_app_rows(&a, 5);
-            CHECK(rows == pure_app_rows(&b, 5));
+            size_t rows = pure_app_rows(&a, 6);
+            CHECK(rows == pure_app_rows(&b, 6));
             for (size_t row = 0; row < rows; ++row) {
                 double x, y;
-                CHECK(pure_app_cell(&a, 6, row, &x) && pure_app_cell(&b, 6, row, &y) && x == y);
+                CHECK(pure_app_cell(&a, 7, row, &x) && pure_app_cell(&b, 7, row, &y) && x == y);
             }
-            unsigned input = 1 + next_random(&seed) % 2;
+            unsigned input = 1 + next_random(&seed) % 3;
             PureResult went_a = pure_app_input(&a, input, PURE_EDGE_DOWN), went_b = pure_app_input(&b, input, PURE_EDGE_DOWN);
             CHECK(went_a == went_b && same_lists(&a, &b) && !memcmp(a.values, b.values, 3 * sizeof(double)));
             walked += input == 1;

@@ -202,8 +202,13 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_UNIT: return arg <= PURE_UNIT_LINE;
     case A_ROW: return (int)arg == row;
     case A_OUTER: return outer >= 0 && (int)arg == outer;
-    case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_DISTINCT && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
-    case A_EACH: return !(arg & 0xFF) && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
+    case A_FOLD: case A_EACH: { /* a slice's list is keyed by a number */
+        uint32_t list = arg >> 8 & 0xFF, flags = arg & 0xFF;
+        bool sliced = kind == A_FOLD ? flags & PURE_FOLD_SLICED : flags & PURE_EACH_SLICED;
+        return (kind == A_FOLD ? (flags & 0x7F) <= PURE_FOLD_DISTINCT : flags <= PURE_EACH_SLICED) &&
+               state_of(m, list, PURE_STATE_LIST) && arg >> 16 &&
+               (!sliced || (m->state_key[list] && field_type(m, list, m->state_key[list] - 1u) == T_NUM));
+    }
     case A_LOCAL: /* a slot, and a number or an index of a list */
         return (arg & 0xFF) < PURE_MODULE_LOCALS && (arg >> 8 & 0xFF) <= 1 &&
                ((arg >> 8 & 0xFF) ? state_of(m, arg >> 16, PURE_STATE_LIST) : !(arg >> 16));
@@ -324,7 +329,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             if (kind == A_FOLD && (folding || view == FILTER))
                 REFUSE(view == FILTER ? "fold inside a filter" : "fold inside a fold");
             if (skip > block.length - i - 1) REFUSE(kind == A_FOLD ? "fold block outside its block" : "each block outside its block");
-            unsigned how = arg & 0xFF;
+            unsigned how = arg & 0x7F;
             /* A fold in a walk reads the walk's item as a fold in a column reads its row. */
             const char *why = kind == A_EACH ? verify_block(m, (PureBlock){pc + 1, skip}, WALK, (int)(arg >> 8 & 0xFF), -1,
                                                             event, locals, &inner)
@@ -359,6 +364,9 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             need[0] = field_type(m, arg, m->state_key[arg] - 1u);
         } else if (need[0] == T_LOCAL) {
             need[0] = arg >> 8 & 0xFF ? T_INDEX : T_NUM;
+        } else if ((kind == A_FOLD && arg & PURE_FOLD_SLICED) || (kind == A_EACH && arg & PURE_EACH_SLICED)) {
+            need[0] = need[1] = T_NUM; /* a slice's low and high keys */
+            pops = 2;
         }
         if (height < (int)pops) REFUSE("stack underflow");
         height -= (int)pops;
@@ -375,7 +383,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
                 REFUSE(type == T_CURSOR ? "cursor of another text" : "index of another list");
         }
         unsigned char out = signature[op->op].out;
-        if (kind == A_FOLD && (arg & 0xFF) == PURE_FOLD_FIRST) { /* an index of its list */
+        if (kind == A_FOLD && (arg & 0x7F) == PURE_FOLD_FIRST) { /* an index of its list */
             out = T_INDEX;
             of = O_ARG;
             owner = arg >> 8 & 0xFF;
@@ -545,10 +553,10 @@ PURE_COLD static bool conjuncts(const PureModule *m, PureBlock block, const Node
 /* The shape of a planned fold in a column, if it has one (see PureShape). */
 PURE_COLD static void shape_fold(PureModule *m, uint32_t pc) {
     PureOp *fold = &m->code[pc];
-    unsigned how = fold->arg & 0xFF;
+    unsigned how = fold->arg & 0x7F;
     int list = (int)(fold->arg >> 8 & 0xFF);
     PureBlock block = {pc + 1, fold->arg >> 16};
-    if (!fold->plan || m->shapes == PURE_MODULE_SHAPES || how == PURE_FOLD_DISTINCT) return;
+    if (!fold->plan || m->shapes == PURE_MODULE_SHAPES || how == PURE_FOLD_DISTINCT || fold->arg & PURE_FOLD_SLICED) return;
     Node *nodes = malloc(block.length * sizeof(*nodes));
     int roots[PURE_MODULE_STACK], tests[16];
     unsigned count = 0, tested = 0;
@@ -718,13 +726,14 @@ PURE_COLD static void range_code(PureModule *m, PureBlock block, int input) {
     for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
         PureOp *op = &m->code[pc];
         PureRange range;
-        if (op->op == PURE_OP_FOLD) {
-            if (op->plan && block_range(m, (PureBlock){pc + 1, op->arg >> 16}, (int)(op->arg >> 8 & 0xFF), false, &range))
+        if (op->op == PURE_OP_FOLD) { /* a slice has its range already */
+            if (op->plan && !(op->arg & PURE_FOLD_SLICED) &&
+                block_range(m, (PureBlock){pc + 1, op->arg >> 16}, (int)(op->arg >> 8 & 0xFF), false, &range))
                 op->range = keep_range(m, &range);
             pc += op->arg >> 16;
             continue;
         }
-        if (op->op != PURE_OP_EACH) continue;
+        if (op->op != PURE_OP_EACH || op->arg & PURE_EACH_SLICED) continue;
         uint32_t end = pc + 1 + (op->arg >> 16);
         int height = 0;
         for (uint32_t at = pc + 1; at < end; ++at) {
@@ -1688,12 +1697,16 @@ static PureResult fold_runs(const PureModule *m, double *values, PureBlock inner
     PureRun items;
     Memo memo;
     memo.known = 0;
-    /* Items from and to (a range's): whole leaves, whose items out of range the test leaves out. */
+    /* The items from and up to before to (a slice's, or a range's): a leaf
+     * at a time, its lanes out of them left out (a slice's may fault: the
+     * leaf then runs item by item, its items in them alone). */
     for (bool more = from < to && pure_list_run(list, from, &items); more && !fold->done && items.start < to;
          more = pure_list_next(list, &items)) {
+        unsigned first = from > items.start ? (unsigned)(from - items.start) : 0,
+                 last = to - items.start < items.count ? (unsigned)(to - items.start) : items.count;
         Lanes out[2];
         if (!run_lanes(m, values, inner, per, &items, out, store, &memo, NULL)) {
-            PureResult status = fold_rows(m, values, inner, per, items.start, items.start + items.count, fold);
+            PureResult status = fold_rows(m, values, inner, per, items.start + first, items.start + last, fold);
             if (status != PURE_OK) return status;
             continue;
         }
@@ -1702,21 +1715,29 @@ static PureResult fold_runs(const PureModule *m, double *values, PureBlock inner
         const double *c = lanes_of(counts, scratch[0], &items), *v = lanes_of(&out[0], scratch[1], &items);
         if (fold->how == PURE_FOLD_COUNT) {
             size_t counted = 0;
-            for (unsigned i = 0; i < items.count; ++i) counted += c[i] != 0;
+            for (unsigned i = first; i < last; ++i) counted += c[i] != 0;
             fold->total += (double)counted;
             fold->any = fold->any || counted;
         } else if (fold->how == PURE_FOLD_SUM) {
             double total = fold->total;
             bool any = fold->any;
-            for (unsigned i = 0; i < items.count; ++i)
+            for (unsigned i = first; i < last; ++i)
                 if (c[i] != 0) total += v[i], any = true;
             fold->total = total;
             fold->any = any;
         } else
-            for (unsigned i = 0; i < items.count && !fold->done; ++i)
+            for (unsigned i = first; i < last && !fold->done; ++i)
                 if (!fold_in(fold, items.start + i, v[i], c[i])) return PURE_ALLOCATION;
     }
     return PURE_OK;
+}
+
+/* The positions of the items whose keys are from low up to before high. */
+static void slice_of(const PureList *list, unsigned key, double low, double high, size_t *from, size_t *to) {
+    bool found;
+    *from = pure_list_seek(list, key, (PureCell){low, NULL, 0}, &found);
+    *to = pure_list_seek(list, key, (PureCell){high, NULL, 0}, &found);
+    if (*to < *from) *to = *from;
 }
 
 /* The positions of the items whose keys a range allows: its bounds run
@@ -2236,15 +2257,19 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             PureBlock inner = {pc, arg >> 16};
             PureList *list = app->lists[arg >> 8 & 0xFF];
             pc += inner.length;
-            Fold fold = {arg & 0xFF, 0, false, false, {0}};
+            Fold fold = {arg & 0x7F, 0, false, false, {0}};
             Event per = *ev;
             per.outer = ev->row;
+            size_t from = 0, to = pure_list_count(list);
+            if (arg & PURE_FOLD_SLICED) { /* the items with keys from low up to before high */
+                double high = stack[--sp].num, low = stack[--sp].num;
+                slice_of(list, m->state_key[arg >> 8 & 0xFF] - 1u, low, high, &from, &to);
+            }
             if (!op->shape || !fold_shaped(m, values, op, list, &per, &fold)) {
-                size_t from = 0, to = pure_list_count(list);
                 if (op->range) /* only the items a range of keys allows can count */
                     range_bounds(m, values, &m->range[op->range - 1], list, m->state_key[arg >> 8 & 0xFF] - 1u, &per, &from, &to);
                 status = op->plan ? fold_runs(m, values, inner, list, &per, &fold, from, to)
-                                  : fold_rows(m, values, inner, &per, 0, pure_list_count(list), &fold);
+                                  : fold_rows(m, values, inner, &per, from, to, &fold);
                 free(fold.seen.keys);
                 if (status != PURE_OK) return status;
             }
@@ -2265,7 +2290,10 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             pc += inner.length;
             Event per = *ev;
             per.walk = &walk;
-            if (op->range) /* a where that bounds the key: only the items in bounds */
+            if (arg & PURE_EACH_SLICED) { /* the items with keys from low up to before high */
+                double high = stack[--sp].num, low = stack[--sp].num;
+                slice_of(app->lists[walk.list], m->state_key[walk.list] - 1u, low, high, &walk.at, &walk.end);
+            } else if (op->range) /* a where that bounds the key: only the items in bounds */
                 range_bounds(m, values, &m->range[op->range - 1], app->lists[walk.list], m->state_key[walk.list] - 1u, &per,
                              &walk.at, &walk.end);
             while (walk.at < walk.end && walk.at < pure_list_count(app->lists[walk.list])) {

@@ -61,6 +61,11 @@ enum { PURE_MODULE_LOCALS = 64 };
  * (distinct counts the different values, -0 as 0); first gives the index of
  * the first item whose block leaves a non-zero number. */
 typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PURE_FOLD_FIRST, PURE_FOLD_DISTINCT } PureFold;
+/* A slice: a fold whose kind has PURE_FOLD_SLICED, or a walk whose argument
+ * has PURE_EACH_SLICED, first takes two numbers, a low and a high key, and
+ * runs for the items of its list (keyed by a number) whose keys are from
+ * low up to before high, found by key. */
+enum { PURE_FOLD_SLICED = 0x80, PURE_EACH_SLICED = 1 };
 /* TEXT_COMPARE's argument: the relation, in the order of the number
  * comparisons (LT LE GT GE EQ NE); texts order by their bytes. */
 typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PURE_EQUAL, PURE_NOT_EQUAL } PureRelation;
