@@ -642,10 +642,80 @@ static bool decode_cell(const Layout *l, unsigned field, const unsigned char *by
 }
 
 /* ---- The journal: records of a stored list's changes, in the order they
- * were made. Each is a u8 kind and the u32le position, then for an insert
- * the item's fields in stored form, for a set the u8 field and its cell. */
+ * were made. Each is a u8 kind and the position, then for an insert the
+ * item's fields, for a set the u8 field and its cell. A record is written
+ * compact (kinds 4-6): the position as a varint (LEB128), a number as the
+ * varint 2 * zigzag(n) when it is an integer n below 2^53 in size (not -0),
+ * else 1 and its binary64 bits (8 bytes, little-endian), a text as a varint
+ * length and its bytes. Records stored before (kinds 1-3, a list's tree
+ * value "PLS2") had a u32le position and cells in stored form. */
 
-enum { RECORD_INSERT = 1, RECORD_REMOVE = 2, RECORD_SET = 3, RECORD_HEAD = 5, JOURNAL_KEPT = 1 << 20 };
+enum { FIXED_INSERT = 1, FIXED_REMOVE = 2, FIXED_SET = 3, RECORD_INSERT = 4, RECORD_REMOVE = 5, RECORD_SET = 6,
+       FIXED_HEAD = 5, RECORD_HEAD = 6, JOURNAL_KEPT = 1 << 20 };
+
+static unsigned char *put_varint(unsigned char *out, uint64_t value) {
+    for (; value >= 0x80; value >>= 7) *out++ = (unsigned char)(value | 0x80);
+    *out++ = (unsigned char)value;
+    return out;
+}
+
+static bool get_varint(const unsigned char *bytes, size_t size, size_t *at, uint64_t *value) {
+    *value = 0;
+    for (unsigned shift = 0; shift < 64 && *at < size; shift += 7) {
+        unsigned char byte = bytes[(*at)++];
+        *value |= (uint64_t)(byte & 0x7f) << shift;
+        if (!(byte & 0x80)) return true;
+    }
+    return false;
+}
+
+/* A cell in compact form (the most it takes: compact_bound). */
+static size_t compact_bound(const Layout *l, unsigned field, PureCell cell) { return l->text_fields[field] ? 5 + cell.size : 9; }
+
+static unsigned char *put_compact(const Layout *l, unsigned field, PureCell cell, unsigned char *out) {
+    if (l->text_fields[field]) {
+        out = put_varint(out, cell.size);
+        if (cell.size) memcpy(out, cell.text, cell.size);
+        return out + cell.size;
+    }
+    double v = cell.num;
+    if (fabs(v) < 9007199254740992.0 && v == (double)(int64_t)v && !(v == 0 && signbit(v))) {
+        int64_t n = (int64_t)v;
+        uint64_t zigzag = (uint64_t)n << 1 ^ (n < 0 ? UINT64_MAX : 0);
+        return put_varint(out, zigzag << 1);
+    }
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    *out++ = 1;
+    for (unsigned i = 0; i < 8; ++i) *out++ = (unsigned char)(bits >> (8 * i));
+    return out;
+}
+
+static bool get_compact(const Layout *l, unsigned field, const unsigned char *bytes, size_t size, size_t *at,
+                        PureCell *cell) {
+    uint64_t value;
+    *cell = (PureCell){0};
+    if (!get_varint(bytes, size, at, &value)) return false;
+    if (l->text_fields[field]) {
+        if (value > size - *at || !pure_utf8_valid((PureSpan){bytes + *at, (size_t)value})) return false;
+        *cell = (PureCell){0, (unsigned char *)bytes + *at, (size_t)value};
+        *at += (size_t)value;
+        return true;
+    }
+    if (!(value & 1)) { /* an integer */
+        uint64_t zigzag = value >> 1;
+        if (zigzag >= UINT64_C(1) << 54) return false;
+        int64_t n = zigzag & 1 ? -(int64_t)(zigzag >> 1) - 1 : (int64_t)(zigzag >> 1);
+        cell->num = (double)n;
+        return true;
+    }
+    if (value != 1 || size - *at < 8) return false;
+    uint64_t bits = 0;
+    for (unsigned i = 0; i < 8; ++i) bits |= (uint64_t)bytes[*at + i] << (8 * i);
+    *at += 8;
+    memcpy(&cell->num, &bits, sizeof(bits));
+    return isfinite(cell->num);
+}
 
 /* Room for size more bytes at the journal's end, or NULL without memory. */
 static unsigned char *journal_room(PureList *list, size_t size) {
@@ -662,8 +732,7 @@ static unsigned char *journal_room(PureList *list, size_t size) {
 
 static unsigned char *record_head(unsigned char *out, unsigned kind, size_t at) {
     *out++ = (unsigned char)kind;
-    for (unsigned i = 0; i < 4; ++i) *out++ = (unsigned char)(at >> (8 * i));
-    return out;
+    return put_varint(out, at);
 }
 
 void pure_list_journal(PureList *list, bool journaled) {
@@ -748,27 +817,40 @@ PURE_COLD PureResult pure_list_read(PureList *list, const unsigned char *bytes, 
     return PURE_OK;
 }
 
+/* A record's cell, compact or as stored before. */
+static bool record_cell(const Layout *l, bool compact, unsigned field, const unsigned char *bytes, size_t size,
+                        size_t *at, PureCell *cell) {
+    return compact ? get_compact(l, field, bytes, size, at, cell) : decode_cell(l, field, bytes, size, at, cell);
+}
+
 PURE_COLD PureResult pure_list_replay(PureList *list, const unsigned char *bytes, size_t size) {
     const Layout *l = &list->layout;
     bool journaled = list->journaled;
     PureResult result = PURE_OK;
     list->journaled = false;
     for (size_t at = 0; at < size && result == PURE_OK;) {
-        if (size - at < RECORD_HEAD) { result = PURE_STORE_ERROR; break; }
-        unsigned kind = bytes[at];
-        size_t position = 0;
-        for (unsigned i = 0; i < 4; ++i) position |= (size_t)bytes[at + 1 + i] << (8 * i);
-        at += RECORD_HEAD;
+        unsigned kind = bytes[at++];
+        bool compact = kind >= RECORD_INSERT;
+        uint64_t position = 0;
+        if (compact) {
+            if (!get_varint(bytes, size, &at, &position)) { result = PURE_STORE_ERROR; break; }
+        } else {
+            if (size - at < FIXED_HEAD - 1) { result = PURE_STORE_ERROR; break; }
+            for (unsigned i = 0; i < 4; ++i) position |= (uint64_t)bytes[at + i] << (8 * i);
+            at += FIXED_HEAD - 1;
+        }
         PureCell cells[16];
-        if (kind == RECORD_INSERT)
-            result = position <= list->count && decode_item(l, bytes, size, &at, cells) ?
-                     pure_list_insert(list, position, cells, NULL) : PURE_STORE_ERROR;
-        else if (kind == RECORD_REMOVE)
-            result = position < list->count ? pure_list_remove(list, position, NULL) : PURE_STORE_ERROR;
-        else if (kind == RECORD_SET) {
+        unsigned change = compact ? kind - (RECORD_INSERT - FIXED_INSERT) : kind;
+        bool ok = true;
+        if (change == FIXED_INSERT) {
+            for (unsigned f = 0; ok && f < l->fields; ++f) ok = record_cell(l, compact, f, bytes, size, &at, &cells[f]);
+            result = ok && position <= list->count ? pure_list_insert(list, (size_t)position, cells, NULL) : PURE_STORE_ERROR;
+        } else if (change == FIXED_REMOVE)
+            result = position < list->count ? pure_list_remove(list, (size_t)position, NULL) : PURE_STORE_ERROR;
+        else if (change == FIXED_SET) {
             unsigned field = at < size ? bytes[at++] : l->fields;
-            result = field < l->fields && position < list->count && decode_cell(l, field, bytes, size, &at, &cells[0]) ?
-                     pure_list_set(list, position, field, cells[0], NULL) : PURE_STORE_ERROR;
+            result = field < l->fields && position < list->count && record_cell(l, compact, field, bytes, size, &at, &cells[0]) ?
+                     pure_list_set(list, (size_t)position, field, cells[0], NULL) : PURE_STORE_ERROR;
         } else
             result = PURE_STORE_ERROR;
     }
@@ -784,7 +866,7 @@ PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, Pu
     for (; owned < l->fields; ++owned)
         if (!own_cell(list, owned, cells[owned], &item[owned])) break;
     size_t size = RECORD_HEAD;
-    for (unsigned f = 0; list->journaled && f < l->fields; ++f) size += cell_bytes(l, f, cells[f]);
+    for (unsigned f = 0; list->journaled && f < l->fields; ++f) size += compact_bound(l, f, cells[f]);
     unsigned char *record = list->journaled ? journal_room(list, size) : NULL;
     Place p;
     if (owned < l->fields || (list->journaled && !record) || !prepare(list, at, &p)) {
@@ -798,8 +880,8 @@ PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, Pu
     }
     if (record) {
         unsigned char *end = record_head(record, RECORD_INSERT, at);
-        for (unsigned f = 0; f < l->fields; ++f) end = encode_cell(l, f, item[f], end);
-        list->journal_size += size;
+        for (unsigned f = 0; f < l->fields; ++f) end = put_compact(l, f, item[f], end);
+        list->journal_size += (size_t)(end - record);
     }
     list->bytes += cells_bytes(l, item);
     place(list, &p, item);
@@ -833,10 +915,7 @@ PureResult pure_list_remove(PureList *list, size_t at, PureUndo *undo) {
         return PURE_ALLOCATION;
     if (!cells) cells = kept;
     for (unsigned f = 0; f < l->fields; ++f) cells[f] = cell_at(l, leaf, within, f);
-    if (record) {
-        record_head(record, RECORD_REMOVE, at);
-        list->journal_size += RECORD_HEAD;
-    }
+    if (record) list->journal_size += (size_t)(record_head(record, RECORD_REMOVE, at) - record);
     if (undo) undo->cell_count += l->fields;
     list->bytes -= cells_bytes(l, cells);
     if (!undo) let_go_cells(list, cells);
@@ -866,7 +945,7 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
     PureCell copy;
     if (!own_cell(list, field, value, &copy)) return PURE_ALLOCATION;
     PureCell old = cell_at(l, leaf, within, field);
-    size_t size = RECORD_HEAD + 1 + cell_bytes(l, field, copy);
+    size_t size = RECORD_HEAD + 1 + compact_bound(l, field, copy);
     unsigned char *record = list->journaled ? journal_room(list, size) : NULL;
     if ((list->journaled && !record) ||
         (undo && !log_change(undo, (Entry){.change = CHANGED, .list = list, .at = at, .field = field, .old = old}))) {
@@ -876,8 +955,7 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
     if (record) {
         unsigned char *end = record_head(record, RECORD_SET, at);
         *end++ = (unsigned char)field;
-        encode_cell(l, field, copy, end);
-        list->journal_size += size;
+        list->journal_size += (size_t)(put_compact(l, field, copy, end) - record);
     }
     list->bytes += cell_bytes(l, field, copy) - cell_bytes(l, field, old);
     if (l->text_fields[field]) texts(l, leaf, field)[within] = (PureSpan){copy.text, copy.size};

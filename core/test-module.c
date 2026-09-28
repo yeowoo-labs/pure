@@ -1155,6 +1155,25 @@ static void list_trees(void) {
     stored.size = length - 1; /* the last record cut short */
     CHECK(!stored_list(&stored, stored_items));
     free(stored.bytes);
+    /* Compact records keep every number bit for bit: integers, -0, the edges of 2^53, the rest. */
+    static const uint8_t number_field[1] = {0};
+    static const double edges[] = {0.0, -0.0, 1, -1, 127, -128, 9007199254740991.0, -9007199254740991.0,
+                                   9007199254740992.0, -9007199254740994.0, 1e300, -1e-300, 0.1, 3.5e15 + 0.5, 4.9e-324};
+    PureList *numbers = pure_list_new(1, number_field), *read_back = pure_list_new(1, number_field);
+    CHECK(numbers && read_back);
+    pure_list_journal(numbers, true);
+    for (size_t k = 0; k < sizeof(edges) / sizeof(*edges); ++k) {
+        CHECK(pure_list_insert(numbers, k, (PureCell[]){{edges[k], NULL, 0}}, NULL) == PURE_OK);
+        CHECK(pure_list_set(numbers, k, 0, (PureCell){edges[k], NULL, 0}, NULL) == PURE_OK);
+    }
+    PureSpan edge_records = pure_list_changes(numbers);
+    CHECK(edge_records.size < sizeof(edges) / sizeof(*edges) * 2 * 14 && pure_list_replay(read_back, edge_records.data, edge_records.size) == PURE_OK);
+    for (size_t k = 0; k < sizeof(edges) / sizeof(*edges); ++k) {
+        double got = pure_list_get(read_back, k, 0).num;
+        CHECK(!memcmp(&got, &edges[k], sizeof(got)));
+    }
+    pure_list_free(numbers);
+    pure_list_free(read_back);
     printf("{\"journal_saves\":%zu,\"journal_rewrites\":%zu}\n", saves, rewrites);
     for (; held; --held, first = (first + 1) % SHARES) {
         CHECK(same_items(copies[first], &shared[first]));

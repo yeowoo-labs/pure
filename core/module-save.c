@@ -35,8 +35,8 @@ static const unsigned char values_magic[4] = {'P', 'V', 'S', '1'}, image_magic[4
  * log is kept within as many bytes as all their items (and LOG_KEPT) by
  * writing the image that holds it back. */
 #ifdef PURE_STORE_TEST
-enum { JOURNAL_MIN = 256 };
-#define LOG_KEPT (UINT64_C(64) << 10)
+enum { JOURNAL_MIN = 64 };
+#define LOG_KEPT (UINT64_C(4) << 10)
 unsigned long pure_save_test_checkpoints;
 #else
 enum { JOURNAL_MIN = 1 << 20 };
