@@ -57,9 +57,10 @@ enum { PURE_MODULE_LOCALS = 64 };
 /* FOLD's argument: the kind (bits 0-7), the list state (8-15) and the length
  * of the block that follows (16-31), run once per item as a column of that
  * list. count counts the items whose block leaves a non-zero number; sum,
- * max and min take a value and an include flag from their block; first gives
- * the index of the first item whose block leaves a non-zero number. */
-typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PURE_FOLD_FIRST } PureFold;
+ * max, min and distinct take a value and an include flag from their block
+ * (distinct counts the different values, -0 as 0); first gives the index of
+ * the first item whose block leaves a non-zero number. */
+typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PURE_FOLD_FIRST, PURE_FOLD_DISTINCT } PureFold;
 /* TEXT_COMPARE's argument: the relation, in the order of the number
  * comparisons (LT LE GT GE EQ NE); texts order by their bytes. */
 typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PURE_EQUAL, PURE_NOT_EQUAL } PureRelation;
@@ -107,11 +108,13 @@ typedef enum {
     PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING, PURE_FAULT_EXISTS
 } PureFault;
 
-/* plan and shape are the runtime's, set at load: a fold whose block has a
- * form for every instruction that works on a leaf of its list at once runs
- * so (plan), and one in a column may be answered for every row from one
- * pass over its list (shape: its PureShape + 1). */
-typedef struct { double value; uint32_t arg; uint8_t op, plan, shape; } PureOp;
+/* plan, shape and range are the runtime's, set at load: a fold whose block
+ * has a form for every instruction that works on a leaf of its list at once
+ * runs so (plan), one in a column may be answered for every row from one
+ * pass over its list (shape: its PureShape + 1), and a fold or a walk whose
+ * test bounds a keyed list's key reads only the items in bounds (range: its
+ * PureRange + 1). */
+typedef struct { double value; uint32_t arg; uint8_t op, plan, shape, range; } PureOp;
 typedef struct { uint32_t start, length; } PureBlock;
 typedef struct { uint32_t event; PureBlock code; } PureHandler;
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint16_t rows; uint32_t offset; } PureField;
@@ -135,6 +138,15 @@ typedef struct { uint16_t first, count; } PureRecord;
  * opcode with the item on its left. */
 enum { PURE_SHAPE_GROUP = 1, PURE_SHAPE_RANK = 2, PURE_MODULE_SHAPES = 64 };
 typedef struct { uint8_t form, relation; uint16_t field; uint32_t test; PureBlock key; } PureShape;
+
+/* A test (a fold's, a walk's where, a filter) that ANDs comparisons of a
+ * keyed list's item key with values reading no item: lower (the key GT or
+ * GE it) and upper (LT or LE; a relation of 0: none; EQ is both). Only the
+ * items with keys in bounds can pass it, so only those are read: a filter
+ * leaves the rest out anyway, and a fold's or walk's other parts cannot
+ * fault (what the skipped items would have run). */
+enum { PURE_MODULE_RANGES = 64 };
+typedef struct { uint8_t lower_relation, upper_relation; PureBlock lower, upper; } PureRange;
 
 typedef struct {
     uint16_t states, inputs, views, handlers, fields, collections, constants, records, record_fields;
@@ -161,6 +173,9 @@ typedef struct {
     uint8_t view_arguments[PURE_MODULE_VIEWS]; /* the input of a view's arguments + 1 (a column's: its table's), or 0 */
     PureShape shape[PURE_MODULE_SHAPES];
     uint8_t shapes;
+    PureRange range[PURE_MODULE_RANGES];
+    uint8_t ranges;
+    uint8_t view_range[PURE_MODULE_VIEWS]; /* a table's filter's PureRange + 1, or 0 */
     PureHandler handler[PURE_MODULE_HANDLERS];
     /* The code and the text constants, sized to the module in one block
      * (storage) that load takes and pure_module_release gives back. */

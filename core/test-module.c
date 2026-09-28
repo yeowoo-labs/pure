@@ -2266,7 +2266,7 @@ static void gen_own(Gen *g, int depth) {
  * key the row gives, ANDed with the item's own tests, and an own value. */
 static void gen_shaped(Gen *g, int list) {
     static const uint8_t relations[] = {PURE_OP_EQ, PURE_OP_EQ, PURE_OP_LT, PURE_OP_LE, PURE_OP_GT, PURE_OP_GE};
-    unsigned how = roll(g, 5) < 2 ? PURE_FOLD_COUNT : roll(g, 5), before = roll(g, 3) ? 0 : 1 + roll(g, 2),
+    unsigned how = roll(g, 5) < 2 ? PURE_FOLD_COUNT : roll(g, 6), before = roll(g, 3) ? 0 : 1 + roll(g, 2),
              after = roll(g, 3) ? 0 : 1;
     size_t at = g->count;
     put_op(g, PURE_OP_FOLD, 0, 0);
@@ -2305,7 +2305,7 @@ static void gen_shaped(Gen *g, int list) {
 
 /* A fold over list leaving a number (first's index as one), in a column of L (outer) or not. */
 static void gen_fold(Gen *g, int list, int outer) {
-    unsigned how = roll(g, 5);
+    unsigned how = roll(g, 6); /* count, sum, max, min, first, distinct */
     size_t at = g->count;
     put_op(g, PURE_OP_FOLD, 0, 0);
     int fold_list = g->fold_list, fold_outer = g->outer;
@@ -2424,7 +2424,7 @@ static void lane_folds(void) {
         pure_module_release(&module_a);
         pure_module_release(&module_b);
     }
-    CHECK(planned > folds / 2 && faults > 100 && cells > 1000 && shaped[PURE_SHAPE_GROUP] > 150 &&
+    CHECK(planned > folds / 2 && faults > 100 && cells > 1000 && shaped[PURE_SHAPE_GROUP] > 80 &&
           shaped[PURE_SHAPE_RANK] > 100 && passes > 60);
     printf("{\"lane_folds\":%u,\"planned\":%u,\"groups\":%u,\"ranks\":%u,\"passes\":%u,\"faults_alike\":%u,"
            "\"cells\":%u}\n", folds, planned, shaped[PURE_SHAPE_GROUP], shaped[PURE_SHAPE_RANK], passes, faults, cells);
@@ -2874,6 +2874,123 @@ static void locals(void) {
             abort();
         }
     printf("{\"locals\":{\"events\":80}}\n");
+}
+
+/* ---- Key ranges -----------------------------------------------------------
+ * Folds, a filter and walks whose tests bound a keyed list's key read only
+ * the items in bounds; each answers as the same module reading every item:
+ * two bounds, one, an equality, a bound on the right, a test that may fault
+ * (no range), a walk that changes and removes items in its range, and a
+ * walk whose body moves its own bound (no range). */
+enum { R_LO = 0, R_HI = 1, R_N = 2, R_L = 3 };
+static const S range_numbers[] = {{"lo", 0}, {"hi", 0}, {"n", 0}};
+static const T range_lists[] = {{"l", 3 | 1 << 8, 0}};
+static const RF range_fields[] = {{"key", 0, 0}, {"a", 0, 0}, {"b", 0, 0}};
+static const R range_records[] = {{"K", range_fields, 3}};
+static const F bounds_fields[] = {{"lo", 3}, {"hi", 3}};
+static const I range_inputs[] = {{"bounds", NULL, PURE_KIND_MESSAGE, false, bounds_fields, 2}, KEY("walk", "KeyW"),
+                                 KEY("drift", "KeyD")};
+#define KEYED(field) {IG, ITEM(R_L, field), 0}
+static const O range_code[] = {
+    /* 0 v0 = count(x in l where x.key >= lo && x.key < hi) */
+    {FOLD, FOLDING(PURE_FOLD_COUNT, R_L, 9), 0}, {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {PURE_OP_GE, 0, 0},
+    {ROW, R_L, 0}, KEYED(0), {L, R_HI, 0}, {PURE_OP_LT, 0, 0}, {PURE_OP_AND, 0, 0},
+    /* 10 v1 = sum(x.a for x in l where x.key > lo && x.key <= hi && x.b > 0) */
+    {FOLD, FOLDING(PURE_FOLD_SUM, R_L, 16), 0}, {ROW, R_L, 0}, KEYED(1),
+    {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {GT, 0, 0}, {ROW, R_L, 0}, KEYED(0), {L, R_HI, 0}, {PURE_OP_LE, 0, 0},
+    {PURE_OP_AND, 0, 0}, {ROW, R_L, 0}, KEYED(2), {C, 0, 0}, {GT, 0, 0}, {PURE_OP_AND, 0, 0},
+    /* 27 v2 = first(x in l where x.key == lo).position */
+    {FOLD, FOLDING(PURE_FOLD_FIRST, R_L, 4), 0}, {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {EQ, 0, 0}, {XN, 0, 0},
+    /* 33 v3 = min(x.b for x in l where hi > x.key && x.key >= lo) */
+    {FOLD, FOLDING(PURE_FOLD_MIN, R_L, 11), 0}, {ROW, R_L, 0}, KEYED(2),
+    {L, R_HI, 0}, {ROW, R_L, 0}, KEYED(0), {GT, 0, 0}, {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {PURE_OP_GE, 0, 0},
+    {PURE_OP_AND, 0, 0},
+    /* 45 v4 = count(x in l where x.key >= lo && x.a / x.b > 0): a test that may fault */
+    {FOLD, FOLDING(PURE_FOLD_COUNT, R_L, 12), 0}, {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {PURE_OP_GE, 0, 0},
+    {ROW, R_L, 0}, KEYED(1), {ROW, R_L, 0}, KEYED(2), {DIV, 0, 0}, {C, 0, 0}, {GT, 0, 0}, {PURE_OP_AND, 0, 0},
+    /* 58 table t: each x in l where x.key >= lo && x.key < hi && x.a > 1 */
+    {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {PURE_OP_GE, 0, 0}, {ROW, R_L, 0}, KEYED(0), {L, R_HI, 0}, {PURE_OP_LT, 0, 0},
+    {PURE_OP_AND, 0, 0}, {ROW, R_L, 0}, KEYED(1), {C, 0, 1}, {GT, 0, 0}, {PURE_OP_AND, 0, 0},
+    /* 72 column c = x.b */
+    {ROW, R_L, 0}, KEYED(2),
+    /* 74 on bounds: lo = bounds.lo; hi = bounds.hi */
+    {FIELD, 0, 0}, {ST, R_LO, 0}, {FIELD, 1, 0}, {ST, R_HI, 0},
+    /* 78 on walk: for x in l where x.key >= lo && x.key < hi { x.a = x.a + 1; if x.b < 0 { l.remove(x) } } */
+    {EACH, WALKING(R_L, 23), 0},
+    {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {PURE_OP_GE, 0, 0}, {ROW, R_L, 0}, KEYED(0), {L, R_HI, 0}, {PURE_OP_LT, 0, 0},
+    {PURE_OP_AND, 0, 0}, {JZ, 102, 0},
+    {ROW, R_L, 0}, {ROW, R_L, 0}, KEYED(1), {C, 0, 1}, {ADD, 0, 0}, {IS, ITEM(R_L, 1), 0},
+    {ROW, R_L, 0}, KEYED(2), {C, 0, 0}, {PURE_OP_LT, 0, 0}, {JZ, 102, 0}, {ROW, R_L, 0}, {LR, R_L, 0},
+    /* 102 on drift: for x in l where x.key < hi { hi = hi - 1; n = n + 1 }: its bound moves */
+    {EACH, WALKING(R_L, 13), 0},
+    {ROW, R_L, 0}, KEYED(0), {L, R_HI, 0}, {PURE_OP_LT, 0, 0}, {JZ, 116, 0},
+    {L, R_HI, 0}, {C, 0, 1}, {PURE_OP_SUB, 0, 0}, {ST, R_HI, 0}, {L, R_N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, R_N, 0},
+};
+#undef KEYED
+static const V range_views[] = {{"v0", 0, 10}, {"v1", 10, 17}, {"v2", 27, 6}, {"v3", 33, 12}, {"v4", 45, 13}};
+static const W range_tables[] = {{"t", 2 | (R_L + 1) << 8, 0, 58, 14}, {"c", 0, 6, 72, 2}};
+static const H range_handlers[] = {{1, 74, 4}, {3, 78, 24}, {5, 102, 14}};
+
+static bool same_lists(const PureApp *a, const PureApp *b) {
+    const PureList *x = a->lists[R_L], *y = b->lists[R_L];
+    if (pure_list_count(x) != pure_list_count(y)) return false;
+    for (size_t i = 0; i < pure_list_count(x); ++i)
+        for (unsigned f = 0; f < 3; ++f)
+            if (pure_list_get(x, i, f).num != pure_list_get(y, i, f).num) return false;
+    return true;
+}
+
+static void ranges(void) {
+    Spec spec = {range_numbers, 3, range_inputs, 3, range_views, 5, range_handlers, 3, range_code, LEN(range_code), NULL, 0,
+                 range_lists, 1, NULL, 0, NULL, 0, range_records, 1, range_tables, 2};
+    CHECK(load(spec, &module_a) == PURE_OK && load(spec, &module_b) == PURE_OK);
+    CHECK(module_a.code[0].range && module_a.code[10].range && module_a.code[27].range && module_a.code[33].range &&
+          !module_a.code[45].range && module_a.view_range[5] && module_a.code[78].range && !module_a.code[102].range);
+    for (uint32_t i = 0; i < module_b.code_count; ++i) module_b.code[i].range = 0;
+    memset(module_b.view_range, 0, sizeof(module_b.view_range));
+    uint32_t seed = 0x7a45e11u;
+    unsigned compared = 0, walked = 0;
+    for (unsigned round = 0; round < 60; ++round) {
+        PureApp a, b;
+        CHECK(pure_app_start(&a, &module_a, (PureData){0}) == PURE_OK && pure_app_start(&b, &module_b, (PureData){0}) == PURE_OK);
+        double key = (double)(next_random(&seed) % 5);
+        for (size_t i = 0, items = next_random(&seed) % 400; i < items; ++i) {
+            key += 1 + next_random(&seed) % 3;
+            PureCell cells[3] = {{key, NULL, 0}, {(double)(next_random(&seed) % 9) - 3, NULL, 0},
+                                 {(double)(next_random(&seed) % 7) - 3, NULL, 0}};
+            CHECK(pure_list_insert(a.lists[R_L], i, cells, NULL) == PURE_OK && pure_list_insert(b.lists[R_L], i, cells, NULL) == PURE_OK);
+        }
+        for (unsigned step = 0; step < 12; ++step) {
+            unsigned char payload[16];
+            double lo = (double)(next_random(&seed) % 900) - 50, hi = lo + (double)(next_random(&seed) % 400) - 20;
+            put_double(payload, lo);
+            put_double(payload + 8, hi);
+            CHECK(pure_app_message(&a, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_OK &&
+                  pure_app_message(&b, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_OK);
+            for (uint32_t v = 0; v < 5; ++v) {
+                double x = 0, y = 0;
+                bool ok_a = pure_app_view(&a, v, &x), ok_b = pure_app_view(&b, v, &y);
+                if (!same_number(ok_a, x, ok_b, y)) {
+                    fprintf(stderr, "range round %u view %u: %d %g / %d %g\n", round, v, ok_a, x, ok_b, y);
+                    abort();
+                }
+                ++compared;
+            }
+            size_t rows = pure_app_rows(&a, 5);
+            CHECK(rows == pure_app_rows(&b, 5));
+            for (size_t row = 0; row < rows; ++row) {
+                double x, y;
+                CHECK(pure_app_cell(&a, 6, row, &x) && pure_app_cell(&b, 6, row, &y) && x == y);
+            }
+            unsigned input = 1 + next_random(&seed) % 2;
+            PureResult went_a = pure_app_input(&a, input, PURE_EDGE_DOWN), went_b = pure_app_input(&b, input, PURE_EDGE_DOWN);
+            CHECK(went_a == went_b && same_lists(&a, &b) && !memcmp(a.values, b.values, 3 * sizeof(double)));
+            walked += input == 1;
+        }
+        pure_app_stop(&a);
+        pure_app_stop(&b);
+    }
+    printf("{\"ranges\":{\"compared\":%u,\"walks\":%u}}\n", compared, walked);
 }
 
 /* Damaged fold and filter modules: whatever loads runs safely. */
@@ -3801,6 +3918,7 @@ int main(void) {
     walk_mutations();
     view_arguments();
     locals();
+    ranges();
     keyed();
     keyed_mutations();
     snapshots();

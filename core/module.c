@@ -202,7 +202,7 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_UNIT: return arg <= PURE_UNIT_LINE;
     case A_ROW: return (int)arg == row;
     case A_OUTER: return outer >= 0 && (int)arg == outer;
-    case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_FIRST && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
+    case A_FOLD: return (arg & 0xFF) <= PURE_FOLD_DISTINCT && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
     case A_EACH: return !(arg & 0xFF) && state_of(m, arg >> 8 & 0xFF, PURE_STATE_LIST) && arg >> 16;
     case A_LOCAL: /* a slot, and a number or an index of a list */
         return (arg & 0xFF) < PURE_MODULE_LOCALS && (arg >> 8 & 0xFF) <= 1 &&
@@ -548,7 +548,7 @@ PURE_COLD static void shape_fold(PureModule *m, uint32_t pc) {
     unsigned how = fold->arg & 0xFF;
     int list = (int)(fold->arg >> 8 & 0xFF);
     PureBlock block = {pc + 1, fold->arg >> 16};
-    if (!fold->plan || m->shapes == PURE_MODULE_SHAPES) return;
+    if (!fold->plan || m->shapes == PURE_MODULE_SHAPES || how == PURE_FOLD_DISTINCT) return;
     Node *nodes = malloc(block.length * sizeof(*nodes));
     int roots[PURE_MODULE_STACK], tests[16];
     unsigned count = 0, tested = 0;
@@ -606,6 +606,141 @@ PURE_COLD static bool locals_agree(const PureModule *m, PureBlock block) {
         used[slot] = what;
     }
     return true;
+}
+
+/* Whether a node's subtree cannot fault: no division, no overflow of a sum
+ * or product, no key or item that may be missing (an item read through the
+ * item itself or the column's row is there). */
+PURE_COLD static bool faultless(const PureModule *m, PureBlock block, const Node *nodes, int at) {
+    const PureOp *op = &m->code[block.start + at];
+    switch (op->op) {
+    case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_FIELD: case PURE_OP_LOCAL_LOAD: case PURE_OP_ROW:
+    case PURE_OP_OUTER_ROW: case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
+    case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_NUM: case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE:
+    case PURE_OP_EQ: case PURE_OP_NE: case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_NOT: case PURE_OP_NEG:
+    case PURE_OP_FLOOR: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_LIST_HAS:
+        break;
+    case PURE_OP_ITEM_GET: {
+        uint8_t index = m->code[block.start + nodes[at].kid[0]].op;
+        if (index != PURE_OP_ROW && index != PURE_OP_OUTER_ROW) return false;
+        break;
+    }
+    default: return false;
+    }
+    for (unsigned k = 0; k < 3; ++k)
+        if (nodes[at].kid[k] >= 0 && !faultless(m, block, nodes, nodes[at].kid[k])) return false;
+    return true;
+}
+
+/* The range of a keyed list's keys a planned block's test allows (see
+ * PureRange): a filter's other parts may fault, a fold's or walk's may not;
+ * a fold's value (the first of two) neither. */
+PURE_COLD static bool block_range(const PureModule *m, PureBlock block, int list, bool faults, PureRange *out) {
+    if (!m->state_key[list] || field_type(m, (uint32_t)list, m->state_key[list] - 1u) != T_NUM || !block.length) return false;
+    uint32_t key = m->state_key[list] - 1u;
+    Node *nodes = malloc(block.length * sizeof(*nodes));
+    int roots[PURE_MODULE_STACK], tests[16];
+    unsigned count = 0, tested = 0;
+    bool ok = nodes && block_tree(m, block, list, nodes, roots, &count) && count >= 1 &&
+              conjuncts(m, block, nodes, roots[count - 1], tests, &tested) &&
+              (faults || count == 1 || faultless(m, block, nodes, roots[0]));
+    PureRange range = {0};
+    for (unsigned k = 0; ok && k < tested; ++k) {
+        const Node *node = &nodes[tests[k]];
+        uint8_t op = m->code[block.start + tests[k]].op;
+        bool bounded = false;
+        for (unsigned side = 0; side < 2 && !bounded && op >= PURE_OP_LT && op <= PURE_OP_EQ; ++side) {
+            int item = node->kid[side], value = node->kid[1 - side];
+            const PureOp *get = &m->code[block.start + item];
+            if (get->op != PURE_OP_ITEM_GET || list_of(get->arg) != (uint32_t)list || item_field(get->arg) != key ||
+                m->code[block.start + nodes[item].kid[0]].op != PURE_OP_ROW || nodes[value].item)
+                continue;
+            static const uint8_t flipped[] = {[PURE_OP_LT] = PURE_OP_GT, [PURE_OP_LE] = PURE_OP_GE,
+                                              [PURE_OP_GT] = PURE_OP_LT, [PURE_OP_GE] = PURE_OP_LE, [PURE_OP_EQ] = PURE_OP_EQ};
+            uint8_t relation = side ? flipped[op] : op; /* the key REL the value */
+            PureBlock bound = {nodes[value].first, block.start + (uint32_t)value + 1 - nodes[value].first};
+            bool lower = relation == PURE_OP_GT || relation == PURE_OP_GE || relation == PURE_OP_EQ,
+                 upper = relation == PURE_OP_LT || relation == PURE_OP_LE || relation == PURE_OP_EQ;
+            if ((lower && range.lower_relation) || (upper && range.upper_relation)) continue; /* one of each */
+            if (lower) range.lower_relation = relation == PURE_OP_EQ ? PURE_OP_GE : relation, range.lower = bound;
+            if (upper) range.upper_relation = relation == PURE_OP_EQ ? PURE_OP_LE : relation, range.upper = bound;
+            bounded = true;
+        }
+        if (!bounded && !faults && !faultless(m, block, nodes, tests[k])) ok = false;
+    }
+    free(nodes);
+    if (!ok || (!range.lower_relation && !range.upper_relation)) return false;
+    *out = range;
+    return true;
+}
+
+PURE_COLD static uint8_t keep_range(PureModule *m, const PureRange *range) {
+    if (m->ranges == PURE_MODULE_RANGES) return 0;
+    m->range[m->ranges++] = *range;
+    return m->ranges;
+}
+
+/* Whether a walk's bounds read nothing its block writes: the states and
+ * locals it stores, the lists it changes. A bound is found once, before
+ * the walk; the walk's where reads it anew for every item. */
+PURE_COLD static bool bounds_fixed(const PureModule *m, const PureRange *range, PureBlock body) {
+    uint64_t states = 0, locals = 0, lists = 0;
+    for (uint32_t pc = body.start; pc < body.start + body.length; ++pc) {
+        const PureOp *op = &m->code[pc];
+        switch (op->op) {
+        case PURE_OP_STORE: case PURE_OP_CUR_STORE: case PURE_OP_INDEX_STORE: case PURE_OP_TEXT_INSERT:
+        case PURE_OP_TEXT_REMOVE: case PURE_OP_TEXT_SET:
+            states |= (uint64_t)1 << (op->arg & 63);
+            break;
+        case PURE_OP_LOCAL_STORE: locals |= (uint64_t)1 << (op->arg & 63); break;
+        case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: lists |= (uint64_t)1 << (op->arg & 63); break;
+        case PURE_OP_ITEM_SET: lists |= (uint64_t)1 << (list_of(op->arg) & 63); break;
+        default: break;
+        }
+    }
+    for (unsigned side = 0; side < 2; ++side) {
+        PureBlock bound = side ? range->upper : range->lower;
+        if (!(side ? range->upper_relation : range->lower_relation)) continue;
+        for (uint32_t pc = bound.start; pc < bound.start + bound.length; ++pc) {
+            const PureOp *op = &m->code[pc];
+            int list = list_read(op);
+            if ((op->op == PURE_OP_LOAD || op->op == PURE_OP_INDEX_LOAD) && states >> (op->arg & 63) & 1) return false;
+            if (op->op == PURE_OP_LOCAL_LOAD && locals >> (op->arg & 63) & 1) return false;
+            if (list >= 0 && lists >> (list & 63) & 1) return false;
+        }
+    }
+    return true;
+}
+
+/* A walk whose block begins with its where (a test, then a jump to the
+ * block's end when it fails) and a planned fold: the range their test allows. */
+PURE_COLD static void range_code(PureModule *m, PureBlock block, int input) {
+    for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
+        PureOp *op = &m->code[pc];
+        PureRange range;
+        if (op->op == PURE_OP_FOLD) {
+            if (op->plan && block_range(m, (PureBlock){pc + 1, op->arg >> 16}, (int)(op->arg >> 8 & 0xFF), false, &range))
+                op->range = keep_range(m, &range);
+            pc += op->arg >> 16;
+            continue;
+        }
+        if (op->op != PURE_OP_EACH) continue;
+        uint32_t end = pc + 1 + (op->arg >> 16);
+        int height = 0;
+        for (uint32_t at = pc + 1; at < end; ++at) {
+            const PureOp *next = &m->code[at];
+            if (next->op == PURE_OP_JZ) {
+                PureBlock where = {pc + 1, at - pc - 1};
+                if (height == 1 && next->arg == end && block_has_lanes(m, where, input) &&
+                    block_range(m, where, (int)(op->arg >> 8 & 0xFF), false, &range) &&
+                    bounds_fixed(m, &range, (PureBlock){at + 1, end - at - 1}))
+                    op->range = keep_range(m, &range);
+                break;
+            }
+            if (!has_lanes(m, next, input) || next->op == PURE_OP_PICK || next->op == PURE_OP_SLIDE) break;
+            height += 1 - (int)arity(next->op);
+        }
+    }
 }
 
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
@@ -916,6 +1051,10 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         plan_folds(out, out->view_code[i], given);
         out->view_plan[i] = out->view_type[i] == PURE_VIEW_TABLE && out->view_code[i].length &&
                             block_has_lanes(out, out->view_code[i], given);
+        PureRange range;
+        if (out->view_plan[i] && block_range(out, out->view_code[i], out->view_list[i], true, &range))
+            out->view_range[i] = keep_range(out, &range);
+        if (out->view_type[i] != PURE_VIEW_TABLE) range_code(out, out->view_code[i], given);
         /* A fold in a column runs for every row: one pass may answer them all. */
         for (uint32_t pc = out->view_code[i].start; out->view_table[i] && pc < out->view_code[i].start + out->view_code[i].length; ++pc)
             if (out->code[pc].op == PURE_OP_FOLD) {
@@ -925,7 +1064,9 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     }
     for (uint32_t i = 0; i < out->handlers; ++i) {
         int input = event_input(out->handler[i].event);
-        plan_folds(out, out->handler[i].code, input >= 0 && out->input[input].kind == PURE_KIND_MESSAGE ? input : -1);
+        input = input >= 0 && out->input[input].kind == PURE_KIND_MESSAGE ? input : -1;
+        plan_folds(out, out->handler[i].code, input);
+        range_code(out, out->handler[i].code, input);
     }
     return PURE_OK;
 refused:
@@ -975,8 +1116,9 @@ static double minimum(double a, double b) { return a < b || (a == b && signbit(a
 static double maximum(double a, double b) { return a > b || (a == b && !signbit(a)) ? a : b; }
 
 typedef struct { double num; PureBytes bytes; } Slot;
-/* A walk (EACH): the list, the item it runs for, and whether that item left. */
-typedef struct { uint32_t list; size_t at; bool removed; } Walk;
+/* A walk (EACH): the list, the item it runs for, where it ends (items the
+ * walk removes move it), and whether that item left. */
+typedef struct { uint32_t list; size_t at, end; bool removed; } Walk;
 typedef struct {
     PureApp *app;
     const PureInputShape *shape; /* message, or NULL */
@@ -1458,21 +1600,66 @@ static bool run_lanes(const PureModule *m, const double *values, PureBlock block
     return true;
 }
 
-/* A fold's running value: what count, sum, max, min or first has so far. */
-typedef struct { unsigned how; double total; bool any, done; } Fold;
+/* The values a distinct fold has seen: open addressing over their bits (-0
+ * as 0), UINT64_MAX free (no finite number's bits). */
+typedef struct { uint64_t *keys; size_t capacity, count; } Seen;
 
-/* One item: its value, and whether it counts (for count and first, the value is). */
-static void fold_in(Fold *fold, size_t row, double value, double counts) {
-    if (counts == 0) return;
+/* A fold's running value: what count, sum, max, min, first or distinct has so far. */
+typedef struct { unsigned how; double total; bool any, done; Seen seen; } Fold;
+
+static size_t seen_slot(uint64_t bits, size_t capacity) {
+    bits ^= bits >> 33, bits *= 0xff51afd7ed558ccdu, bits ^= bits >> 33;
+    return (size_t)bits & (capacity - 1);
+}
+
+/* Whether value is new to the set (added); false without memory too (*full). */
+static bool seen_new(Seen *seen, double value, bool *full) {
+    uint64_t bits;
+    value = value == 0 ? 0 : value;
+    memcpy(&bits, &value, sizeof(bits));
+    if (2 * (seen->count + 1) > seen->capacity) { /* half the slots free */
+        size_t capacity = seen->capacity ? 2 * seen->capacity : 64;
+        uint64_t *keys = malloc(capacity * sizeof(*keys));
+        if (!keys) { *full = true; return false; }
+        memset(keys, 0xFF, capacity * sizeof(*keys));
+        for (size_t i = 0; i < seen->capacity; ++i) {
+            if (seen->keys[i] == UINT64_MAX) continue;
+            size_t at = seen_slot(seen->keys[i], capacity);
+            while (keys[at] != UINT64_MAX) at = (at + 1) & (capacity - 1);
+            keys[at] = seen->keys[i];
+        }
+        free(seen->keys);
+        seen->keys = keys;
+        seen->capacity = capacity;
+    }
+    size_t at = seen_slot(bits, seen->capacity);
+    for (; seen->keys[at] != UINT64_MAX; at = (at + 1) & (seen->capacity - 1))
+        if (seen->keys[at] == bits) return false;
+    seen->keys[at] = bits;
+    ++seen->count;
+    return true;
+}
+
+/* One item: its value, and whether it counts (for count and first, the
+ * value is). false without memory (a distinct fold's set). */
+static bool fold_in(Fold *fold, size_t row, double value, double counts) {
+    if (counts == 0) return true;
     unsigned how = fold->how;
     if (how == PURE_FOLD_FIRST) {
         fold->total = (double)row;
         fold->any = fold->done = true;
-        return;
+        return true;
+    }
+    if (how == PURE_FOLD_DISTINCT) {
+        bool full = false;
+        fold->total += seen_new(&fold->seen, value, &full);
+        fold->any = true;
+        return !full;
     }
     fold->total = how == PURE_FOLD_COUNT ? fold->total + 1 : how == PURE_FOLD_SUM ? fold->total + value :
                   !fold->any ? value : how == PURE_FOLD_MAX ? maximum(fold->total, value) : minimum(fold->total, value);
     fold->any = true;
+    return true;
 }
 
 /* The fold's block for its items from first to last, one at a time. */
@@ -1486,7 +1673,7 @@ static PureResult fold_rows(const PureModule *m, double *values, PureBlock inner
         PureResult status = run(m, values, inner, per, out);
         per->arena->used = mark;
         if (status != PURE_OK) return status;
-        fold_in(fold, row, out[0].num, one ? out[0].num : out[1].num);
+        if (!fold_in(fold, row, out[0].num, one ? out[0].num : out[1].num)) return PURE_ALLOCATION;
     }
     return PURE_OK;
 }
@@ -1495,13 +1682,15 @@ static PureResult fold_rows(const PureModule *m, double *values, PureBlock inner
  * fault goes item by item. The items join the fold in order, so a sum adds
  * as it would one at a time. */
 static PureResult fold_runs(const PureModule *m, double *values, PureBlock inner, const PureList *list, Event *per,
-                            Fold *fold) {
+                            Fold *fold, size_t from, size_t to) {
     double store[PURE_MODULE_STACK][PURE_LIST_RUN], scratch[2][PURE_LIST_RUN];
     bool one = fold->how == PURE_FOLD_COUNT || fold->how == PURE_FOLD_FIRST;
     PureRun items;
     Memo memo;
     memo.known = 0;
-    for (bool more = pure_list_run(list, 0, &items); more && !fold->done; more = pure_list_next(list, &items)) {
+    /* Items from and to (a range's): whole leaves, whose items out of range the test leaves out. */
+    for (bool more = from < to && pure_list_run(list, from, &items); more && !fold->done && items.start < to;
+         more = pure_list_next(list, &items)) {
         Lanes out[2];
         if (!run_lanes(m, values, inner, per, &items, out, store, &memo, NULL)) {
             PureResult status = fold_rows(m, values, inner, per, items.start, items.start + items.count, fold);
@@ -1524,9 +1713,40 @@ static PureResult fold_runs(const PureModule *m, double *values, PureBlock inner
             fold->total = total;
             fold->any = any;
         } else
-            for (unsigned i = 0; i < items.count && !fold->done; ++i) fold_in(fold, items.start + i, v[i], c[i]);
+            for (unsigned i = 0; i < items.count && !fold->done; ++i)
+                if (!fold_in(fold, items.start + i, v[i], c[i])) return PURE_ALLOCATION;
     }
     return PURE_OK;
+}
+
+/* The positions of the items whose keys a range allows: its bounds run
+ * alone, then found by key. false when a bound faults: the test then runs
+ * for every item, as written (and faults as it would). */
+static bool range_bounds(const PureModule *m, double *values, const PureRange *range, const PureList *list, unsigned key,
+                         Event *ev, size_t *from, size_t *to) {
+    PureApp *app = ev->app;
+    PureFault fault = app->fault;
+    uint32_t fault_pc = app->fault_pc;
+    bool ok = true;
+    *from = 0;
+    *to = pure_list_count(list);
+    for (unsigned side = 0; side < 2 && ok; ++side) {
+        uint8_t relation = side ? range->upper_relation : range->lower_relation;
+        if (!relation) continue;
+        Slot bound;
+        size_t mark = ev->arena->used;
+        ok = run(m, values, side ? range->upper : range->lower, ev, &bound) == PURE_OK;
+        ev->arena->used = mark;
+        if (!ok) break;
+        bool found;
+        size_t at = pure_list_seek(list, key, (PureCell){bound.num, NULL, 0}, &found);
+        at += (relation == PURE_OP_GT || relation == PURE_OP_LE) && found; /* past the key itself */
+        if (side) *to = at < *to ? at : *to;
+        else *from = at;
+    }
+    app->fault = fault, app->fault_pc = fault_pc;
+    if (*from > *to) *from = *to;
+    return ok;
 }
 
 /* ---- Passes: a shaped fold in a column answered for every row --------
@@ -1640,7 +1860,7 @@ static Group *group_of(struct PurePass *pass, double key, unsigned how, bool add
     }
     size_t at = group_slot(order_bits(key), pass->capacity);
     while (pass->groups[at].used) at = (at + 1) & (pass->capacity - 1);
-    pass->groups[at] = (Group){key, {how, 0, false, false}, true};
+    pass->groups[at] = (Group){key, {how, 0, false, false, {0}}, true};
     ++pass->count;
     return &pass->groups[at];
 }
@@ -1664,7 +1884,7 @@ static bool group_pass(const PureModule *m, double *values, PureBlock inner, con
             if (c[i] == 0) continue;
             Group *group = group_of(pass, keys[i], how, true);
             if (!group) return false;
-            if (!group->fold.done) fold_in(&group->fold, items.start + i, v[i], c[i]);
+            if (!group->fold.done && !fold_in(&group->fold, items.start + i, v[i], c[i])) return false;
         }
     }
     return true;
@@ -1973,6 +2193,7 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             if (ev->walk && ev->walk->list == arg) { /* the walk goes on with the item after */
                 if (at < ev->walk->at) --ev->walk->at;
                 else if (at == ev->walk->at) ev->walk->removed = true;
+                if (at < ev->walk->end && ev->walk->end != SIZE_MAX) --ev->walk->end;
             }
             continue;
         }
@@ -2015,15 +2236,22 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             PureBlock inner = {pc, arg >> 16};
             PureList *list = app->lists[arg >> 8 & 0xFF];
             pc += inner.length;
-            Fold fold = {arg & 0xFF, 0, false, false};
+            Fold fold = {arg & 0xFF, 0, false, false, {0}};
             Event per = *ev;
             per.outer = ev->row;
             if (!op->shape || !fold_shaped(m, values, op, list, &per, &fold)) {
-                status = op->plan ? fold_runs(m, values, inner, list, &per, &fold)
+                size_t from = 0, to = pure_list_count(list);
+                if (op->range) /* only the items a range of keys allows can count */
+                    range_bounds(m, values, &m->range[op->range - 1], list, m->state_key[arg >> 8 & 0xFF] - 1u, &per, &from, &to);
+                status = op->plan ? fold_runs(m, values, inner, list, &per, &fold, from, to)
                                   : fold_rows(m, values, inner, &per, 0, pure_list_count(list), &fold);
+                free(fold.seen.keys);
                 if (status != PURE_OK) return status;
             }
-            if (!fold.any && fold.how >= PURE_FOLD_MAX) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
+            if (!fold.any && (fold.how == PURE_FOLD_MAX || fold.how == PURE_FOLD_MIN || fold.how == PURE_FOLD_FIRST)) {
+                kind = PURE_FAULT_NOT_FOUND;
+                goto failed;
+            }
             if (!isfinite(fold.total)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
             stack[sp].num = fold.total;
             stack[sp++].bytes.owner = (uint16_t)(arg >> 8 & 0xFF); /* first: the list the index is in */
@@ -2033,11 +2261,14 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             /* The block that follows runs for each item the list has, as the
              * handler's code with ROW the item; the list only shrinks meanwhile. */
             PureBlock inner = {pc, arg >> 16};
-            Walk walk = {arg >> 8 & 0xFF, 0, false};
+            Walk walk = {arg >> 8 & 0xFF, 0, SIZE_MAX, false};
             pc += inner.length;
             Event per = *ev;
             per.walk = &walk;
-            while (walk.at < pure_list_count(app->lists[walk.list])) {
+            if (op->range) /* a where that bounds the key: only the items in bounds */
+                range_bounds(m, values, &m->range[op->range - 1], app->lists[walk.list], m->state_key[walk.list] - 1u, &per,
+                             &walk.at, &walk.end);
+            while (walk.at < walk.end && walk.at < pure_list_count(app->lists[walk.list])) {
                 size_t mark = arena->used;
                 per.row = walk.at;
                 walk.removed = false;
@@ -2734,7 +2965,11 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
         Memo memo;
         memo.known = 0;
         if (!argue(app, table, &ev)) return NULL;
-        for (bool more = pure_list_run(list, 0, &run); more; more = pure_list_next(list, &run)) {
+        size_t from = 0, to = pure_list_count(list);
+        if (m->view_range[table]) /* items out of the range fail the filter: they are not read */
+            range_bounds(m, (double *)app->values, &m->range[m->view_range[table] - 1], list,
+                         m->state_key[m->view_list[table]] - 1u, &ev, &from, &to);
+        for (bool more = from < to && pure_list_run(list, from, &run); more && run.start < to; more = pure_list_next(list, &run)) {
             Lanes keep;
             if (run_lanes(m, app->values, m->view_code[table], &ev, &run, &keep, store, &memo, NULL)) {
                 const double *kept = lanes_of(&keep, scratch, &run);
