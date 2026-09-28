@@ -42,22 +42,33 @@ static size_t json_number(const unsigned char *p, size_t size, bool *integer) {
     return i;
 }
 
-/* A fixed field's value from its text (a query value or a JSON number) into
- * the prefix: a u32 in range, or a finite number. */
-bool pure_json_fixed(const PureField *field, const unsigned char *text, size_t size, unsigned char *prefix) {
+/* A JSON number's finite value. */
+static bool json_double(const unsigned char *text, size_t size, double *value) {
     bool integer;
     if (!size || json_number(text, size, &integer) != size || size > 40) return false;
     char digits[48];
     memcpy(digits, text, size);
     digits[size] = 0;
+    *value = strtod(digits, NULL);
+    return isfinite(*value);
+}
+
+/* A fixed field's value from its text (a query value or a JSON number) into
+ * the prefix: a u32 in range, or a finite number. */
+bool pure_json_fixed(const PureField *field, const unsigned char *text, size_t size, unsigned char *prefix) {
+    bool integer;
+    if (!size || json_number(text, size, &integer) != size || size > 40) return false;
     if (field->type == PURE_FIELD_U32) {
+        char digits[48];
         uint64_t n;
+        memcpy(digits, text, size);
+        digits[size] = 0;
         if (!integer || !decimal(digits, UINT32_MAX, &n)) return false;
         write_u32(prefix + field->offset, (uint32_t)n);
         return true;
     }
-    double value = strtod(digits, NULL);
-    if (!isfinite(value)) return false;
+    double value;
+    if (!json_double(text, size, &value)) return false;
     memcpy(prefix + field->offset, &value, 8);
     return true;
 }
@@ -203,6 +214,116 @@ static uint32_t field_named(const PureJsonMessage *b, const char *path, size_t p
     return b->shape->field_count;
 }
 
+/* Room for more bytes of rows. */
+static bool rows_room(PureJsonMessage *b, size_t more) {
+    if (more <= b->rows_capacity - b->rows_size) return true;
+    size_t capacity = b->rows_capacity ? b->rows_capacity : 4096;
+    while (capacity - b->rows_size < more) {
+        if (capacity > SIZE_MAX / 2) return false;
+        capacity *= 2;
+    }
+    unsigned char *grown = realloc(b->rows, capacity);
+    if (!grown) return false;
+    b->rows = grown;
+    b->rows_capacity = capacity;
+    return true;
+}
+
+/* A rows field's array (at its opening bracket): each an object of its
+ * record's fields by name, a number or a string, a field left out taking its
+ * default; encoded one after another as the list's stored form (a number's
+ * binary64 bits, a text's u32le length and bytes). */
+static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size, size_t *at, uint32_t f, unsigned depth) {
+    const PureModule *m = b->module;
+    const PureField *field = &m->field[b->shape->field_start + f];
+    const PureRecord *record = &m->record[m->state_ref[field->rows]];
+    size_t start = b->rows_size;
+    if (*at == size || json[(*at)++] != '[') return "json_type";
+    *at = pure_json_space(json, *at, size);
+    for (bool first = true; *at < size && json[*at] != ']'; first = false) {
+        if (!first) {
+            if (json[(*at)++] != ',') return "json";
+            *at = pure_json_space(json, *at, size);
+        }
+        if (*at == size || json[(*at)++] != '{') return "json_type";
+        double numbers[PURE_RECORD_FIELDS];
+        PureSpan texts[PURE_RECORD_FIELDS];
+        bool given[PURE_RECORD_FIELDS] = {false};
+        *at = pure_json_space(json, *at, size);
+        for (bool member = true; *at < size && json[*at] != '}'; member = false) {
+            if (!member) {
+                if (json[(*at)++] != ',') return "json";
+                *at = pure_json_space(json, *at, size);
+            }
+            size_t key_end = *at < size && json[*at] == '"' ? json_string_end(json + *at + 1, size - *at - 1) : 0;
+            if (!key_end) return "json";
+            const unsigned char *key = json + *at + 1;
+            size_t key_size = key_end - 1;
+            *at = pure_json_space(json, *at + 1 + key_end, size);
+            if (*at == size || json[(*at)++] != ':') return "json";
+            *at = pure_json_space(json, *at, size);
+            unsigned k = 0;
+            while (k < record->count && (strlen(m->record_field_names[record->first + k]) != key_size ||
+                                         memcmp(m->record_field_names[record->first + k], key, key_size)))
+                ++k;
+            if (k == record->count) {
+                if (!b->lenient) return "json_field";
+                if (!skip_value(json, size, at, depth + 1)) return "json";
+                *at = pure_json_space(json, *at, size);
+                continue;
+            }
+            if (given[k]) return "json_field";
+            given[k] = true;
+            bool text = m->record_field_text[record->first + k];
+            if (*at < size && json[*at] == '"') {
+                size_t end = json_string_end(json + *at + 1, size - *at - 1), written;
+                if (!end) return "json";
+                if (!text) return "json_type";
+                unsigned char *value = json + *at + 1;
+                if (!memchr(value, '\\', end - 1)) written = end - 1;
+                else if (!json_unescape(value, end - 1, value, &written)) return "json";
+                if (!pure_utf8_valid((PureSpan){value, written})) return "json";
+                texts[k] = (PureSpan){value, written};
+                *at = pure_json_space(json, *at + 1 + end, size);
+                continue;
+            }
+            bool integer;
+            size_t length = json_number(json + *at, size - *at, &integer);
+            if (!length) return *at < size && (json[*at] == '[' || json[*at] == '{' || json[*at] == 't' || json[*at] == 'f' ||
+                                               json[*at] == 'n') ? "json_type" : "json";
+            if (text || !json_double(json + *at, length, &numbers[k])) return "json_type";
+            *at = pure_json_space(json, *at + length, size);
+        }
+        if (*at == size) return "json";
+        ++*at;
+        for (unsigned k = 0; k < record->count; ++k) {
+            uint32_t at_field = record->first + k;
+            if (m->record_field_text[at_field]) {
+                uint32_t constant = (uint32_t)m->record_field_default[at_field];
+                PureSpan text = given[k] ? texts[k]
+                                         : (PureSpan){m->constant_data + m->constant_offset[constant], m->constant_length[constant]};
+                if (!rows_room(b, 4 + text.size)) return "memory";
+                write_u32(b->rows + b->rows_size, (uint32_t)text.size);
+                if (text.size) memcpy(b->rows + b->rows_size + 4, text.data, text.size);
+                b->rows_size += 4 + text.size;
+            } else {
+                double value = given[k] ? numbers[k] : m->record_field_default[at_field];
+                uint64_t bits;
+                memcpy(&bits, &value, 8);
+                if (!rows_room(b, 8)) return "memory";
+                for (unsigned i = 0; i < 8; ++i) b->rows[b->rows_size + i] = (unsigned char)(bits >> (8 * i));
+                b->rows_size += 8;
+            }
+        }
+    }
+    if (*at == size) return "json";
+    ++*at;
+    if (b->rows_base + b->rows_size > UINT32_MAX >> 2) return "limit";
+    write_u32(b->table + 8 * f, (uint32_t)(b->rows_base + start));
+    write_u32(b->table + 8 * f + 4, (uint32_t)(b->rows_size - start));
+    return NULL;
+}
+
 /* An object's members from json[*at] (its opening brace), in the group named
  * path: a field's value, or a group's object. Strings stay where they are
  * (an escaped one is unescaped over itself, which never makes it longer).
@@ -226,6 +347,14 @@ static const char *members(PureJsonMessage *b, unsigned char *json, size_t size,
         *at = pure_json_space(json, *at, size);
         bool group;
         uint32_t f = field_named(b, path, path_size, key, key_size, &group);
+        if (f < b->shape->field_count && m->field[b->shape->field_start + f].type == PURE_FIELD_ROWS) {
+            if (b->seen[f] || (b->given && b->given[f])) return "json_field";
+            b->seen[f] = true;
+            const char *why = rows_of(b, json, size, at, f, depth);
+            if (why) return why;
+            *at = pure_json_space(json, *at, size);
+            continue;
+        }
         if (f == b->shape->field_count && !group && b->lenient) { /* not the app's: skipped */
             if (!skip_value(json, size, at, depth)) return "json";
             *at = pure_json_space(json, *at, size);

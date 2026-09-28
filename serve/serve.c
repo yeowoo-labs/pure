@@ -643,12 +643,14 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
     if (*c->source && !message) return "delivery";
     if (!host->owner) c->source[0] = 0; /* an app without states or outputs applies it as a message */
     if (shape) {
-        /* A body is a text input's text, a message's one variable field, or a
-         * JSON object of a message's fields (two variable fields need one). */
+        /* A body is a text input's text, a message's one variable field (rows
+         * in their list's stored form), or a JSON object of a message's fields
+         * (two variable fields need one). */
         unsigned variables = 0;
         for (uint32_t f = 0; message && f < shape->field_count; ++f)
             variables += m->field[shape->field_start + f].type == PURE_FIELD_BYTES ||
-                         m->field[shape->field_start + f].type == PURE_FIELD_TEXT;
+                         m->field[shape->field_start + f].type == PURE_FIELD_TEXT ||
+                         m->field[shape->field_start + f].type == PURE_FIELD_ROWS;
         if (c->json && !message) return "json";
         if (!c->json && (variables > 1 || (c->body_size && shape->kind == PURE_KIND_KEY) ||
                          (c->body_size && message && !variables))) return variables > 1 ? "json" : "body";
@@ -706,31 +708,45 @@ enum { DELIVERY = 80 };
 static const char *convert(Connection *c) {
     const PureInputShape *shape = &c->host->module->input[c->input];
     uint32_t delivered = get_u32(c->ingress) & DELIVERED;
-    size_t table = 8 * (size_t)shape->field_count;
+    size_t table = 8 * (size_t)shape->field_count, payload = c->batch * c->field_bytes + c->body_size;
     unsigned char *tables = c->ingress + 4 + (delivered ? DELIVERY : 0), *prefixes = tables + c->batch * table;
     unsigned char *json = c->body;
     size_t size = c->body_size, at = pure_json_space(json, 0, size);
+    /* A message's rows go after the body: they are encoded, then placed. */
+    PureJsonMessage b = {.module = c->host->module, .shape = shape, .given = c->given, .rows_base = payload};
+    const char *why = NULL;
     /* A batch is an array of its messages' objects. */
     if (c->batch > 1) {
         if (at == size || json[at++] != '[') return "json";
         at = pure_json_space(json, at, size);
     }
-    for (unsigned i = 0; i < c->batch; ++i) {
-        if (i) {
-            if (at == size || json[at++] != ',') return "json";
-            at = pure_json_space(json, at, size);
-        }
-        PureJsonMessage b = {.module = c->host->module, .shape = shape, .table = tables + i * table,
-                             .payload = prefixes + i * c->field_bytes, .given = c->given};
-        const char *why = pure_json_message(&b, json, size, &at);
-        if (why) return why;
+    for (unsigned i = 0; i < c->batch && !why; ++i) {
+        if (i && (at == size || json[at++] != ',')) why = "json";
         at = pure_json_space(json, at, size);
-        for (uint32_t f = 0; f < shape->field_count; ++f)
-            if (!b.seen[f] && !c->given[f]) return "missing_field";
+        b.table = tables + i * table;
+        b.payload = prefixes + i * c->field_bytes;
+        memset(b.seen, 0, sizeof(b.seen));
+        if (!why) why = pure_json_message(&b, json, size, &at);
+        at = pure_json_space(json, at, size);
+        for (uint32_t f = 0; !why && f < shape->field_count; ++f)
+            if (!b.seen[f] && !c->given[f]) why = "missing_field";
+        if (!why && c->batch > 1 && b.rows_size) why = "delivery"; /* an output sends no rows */
     }
-    if (c->batch > 1 && (at == size || json[at++] != ']')) return "json";
-    if (pure_json_space(json, at, size) != size) return "json";
-    put_u32(c->ingress, (uint32_t)(c->batch * c->field_bytes + c->body_size) | PLACED | delivered);
+    if (!why && c->batch > 1 && (at == size || json[at++] != ']')) why = "json";
+    if (!why && pure_json_space(json, at, size) != size) why = "json";
+    if (!why && b.rows_size) {
+        size_t body = (size_t)(c->body - c->ingress);
+        PureResult grown = pure_runtime_grow(c->ticket, body + c->body_size + b.rows_size);
+        if (grown != PURE_OK) why = grown == PURE_BUDGET ? "payload_budget" : "memory";
+        else {
+            c->ingress = pure_runtime_ingress(c->ticket, NULL);
+            c->body = c->ingress + body;
+            memcpy(c->body + c->body_size, b.rows, b.rows_size);
+        }
+    }
+    free(b.rows);
+    if (why) return why;
+    put_u32(c->ingress, (uint32_t)(payload + b.rows_size) | PLACED | delivered);
     return NULL;
 }
 
@@ -784,7 +800,8 @@ static void body_done(Connection *c) {
     const char *why = c->route == ROUTE_INPUT && c->json ? convert(c) : NULL;
     if (why) {
         release_ticket(c); /* never made ready: it never runs */
-        respond(c, 400, "Bad Request", why, 0, (PureSpan){0});
+        if (!strcmp(why, "payload_budget") || !strcmp(why, "memory")) respond(c, 503, "Service Unavailable", why, 0, (PureSpan){0});
+        else respond(c, 400, "Bad Request", why, 0, (PureSpan){0});
         return;
     }
     if (!pure_runtime_ready(c->ticket)) abort();

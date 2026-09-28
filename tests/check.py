@@ -1023,6 +1023,163 @@ def server_surface(aup, pure, work):
     return {'events': 5, 'lines': len(got)}
 
 
+SHOP = '''
+record Stock {
+  item = 0
+  left = 0
+}
+record Line {
+  item = 0
+  qty = 1
+  note: text
+}
+record Entry {
+  item = 0
+  qty = 0
+  note: text
+}
+state stock: list of Stock by item
+state log: list of Entry
+state orders = 0
+
+input restock = message {
+  rows: list of Stock
+}
+input order = message {
+  customer: u32
+  lines: list of Line
+}
+input clean = message {
+  below: number
+}
+
+on restock {
+  for r in restock.rows {
+    stock.add(Stock { item: r.item, left: r.left })
+  }
+}
+on order {
+  for l in order.lines {
+    stock[l.item].left = stock[l.item].left - l.qty
+    require stock[l.item].left >= 0
+    log.append(Entry { item: l.item, qty: l.qty, note: l.note })
+  }
+  orders = orders + order.lines.count
+}
+on clean {
+  for s in stock where s.left < clean.below {
+    stock.remove(s)
+  }
+}
+view items = stock.count
+view left = sum(s.left for s in stock)
+view logged = log.count
+view total = sum(e.qty for e in log)
+view lines = orders
+view notes = each e in log {
+  item = e.item
+  note = e.note
+}
+'''
+
+
+def server_rows(aup, pure, work):
+    """A message's rows (a list of a record: a JSON array of objects, or the
+    list's stored form as the body) walked with for, all or nothing: 30,000
+    stock rows in one request, then 20,000 as bytes, then random orders whose
+    rows take stock (an item not stocked or not enough of it fails the whole
+    order, none of its rows applied), a walk that removes, and a restart that
+    keeps every state and no rows. Checked against a model."""
+    import http.client
+    import random
+    import struct
+    import time
+    source, module = work / 'shop.aup', work / 'shop.pmod'
+    source.write_text(SHOP)
+    compile_module(aup, source, module)
+    store = work / 'shop-store'
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store])
+
+    def call(method, path, body=None, kind='application/json'):
+        connection = http.client.HTTPConnection('127.0.0.1', host.port, timeout=60)
+        try:
+            connection.request(method, path, body, {'Content-Type': kind} if body is not None else {})
+            answer = connection.getresponse()
+            return answer.status, answer.getheader('X-Pure-Error'), answer.read()
+        finally:
+            connection.close()
+
+    def number(view):
+        status, _, data = call('GET', f'/views/{view}')
+        assert status == 200, (view, status)
+        return float(data)
+
+    stock, log = {}, []
+    try:
+        began = time.perf_counter()
+        rows = [{'item': i, 'left': i % 7} for i in range(30000)]
+        assert call('POST', '/inputs/restock', json.dumps({'rows': rows}).encode())[:2] == (200, 'none')
+        seconds = time.perf_counter() - began
+        stock.update({i: i % 7 for i in range(30000)})
+        packed = b''.join(struct.pack('<dd', i, 5) for i in range(30000, 50000))
+        assert call('POST', '/inputs/restock', packed, 'application/octet-stream')[:2] == (200, 'none')
+        stock.update({i: 5 for i in range(30000, 50000)})
+        assert number('items') == 50000 and number('left') == sum(stock.values())
+        # All or nothing: a row whose item is there already fails the whole message.
+        assert call('POST', '/inputs/restock', json.dumps({'rows': [{'item': 60000}, {'item': 7}]}).encode())[:2] == \
+            (409, 'exists')
+        assert call('POST', '/inputs/restock', packed[:40], 'application/octet-stream')[:2] == (422, 'limit')
+        assert call('POST', '/inputs/restock', json.dumps({'rows': [{'item': 1, 'lft': 2}]}).encode())[:2] == \
+            (400, 'json_field')
+        assert call('POST', '/inputs/restock', json.dumps({'rows': [{'item': 'one'}]}).encode())[:2] == (400, 'json_type')
+        assert number('items') == 50000
+        rng = random.Random(21)
+        notes = ['', 'fast', '빨리', 'a "quoted" \\ note', 'tab\there', '😀']
+        applied = refused = 0
+        for _ in range(400):
+            lines = [{'item': rng.randrange(50010), 'qty': rng.randrange(4), 'note': rng.choice(notes)}
+                     for _ in range(rng.randrange(6))]
+            if lines and rng.random() < 0.3:
+                del lines[0]['qty']  # a field left out takes its default (1)
+            model = dict(stock)
+            ok = True
+            for line in lines:
+                qty = line.get('qty', 1)
+                if line['item'] not in model or model[line['item']] - qty < 0:
+                    ok = False
+                    break
+                model[line['item']] -= qty
+            status, error, _ = call('POST', '/inputs/order', json.dumps({'customer': 3, 'lines': lines}).encode())
+            assert (status == 200) == ok, (status, error, lines)
+            if ok:
+                stock = model
+                log.extend((line['item'], line.get('qty', 1), line['note']) for line in lines)
+                applied += 1
+            else:
+                refused += 1
+        assert number('logged') == len(log) and number('total') == sum(q for _, q, _ in log)
+        assert number('left') == sum(stock.values()) and number('lines') == len(log)
+        shown = json.loads(call('GET', f'/views/notes?from={max(0, len(log) - 50)}')[2])['items']
+        assert [(r['item'], r['note']) for r in shown] == [(i, n) for i, _, n in log[-50:]]
+        assert call('POST', '/inputs/clean', json.dumps({'below': 2}).encode())[:2] == (200, 'none')
+        stock = {item: left for item, left in stock.items() if left >= 2}
+        assert number('items') == len(stock) and number('left') == sum(stock.values())
+    finally:
+        host.stop()
+    # Restarted: the states as they were; rows are never kept, and come again.
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store])
+    try:
+        assert number('items') == len(stock) and number('logged') == len(log) and number('lines') == len(log)
+        assert call('POST', '/inputs/restock', json.dumps({'rows': [{'item': 90000, 'left': 1}]}).encode())[:2] == \
+            (200, 'none')
+        assert number('items') == len(stock) + 1
+    finally:
+        host.stop()
+    assert applied > 50 and refused > 50
+    return {'bulk_rows_json': 30000, 'bulk_rows_bytes': 20000, 'bulk_rows_per_second': round(30000 / seconds),
+            'orders_applied': applied, 'orders_refused': refused, 'logged': len(log)}
+
+
 def server_queries(aup, pure, work):
     """Queries as verified programs over a snapshot (PUT and GET /queries/NAME):
     aup query compiles a bank's declarations with views of its own; the node
@@ -1608,6 +1765,7 @@ def main():
         report['server_sealed'] = server_sealed(aup, pure, work)
         report['server_surface'] = server_surface(aup, pure, work)
         report['server_queries'] = server_queries(aup, pure, work)
+        report['server_rows'] = server_rows(aup, pure, work)
         report['server_answers'] = server_answers(aup, pure, work)
     print(json.dumps(report))
 

@@ -110,6 +110,10 @@ bool pure_runtime_bind(PureRuntime *, PureWork *, size_t capacity);
 PureResult pure_runtime_accept(PureRuntime *, PureInput, const char *key,
                                int64_t expected, size_t input_size, PureTicket *out);
 unsigned char *pure_runtime_ingress(PureTicket, size_t *size);
+/* A WRITE input still being filled grows to size with its bytes kept (the
+ * ingress moves: take it again), charged to the budget as its admission was;
+ * BUDGET or ALLOCATION leave it as it was. */
+PureResult pure_runtime_grow(PureTicket, size_t size);
 bool pure_runtime_ready(PureTicket);
 bool pure_runtime_step(PureRuntime *); /* execute at most one ready job */
 bool pure_runtime_result(PureTicket, PureOutcome *out);

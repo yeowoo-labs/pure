@@ -482,15 +482,37 @@ static bool form_answer(const PureWire *w, int status, const Text *body, const P
     unsigned char *prefix = bytes + table, *text = prefix + in->prefix, *copy = text + body->size;
     if (body->size) memcpy(text, body->bytes, body->size);
     if (p->sent_size) memcpy(copy, p->sent, p->sent_size);
-    PureJsonMessage message = {.module = m, .shape = in, .payload = prefix, .table = bytes, .lenient = true};
+    /* Rows the answer gives go after the send's copy. */
+    PureJsonMessage message = {.module = m, .shape = in, .payload = prefix, .table = bytes, .lenient = true,
+                               .rows_base = in->prefix + body->size + p->sent_size};
     size_t at = pure_json_space(text, 0, body->size);
     if (at < body->size && text[at] == '{' && pure_json_message(&message, text, body->size, &at)) {
+        free(message.rows);
         free(bytes);
         return false;
     }
+    if (message.rows_size) {
+        unsigned char *grown = realloc(bytes, total + message.rows_size);
+        if (!grown) {
+            free(message.rows);
+            free(bytes);
+            return false;
+        }
+        memcpy(grown + total, message.rows, message.rows_size);
+        bytes = grown;
+        prefix = bytes + table;
+        copy = prefix + in->prefix + body->size;
+        total += message.rows_size;
+    }
+    free(message.rows);
     for (uint32_t f = 0; f < in->field_count; ++f) {
         if (message.seen[f]) continue;
         const PureField *field = &m->field[in->field_start + f];
+        if (field->type == PURE_FIELD_ROWS) { /* none given: none */
+            write_u32(bytes + 8 * f, 0);
+            write_u32(bytes + 8 * f + 4, 0);
+            continue;
+        }
         if (field->type == PURE_FIELD_U32 && !strcmp(field->name, "http_status")) {
             write_u32(prefix + field->offset, (uint32_t)status);
             continue;

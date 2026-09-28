@@ -201,6 +201,35 @@ unsigned char *pure_runtime_ingress(PureTicket ticket, size_t *size) {
     return (unsigned char *)w->resource.body.data;
 }
 
+PureResult pure_runtime_grow(PureTicket ticket, size_t size) {
+    PureWork *w = lookup(ticket, true);
+    PureRuntime *r = ticket.runtime;
+    if (!w || r->running || w->state != RECEIVING || w->input != PURE_INPUT_WRITE || w->parent.runtime)
+        return PURE_INVALID;
+    size_t had = w->resource.body.size;
+    if (size <= had) return PURE_OK;
+    if (size - had > r->budget - r->retained) {
+        METRIC(++r->budget_rejections);
+        return PURE_BUDGET;
+    }
+    if (!r->host.allocate) return PURE_ALLOCATION;
+    PureResource grown = {0};
+    r->running = true;
+    bool ok = r->host.allocate(r->host.context, size, &grown);
+    r->running = false;
+    if (!ok || !grown.body.data || grown.body.size != size || !grown.release) {
+        dispose(r, &grown);
+        return PURE_ALLOCATION;
+    }
+    if (had) memcpy((unsigned char *)grown.body.data, w->resource.body.data, had);
+    dispose(r, &w->resource);
+    w->resource = grown;
+    w->charged += size - had;
+    r->retained += size - had;
+    METRIC(if (r->retained > r->peak_retained) r->peak_retained = r->retained);
+    return PURE_OK;
+}
+
 bool pure_runtime_step(PureRuntime *r) {
     if (!r || r->running || r->ready_head == NONE) return false;
 #ifdef PURE_ASYNC_EFFECTS
