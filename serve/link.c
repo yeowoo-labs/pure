@@ -22,7 +22,8 @@
 #include <unistd.h>
 
 enum { VERSION = 0x70, HEADER = 21, DATAGRAM = 1200, BODY = DATAGRAM - HEADER - PURE_AEAD_TAG, PIECE = 1000 };
-enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, STORED_GAP = 1 };
+enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, F_RECORDS = 6, STORED_GAP = 1 };
+enum { RECORDS_HEAD = 10 }; /* type, the first number, the count */
 /* Packets sent at once with UDP GSO: each but the last is a whole datagram
  * (a full one padded), and 54 of them fit a UDP datagram's 65,507 bytes. */
 enum { BURST = 54 };
@@ -46,6 +47,28 @@ static uint32_t get32(const unsigned char *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 static uint64_t get64(const unsigned char *p) { return (uint64_t)get32(p) | (uint64_t)get32(p + 4) << 32; }
+/* LEB128: seven bits a byte, low first. */
+static size_t put_varint(unsigned char *p, uint64_t v) {
+    size_t n = 0;
+    for (; v >= 0x80; v >>= 7) p[n++] = (unsigned char)(v | 0x80);
+    p[n++] = (unsigned char)v;
+    return n;
+}
+static size_t varint_size(uint64_t v) {
+    size_t n = 1;
+    for (; v >= 0x80; v >>= 7) ++n;
+    return n;
+}
+/* A varint from p (size bytes): how many bytes it took, or 0. */
+static size_t get_varint(const unsigned char *p, size_t size, uint64_t *v) {
+    *v = 0;
+    for (size_t n = 0; n < size && n < 10; ++n) {
+        *v |= (uint64_t)(p[n] & 0x7f) << (7 * n);
+        if (!(p[n] & 0x80)) return n + 1;
+    }
+    return 0;
+}
+
 static uint64_t least(uint64_t a, uint64_t b) { return a < b ? a : b; }
 static uint64_t most(uint64_t a, uint64_t b) { return a > b ? a : b; }
 
@@ -549,6 +572,10 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
      * it are sent, and every one found sent moves that mark on. */
     size_t k = l->count && l->unsent_from > base + 1 ? (size_t)(l->unsent_from - base - 1) : 0;
     bool before = true;
+    /* Whole records whose numbers follow on share a RECORDS frame (its count
+     * at run); a piece of a larger one goes alone (RECORD). */
+    size_t run = 0;
+    uint64_t next = 0;
     for (; k < l->count && f->count < UNITS; ++k) {
         Record *r = record_at(l, k);
         if (r->seq > base + l->credit) break;
@@ -556,17 +583,35 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
         for (uint32_t i = 0; i < r->pieces; ++i) {
             if (r->piece[i].state != UNSENT) continue;
             uint32_t offset = i * PIECE, length = (uint32_t)least(PIECE, r->size - offset);
-            if (f->count == UNITS || at + RECORD_HEAD + length > BODY) {
+            bool whole = r->pieces == 1, joins = whole && run && r->seq == next;
+            size_t need = whole ? (joins ? 0 : RECORDS_HEAD) + varint_size(length) + length : RECORD_HEAD + length;
+            if (f->count == UNITS || at + need > BODY) {
                 unsent = true;
                 break;
             }
-            body[at] = F_RECORD;
-            put64(body + at + 1, r->seq);
-            put32(body + at + 9, r->size);
-            put32(body + at + 13, offset);
-            put16(body + at + 17, length);
-            if (length) memcpy(body + at + RECORD_HEAD, r->bytes + offset, length);
-            at += RECORD_HEAD + length;
+            if (whole) {
+                if (!joins) {
+                    body[at] = F_RECORDS;
+                    put64(body + at + 1, r->seq);
+                    body[at + 9] = 0;
+                    run = at + 9;
+                    at += RECORDS_HEAD;
+                }
+                at += put_varint(body + at, length);
+                if (length) memcpy(body + at, r->bytes, length);
+                at += length;
+                ++body[run];
+                next = r->seq + 1;
+            } else {
+                body[at] = F_RECORD;
+                put64(body + at + 1, r->seq);
+                put32(body + at + 9, r->size);
+                put32(body + at + 13, offset);
+                put16(body + at + 17, length);
+                if (length) memcpy(body + at + RECORD_HEAD, r->bytes + offset, length);
+                at += RECORD_HEAD + length;
+                run = 0;
+            }
             set_piece(l, r, i, FLYING);
             r->piece[i].pn = f->pn;
             f->units[f->count++] = (Unit){r->seq, i};
@@ -1392,6 +1437,20 @@ static bool take_from(PureLinkListener *s, Peer *peer, unsigned char *packet, si
             }
             at += RECORD_HEAD - 1 + length;
             eliciting = true;
+        } else if (type == F_RECORDS) {
+            if (at + RECORDS_HEAD - 1 > size) break;
+            uint64_t first = get64(plain + at), length = 0;
+            unsigned count = plain[at + 8];
+            at += RECORDS_HEAD - 1;
+            unsigned i = 0;
+            for (size_t used; i < count && (used = get_varint(plain + at, size - at, &length)) &&
+                              length <= PIECE && length <= size - at - used; ++i) {
+                if (st) hold(st, first + i, (uint32_t)length, 0, plain + at + used, (uint32_t)length);
+                at += used + length;
+            }
+            if (st) mark_ready(s, st);
+            eliciting = true;
+            if (i < count) break; /* cut short: the rest is not read */
         } else if (type == F_PING) {
             eliciting = true;
         } else

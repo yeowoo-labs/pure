@@ -38,6 +38,12 @@
  *                not taken: send what follows it again), u32 credit (records
  *                it takes past that)
  *   0x05 PING    to be acknowledged
+ *   0x06 RECORDS u64 the first one's number, u8 count, then whole records one
+ *                after another (numbers following on), each its size (a
+ *                varint: LEB128) and its bytes: small sends, 1 or 2 bytes
+ *                of framing each, not the 19 of RECORD
+ *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
+ *                a whole datagram
  * Losses are detected as RFC 9002 says; congestion control is its NewReno
  * (RFC 9002 §7). */
 
