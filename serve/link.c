@@ -20,7 +20,7 @@
 
 enum { VERSION = 0x70, HEADER = 21, DATAGRAM = 1200, BODY = DATAGRAM - HEADER - PURE_AEAD_TAG, PIECE = 1000 };
 enum { F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, STORED_GAP = 1 };
-enum { RANGES = 32, RUNS = 4, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
+enum { RANGES = 32, RUNS = 2, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
 enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
 #define MS UINT64_C(1000000)
 /* RFC 9002's values, but a first RTT of 100 ms (a LAN's, not the 333 ms of
@@ -75,19 +75,29 @@ static uint64_t random64(void) {
 
 /* The key and nonce base of packets from `from` (in its run from_run) to
  * `to`, answering to_run (0 for none). */
-static PureAead *derive(const unsigned char secret[32], const unsigned char from[PURE_SEAL_KEY],
-                        const unsigned char to[PURE_SEAL_KEY], uint64_t from_run, uint64_t to_run,
-                        unsigned char base[PURE_AEAD_NONCE]) {
+static bool derive(const unsigned char secret[32], const unsigned char from[PURE_SEAL_KEY],
+                   const unsigned char to[PURE_SEAL_KEY], uint64_t from_run, uint64_t to_run,
+                   unsigned char key[PURE_AEAD_KEY], unsigned char base[PURE_AEAD_NONCE]) {
     unsigned char info[16 + 2 * PURE_SEAL_KEY + 16], out[PURE_AEAD_KEY + PURE_AEAD_NONCE];
     memcpy(info, "pure link 0 keys", 16);
     memcpy(info + 16, from, PURE_SEAL_KEY);
     memcpy(info + 16 + PURE_SEAL_KEY, to, PURE_SEAL_KEY);
     put64(info + 16 + 2 * PURE_SEAL_KEY, from_run);
     put64(info + 24 + 2 * PURE_SEAL_KEY, to_run);
-    if (!pure_link_derive(secret, info, sizeof(info), out, sizeof(out))) return NULL;
+    if (!pure_link_derive(secret, info, sizeof(info), out, sizeof(out))) return false;
+    memcpy(key, out, PURE_AEAD_KEY);
     memcpy(base, out + PURE_AEAD_KEY, PURE_AEAD_NONCE);
-    PureAead *aead = pure_aead(out);
     explicit_bzero(out, sizeof(out));
+    return true;
+}
+
+/* The same as a context of its own, for a sender's one link. */
+static PureAead *aead_of(const unsigned char secret[32], const unsigned char from[PURE_SEAL_KEY],
+                         const unsigned char to[PURE_SEAL_KEY], uint64_t from_run, uint64_t to_run,
+                         unsigned char base[PURE_AEAD_NONCE]) {
+    unsigned char key[PURE_AEAD_KEY];
+    PureAead *aead = derive(secret, from, to, from_run, to_run, key, base) ? pure_aead(key) : NULL;
+    explicit_bzero(key, sizeof(key));
     return aead;
 }
 
@@ -96,16 +106,17 @@ static void nonce_of(unsigned char out[PURE_AEAD_NONCE], const unsigned char bas
     for (int i = 0; i < 8; ++i) out[4 + i] ^= (unsigned char)(pn >> (56 - 8 * i));
 }
 
-/* A packet: the header, then body sealed; its size, or 0. */
-static size_t seal_packet(PureAead *aead, const unsigned char base[PURE_AEAD_NONCE], uint32_t id, uint64_t run,
-                          uint64_t pn, const unsigned char *body, size_t size, unsigned char *out) {
+/* A packet: the header, then body sealed (with key, or the context's own
+ * when NULL); its size, or 0. */
+static size_t seal_packet(PureAead *aead, const unsigned char *key, const unsigned char base[PURE_AEAD_NONCE], uint32_t id,
+                          uint64_t run, uint64_t pn, const unsigned char *body, size_t size, unsigned char *out) {
     unsigned char nonce[PURE_AEAD_NONCE];
     out[0] = VERSION;
     put32(out + 1, id);
     put64(out + 5, run);
     put64(out + 13, pn);
     nonce_of(nonce, base, pn);
-    return pure_aead_seal(aead, nonce, out, HEADER, body, size, out + HEADER) ? HEADER + size + PURE_AEAD_TAG : 0;
+    return pure_aead_seal(aead, key, nonce, out, HEADER, body, size, out + HEADER) ? HEADER + size + PURE_AEAD_TAG : 0;
 }
 
 static size_t put_names(unsigned char *p, const char *source, const char *input) {
@@ -437,14 +448,14 @@ static void take_answers(PureLink *l, uint64_t now) {
         uint64_t run = get64(packet + 5), pn = get64(packet + 13);
         if (!l->in || l->in_run != run) {
             pure_aead_free(l->in);
-            l->in = derive(l->secret, l->peer, l->own_public, run, l->run, l->in_base);
+            l->in = aead_of(l->secret, l->peer, l->own_public, run, l->run, l->in_base);
             l->in_run = run;
             if (!l->in) continue;
         }
         unsigned char nonce[PURE_AEAD_NONCE];
         nonce_of(nonce, l->in_base, pn);
         size_t size = (size_t)n - HEADER - PURE_AEAD_TAG;
-        if (!pure_aead_open(l->in, nonce, packet, HEADER, packet + HEADER, (size_t)n - HEADER, plain)) continue;
+        if (!pure_aead_open(l->in, NULL, nonce, packet, HEADER, packet + HEADER, (size_t)n - HEADER, plain)) continue;
         ++l->counts.received;
         for (size_t at = 0; at < size;) {
             unsigned type = plain[at++];
@@ -503,7 +514,7 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
  * refuses it (what it carried is then marked unsent again). */
 static bool transmit(PureLink *l, Flight *f, const unsigned char *body, size_t size, uint64_t now) {
     unsigned char packet[DATAGRAM];
-    size_t total = seal_packet(l->out, l->out_base, l->own_id, l->run, f->pn, body, size, packet);
+    size_t total = seal_packet(l->out, NULL, l->out_base, l->own_id, l->run, f->pn, body, size, packet);
     ++l->next_pn;
     bool sent = total && (send(l->fd, packet, total, 0) >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK &&
                                                                   errno != ENOBUFS && errno != EINTR));
@@ -657,7 +668,7 @@ bool pure_link_start(PureLink *l, void (*notify)(void *), void *context, char *e
     l->threshold = UINT64_MAX;
     l->credit = CREDIT;
     ok = ok && pure_link_secret(l->own, l->peer, l->secret) &&
-         (l->out = derive(l->secret, l->own_public, l->peer, l->run, 0, l->out_base)) &&
+         (l->out = aead_of(l->secret, l->own_public, l->peer, l->run, 0, l->out_base)) &&
          (l->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) >= 0;
     l->notify = notify;
     l->context = context;
@@ -716,10 +727,9 @@ typedef struct {
     Active *active;
     uint64_t run, seen; /* the sender's run; when it last sent */
     bool used, ack_due, due;
-    PureAead *in, *out;
-    unsigned char in_base[PURE_AEAD_NONCE], out_base[PURE_AEAD_NONCE];
+    unsigned char in_key[PURE_AEAD_KEY], out_key[PURE_AEAD_KEY], in_base[PURE_AEAD_NONCE], out_base[PURE_AEAD_NONCE];
     uint64_t next_pn, largest_at;
-    struct sockaddr_storage address;
+    struct sockaddr_in6 address; /* or an IPv4 one */
     socklen_t address_size;
     Range got[RANGES]; /* the numbers received, newest first */
     unsigned got_count;
@@ -760,8 +770,10 @@ typedef struct { uint32_t name, next; } Allowed; /* name: where in names (u8 len
 typedef struct { Stream *stream; uint64_t heard; bool stored, gap; } Done;
 
 /* A peer quiet this long lets its active state go; the active are looked at
- * that often. */
-static const uint64_t IDLE_FIRST = 30000 * MS, SWEEP_EVERY = 250 * MS;
+ * that often; what they held goes back to the system once TRIM_AFTER have
+ * gone, or TRIM_WAIT after any went. */
+static const uint64_t IDLE_FIRST = 30000 * MS, SWEEP_EVERY = 250 * MS, TRIM_WAIT = 10000 * MS;
+enum { TRIM_AFTER = 1024 };
 
 struct PureLinkListener {
     const PureModule *module;
@@ -769,7 +781,8 @@ struct PureLinkListener {
     unsigned char own_public[PURE_SEAL_KEY];
     uint32_t own_id;
     unsigned port;
-    uint64_t run, idle, swept;
+    uint64_t run, idle, swept, trimmed, untrimmed;
+    PureAead *aead; /* keyed by each packet's run */
     int fd, wake;
     pthread_t thread;
     bool started;
@@ -931,10 +944,6 @@ static Active *activate(PureLinkListener *s, Peer *peer, uint64_t now) {
 }
 
 static void let_go(PureLinkListener *s, Active *a) {
-    for (unsigned i = 0; i < RUNS; ++i) {
-        pure_aead_free(a->runs[i].in);
-        pure_aead_free(a->runs[i].out);
-    }
     for (unsigned k = 0; k < a->stream_count; ++k) {
         while (a->streams[k]->held_count) drop_held(a->streams[k], 0);
         free(a->streams[k]->held);
@@ -944,7 +953,7 @@ static void let_go(PureLinkListener *s, Active *a) {
     s->peers[a->peer].active = NULL;
     s->actives[a->place] = s->actives[--s->active_count];
     s->actives[a->place]->place = a->place;
-    explicit_bzero(a->secret, sizeof(a->secret));
+    explicit_bzero(a, sizeof(*a));
     free(a);
 }
 
@@ -958,7 +967,7 @@ static bool busy(const Active *a) {
 }
 
 /* Let go the active state of peers quiet for the idle period; what idle
- * links held goes back to the system when there was much of it. */
+ * links held goes back to the system. */
 static void sweep(PureLinkListener *s, uint64_t now) {
     if (now - s->swept < SWEEP_EVERY) return;
     s->swept = now;
@@ -969,7 +978,12 @@ static void sweep(PureLinkListener *s, uint64_t now) {
         else let_go(s, a), ++freed;
     }
     s->counts.swept += freed;
-    if (freed >= 1024) malloc_trim(0);
+    s->untrimmed += freed;
+    if (s->untrimmed >= TRIM_AFTER || (s->untrimmed && now - s->trimmed >= TRIM_WAIT)) {
+        malloc_trim(0);
+        s->untrimmed = 0;
+        s->trimmed = now;
+    }
 }
 
 static void mark_ready(PureLinkListener *s, Stream *st) {
@@ -1002,8 +1016,6 @@ static Run *install_run(Active *a, const Run *made) {
         Run *r = &a->runs[i];
         if (!r->used || (slot->used && r->seen < slot->seen)) slot = r;
     }
-    pure_aead_free(slot->in);
-    pure_aead_free(slot->out);
     bool due = slot->due; /* the answer list may hold the slot */
     *slot = *made;
     slot->due = due;
@@ -1150,17 +1162,14 @@ static bool take_from(PureLinkListener *s, Peer *peer, unsigned char *packet, si
     bool woke = !a;
     if (woke && !(a = activate(s, peer, now))) return false;
     Run made = {.active = a, .run = run, .seen = now, .used = true};
-    if (!r) {
-        made.in = derive(a->secret, peer->key, s->own_public, run, 0, made.in_base);
-        made.out = derive(a->secret, s->own_public, peer->key, s->run, run, made.out_base);
-    }
+    bool keyed = r || (derive(a->secret, peer->key, s->own_public, run, 0, made.in_key, made.in_base) &&
+                       derive(a->secret, s->own_public, peer->key, s->run, run, made.out_key, made.out_base));
     unsigned char plain[DATAGRAM], nonce[PURE_AEAD_NONCE];
     nonce_of(nonce, r ? r->in_base : made.in_base, pn);
     size_t size = n - HEADER - PURE_AEAD_TAG;
-    PureAead *in = r ? r->in : made.in;
-    if (!in || (!r && !made.out) || !pure_aead_open(in, nonce, packet, HEADER, packet + HEADER, n - HEADER, plain)) {
-        pure_aead_free(made.in);
-        pure_aead_free(made.out);
+    if (!keyed || !pure_aead_open(s->aead, r ? r->in_key : made.in_key, nonce, packet, HEADER, packet + HEADER,
+                                  n - HEADER, plain)) {
+        explicit_bzero(&made, sizeof(made));
         if (woke) let_go(s, a);
         return false;
     }
@@ -1168,8 +1177,8 @@ static bool take_from(PureLinkListener *s, Peer *peer, unsigned char *packet, si
     if (!r) r = install_run(a, &made);
     a->seen = r->seen = now;
     note(r, pn, now);
-    memcpy(&r->address, from, from_size); /* where it is now: answers go there */
-    r->address_size = from_size;
+    r->address_size = from_size <= sizeof(r->address) ? from_size : sizeof(r->address);
+    memcpy(&r->address, from, r->address_size); /* where it is now: answers go there */
     ++s->counts.received;
     Stream *st = NULL;
     bool eliciting = false;
@@ -1267,7 +1276,7 @@ static void answer(PureLinkListener *s, uint64_t now) {
         }
         r->ack_due = false;
         if (!at) continue;
-        size_t total = seal_packet(r->out, r->out_base, s->own_id, s->run, r->next_pn++, body, at, packet);
+        size_t total = seal_packet(s->aead, r->out_key, r->out_base, s->own_id, s->run, r->next_pn++, body, at, packet);
         if (total && sendto(s->fd, packet, total, 0, (const struct sockaddr *)&r->address, r->address_size) >= 0)
             ++s->counts.packets;
     }
@@ -1360,9 +1369,10 @@ bool pure_link_serve(PureLinkListener *s, char *error, size_t size) {
     setsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
     setsockopt(s->fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer));
     s->run = random64();
-    s->swept = now_ns();
+    s->swept = s->trimmed = now_ns();
     s->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (s->wake < 0 || pthread_create(&s->thread, NULL, run_listener, s)) {
+    unsigned char key[PURE_AEAD_KEY] = {0}; /* each packet brings its run's */
+    if (s->wake < 0 || !(s->aead = pure_aead(key)) || pthread_create(&s->thread, NULL, run_listener, s)) {
         snprintf(error, size, "--link-port %u: cannot start", s->port);
         return false;
     }
@@ -1398,6 +1408,7 @@ void pure_link_listener_close(PureLinkListener *s, PureLinkCounts *counts) {
         counts->active = s->active_count;
     }
     while (s->active_count) let_go(s, s->actives[0]);
+    pure_aead_free(s->aead);
     free(s->actives);
     free(s->peers);
     free(s->index);

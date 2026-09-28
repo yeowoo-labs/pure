@@ -8,7 +8,7 @@
  * first time a server seals, opens a seal or connects to an https receiver
  * (serve/crypto.c): one that does none of these maps no OpenSSL, 2.3 MiB
  * less resident and 0.6 MiB less of its own. */
-enum { PURE_CRYPTO_VERSION = 3 };
+enum { PURE_CRYPTO_VERSION = 4 };
 
 typedef struct {
     unsigned version;
@@ -38,10 +38,12 @@ typedef struct {
     bool (*link_derive)(const unsigned char secret[32], const unsigned char *info, size_t info_size, unsigned char *out,
                         size_t out_size);
     PureAead *(*aead)(const unsigned char key[PURE_AEAD_KEY]);
-    bool (*aead_seal)(PureAead *, const unsigned char nonce[PURE_AEAD_NONCE], const unsigned char *aad, size_t aad_size,
-                      const unsigned char *plain, size_t size, unsigned char *out);
-    bool (*aead_open)(PureAead *, const unsigned char nonce[PURE_AEAD_NONCE], const unsigned char *aad,
-                      size_t aad_size, const unsigned char *sealed, size_t size, unsigned char *plain);
+    bool (*aead_seal)(PureAead *, const unsigned char *key, const unsigned char nonce[PURE_AEAD_NONCE],
+                      const unsigned char *aad, size_t aad_size, const unsigned char *plain, size_t size,
+                      unsigned char *out);
+    bool (*aead_open)(PureAead *, const unsigned char *key, const unsigned char nonce[PURE_AEAD_NONCE],
+                      const unsigned char *aad, size_t aad_size, const unsigned char *sealed, size_t size,
+                      unsigned char *plain);
     void (*aead_free)(PureAead *);
 } PureCrypto;
 #endif

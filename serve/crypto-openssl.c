@@ -207,10 +207,23 @@ static bool link_secret(const PureSealKey *own, const unsigned char peer[PURE_SE
     return ok && any;
 }
 
+/* HKDF, fetched once. */
+static EVP_KDF *hkdf(void) {
+    static EVP_KDF *kept;
+    EVP_KDF *kdf = __atomic_load_n(&kept, __ATOMIC_ACQUIRE), *none = NULL;
+    if (kdf) return kdf;
+    if ((kdf = EVP_KDF_fetch(NULL, "HKDF", NULL)) &&
+        !__atomic_compare_exchange_n(&kept, &none, kdf, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        EVP_KDF_free(kdf); /* another thread's is kept */
+        kdf = none;
+    }
+    return kdf;
+}
+
 static bool link_derive(const unsigned char secret[32], const unsigned char *info, size_t info_size, unsigned char *out,
                         size_t out_size) {
     static const char salt[] = "pure link 0";
-    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
+    EVP_KDF *kdf = hkdf();
     EVP_KDF_CTX *context = kdf ? EVP_KDF_CTX_new(kdf) : NULL;
     OSSL_PARAM params[] = {OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, (char *)"SHA256", 0),
                            OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY, (void *)secret, 32),
@@ -219,7 +232,6 @@ static bool link_derive(const unsigned char secret[32], const unsigned char *inf
                            OSSL_PARAM_construct_end()};
     bool ok = context && EVP_KDF_derive(context, out, out_size, params) == 1;
     EVP_KDF_CTX_free(context);
-    EVP_KDF_free(kdf);
     return ok;
 }
 
@@ -243,22 +255,24 @@ static PureAead *aead(const unsigned char key[PURE_AEAD_KEY]) {
     return a;
 }
 
-static bool aead_seal(PureAead *a, const unsigned char nonce[PURE_AEAD_NONCE], const unsigned char *aad,
-                      size_t aad_size, const unsigned char *plain, size_t size, unsigned char *out) {
+static bool aead_seal(PureAead *a, const unsigned char *key, const unsigned char nonce[PURE_AEAD_NONCE],
+                      const unsigned char *aad, size_t aad_size, const unsigned char *plain, size_t size,
+                      unsigned char *out) {
     int n = 0, last = 0;
-    return size <= INT_MAX && EVP_EncryptInit_ex(a->seal, NULL, NULL, NULL, nonce) == 1 &&
+    return size <= INT_MAX && EVP_EncryptInit_ex(a->seal, NULL, NULL, key, nonce) == 1 &&
            (!aad_size || EVP_EncryptUpdate(a->seal, NULL, &n, aad, (int)aad_size) == 1) &&
            (!size || EVP_EncryptUpdate(a->seal, out, &n, plain, (int)size) == 1) &&
            EVP_EncryptFinal_ex(a->seal, out + size, &last) == 1 &&
            EVP_CIPHER_CTX_ctrl(a->seal, EVP_CTRL_GCM_GET_TAG, PURE_AEAD_TAG, out + size) == 1;
 }
 
-static bool aead_open(PureAead *a, const unsigned char nonce[PURE_AEAD_NONCE], const unsigned char *aad,
-                      size_t aad_size, const unsigned char *sealed, size_t size, unsigned char *plain) {
+static bool aead_open(PureAead *a, const unsigned char *key, const unsigned char nonce[PURE_AEAD_NONCE],
+                      const unsigned char *aad, size_t aad_size, const unsigned char *sealed, size_t size,
+                      unsigned char *plain) {
     int n = 0, last = 0;
     if (size < PURE_AEAD_TAG || size - PURE_AEAD_TAG > INT_MAX) return false;
     size_t body = size - PURE_AEAD_TAG;
-    return EVP_DecryptInit_ex(a->open, NULL, NULL, NULL, nonce) == 1 &&
+    return EVP_DecryptInit_ex(a->open, NULL, NULL, key, nonce) == 1 &&
            (!aad_size || EVP_DecryptUpdate(a->open, NULL, &n, aad, (int)aad_size) == 1) &&
            (!body || EVP_DecryptUpdate(a->open, plain, &n, sealed, (int)body) == 1) &&
            EVP_CIPHER_CTX_ctrl(a->open, EVP_CTRL_GCM_SET_TAG, PURE_AEAD_TAG, (void *)(sealed + body)) == 1 &&

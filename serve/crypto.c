@@ -152,14 +152,16 @@ PureAead *pure_aead(const unsigned char key[PURE_AEAD_KEY]) {
     return c ? c->aead(key) : NULL;
 }
 
-bool pure_aead_seal(PureAead *a, const unsigned char nonce[PURE_AEAD_NONCE], const unsigned char *aad, size_t aad_size,
-                    const unsigned char *plain, size_t size, unsigned char *out) {
-    return crypto->aead_seal(a, nonce, aad, aad_size, plain, size, out);
+bool pure_aead_seal(PureAead *a, const unsigned char *key, const unsigned char nonce[PURE_AEAD_NONCE],
+                    const unsigned char *aad, size_t aad_size, const unsigned char *plain, size_t size,
+                    unsigned char *out) {
+    return crypto->aead_seal(a, key, nonce, aad, aad_size, plain, size, out);
 }
 
-bool pure_aead_open(PureAead *a, const unsigned char nonce[PURE_AEAD_NONCE], const unsigned char *aad,
-                    size_t aad_size, const unsigned char *sealed, size_t size, unsigned char *plain) {
-    return crypto->aead_open(a, nonce, aad, aad_size, sealed, size, plain);
+bool pure_aead_open(PureAead *a, const unsigned char *key, const unsigned char nonce[PURE_AEAD_NONCE],
+                    const unsigned char *aad, size_t aad_size, const unsigned char *sealed, size_t size,
+                    unsigned char *plain) {
+    return crypto->aead_open(a, key, nonce, aad, aad_size, sealed, size, plain);
 }
 
 void pure_aead_free(PureAead *a) { if (a) crypto->aead_free(a); }
