@@ -177,6 +177,7 @@ typedef struct {
     Applied *applied; /* a round's requests, grown to fit */
     size_t applied_capacity;
     bool wrote;       /* the last round saved an event or an edit */
+    uint64_t save_waited; /* ns the last save waited for the device (a sync), not working */
     bool reads_first; /* the owner's: a round's reads before its writes */
     double next[PURE_MODULE_INPUTS]; /* when each timer ticks next (wall clock, ms) */
     uint64_t ticks;
@@ -1445,7 +1446,15 @@ static void save_burst(Executor *ex, Applied *applied, size_t count) {
     if (!count) return;
     for (size_t i = 0; i < count; ++i)
         ex->wrote = ex->wrote || (applied[i].status == PURE_OK && applied[i].input == PURE_INPUT_WRITE);
+    struct timespec began, ended, worked, work_ended;
+    clock_gettime(CLOCK_MONOTONIC, &began);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &worked);
     PureResult saved = pure_app_save(&ex->app);
+    clock_gettime(CLOCK_MONOTONIC, &ended);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &work_ended);
+    int64_t waited = (int64_t)(ended.tv_sec - began.tv_sec) * 1000000000 + (ended.tv_nsec - began.tv_nsec) -
+                     ((int64_t)(work_ended.tv_sec - worked.tv_sec) * 1000000000 + (work_ended.tv_nsec - worked.tv_nsec));
+    ex->save_waited = waited > 0 ? (uint64_t)waited : 0;
     ++ex->bursts;
     if (saved == PURE_OK) after_save(ex);
     for (size_t i = 0; i < count; ++i)
@@ -1810,14 +1819,20 @@ static void *run_owner(void *context) {
          * counts only once a request came after the answers: requests that
          * waited out the save alone would otherwise start the next round
          * without the clients just answered, and the clients would settle
-         * into two halves taking turns, each save carrying half of them. */
+         * into two halves taking turns, each save carrying half of them.
+         * Gathering never outlasts the time the last save waited for its
+         * device, nor does the quiet: waiting pays only while it costs less
+         * than the wait a save of the late requests would take on its own
+         * (a sync of milliseconds on a flash card; in RAM next to none, and
+         * there gathering would only leave the owner idle). */
+        uint64_t waited = owner->executor.save_waited, budget = waited < 1000000 ? waited : 1000000;
         struct timespec now, end;
         clock_gettime(CLOCK_REALTIME, &now);
-        end = later(now, 1000000);
+        end = later(now, (long)budget);
         while (gather && owner->count && !owner->stopping && before(now, end)) {
             size_t seen = owner->count;
             bool returned = owner->arrivals != answered_at;
-            struct timespec quiet = later(now, 100000);
+            struct timespec quiet = later(now, budget < 100000 ? (long)budget : 100000);
             pthread_cond_timedwait(&owner->waiting, &owner->lock, returned && before(quiet, end) ? &quiet : &end);
             if (returned && owner->count == seen) break;
             clock_gettime(CLOCK_REALTIME, &now);
