@@ -20,6 +20,10 @@
 //!       connects again and sends it again. Then a line of JSON: orders made
 //!       and stored, connections made again, the orders stored in each
 //!       100 ms, the time from an order made to it stored
+//!   idle-quic drain PORT COUNT SIZE
+//!       one client sends COUNT messages of SIZE bytes over one stream
+//!       (each after its u32 length) and waits until the service says it
+//!       read them all; a line of JSON: how long
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -72,7 +76,17 @@ fn serve(cert: Vec<u8>, key: Vec<u8>, port: u16) {
                 let Ok(connection) = incoming.await else { return };
                 kept.lock().unwrap().push(connection.clone());
                 while let Ok((mut send, mut recv)) = connection.accept_bi().await {
-                    let Ok(bytes) = recv.read_to_end(1024).await else { return };
+                    let mut first = [0u8; 4];
+                    if recv.read_exact(&mut first).await.is_err() {
+                        return;
+                    }
+                    if first == *DRAIN {
+                        drain(&mut send, &mut recv).await;
+                        continue;
+                    }
+                    let Ok(rest) = recv.read_to_end(1024).await else { return };
+                    let mut bytes = first.to_vec();
+                    bytes.extend_from_slice(&rest);
                     if bytes.len() < 16 {
                         return;
                     }
@@ -97,6 +111,32 @@ fn serve(cert: Vec<u8>, key: Vec<u8>, port: u16) {
             });
         }
     });
+}
+
+/// A drain's stream begins with these bytes; an order's never does (a client number that large).
+const DRAIN: &[u8; 4] = b"pure";
+
+/// Messages each after its u32 length until a length of 0; then how many, as the answer.
+async fn drain(send: &mut quinn::SendStream, recv: &mut quinn::RecvStream) {
+    let mut count = 0u64;
+    let mut buffer = Vec::new();
+    loop {
+        let mut length = [0u8; 4];
+        if recv.read_exact(&mut length).await.is_err() {
+            return;
+        }
+        let length = u32::from_le_bytes(length) as usize;
+        if length == 0 {
+            break;
+        }
+        buffer.resize(length, 0);
+        if recv.read_exact(&mut buffer).await.is_err() {
+            return;
+        }
+        count += 1;
+    }
+    let _ = send.write_all(&count.to_le_bytes()).await;
+    let _ = send.finish();
 }
 
 #[derive(Debug)]
@@ -308,12 +348,39 @@ fn steady(port: u16, first: u64, count: u64, period: Duration, seconds: u64, win
     });
 }
 
+/// One client, COUNT messages of SIZE bytes over one stream, and the answer.
+fn drain_client(port: u16, count: u64, size: usize) {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async move {
+        let mut endpoint = Endpoint::client(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        endpoint.set_default_client_config(client_config());
+        let connection = endpoint.connect(SocketAddr::from(([127, 0, 0, 1], port)), "localhost").unwrap().await.unwrap();
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        let message = vec![b'x'; size];
+        let began = Instant::now();
+        send.write_all(DRAIN).await.unwrap();
+        for _ in 0..count {
+            send.write_all(&(size as u32).to_le_bytes()).await.unwrap();
+            send.write_all(&message).await.unwrap();
+        }
+        send.write_all(&0u32.to_le_bytes()).await.unwrap();
+        send.finish().unwrap();
+        let answer = recv.read_to_end(16).await.unwrap();
+        let seconds = began.elapsed().as_secs_f64();
+        let read = u64::from_le_bytes(answer[..8].try_into().unwrap());
+        println!("{{\"messages\":{count},\"size\":{size},\"read\":{read},\"seconds\":{seconds:.3},\"per_second\":{:.0}}}",
+                 count as f64 / seconds);
+    });
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("serve") if args.len() == 4 || args.len() == 5 => serve(std::fs::read(&args[2]).unwrap(),
                                                                     std::fs::read(&args[3]).unwrap(),
                                                                     args.get(4).map_or(0, |p| p.parse().unwrap())),
+        Some("drain") if args.len() == 5 => drain_client(args[2].parse().unwrap(), args[3].parse().unwrap(),
+                                                         args[4].parse().unwrap()),
         Some("steady") if args.len() == 8 => steady(args[2].parse().unwrap(), args[3].parse().unwrap(),
                                                     args[4].parse().unwrap(),
                                                     Duration::from_millis(args[5].parse().unwrap()),
@@ -322,7 +389,7 @@ fn main() {
                                                       args[4].parse().unwrap(), args[5].parse().unwrap()),
         _ => {
             eprintln!("idle-quic serve CERT.der KEY.der [PORT] | idle-quic connect PORT FIRST COUNT WINDOW | \
-                       idle-quic steady PORT FIRST COUNT PERIOD_MS SECONDS WINDOW");
+                       idle-quic steady PORT FIRST COUNT PERIOD_MS SECONDS WINDOW | idle-quic drain PORT COUNT SIZE");
             std::process::exit(2);
         }
     }

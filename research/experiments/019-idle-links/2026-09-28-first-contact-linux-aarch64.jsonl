@@ -1,0 +1,3 @@
+{"delay_ms_each_way": 5, "senders": 100, "pure_ms_p50": 10.585, "pure_ms_p99": 12.202, "pure_round_trips": 1.06, "quinn_ms_p50": 20.991, "quinn_ms_p99": 21.499, "quinn_round_trips": 2.1}
+{"delay_ms_each_way": 25, "senders": 100, "pure_ms_p50": 50.932, "pure_ms_p99": 52.325, "pure_round_trips": 1.02, "quinn_ms_p50": 101.153, "quinn_ms_p99": 101.799, "quinn_round_trips": 2.02}
+{"delay_ms_each_way": 50, "senders": 100, "pure_ms_p50": 100.735, "pure_ms_p99": 102.419, "pure_round_trips": 1.01, "quinn_ms_p50": 201.192, "quinn_ms_p99": 202.022, "quinn_round_trips": 2.01}

@@ -16,8 +16,22 @@ clients connect, send one order each and wait until it is stored, and stay
 connected at rest; the service's memory is read then; then each sends one
 more order over its connection.
 
+With --restart (M2), n devices each make an order every --period-ms and
+send it until it is stored; at --kill-at seconds the receiver is killed
+(-9) and started again at once: the orders stored each 100 ms, the CPU of
+both sides before and after, the X25519 made (none when the node
+remembers its secrets; --no-memo forgets them), and that every order made
+was applied once. With --quic too, the same for quinn clients, which
+connect again when their connection is lost.
+
+With --first-contact DELAYS (M4), for each one-way delay in ms, in a
+network namespace of its own (unshare -rn) whose loopback delays UDP:
+senders the node never heard from, and new quinn clients, each send one
+order and wait until it is stored, one at a time.
+
     python3 research/experiments/019-idle-links/run.py [--counts 1000,10000]
-        [--store DIRECTORY] [--out FILE.jsonl] [--quic]
+        [--store DIRECTORY] [--out FILE.jsonl] [--quic] [--restart [--no-memo]]
+        [--first-contact 5,25,50]
 """
 import argparse
 import json
@@ -197,21 +211,21 @@ def quic(counts, work, window, out):
                 file.write(line + '\n')
 
 
-def recovery(timeline, gap_from_ms, gap_ms):
-    """From a timeline of orders stored each 100 ms: the steady rate before
-    the gap, and how long after the gap began until a second of storing was
-    back at 90 % of it with what waited cleared (the rate seen at least once
-    and the backlog gone: the cumulative stored caught up with the steady
-    line)."""
-    start = gap_from_ms // 100
+def recovery(timeline, killed_ms):
+    """From a timeline of orders stored each 100 ms and when the receiver was
+    killed: the steady rate in the 5 s before; the 100 ms steps after the
+    kill with nothing stored; and how long until the orders stored since the
+    kill caught up with the steady rate (99 %), what waited included."""
+    start = killed_ms // 100
     before = timeline[max(0, start - 50):start]
     steady = sum(before) / len(before) if before else 0
-    total_before = sum(timeline[:start])
-    for b in range(start + gap_ms // 100, len(timeline)):
-        expected = total_before + steady * (b + 1 - start)
-        if sum(timeline[:b + 1]) >= expected * 0.99:
-            return {'steady_per_100ms': round(steady, 1), 'caught_up_ms': (b + 1 - start) * 100}
-    return {'steady_per_100ms': round(steady, 1), 'caught_up_ms': None}
+    silent = sum(1 for b in range(start, min(len(timeline), start + 100)) if not timeline[b])
+    since = 0
+    for b in range(start, len(timeline)):
+        since += timeline[b]
+        if b > start and since >= steady * (b + 1 - start) * 0.99:
+            return {'steady_per_100ms': round(steady, 1), 'silent_100ms_steps': silent, 'caught_up_ms': (b + 1 - start) * 100}
+    return {'steady_per_100ms': round(steady, 1), 'silent_100ms_steps': silent, 'caught_up_ms': None}
 
 
 def restart_pure(n, work, keys, module, period_ms, seconds, kill_at, memo):
@@ -231,27 +245,33 @@ def restart_pure(n, work, keys, module, period_ms, seconds, kill_at, memo):
                                   link_port, info['public_key'], 0, n, period_ms, seconds]],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     for line in generator.stderr:  # progress, a line a second
-        if json.loads(line).get('t', 0) >= kill_at:
+        t = json.loads(line).get('t', 0)
+        if t >= kill_at:
             break
-    cpu_before = cpu_ms(node.pid)
+    seen = time.monotonic()
+    cpu_before, senders_before = cpu_ms(node.pid), cpu_ms(generator.pid)
     time.sleep(1.0)
     steady_cpu = cpu_ms(node.pid) - cpu_before  # ms of CPU in the second before the kill
+    senders_steady = cpu_ms(generator.pid) - senders_before
     node.kill()
     node.wait()
     killed = time.monotonic()
+    killed_ms = int((t + killed - seen) * 1000)  # on the generator's clock
     if not memo:
         (work / 'node.key.links').unlink()
     node, _ = start(args)
     row = {'devices': n, 'period_ms': period_ms, 'memo': memo, 'restart_ms': round((time.monotonic() - killed) * 1000, 1),
-           'steady_cpu_ms_per_s': round(steady_cpu, 1)}
-    cpu_start = cpu_ms(node.pid)
+           'steady_cpu_ms_per_s': round(steady_cpu, 1), 'senders_steady_cpu_ms_per_s': round(senders_steady, 1)}
+    cpu_start, senders_start = cpu_ms(node.pid), cpu_ms(generator.pid)
     time.sleep(10)
     row['recovery_cpu_ms_first_10s'] = round(cpu_ms(node.pid) - cpu_start, 1)
+    row['senders_cpu_ms_first_10s'] = round(cpu_ms(generator.pid) - senders_start, 1)
     out, error = generator.communicate(timeout=600)
     result = json.loads(out)
     row['generator'] = {k: v for k, v in result.items() if k != 'timeline_100ms'}
     row['timeline_100ms'] = result['timeline_100ms']
-    row['recovery'] = recovery(result['timeline_100ms'], result['gap_from_ms'], result['longest_gap_ms'])
+    row['killed_ms'] = killed_ms
+    row['recovery'] = recovery(result['timeline_100ms'], killed_ms)
     count = view(port, 'count')
     row['applied'] = count
     assert count == result['made'] == result['stored'], (count, result['made'], result['stored'])
@@ -273,26 +293,95 @@ def restart_quic(n, work, period_ms, seconds, kill_at):
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     began = time.monotonic()
     time.sleep(kill_at)
-    cpu_before = cpu_ms(server.pid)
+    cpu_before, clients_before = cpu_ms(server.pid), cpu_ms(client.pid)
     time.sleep(1.0)
     steady_cpu = cpu_ms(server.pid) - cpu_before
+    clients_steady = cpu_ms(client.pid) - clients_before
     server.kill()
     server.wait()
     killed = time.monotonic()
     server, _ = start(args)
     row = {'clients': n, 'period_ms': period_ms, 'restart_ms': round((time.monotonic() - killed) * 1000, 1),
-           'killed_at_s': round(killed - began, 1), 'steady_cpu_ms_per_s': round(steady_cpu, 1)}
-    cpu_start = cpu_ms(server.pid)
+           'killed_at_s': round(killed - began, 1), 'steady_cpu_ms_per_s': round(steady_cpu, 1),
+           'senders_steady_cpu_ms_per_s': round(clients_steady, 1)}
+    cpu_start, clients_start = cpu_ms(server.pid), cpu_ms(client.pid)
     time.sleep(10)
     row['recovery_cpu_ms_first_10s'] = round(cpu_ms(server.pid) - cpu_start, 1)
+    row['senders_cpu_ms_first_10s'] = round(cpu_ms(client.pid) - clients_start, 1)
     out, _ = client.communicate(timeout=900)
     result = json.loads(out)
     row['client'] = {k: v for k, v in result.items() if k != 'timeline_100ms'}
     row['timeline_100ms'] = result['timeline_100ms']
-    row['recovery'] = recovery(result['timeline_100ms'], result['gap_from_ms'], result['longest_gap_ms'])
+    row['killed_ms'] = int((killed - began) * 1000)
+    row['recovery'] = recovery(result['timeline_100ms'], row['killed_ms'])
     server.kill()
     server.wait()
     return row
+
+
+def first_contact(work, delay_ms, count):
+    """M4, run in a network namespace of its own whose loopback delays UDP
+    by delay_ms each way: count senders the node never heard from each send
+    one order and wait until it is stored, one at a time; then count quinn
+    clients each connect, send one and wait. How many round trips each
+    takes is the time over 2 delay_ms."""
+    source = work / 'receiver.aup'
+    source.write_text(check.LINK_RECEIVER)
+    module = work / 'receiver.pmod'
+    check.compile_module(Path(os.environ.get('AUP', ROOT.parent / 'aup/build/aup')), source, module)
+    keys = work / 'keys'
+    subprocess.run([str(ROOT / 'build/links'), 'keys', str(count), str(keys)], check=True)
+    port, link_port = free_port(socket.SOCK_STREAM), free_port(socket.SOCK_DGRAM)
+    node, info = start([ROOT / 'build/pure-serve', '--module', module, '--store', work / 'store', '--port', port,
+                        '--key', work / 'node.key', '--link-port', link_port, '--senders', f'{keys}.senders'])
+    sent = subprocess.run([str(a) for a in [ROOT / 'build/links', 'send', keys, module, 'order', '127.0.0.1', link_port,
+                                            info['public_key'], 0, count, 1, 1]], capture_output=True, text=True)
+    node.terminate()
+    node.communicate(timeout=60)
+    pure = json.loads(sent.stdout)
+    make_certificate(work)
+    binary = Path(__file__).parent / 'quic/target/release/idle-quic'
+    server, info = start([binary, 'serve', work / 'cert.der', work / 'key.der'])
+    fresh = subprocess.run([str(binary), 'connect', str(info['port']), '0', str(count), '1'], input=b'',
+                           capture_output=True, timeout=600)
+    server.kill()
+    server.wait()
+    quic = json.loads(fresh.stdout.decode().splitlines()[0])
+    rtt = 2 * delay_ms
+    return {'delay_ms_each_way': delay_ms, 'senders': count,
+            'pure_ms_p50': pure['stored_ms_p50'], 'pure_ms_p99': pure['stored_ms_p99'],
+            'pure_round_trips': round(pure['stored_ms_p50'] / rtt, 2),
+            'quinn_ms_p50': quic['stored_ms_p50'], 'quinn_ms_p99': quic['stored_ms_p99'],
+            'quinn_round_trips': round(quic['stored_ms_p50'] / rtt, 2)}
+
+
+def in_namespace(delay_ms, count, out):
+    """first_contact in `unshare -rn`, UDP alone through netem (the node's
+    HTTP view stays quick)."""
+    import shutil
+    tc = shutil.which('tc') or '/usr/sbin/tc'
+    ip = shutil.which('ip') or '/usr/sbin/ip'
+    script = f"""
+import json, subprocess, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, {str(Path(__file__).parent)!r})
+import run
+subprocess.run([{ip!r}, 'link', 'set', 'lo', 'up'], check=True)
+for rule in (['qdisc', 'add', 'dev', 'lo', 'root', 'handle', '1:', 'prio'],
+             ['qdisc', 'add', 'dev', 'lo', 'parent', '1:3', 'handle', '30:', 'netem', 'delay', '{delay_ms}ms'],
+             ['filter', 'add', 'dev', 'lo', 'protocol', 'ip', 'parent', '1:0', 'prio', '3', 'u32', 'match', 'ip',
+              'protocol', '17', '0xff', 'flowid', '1:3']):
+    subprocess.run([{tc!r}] + rule, check=True)
+with tempfile.TemporaryDirectory(prefix='pure-m4-') as d:
+    print(json.dumps(run.first_contact(Path(d), {delay_ms}, {count})))
+"""
+    done = subprocess.run(['unshare', '-rn', sys.executable, '-c', script], capture_output=True, text=True, timeout=1800)
+    assert done.returncode == 0, done.stderr[-3000:]
+    line = done.stdout.strip().splitlines()[-1]
+    print(line, flush=True)
+    if out:
+        with open(out, 'a') as file:
+            file.write(line + '\n')
 
 
 def main():
@@ -308,8 +397,15 @@ def main():
     parser.add_argument('--period-ms', type=int, default=5000)
     parser.add_argument('--seconds', type=int, default=40)
     parser.add_argument('--kill-at', type=int, default=20)
+    parser.add_argument('--first-contact', type=str, default=None,
+                        help='M4: one-way delays in ms (for example 5,25,50), each in a namespace of its own')
     args = parser.parse_args()
     counts = [int(c) for c in args.counts.split(',')]
+    if args.first_contact:
+        subprocess.run(['cargo', 'build', '--release', '--offline', '--quiet'], cwd=Path(__file__).parent / 'quic', check=True)
+        for delay in args.first_contact.split(','):
+            in_namespace(int(delay), counts[0], args.out)
+        return
     if args.restart:
         with tempfile.TemporaryDirectory(prefix='pure-m2-', dir=args.store) as directory:
             work = Path(directory)
