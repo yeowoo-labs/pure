@@ -16,7 +16,7 @@ WAL), both kept in --directory. Then:
    SQLite's from each count of --sqlite-threads threads, each with its own
    connection, on cores 0-2, synchronous --sync (FULL syncs each commit
    before it is answered, as Pure does).
-3. The consistency conditions of clause 3.3.2 on both after each run.
+3. The consistency conditions of clause 3.3.2 on both after each run, each side read from one snapshot.
 
 Prints one JSON line a step.
 """
@@ -172,20 +172,28 @@ DUMPS = {
                 'SELECT (h_c_w_id * 10 + h_c_d_id) * 3000 + h_c_id, h_w_id * 10 + h_d_id, h_amount FROM history'),
 }
 
-# Clause 3.3.2.2 and 3.3.2.3, a district a row: its next order, its newest order, and its oldest and newest new orders
-# and how many (orders and new orders by their numbers in the district).
+# Clause 3.3.2.1-4, a district a row, from one snapshot (one query, one SELECT): its next order, its newest
+# order, its oldest and newest new orders and how many (orders by their numbers in the district), the lines its
+# orders count and the lines it has, and the warehouses' and districts' year-to-date totals.
 DISTRICTS = ('each d in districts {\n  id = d.id\n  next_order = d.next_order\n'
              '  newest = max(o.id for o in orders[d.id * 10000000 .. d.id * 10000000 + 10000000]) - d.id * 10000000\n'
              '  newest_new = max(n.id for n in new_orders[d.id * 10000000 .. d.id * 10000000 + 10000000])'
              ' - d.id * 10000000\n'
              '  oldest_new = min(n.id for n in new_orders[d.id * 10000000 .. d.id * 10000000 + 10000000])'
              ' - d.id * 10000000\n'
-             '  new_orders = count(n in new_orders[d.id * 10000000 .. d.id * 10000000 + 10000000])\n}',
+             '  new_orders = count(n in new_orders[d.id * 10000000 .. d.id * 10000000 + 10000000])\n'
+             '  ordered = sum(o.lines for o in orders[d.id * 10000000 .. d.id * 10000000 + 10000000])\n'
+             '  lines = count(l in lines[d.id * 160000000 .. d.id * 160000000 + 160000000])\n'
+             '  warehouse_ytd = sum(w.ytd for w in warehouses)\n'
+             '  district_ytd = sum(x.ytd for x in districts)\n}',
              'SELECT d_w_id * 10 + d_id, d_next_o_id, '
              '(SELECT max(o_id) FROM orders WHERE o_w_id = d_w_id AND o_d_id = d_id), '
              '(SELECT max(no_o_id) FROM new_order WHERE no_w_id = d_w_id AND no_d_id = d_id), '
              '(SELECT min(no_o_id) FROM new_order WHERE no_w_id = d_w_id AND no_d_id = d_id), '
-             '(SELECT count(*) FROM new_order WHERE no_w_id = d_w_id AND no_d_id = d_id) FROM district')
+             '(SELECT count(*) FROM new_order WHERE no_w_id = d_w_id AND no_d_id = d_id), '
+             '(SELECT sum(o_ol_cnt) FROM orders WHERE o_w_id = d_w_id AND o_d_id = d_id), '
+             '(SELECT count(*) FROM order_line WHERE ol_w_id = d_w_id AND ol_d_id = d_id), '
+             '(SELECT sum(w_ytd) FROM warehouse), (SELECT sum(d_ytd) FROM district) FROM district')
 
 
 def register(pure, aup, work, name, view):
@@ -218,23 +226,18 @@ def compare(table, pure_rows, sqlite_rows_):
 
 
 def consistency(pure, db):
-    """Clause 3.3.2.1-4 on both: the conditions each fails (none when consistent)."""
+    """Clause 3.3.2.1-4 on both, each read from one snapshot: the conditions failed (none when consistent)."""
     failures = []
-    for system, ytd, district_ytd, districts, ordered, lines in (
-            ('pure', pure.view('warehouse_ytd'), pure.view('district_ytd'), asked(pure, 'district_check'),
-             pure.view('ordered_lines'), pure.view('line_count')),
-            ('sqlite', *db.execute('SELECT (SELECT sum(w_ytd) FROM warehouse), (SELECT sum(d_ytd) FROM district)').fetchone(),
-             db.execute(DISTRICTS[1]).fetchall(), *db.execute(
-                 'SELECT (SELECT sum(o_ol_cnt) FROM orders), (SELECT count(*) FROM order_line)').fetchone())):
-        if not same(ytd, district_ytd):
-            failures.append((system, '3.3.2.1', ytd, district_ytd))
-        for key, next_order, newest, newest_new, oldest_new, new_orders in districts:
+    for system, districts in (('pure', asked(pure, 'district_check')), ('sqlite', db.execute(DISTRICTS[1]).fetchall())):
+        for key, next_order, newest, newest_new, oldest_new, new_orders, ordered, lines, ytd, district_ytd in districts:
+            if not same(ytd, district_ytd):
+                failures.append((system, '3.3.2.1', ytd, district_ytd))
             if not next_order - 1 == newest == newest_new:
                 failures.append((system, '3.3.2.2', key, next_order, newest, newest_new))
             if newest_new - oldest_new + 1 != new_orders:
                 failures.append((system, '3.3.2.3', key, oldest_new, newest_new, new_orders))
-        if ordered != lines:
-            failures.append((system, '3.3.2.4', ordered, lines))
+            if ordered != lines:
+                failures.append((system, '3.3.2.4', key, ordered, lines))
     return failures
 
 
@@ -303,7 +306,7 @@ def main():
                               'failed': [sum(pure_run[k]['failed'] for k in kinds),
                                          sum(sqlite_run[k]['failed'] for k in kinds)],
                               'differing': differing, 'consistency_failures': consistency(pure, db)}), flush=True)
-        for terminals in (int(t) for t in args.terminals.split(',')):
+        for terminals in (int(t) for t in args.terminals.split(',') if t):
             used = pure.cpu_seconds()
             result = json.loads(subprocess.run(
                 ['taskset', '-c', '3', str(work / 'tpcc-load'), str(pure.port), str(terminals), str(args.seconds),
@@ -314,7 +317,7 @@ def main():
                               'cpu_us_per_transaction': round(used / max(done, 1) * 1e6, 1),
                               'resident_mib': pure.resident_mib(), 'consistency_failures': consistency(pure, db)}),
                   flush=True)
-        for threads in (int(t) for t in args.sqlite_threads.split(',')):
+        for threads in (int(t) for t in args.sqlite_threads.split(',') if t):
             result = json.loads(subprocess.run(
                 ['taskset', '-c', '0-2', str(work / 'sqlite-tpcc'), str(database), str(args.warehouses), str(threads),
                  str(args.seconds), args.sync, str(args.seed + threads)], capture_output=True, text=True,
