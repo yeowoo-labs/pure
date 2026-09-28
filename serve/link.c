@@ -195,6 +195,9 @@ struct PureLink {
     size_t head, count, capacity;
     uint64_t queued, stored, told; /* the last queued; saved by the receiver; told the owner */
     bool stopping, started;
+    /* The thread sleeps (in poll), and has been woken since; records were
+     * queued since it last sent. A queue wakes it only when it sleeps, once. */
+    bool sleeping, signaled, queued_new;
     int fd, wake;
     pthread_t thread;
     void (*notify)(void *);
@@ -316,9 +319,13 @@ bool pure_link_queue(PureLink *l, uint64_t seq, PureSpan payload) {
         } else
             ok = false;
     }
+    bool signal = false;
     if (ok) {
         *record_at(l, l->count++) = r;
         l->queued = seq;
+        l->queued_new = true;
+        signal = l->sleeping && !l->signaled;
+        l->signaled = l->signaled || signal;
     }
     pthread_mutex_unlock(&l->lock);
     if (!ok) {
@@ -326,7 +333,7 @@ bool pure_link_queue(PureLink *l, uint64_t seq, PureSpan payload) {
         free(r.piece);
         return false;
     }
-    wake(l->wake);
+    if (signal) wake(l->wake);
     return true;
 }
 
@@ -648,6 +655,7 @@ static bool transmit(PureLink *l, Flight *f, const unsigned char *body, size_t s
 
 static void send_packets(PureLink *l, uint64_t now) {
     unsigned char body[BODY];
+    l->queued_new = false; /* all queued is looked at now */
     for (unsigned n = 0; n < 128; ++n) {
         bool probe = l->probes > 0;
         if (!probe && l->in_flight + DATAGRAM > l->window) break;
@@ -721,10 +729,11 @@ static void *run_link(void *context) {
     for (;;) {
         pthread_mutex_lock(&l->lock);
         uint64_t now = now_ns(), due = next_timer(l);
-        bool stopping = l->stopping;
+        bool stopping = l->stopping, more = l->queued_new; /* queued while it sent: no sleep */
+        l->sleeping = !more;
         pthread_mutex_unlock(&l->lock);
         if (stopping) break;
-        int timeout = due ? (int)((due > now ? due - now : 0) / MS) + 1 : -1;
+        int timeout = more ? 0 : due ? (int)((due > now ? due - now : 0) / MS) + 1 : -1;
         struct pollfd waits[2] = {{l->fd, POLLIN, 0}, {l->wake, POLLIN, 0}};
         if (poll(waits, 2, timeout) < 0 && errno != EINTR) break;
         if (waits[1].revents & POLLIN) {
@@ -732,6 +741,7 @@ static void *run_link(void *context) {
             if (read(l->wake, &signals, sizeof(signals)) < 0) { /* cleared already */ }
         }
         pthread_mutex_lock(&l->lock);
+        l->sleeping = l->signaled = false;
         now = now_ns();
         if (waits[0].revents) take_answers(l, now);
         run_timers(l, now);
