@@ -50,8 +50,11 @@ struct PureList {
     Layout layout;
     Node *root;           /* NULL when the list has no item */
     size_t count;
-    PureDraft *draft;     /* the stored copy, or NULL */
-    size_t header;        /* draft bytes before the first item */
+    /* A stored list's changes since they were last taken, as records
+     * (pure_list_replay); none are kept while journaled is false. */
+    bool journaled;
+    unsigned char *journal;
+    size_t journal_size, journal_capacity;
     uint64_t id, version; /* which list, and a number every change moves on */
     uint64_t shares;      /* copies made so far: a node or text made before the last one is shared */
     PureRetired *retired; /* where shared nodes and texts go when the list lets them go */
@@ -193,12 +196,6 @@ static void drop_node(PureList *list, Node *node) {
 
 static size_t cell_bytes(const Layout *l, unsigned field, PureCell cell) { return l->text_fields[field] ? 4 + cell.size : 8; }
 
-static size_t item_bytes(const Layout *l, const Node *leaf, unsigned i) {
-    size_t size = l->number_bytes;
-    for (unsigned t = 0; t < l->texts; ++t) size += 4 + texts(l, leaf, l->text_field[t])[i].size;
-    return size;
-}
-
 /* A node's summary, from its items or children. */
 static void sum(const PureList *list, Node *node) {
     const Layout *l = &list->layout;
@@ -239,27 +236,6 @@ static const Node *leaf_of(const PureList *list, size_t at, size_t *within) {
     finger.id = list->id, finger.version = list->version, finger.leaf = node, finger.start = start;
     *within = at - start;
     return node;
-}
-
-/* Where an item starts in the draft: the bytes of the children before it,
- * level by level. */
-static size_t item_offset(const PureList *list, size_t at) {
-    const Layout *l = &list->layout;
-    size_t offset = list->header;
-    const Node *node = list->root;
-    if (!node) return offset;
-    while (!node->leaf) {
-        unsigned i = 0;
-        while (i + 1 < node->count && at >= child(node, i)->items) {
-            at -= child(node, i)->items;
-            offset += child(node, i)->bytes;
-            ++i;
-        }
-        node = child(node, i);
-    }
-    if (!l->texts) return offset + (at < node->count ? at : node->count) * l->number_bytes;
-    for (unsigned i = 0; i < at && i < node->count; ++i) offset += item_bytes(l, node, i);
-    return offset;
 }
 
 /* The node at *place, the list's own to change: a copy (the node retired)
@@ -481,6 +457,7 @@ void pure_list_free(PureList *list) {
     if (list->copy) {
         if (__atomic_sub_fetch(&list->refs, 1, __ATOMIC_ACQ_REL)) return;
     } else {
+        free(list->journal);
         let_go_tree(list, list->root);
         for (unsigned kind = 0; kind < 2; ++kind)
             while (list->spare[kind]) {
@@ -553,17 +530,66 @@ static unsigned char *encode_cell(const Layout *l, unsigned field, PureCell cell
     return out;
 }
 
-/* Replace remove bytes of the draft, within bytes into the item at `at` (or
- * after the last item), with bytes; nothing to do without a draft. */
-static PureResult mirror(PureList *list, size_t at, size_t within, size_t remove, const unsigned char *bytes,
-                         size_t size) {
-    if (!list->draft) return PURE_OK;
-    return pure_draft_splice(list->draft, item_offset(list, at) + within, remove, (PureSpan){bytes, size});
+/* A stored cell of field at *at in bytes (a text's bytes borrowed from
+ * them): false when it is cut short, not finite or not UTF-8. */
+static bool decode_cell(const Layout *l, unsigned field, const unsigned char *bytes, size_t size, size_t *at,
+                        PureCell *cell) {
+    size_t width = l->text_fields[field] ? 4 : 8;
+    if (size - *at < width) return false;
+    uint64_t bits = 0;
+    for (size_t i = 0; i < width; ++i) bits |= (uint64_t)bytes[*at + i] << (8 * i);
+    *at += width;
+    *cell = (PureCell){0};
+    if (!l->text_fields[field]) {
+        memcpy(&cell->num, &bits, sizeof(bits));
+        return isfinite(cell->num);
+    }
+    if (bits > size - *at || !pure_utf8_valid((PureSpan){bytes + *at, (size_t)bits})) return false;
+    *cell = (PureCell){0, (unsigned char *)bytes + *at, (size_t)bits};
+    *at += (size_t)bits;
+    return true;
 }
 
-void pure_list_mirror(PureList *list, PureDraft *draft, size_t header) {
-    list->draft = draft;
-    list->header = header;
+/* ---- The journal: records of a stored list's changes, in the order they
+ * were made. Each is a u8 kind and the u32le position, then for an insert
+ * the item's fields in stored form, for a set the u8 field and its cell. */
+
+enum { RECORD_INSERT = 1, RECORD_REMOVE = 2, RECORD_SET = 3, RECORD_HEAD = 5, JOURNAL_KEPT = 1 << 20 };
+
+/* Room for size more bytes at the journal's end, or NULL without memory. */
+static unsigned char *journal_room(PureList *list, size_t size) {
+    if (list->journal_capacity - list->journal_size < size) {
+        size_t capacity = list->journal_capacity ? 2 * list->journal_capacity : 256;
+        while (capacity - list->journal_size < size) capacity *= 2;
+        unsigned char *grown = realloc(list->journal, capacity);
+        if (!grown) return NULL;
+        list->journal = grown;
+        list->journal_capacity = capacity;
+    }
+    return list->journal + list->journal_size;
+}
+
+static unsigned char *record_head(unsigned char *out, unsigned kind, size_t at) {
+    *out++ = (unsigned char)kind;
+    for (unsigned i = 0; i < 4; ++i) *out++ = (unsigned char)(at >> (8 * i));
+    return out;
+}
+
+void pure_list_journal(PureList *list, bool journaled) {
+    list->journaled = journaled;
+    if (!journaled) pure_list_forget(list, 0);
+}
+
+PureSpan pure_list_changes(const PureList *list) { return (PureSpan){list->journal, list->journal_size}; }
+
+void pure_list_forget(PureList *list, size_t size) {
+    if (size >= list->journal_size) return;
+    list->journal_size = size;
+    if (!size && list->journal_capacity > JOURNAL_KEPT) { /* a bulk load's room goes back */
+        free(list->journal);
+        list->journal = NULL;
+        list->journal_capacity = 0;
+    }
 }
 
 /* Every leaf in order, to visit (false stops it). */
@@ -584,42 +610,56 @@ static bool encode_leaf(void *context, const Node *leaf) {
     return true;
 }
 
-PURE_COLD PureResult pure_list_write(PureList *list) {
-    size_t size = list->root ? list->root->bytes : 0;
-    unsigned char *bytes = size ? malloc(size) : NULL;
-    if (size && !bytes) return PURE_ALLOCATION;
-    Encoding encoding = {&list->layout, bytes};
+size_t pure_list_size(const PureList *list) { return list->root ? list->root->bytes : 0; }
+
+void pure_list_encode(const PureList *list, unsigned char *out) {
+    Encoding encoding = {&list->layout, out};
     visit_leaves(list->root, encode_leaf, &encoding);
-    PureResult result = mirror(list, 0, 0, 0, bytes, size);
-    free(bytes);
-    return result;
+}
+
+/* An item's cells in stored form at *at in bytes. */
+static bool decode_item(const Layout *l, const unsigned char *bytes, size_t size, size_t *at, PureCell *cells) {
+    for (unsigned f = 0; f < l->fields; ++f)
+        if (!decode_cell(l, f, bytes, size, at, &cells[f])) return false;
+    return true;
 }
 
 PURE_COLD PureResult pure_list_read(PureList *list, const unsigned char *bytes, size_t size) {
-    const Layout *l = &list->layout;
     PureCell cells[16];
     for (size_t at = 0; at < size;) {
-        for (unsigned f = 0; f < l->fields; ++f) {
-            size_t width = l->text_fields[f] ? 4 : 8;
-            if (size - at < width) return PURE_STORE_ERROR;
-            uint64_t bits = 0;
-            for (size_t i = 0; i < width; ++i) bits |= (uint64_t)bytes[at + i] << (8 * i);
-            at += width;
-            if (!l->text_fields[f]) {
-                cells[f] = (PureCell){0};
-                memcpy(&cells[f].num, &bits, sizeof(bits));
-                if (!isfinite(cells[f].num)) return PURE_STORE_ERROR;
-                continue;
-            }
-            if (bits > size - at || !pure_utf8_valid((PureSpan){bytes + at, (size_t)bits}))
-                return PURE_STORE_ERROR;
-            cells[f] = (PureCell){0, (unsigned char *)bytes + at, (size_t)bits};
-            at += (size_t)bits;
-        }
+        if (!decode_item(&list->layout, bytes, size, &at, cells)) return PURE_STORE_ERROR;
         PureResult result = pure_list_insert(list, list->count, cells, NULL);
         if (result != PURE_OK) return result;
     }
     return PURE_OK;
+}
+
+PURE_COLD PureResult pure_list_replay(PureList *list, const unsigned char *bytes, size_t size) {
+    const Layout *l = &list->layout;
+    bool journaled = list->journaled;
+    PureResult result = PURE_OK;
+    list->journaled = false;
+    for (size_t at = 0; at < size && result == PURE_OK;) {
+        if (size - at < RECORD_HEAD) { result = PURE_STORE_ERROR; break; }
+        unsigned kind = bytes[at];
+        size_t position = 0;
+        for (unsigned i = 0; i < 4; ++i) position |= (size_t)bytes[at + 1 + i] << (8 * i);
+        at += RECORD_HEAD;
+        PureCell cells[16];
+        if (kind == RECORD_INSERT)
+            result = position <= list->count && decode_item(l, bytes, size, &at, cells) ?
+                     pure_list_insert(list, position, cells, NULL) : PURE_STORE_ERROR;
+        else if (kind == RECORD_REMOVE)
+            result = position < list->count ? pure_list_remove(list, position, NULL) : PURE_STORE_ERROR;
+        else if (kind == RECORD_SET) {
+            unsigned field = at < size ? bytes[at++] : l->fields;
+            result = field < l->fields && position < list->count && decode_cell(l, field, bytes, size, &at, &cells[0]) ?
+                     pure_list_set(list, position, field, cells[0], NULL) : PURE_STORE_ERROR;
+        } else
+            result = PURE_STORE_ERROR;
+    }
+    list->journaled = journaled;
+    return result;
 }
 
 PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, PureUndo *undo) {
@@ -629,29 +669,23 @@ PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, Pu
     unsigned owned = 0;
     for (; owned < l->fields; ++owned)
         if (!own_cell(list, owned, cells[owned], &item[owned])) break;
-    size_t size = 0;
-    for (unsigned f = 0; list->draft && f < l->fields; ++f) size += cell_bytes(l, f, cells[f]);
-    unsigned char *bytes = size ? malloc(size) : NULL, *end = bytes;
+    size_t size = RECORD_HEAD;
+    for (unsigned f = 0; list->journaled && f < l->fields; ++f) size += cell_bytes(l, f, cells[f]);
+    unsigned char *record = list->journaled ? journal_room(list, size) : NULL;
     Place p;
-    if (owned < l->fields || (size && !bytes) || !prepare(list, at, &p)) {
-        free(bytes);
+    if (owned < l->fields || (list->journaled && !record) || !prepare(list, at, &p)) {
         for (unsigned f = 0; f < owned; ++f) free_text(item[f].text);
         return PURE_ALLOCATION;
     }
-    for (unsigned f = 0; bytes && f < l->fields; ++f) end = encode_cell(l, f, item[f], end);
     if (undo && !log_change(undo, (Entry){.change = INSERTED, .list = list, .at = at})) {
         release_extras(list, &p);
-        free(bytes);
         for (unsigned f = 0; f < l->fields; ++f) free_text(item[f].text);
         return PURE_ALLOCATION;
     }
-    PureResult result = mirror(list, at, 0, 0, bytes, size);
-    free(bytes);
-    if (result != PURE_OK) {
-        if (undo) --undo->count;
-        release_extras(list, &p);
-        for (unsigned f = 0; f < l->fields; ++f) free_text(item[f].text);
-        return result;
+    if (record) {
+        unsigned char *end = record_head(record, RECORD_INSERT, at);
+        for (unsigned f = 0; f < l->fields; ++f) end = encode_cell(l, f, item[f], end);
+        list->journal_size += size;
     }
     place(list, &p, item);
     return PURE_OK;
@@ -677,15 +711,16 @@ PureResult pure_list_remove(PureList *list, size_t at, PureUndo *undo) {
     unsigned within, depth = descend(list, at, path, &within);
     if (!depth) return PURE_ALLOCATION;
     Node *leaf = path[depth - 1].node;
+    unsigned char *record = list->journaled ? journal_room(list, RECORD_HEAD) : NULL;
     PureCell *cells = undo ? log_cells(undo, l->fields) : NULL, kept[16];
-    if (undo && (!cells || !log_change(undo, (Entry){.change = REMOVED, .list = list, .at = at, .cells = undo->cell_count})))
+    if ((list->journaled && !record) ||
+        (undo && (!cells || !log_change(undo, (Entry){.change = REMOVED, .list = list, .at = at, .cells = undo->cell_count}))))
         return PURE_ALLOCATION;
     if (!cells) cells = kept;
     for (unsigned f = 0; f < l->fields; ++f) cells[f] = cell_at(l, leaf, within, f);
-    PureResult result = mirror(list, at, 0, item_bytes(l, leaf, within), NULL, 0);
-    if (result != PURE_OK) {
-        if (undo) --undo->count;
-        return result;
+    if (record) {
+        record_head(record, RECORD_REMOVE, at);
+        list->journal_size += RECORD_HEAD;
     }
     if (undo) undo->cell_count += l->fields;
     else let_go_cells(list, cells);
@@ -702,23 +737,18 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
     if (!depth || !own_cell(list, field, value, &copy)) return PURE_ALLOCATION;
     Node *leaf = path[depth - 1].node;
     PureCell old = cell_at(l, leaf, within, field);
-    size_t size = list->draft ? cell_bytes(l, field, copy) : 0;
-    unsigned char *bytes = size ? malloc(size) : NULL;
-    if ((size && !bytes) ||
+    size_t size = RECORD_HEAD + 1 + cell_bytes(l, field, copy);
+    unsigned char *record = list->journaled ? journal_room(list, size) : NULL;
+    if ((list->journaled && !record) ||
         (undo && !log_change(undo, (Entry){.change = CHANGED, .list = list, .at = at, .field = field, .old = old}))) {
-        free(bytes);
         free_text(copy.text);
         return PURE_ALLOCATION;
     }
-    if (bytes) encode_cell(l, field, copy, bytes);
-    size_t offset = 0;
-    for (unsigned f = 0; f < field; ++f) offset += cell_bytes(l, f, cell_at(l, leaf, within, f));
-    PureResult result = mirror(list, at, offset, cell_bytes(l, field, old), bytes, size);
-    free(bytes);
-    if (result != PURE_OK) {
-        if (undo) --undo->count;
-        free_text(copy.text);
-        return result;
+    if (record) {
+        unsigned char *end = record_head(record, RECORD_SET, at);
+        *end++ = (unsigned char)field;
+        encode_cell(l, field, copy, end);
+        list->journal_size += size;
     }
     if (l->text_fields[field]) texts(l, leaf, field)[within] = (PureSpan){copy.text, copy.size};
     else numbers(l, leaf, field)[within] = copy.num;

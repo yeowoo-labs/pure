@@ -86,16 +86,27 @@ size_t pure_list_seek(const PureList *, unsigned field, PureCell key, bool *foun
  * before] = position after for every item. CONFLICT when two items have the
  * same key (nothing is made). */
 PureResult pure_list_sorted(const PureList *, unsigned field, PureList **out, size_t *moved);
-/* A list may keep a stored copy in a draft: header bytes, then each item's
- * fields in order (a number as its binary64 bits, little-endian; a text as a
- * u32le length and its bytes). Every change splices the draft as well, and a
- * change the draft refuses (such as its size limit) does not happen. Undoing
- * an event changes only the list: the caller restores the draft's version. */
-void pure_list_mirror(PureList *, PureDraft *, size_t header);
-/* Store every item after the header (the draft holds just the header). */
-PureResult pure_list_write(PureList *);
-/* Append the items stored in bytes; each field is checked. Before mirroring. */
+/* The stored form of items: each item's fields in order, a number as its
+ * binary64 bits (little-endian), a text as a u32le length and its bytes.
+ * pure_list_size is the bytes of all the items so stored, and
+ * pure_list_encode writes them to out. */
+size_t pure_list_size(const PureList *);
+void pure_list_encode(const PureList *, unsigned char *out);
+/* Append the items stored in bytes; each field is checked. */
 PureResult pure_list_read(PureList *, const unsigned char *bytes, size_t size);
+/* A stored list journals its changes (from pure_list_journal(list, true)
+ * on): every insert, remove and set adds a record, a u8 kind (1 insert, 2
+ * remove, 3 set) and the u32le position, then an insert's item or a set's
+ * u8 field and cell in stored form. A change there is no room to record does
+ * not happen. pure_list_changes are the records since pure_list_forget last
+ * kept none; forgetting down to a length taken earlier drops the records of
+ * changes undone since (an undo does not journal). pure_list_replay makes
+ * the changes of records again, in order: a list read from its stored items
+ * and given its journal is the list that wrote them. */
+void pure_list_journal(PureList *, bool journaled);
+PureSpan pure_list_changes(const PureList *);
+void pure_list_forget(PureList *, size_t size);
+PureResult pure_list_replay(PureList *, const unsigned char *bytes, size_t size);
 /* Undo the changes logged after mark (a count taken earlier), newest first. */
 void pure_undo_rollback(PureUndo *, size_t mark);
 void pure_undo_commit(PureUndo *);

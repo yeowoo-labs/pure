@@ -2425,8 +2425,9 @@ void pure_app_finish(PureApp *app) {
     app->arena.used = 0;
 }
 
-/* The start of a burst: what a failed save returns to. Text and stored list
- * drafts stay held until the save, so every version since stays readable. */
+/* The start of a burst: what a failed save returns to. Text drafts stay held
+ * until the save, so every version since stays readable; a stored list's
+ * journal is as long as its changes since the last save. */
 static void open_burst(PureApp *app) {
     if (app->open) return;
     const PureModule *m = app->module;
@@ -2438,10 +2439,7 @@ static void open_burst(PureApp *app) {
             pure_draft_hold(app->texts[i], true);
             app->durable_texts[i] = pure_draft_version(app->texts[i]);
         }
-        if (app->list_drafts[i]) {
-            pure_draft_hold(app->list_drafts[i], true);
-            app->durable_lists[i] = pure_draft_version(app->list_drafts[i]);
-        }
+        if (app->list_drafts[i]) app->durable_lists[i] = pure_list_changes(app->lists[i]).size;
     }
     app->open = true;
 }
@@ -2461,10 +2459,7 @@ static void close_burst(PureApp *app, bool keep) {
             if (!keep) pure_draft_restore(app->texts[i], app->durable_texts[i]);
             pure_draft_hold(app->texts[i], false);
         }
-        if (app->list_drafts[i]) {
-            if (!keep) pure_draft_restore(app->list_drafts[i], app->durable_lists[i]);
-            pure_draft_hold(app->list_drafts[i], false);
-        }
+        if (app->list_drafts[i] && !keep) pure_list_forget(app->lists[i], app->durable_lists[i]);
     }
     if (keep) pure_undo_commit(&app->undo);
     else {
@@ -2588,7 +2583,8 @@ void pure_app_stop(PureApp *app) {
 
 /* Where one event began inside the burst: a failed event returns there. */
 typedef struct {
-    PureVersion texts[PURE_MODULE_STATES], lists[PURE_MODULE_STATES];
+    PureVersion texts[PURE_MODULE_STATES];
+    size_t lists[PURE_MODULE_STATES]; /* stored lists' journal lengths */
     size_t undo, sent;
     uint64_t last_sent[PURE_MODULE_INPUTS];
     bool opened;
@@ -2599,7 +2595,7 @@ static void mark_event(PureApp *app, Mark *mark) {
     open_burst(app);
     for (uint32_t i = 0; i < app->module->states; ++i) {
         if (app->texts[i]) mark->texts[i] = pure_draft_version(app->texts[i]);
-        if (app->list_drafts[i]) mark->lists[i] = pure_draft_version(app->list_drafts[i]);
+        if (app->list_drafts[i]) mark->lists[i] = pure_list_changes(app->lists[i]).size;
     }
     mark->undo = app->undo.count;
     mark->sent = app->sent_count;
@@ -2609,7 +2605,7 @@ static void mark_event(PureApp *app, Mark *mark) {
 static void undo_event(PureApp *app, const Mark *mark) {
     for (uint32_t i = 0; i < app->module->states; ++i) {
         if (app->texts[i]) pure_draft_restore(app->texts[i], mark->texts[i]);
-        if (app->list_drafts[i]) pure_draft_restore(app->list_drafts[i], mark->lists[i]);
+        if (app->list_drafts[i]) pure_list_forget(app->lists[i], mark->lists[i]);
     }
     pure_undo_rollback(&app->undo, mark->undo);
     drop_sent(app, mark->sent);
@@ -3238,13 +3234,14 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     PureDraft *texts[PURE_MODULE_STATES] = {0}, *list_drafts[PURE_MODULE_STATES] = {0};
     PureList *lists[PURE_MODULE_STATES] = {0};
     PureVersion saved[PURE_MODULE_STATES] = {{0, 0}}, before[PURE_MODULE_STATES] = {{0, 0}};
+    size_t journaled[PURE_MODULE_STATES] = {0};
     int kept[PURE_MODULE_STATES];
     bool rewrite[PURE_MODULE_STATES] = {false};
     PureResult result = PURE_OK;
     for (uint32_t i = 0; i < module->states; ++i) {
         int previous = old ? pure_module_state(old, module->state_names[i]) : -1;
         kept[i] = previous >= 0 && old->state_type[previous] == module->state_type[i] ? previous : -1;
-        if (kept[i] >= 0) saved[i] = app->saved[kept[i]];
+        if (kept[i] >= 0) saved[i] = app->saved[kept[i]], journaled[i] = app->journaled[kept[i]];
         if (module->state_type[i] == PURE_STATE_TEXT) {
             if (kept[i] >= 0) texts[i] = app->texts[kept[i]];
             else if (result == PURE_OK)
@@ -3258,7 +3255,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
                 list_drafts[i] = app->list_drafts[kept[i]];
                 rewrite[i] = result == PURE_OK && list_drafts[i] && lists[i] != app->lists[kept[i]];
             } else if (stored && !(module->state_flags[i] & PURE_LIST_ROWS >> 8)) { /* rows are never stored */
-                result = pure_save_open_list(app, module, i, &lists[i], &list_drafts[i], &saved[i]);
+                result = pure_save_open_list(app, module, i, &lists[i], &list_drafts[i], &saved[i], &journaled[i]);
             } else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
         } else values[i] = kept[i] >= 0 ? app->values[kept[i]] : module->initial[i];
     }
@@ -3306,7 +3303,10 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
             pure_draft_hold(list_drafts[i], true);
         }
     for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i)
-        if (rewrite[i]) result = pure_save_rewrite_list(module, i, lists[i], list_drafts[i]);
+        if (rewrite[i]) {
+            result = pure_save_rewrite_list(module, i, lists[i], list_drafts[i]);
+            journaled[i] = 0;
+        }
     for (uint32_t i = 0; i < module->states; ++i)
         if (rewrite[i]) {
             if (result != PURE_OK) pure_draft_restore(list_drafts[i], before[i]);
@@ -3340,7 +3340,10 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     memcpy(app->texts, texts, sizeof(texts));
     memcpy(app->lists, lists, sizeof(lists));
     memcpy(app->list_drafts, list_drafts, sizeof(list_drafts));
+    memcpy(app->journaled, journaled, sizeof(journaled));
     memcpy(app->saved, saved, sizeof(saved));
+    for (uint32_t i = 0; i < module->states; ++i)
+        if (list_drafts[i]) pure_list_journal(lists[i], true); /* a stored list's changes are recorded from now on */
     if (old) remap_outputs(app, old, module, true);
     drop_passes(app); /* kept by instruction of the module they were made for */
     app->module = module;

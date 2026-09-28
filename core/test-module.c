@@ -994,9 +994,10 @@ static bool collect_bytes(void *context, PureSpan span) {
 }
 
 /* The stored form of the model: a number's binary64 bits, a text's u32le length and bytes. */
-static bool stored_as(PureDraft *draft, const Model *m) {
-    Grown got = {0};
-    CHECK(pure_draft_read(draft, 0, pure_draft_size(draft), collect_bytes, &got) == PURE_OK);
+static bool stored_as(const PureList *list, const Model *m) {
+    Grown got = {pure_list_size(list) ? malloc(pure_list_size(list)) : NULL, pure_list_size(list), 0};
+    CHECK(got.bytes || !got.size);
+    pure_list_encode(list, got.bytes);
     size_t at = 0;
     bool same = true;
     for (size_t i = 0; i < m->count && same; ++i) {
@@ -1014,13 +1015,28 @@ static bool stored_as(PureDraft *draft, const Model *m) {
     return same;
 }
 
+/* A list read from stored items and given the records stored after them. */
+static PureList *stored_list(const Grown *stored, size_t items) {
+    static const uint8_t text_fields[2] = {0, 1};
+    PureList *list = pure_list_new(2, text_fields);
+    CHECK(list && pure_list_read(list, stored->bytes, items) == PURE_OK);
+    if (pure_list_replay(list, stored->bytes + items, stored->size - items) != PURE_OK) {
+        pure_list_free(list);
+        return NULL;
+    }
+    return list;
+}
+
 static void list_trees(void) {
     static const uint8_t text_fields[2] = {0, 1};
     uint32_t seed = 0x5eed1234u;
     PureList *list = pure_list_new(2, text_fields);
-    PureDraft *draft = pure_draft_new();
-    CHECK(list && draft);
-    pure_list_mirror(list, draft, 0);
+    CHECK(list);
+    pure_list_journal(list, true);
+    /* What a store would hold: the items as last stored whole, then the
+     * records of each save since. */
+    Grown stored = {0};
+    size_t stored_items = 0, saves = 0, rewrites = 0;
     PureUndo undo = {0};
     Model model = {0}, before = {0};
     /* Up to four shares at a time, each with what it shared and the items
@@ -1032,10 +1048,8 @@ static void list_trees(void) {
     unsigned first = 0, held = 0, splits_seen = 0;
     size_t largest = 0, events = 0, undone = 0;
     for (unsigned event = 0; event < 6000; ++event) {
-        size_t mark = undo.count;
+        size_t mark = undo.count, journal = pure_list_changes(list).size;
         model_copy(&before, &model);
-        pure_draft_hold(draft, true);
-        PureVersion version = pure_draft_version(draft);
         /* Mostly growing to a few thousand, then shrinking back down, so the
          * tree gains and loses levels. */
         unsigned grow = event < 2500 ? 70 : event < 4500 ? 30 : 60;
@@ -1067,19 +1081,41 @@ static void list_trees(void) {
                 }
             }
         }
-        if (next_random(&seed) % 5 == 0) { /* undone: the list and its stored copy as before */
+        if (next_random(&seed) % 5 == 0) { /* undone: the list and its journal as before */
             pure_undo_rollback(&undo, mark);
-            pure_draft_restore(draft, version);
+            pure_list_forget(list, journal);
             model_copy(&model, &before);
             ++undone;
         } else
             pure_undo_commit(&undo);
-        pure_draft_hold(draft, false);
         ++events;
         largest = model.count > largest ? model.count : largest;
         splits_seen += model.count > 32;
         if (event % 7 == 0) CHECK(same_items(list, &model));
-        if (event % 50 == 0) CHECK(stored_as(draft, &model));
+        /* A save every few events: its records after the stored ones, or now
+         * and then the items stored whole with none after them. */
+        if (event % 3 == 0) {
+            PureSpan changes = pure_list_changes(list);
+            if (event % 240 == 0) {
+                stored.size = 0;
+                Grown whole = {malloc(pure_list_size(list) + 1), 0, 0};
+                CHECK(whole.bytes);
+                pure_list_encode(list, whole.bytes);
+                collect_bytes(&stored, (PureSpan){whole.bytes, pure_list_size(list)});
+                free(whole.bytes);
+                stored_items = pure_list_size(list);
+                ++rewrites;
+            } else
+                collect_bytes(&stored, changes);
+            pure_list_forget(list, 0);
+            ++saves;
+        }
+        if (event % 51 == 0) { /* just saved: what a restart finds is the list as it is */
+            PureList *restarted = stored_list(&stored, stored_items);
+            CHECK(restarted && same_items(restarted, &model));
+            pure_list_free(restarted);
+            CHECK(stored_as(list, &model));
+        }
         /* A share now and then, as a snapshot takes one; the oldest goes with
          * the items and nodes retired while it was the newest. */
         if (event % 40 == 20) {
@@ -1098,14 +1134,33 @@ static void list_trees(void) {
         if (event % 25 == 0)
             for (unsigned i = 0; i < held; ++i) CHECK(same_items(copies[(first + i) % SHARES], &shared[(first + i) % SHARES]));
     }
-    CHECK(same_items(list, &model) && stored_as(draft, &model) && largest > 2000 && undone > 500);
+    CHECK(same_items(list, &model) && stored_as(list, &model) && largest > 2000 && undone > 500 && rewrites > 20);
+    /* Damaged records are refused: cut short, past the end, of no kind or no field. */
+    collect_bytes(&stored, pure_list_changes(list));
+    pure_list_forget(list, 0);
+    PureList *whole = stored_list(&stored, stored_items);
+    CHECK(whole && same_items(whole, &model));
+    pure_list_free(whole);
+    size_t length = stored.size;
+    static const unsigned char damaged[][8] = {
+        {1, 0xff, 0xff, 0xff, 0}, {2, 0xff, 0xff, 0xff, 0}, {9, 0, 0, 0, 0}, {3, 0, 0, 0, 0, 7}, {3, 0, 0, 0, 0, 0, 1}};
+    static const size_t damaged_size[] = {5, 5, 5, 6, 7};
+    for (unsigned d = 0; d < 5; ++d) {
+        stored.size = length;
+        collect_bytes(&stored, (PureSpan){damaged[d], damaged_size[d]});
+        CHECK(!stored_list(&stored, stored_items));
+    }
+    CHECK(length > stored_items);
+    stored.size = length - 1; /* the last record cut short */
+    CHECK(!stored_list(&stored, stored_items));
+    free(stored.bytes);
+    printf("{\"journal_saves\":%zu,\"journal_rewrites\":%zu}\n", saves, rewrites);
     for (; held; --held, first = (first + 1) % SHARES) {
         CHECK(same_items(copies[first], &shared[first]));
         pure_list_free(copies[first]);
         pure_retired_free(&retired[first]);
     }
     pure_list_free(list);
-    pure_draft_close(draft);
     pure_undo_free(&undo);
 
     /* A keyed list: items kept in key order, found by key. */

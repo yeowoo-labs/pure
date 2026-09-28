@@ -265,13 +265,15 @@ typedef struct {
     PureList *lists[PURE_MODULE_STATES];
     PureUndo undo; /* list changes of the current event */
     PureDraft *list_drafts[PURE_MODULE_STATES]; /* stored lists, when kept */
+    size_t journaled[PURE_MODULE_STATES];       /* a stored list's record bytes after its items */
     PureDraft *stored_values;                   /* numbers, cursors and indices, when kept */
     PureVersion saved[PURE_MODULE_STATES];      /* text and list versions at the last save */
     /* Events since the last save: what a failed save returns to, and the
      * documents messages opened (held until the save). */
     bool deferred, open;
     double durable_values[PURE_MODULE_STATES];
-    PureVersion durable_texts[PURE_MODULE_STATES], durable_lists[PURE_MODULE_STATES];
+    PureVersion durable_texts[PURE_MODULE_STATES];
+    size_t durable_lists[PURE_MODULE_STATES]; /* each stored list's journal length */
     uint64_t durable_ticks, durable_events;
     struct PurePending { void *document; char key[65]; bool edited; } *pending; /* grows to PURE_APP_PENDING */
     unsigned pending_count, pending_capacity;

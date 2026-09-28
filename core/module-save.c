@@ -6,10 +6,19 @@
 #include <string.h>
 
 /* Stored forms. values: "PVS1", then per state {u8 type, u8 name length,
- * name, binary64 bits (little-endian)}. A list: "PLS1", u8 field count, per
- * field {u8 0 number | 1 text, u8 name length, name}, then its items
- * (module-list.h). A text state: its UTF-8 bytes. */
-static const unsigned char values_magic[4] = {'P', 'V', 'S', '1'}, list_magic[4] = {'P', 'L', 'S', '1'};
+ * name, binary64 bits (little-endian)}. A list: "PLS2", u8 field count, per
+ * field {u8 0 number | 1 text, u8 name length, name}, u64le the bytes of its
+ * items, its items, then its journal's records to the end (module-list.h):
+ * a save appends the records of the list's changes, and rewrites the items
+ * with no records once the records outgrow them. "PLS1" (read, rewritten on
+ * start) had no length, no records: its items reached the end. A text state:
+ * its UTF-8 bytes. */
+static const unsigned char values_magic[4] = {'P', 'V', 'S', '1'}, list_magic[4] = {'P', 'L', 'S', '2'},
+                           list_magic_1[4] = {'P', 'L', 'S', '1'};
+/* Records a list keeps before its items are stored again: at least this,
+ * else as many bytes as its items. So a save writes what changed, and the
+ * list's stored bytes stay within twice its items (and this). */
+enum { JOURNAL_MIN = 1 << 16 };
 /* links: "PLK1"; u8 outputs, each {u8 name length, name, u8 field count, the
  * fields' types, u64le last number} (the module's outputs, then those it
  * dropped, without fields); u16le sources, each {u8 length, the name, u64le
@@ -17,6 +26,17 @@ static const unsigned char values_magic[4] = {'P', 'V', 'S', '1'}, list_magic[4]
  * the table), u64le number, u32le size, payload}. */
 static const unsigned char links_magic[4] = {'P', 'L', 'K', '1'};
 static const PureVersion unsaved = {UINT64_MAX, UINT64_MAX};
+
+static unsigned char *put_le(unsigned char *at, uint64_t value, unsigned width) {
+    for (unsigned i = 0; i < width; ++i) *at++ = (unsigned char)(value >> (8 * i));
+    return at;
+}
+
+static uint64_t get_le(const unsigned char *at, unsigned width) {
+    uint64_t value = 0;
+    for (unsigned i = 0; i < width; ++i) value |= (uint64_t)at[i] << (8 * i);
+    return value;
+}
 
 bool pure_save_enabled(const PureApp *app) { return app->data.state && app->data.save; }
 
@@ -88,7 +108,7 @@ PURE_COLD PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint
     return result;
 }
 
-static size_t list_header(const PureModule *m, uint32_t record, unsigned char *out) {
+static size_t list_header(const PureModule *m, uint32_t record, uint64_t items, unsigned char *out) {
     const PureRecord *r = &m->record[record];
     size_t at = 0;
     memcpy(out, list_magic, 4);
@@ -101,27 +121,24 @@ static size_t list_header(const PureModule *m, uint32_t record, unsigned char *o
         memcpy(out + at, name, strlen(name));
         at += strlen(name);
     }
+    for (unsigned b = 0; b < 8; ++b) out[at++] = (unsigned char)(items >> (8 * b));
     return at;
 }
 
-PURE_COLD PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, PureList *list, PureDraft *draft) {
-    unsigned char header[5 + PURE_RECORD_FIELDS * (2 + PURE_MODULE_NAME)];
-    size_t length = list_header(m, m->state_ref[state], header);
-    PureVersion before = pure_draft_version(draft);
-    pure_draft_hold(draft, true);
-    PureResult result = pure_draft_splice(draft, 0, pure_draft_size(draft), (PureSpan){header, length});
-    pure_list_mirror(list, draft, length);
-    if (result == PURE_OK) result = pure_list_write(list);
-    if (result != PURE_OK) {
-        pure_draft_restore(draft, before);
-        pure_list_mirror(list, NULL, 0);
-    }
-    pure_draft_hold(draft, false);
+PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, const PureList *list, PureDraft *draft) {
+    size_t items = pure_list_size(list), length;
+    unsigned char header[5 + PURE_RECORD_FIELDS * (2 + PURE_MODULE_NAME) + 8], *bytes = malloc(sizeof(header) + items);
+    if (!bytes) return PURE_ALLOCATION;
+    length = list_header(m, m->state_ref[state], items, header);
+    memcpy(bytes, header, length);
+    pure_list_encode(list, bytes + length);
+    PureResult result = pure_draft_splice(draft, 0, pure_draft_size(draft), (PureSpan){bytes, length + items});
+    free(bytes);
     return result;
 }
 
 PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint32_t state, PureList **out, PureDraft **draft,
-                               PureVersion *saved) {
+                               PureVersion *saved, size_t *journaled) {
     uint32_t record = m->state_ref[state];
     const PureRecord *r = &m->record[record];
     *out = NULL;
@@ -134,30 +151,36 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     char names[PURE_RECORD_FIELDS][PURE_MODULE_NAME] = {{0}};
     uint8_t text[PURE_RECORD_FIELDS] = {0};
     unsigned count = 0;
-    size_t at = 0;
-    bool stored = result == PURE_OK && bytes;
+    size_t at = 0, items = 0;
+    bool stored = result == PURE_OK && bytes, first = stored && size >= 4 && !memcmp(bytes, list_magic_1, 4);
     if (stored) {
-        bool ok = size >= 5 && !memcmp(bytes, list_magic, 4) && bytes[4] <= PURE_RECORD_FIELDS;
+        bool ok = size >= 5 && (first || !memcmp(bytes, list_magic, 4)) && bytes[4] <= PURE_RECORD_FIELDS;
         count = ok ? bytes[4] : 0;
         at = 5;
         for (unsigned f = 0; ok && f < count; ++f) {
             ok = named(bytes, size, &at, 0, &text[f], names[f]) && text[f] <= 1;
             for (unsigned k = 0; k < f; ++k) ok = ok && strcmp(names[k], names[f]);
         }
+        if (ok && !first) {
+            ok = size - at >= 8 && (items = (size_t)get_le(bytes + at, 8)) <= size - at - 8;
+            at += 8;
+        } else items = size - at;
         if (!ok) result = PURE_STORE_ERROR;
     }
+    /* The stored items, then the changes since they were stored. */
     PureList *from = NULL;
     if (result == PURE_OK && stored) {
         from = pure_list_new(count, text);
-        result = from ? pure_list_read(from, bytes + at, size - at) : PURE_ALLOCATION;
+        result = from ? pure_list_read(from, bytes + at, items) : PURE_ALLOCATION;
+        if (result == PURE_OK) result = pure_list_replay(from, bytes + at + items, size - at - items);
     }
+    *journaled = result == PURE_OK && stored ? size - at - items : 0;
     free(bytes);
     bool same = stored && count == r->count;
     for (unsigned f = 0; same && f < count; ++f)
         same = text[f] == m->record_field_text[r->first + f] && !strcmp(names[f], m->record_field_names[r->first + f]);
-    if (result == PURE_OK && same) {
+    if (result == PURE_OK && same && !first) {
         *out = from;
-        pure_list_mirror(from, *draft, at);
         *saved = pure_draft_version(*draft);
         return PURE_OK;
     }
@@ -165,10 +188,14 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         /* New, or stored with another record: its items move by field name. */
         const char *field_names[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < count; ++f) field_names[f] = names[f];
-        if (from) result = pure_list_migrate(out, from, field_names, text, count, m, record);
+        if (same) { /* stored in the earlier form: the same items, stored again */
+            *out = from;
+            from = NULL;
+        } else if (from) result = pure_list_migrate(out, from, field_names, text, count, m, record);
         else if (!(*out = pure_list_new(r->count, m->record_field_text + r->first))) result = PURE_ALLOCATION;
     }
     pure_list_free(from);
+    *journaled = 0;
     if (result == PURE_OK) result = pure_save_rewrite_list(m, state, *out, *draft);
     if (result != PURE_OK) {
         pure_list_free(*out);
@@ -257,17 +284,6 @@ PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, do
 }
 
 static bool same_version(PureVersion a, PureVersion b) { return a.ref == b.ref && a.bytes == b.bytes; }
-
-static unsigned char *put_le(unsigned char *at, uint64_t value, unsigned width) {
-    for (unsigned i = 0; i < width; ++i) *at++ = (unsigned char)(value >> (8 * i));
-    return at;
-}
-
-static uint64_t get_le(const unsigned char *at, unsigned width) {
-    uint64_t value = 0;
-    for (unsigned i = 0; i < width; ++i) value |= (uint64_t)at[i] << (8 * i);
-    return value;
-}
 
 /* The links as stored; NULL when memory runs out. */
 static unsigned char *encode_links(const PureApp *app, size_t *size) {
@@ -406,6 +422,23 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m) {
     return result;
 }
 
+/* After a save of lists (the first count of states): kept, each list's
+ * changes are stored (its journal empties), or, failed, each draft is as it
+ * was; the holds the save took go either way. */
+static void settle_lists(PureApp *app, PureDraft *const *drafts, const uint32_t *states, size_t count,
+                         const PureVersion *before, const size_t *journaled, bool saved) {
+    for (size_t k = 0; k < count; ++k) {
+        uint32_t i = states[k];
+        if (app->module->state_type[i] != PURE_STATE_LIST) continue;
+        if (!saved) pure_draft_restore(drafts[k], before[i]);
+        else {
+            pure_list_forget(app->lists[i], 0);
+            app->journaled[i] = journaled[i];
+        }
+        pure_draft_hold(drafts[k], false);
+    }
+}
+
 PureResult pure_save_commit(PureApp *app, const double *values, void *const *documents, size_t document_count,
                             int64_t *revisions) {
     if (!pure_save_enabled(app)) {
@@ -422,11 +455,38 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
     for (uint32_t i = 0; i < m->states; ++i) {
         PureDraft *draft = m->state_type[i] == PURE_STATE_TEXT ? app->texts[i] :
                            m->state_type[i] == PURE_STATE_LIST ? app->list_drafts[i] : NULL;
-        if (draft && !same_version(pure_draft_version(draft), app->saved[i])) {
+        if (draft && (!same_version(pure_draft_version(draft), app->saved[i]) ||
+                      (m->state_type[i] == PURE_STATE_LIST && pure_list_changes(app->lists[i]).size))) {
             states[count] = i;
             drafts[count++] = draft;
         }
     }
+    /* A list's changes go after its stored records, or, once the records
+     * would outgrow its items, the items are stored again with none. */
+    PureVersion lists_before[PURE_MODULE_STATES];
+    size_t journaled[PURE_MODULE_STATES];
+    for (size_t k = 0; k < count; ++k) {
+        uint32_t i = states[k];
+        if (m->state_type[i] != PURE_STATE_LIST) continue;
+        PureSpan changes = pure_list_changes(app->lists[i]);
+        size_t items = pure_list_size(app->lists[i]);
+        lists_before[i] = pure_draft_version(drafts[k]);
+        pure_draft_hold(drafts[k], true);
+        PureResult result = PURE_OK;
+        if (!changes.size) journaled[i] = app->journaled[i];
+        else if (app->journaled[i] + changes.size > (items > JOURNAL_MIN ? items : JOURNAL_MIN)) {
+            result = pure_save_rewrite_list(m, i, app->lists[i], drafts[k]);
+            journaled[i] = 0;
+        } else {
+            result = pure_draft_splice(drafts[k], pure_draft_size(drafts[k]), 0, changes);
+            journaled[i] = app->journaled[i] + changes.size;
+        }
+        if (result != PURE_OK) {
+            settle_lists(app, drafts, states, k + 1, lists_before, journaled, false);
+            return result;
+        }
+    }
+    size_t list_count = count;
     /* Numbers, cursors and indices: stored again only when their bytes change. */
     PureVersion values_before = {0, 0};
     bool values_changed = false;
@@ -434,14 +494,21 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
         unsigned char encoded[VALUES_BYTES], *stored;
         size_t length = encode_values(m, values, encoded), size;
         PureResult result = read_whole(app->stored_values, &stored, &size);
-        if (result != PURE_OK) return result;
+        if (result != PURE_OK) {
+            settle_lists(app, drafts, states, list_count, lists_before, journaled, false);
+            return result;
+        }
         values_changed = size != length || memcmp(stored, encoded, length);
         free(stored);
         if (values_changed) {
             values_before = pure_draft_version(app->stored_values);
             pure_draft_hold(app->stored_values, true);
             result = pure_draft_splice(app->stored_values, 0, size, (PureSpan){encoded, length});
-            if (result != PURE_OK) { pure_draft_hold(app->stored_values, false); return result; }
+            if (result != PURE_OK) {
+                pure_draft_hold(app->stored_values, false);
+                settle_lists(app, drafts, states, list_count, lists_before, journaled, false);
+                return result;
+            }
             states[count] = UINT32_MAX;
             drafts[count++] = app->stored_values;
         }
@@ -466,6 +533,7 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
                 pure_draft_restore(app->stored_values, values_before);
                 pure_draft_hold(app->stored_values, false);
             }
+            settle_lists(app, drafts, states, list_count, lists_before, journaled, false);
             return result;
         }
         links_written = true;
@@ -476,6 +544,7 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
     PureResult result = app->data.save(app->data.context, documents, document_count, drafts, count, revisions);
     for (size_t k = 0; result == PURE_OK && k < count; ++k)
         if (states[k] != UINT32_MAX) app->saved[states[k]] = pure_draft_version(drafts[k]);
+    settle_lists(app, drafts, states, list_count, lists_before, journaled, result == PURE_OK);
     if (values_changed) {
         if (result != PURE_OK) pure_draft_restore(app->stored_values, values_before);
         pure_draft_hold(app->stored_values, false);
