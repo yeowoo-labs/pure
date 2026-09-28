@@ -2442,6 +2442,7 @@ static void open_burst(PureApp *app) {
         }
         if (app->lists[i]) app->durable_lists[i] = pure_list_changes(app->lists[i]).size;
     }
+    if (app->heard) app->durable_heard = pure_list_changes(app->heard).size;
     app->open = true;
 }
 
@@ -2462,6 +2463,7 @@ static void close_burst(PureApp *app, bool keep) {
         }
         if (app->lists[i] && !keep) pure_list_forget(app->lists[i], app->durable_lists[i]);
     }
+    if (app->heard && !keep) pure_list_forget(app->heard, app->durable_heard);
     if (keep) pure_undo_commit(&app->undo);
     else {
         pure_undo_rollback(&app->undo, 0);
@@ -2478,7 +2480,8 @@ static void drop_sent(PureApp *app, size_t count) {
 }
 
 /* After a save: what it stored is the links' saved state (trimmed sends go),
- * or, when it failed, the links return to the last saved state. */
+ * or, when it failed, the links return to the last saved state (the numbers
+ * heard go back with the burst's list changes). */
 static void settle_links(PureApp *app, bool saved) {
     if (saved) {
         size_t kept = 0;
@@ -2488,18 +2491,10 @@ static void settle_links(PureApp *app, bool saved) {
         }
         app->sent_count = app->sent_durable = kept;
         memcpy(app->saved_sent, app->last_sent, sizeof(app->saved_sent));
-        for (unsigned i = 0; i < app->heard_count; ++i) app->heard[i].saved = app->heard[i].seq;
     } else {
         drop_sent(app, app->sent_durable);
         for (size_t i = 0; i < app->sent_count; ++i) app->sent[i].trimmed = false;
         memcpy(app->last_sent, app->saved_sent, sizeof(app->last_sent));
-        unsigned kept = 0;
-        for (unsigned i = 0; i < app->heard_count; ++i)
-            if (app->heard[i].saved) {
-                app->heard[kept] = app->heard[i];
-                app->heard[kept++].seq = app->heard[i].saved;
-            }
-        app->heard_count = kept;
     }
     app->links_changed = false;
 }
@@ -2536,13 +2531,16 @@ struct PureSnapshot {
     double values[PURE_MODULE_STATES];
     PureDraft *texts[PURE_MODULE_STATES];
     PureList *lists[PURE_MODULE_STATES];
+    PureList *heard; /* only in a checkpoint's of the heard list */
     PureRetired retired;
     struct PureSnapshot *newer;
 };
 
 void pure_snapshot_hold(PureSnapshot *snapshot) { __atomic_add_fetch(&snapshot->refs, 1, __ATOMIC_RELAXED); }
 
-const PureList *pure_snapshot_list(const PureSnapshot *snapshot, uint32_t state) { return snapshot->lists[state]; }
+const PureList *pure_snapshot_list(const PureSnapshot *snapshot, uint32_t state) {
+    return state == PURE_LIST_HEARD ? snapshot->heard : snapshot->lists[state];
+}
 
 void pure_snapshot_release(PureSnapshot *snapshot) {
     while (snapshot && !__atomic_sub_fetch(&snapshot->refs, 1, __ATOMIC_ACQ_REL)) {
@@ -2551,6 +2549,7 @@ void pure_snapshot_release(PureSnapshot *snapshot) {
             pure_draft_close(snapshot->texts[i]);
             pure_list_free(snapshot->lists[i]);
         }
+        pure_list_free(snapshot->heard);
         pure_retired_free(&snapshot->retired);
         free(snapshot);
         snapshot = newer;
@@ -2574,7 +2573,7 @@ void pure_app_stop(PureApp *app) {
     pure_draft_close(app->stored_values);
     drop_sent(app, 0);
     free(app->sent);
-    free(app->heard);
+    pure_list_free(app->heard);
     free(app->carried);
     pure_draft_close(app->stored_links);
     pure_draft_close(app->stored_seq);
@@ -2593,7 +2592,7 @@ void pure_app_stop(PureApp *app) {
 /* Where one event began inside the burst: a failed event returns there. */
 typedef struct {
     PureVersion texts[PURE_MODULE_STATES];
-    size_t lists[PURE_MODULE_STATES]; /* stored lists' journal lengths */
+    size_t lists[PURE_MODULE_STATES], heard; /* stored lists' journal lengths */
     size_t undo, sent;
     uint64_t last_sent[PURE_MODULE_INPUTS];
     bool opened;
@@ -2606,6 +2605,7 @@ static void mark_event(PureApp *app, Mark *mark) {
         if (app->texts[i]) mark->texts[i] = pure_draft_version(app->texts[i]);
         if (app->lists[i]) mark->lists[i] = pure_list_changes(app->lists[i]).size;
     }
+    mark->heard = app->heard ? pure_list_changes(app->heard).size : 0;
     mark->undo = app->undo.count;
     mark->sent = app->sent_count;
     memcpy(mark->last_sent, app->last_sent, sizeof(mark->last_sent));
@@ -2616,29 +2616,32 @@ static void undo_event(PureApp *app, const Mark *mark) {
         if (app->texts[i]) pure_draft_restore(app->texts[i], mark->texts[i]);
         if (app->lists[i]) pure_list_forget(app->lists[i], mark->lists[i]);
     }
+    if (app->heard) pure_list_forget(app->heard, mark->heard);
     pure_undo_rollback(&app->undo, mark->undo);
     drop_sent(app, mark->sent);
     memcpy(app->last_sent, mark->last_sent, sizeof(app->last_sent));
     if (mark->opened) close_burst(app, true); /* nothing happened: release the holds */
 }
 
-/* The last number heard from source, or NULL. */
-static struct PureHeard *heard_from(PureApp *app, const char *source) {
-    for (unsigned i = 0; i < app->heard_count; ++i)
-        if (!strcmp(app->heard[i].source, source)) return &app->heard[i];
-    return NULL;
+/* Where source's item is in the heard list, or would go; found says which. */
+static size_t heard_at(const PureApp *app, const char *source, bool *found) {
+    *found = false;
+    return app->heard ? pure_list_seek(app->heard, 0, (PureCell){.text = (unsigned char *)source, .size = strlen(source)}, found) : 0;
 }
 
-/* Hear seq from source (room for a new source was made before). */
-static void hear(PureApp *app, const char *source, uint64_t seq) {
-    struct PureHeard *heard = heard_from(app, source);
-    if (!heard) {
-        heard = &app->heard[app->heard_count++];
-        *heard = (struct PureHeard){.saved = 0};
-        memcpy(heard->source, source, strlen(source) + 1);
-    }
-    heard->seq = seq;
-    app->links_changed = true;
+uint64_t pure_app_heard(const PureApp *app, const char *source) {
+    bool found;
+    size_t at = heard_at(app, source, &found);
+    return found ? (uint64_t)pure_list_get(app->heard, at, 1).num : 0;
+}
+
+/* Hear seq from source: a change of the heard list, undone with the burst. */
+static PureResult hear(PureApp *app, const char *source, uint64_t seq) {
+    bool found;
+    size_t at = heard_at(app, source, &found);
+    if (found) return pure_list_set(app->heard, at, 1, (PureCell){.num = (double)seq}, &app->undo);
+    PureCell item[2] = {{.text = (unsigned char *)source, .size = strlen(source)}, {.num = (double)seq}};
+    return pure_list_insert(app->heard, at, item, &app->undo);
 }
 
 static PureResult keep_reply(PureApp *app);
@@ -2673,6 +2676,8 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     if (result == PURE_OK && app->has_reply &&
         ((app->reply.source == FROM_DOCUMENT && ev->modified) || app->reply.source == FROM_TEXT))
         result = keep_reply(app);
+    /* A delivery's number is heard with its changes. */
+    if (result == PURE_OK && app->delivering.pending) result = hear(app, app->delivering.source, app->delivering.seq);
     if (result != PURE_OK) {
         undo_event(app, &mark);
         clear_rows(app);
@@ -2691,10 +2696,7 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
         app->document_pending = true;
         app->revision += ev->modified; /* a save moves an edited document one revision */
     }
-    if (app->delivering.pending) {
-        hear(app, app->delivering.source, app->delivering.seq);
-        app->delivering.pending = false;
-    }
+    app->delivering.pending = false;
     return event && !app->deferred ? pure_app_save(app) : PURE_OK;
 }
 
@@ -2889,22 +2891,16 @@ PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, ui
     const PureModule *m = app->module;
     size_t length = source ? strlen(source) : 0;
     app->duplicate = false;
+    /* Kept states without a directory would not keep the numbers heard. */
     if (input >= m->inputs || m->input[input].kind != PURE_KIND_MESSAGE || m->input[input].keyed || !length ||
-        length > PURE_SOURCE || !seq) return PURE_INVALID;
+        length > PURE_SOURCE || !seq || seq > PURE_SEQ_MOST || !app->heard || (pure_save_enabled(app) && !app->log))
+        return PURE_INVALID;
     for (size_t i = 0; i < length; ++i)
         if (source[i] <= ' ' || source[i] > '~') return PURE_INVALID;
-    struct PureHeard *heard = heard_from(app, source);
-    if (heard && seq <= heard->seq) {
+    if (seq <= pure_app_heard(app, source)) {
         pure_app_finish(app);
         app->duplicate = true;
         return PURE_OK;
-    }
-    if (!heard && app->heard_count == app->heard_capacity) {
-        unsigned capacity = app->heard_capacity ? 2 * app->heard_capacity : 4;
-        struct PureHeard *grown = realloc(app->heard, capacity * sizeof(*grown));
-        if (!grown) return PURE_ALLOCATION;
-        app->heard = grown;
-        app->heard_capacity = capacity;
     }
     app->delivering.source = source;
     app->delivering.seq = seq;
@@ -2917,15 +2913,13 @@ PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, ui
     if (app->fault == PURE_FAULT_NONE) return result;
     Mark mark;
     mark_event(app, &mark);
-    hear(app, source, seq);
+    PureResult heard = hear(app, source, seq);
+    if (heard != PURE_OK) {
+        undo_event(app, &mark);
+        return heard;
+    }
     PureResult saved = app->deferred ? PURE_OK : pure_app_save(app);
     return saved == PURE_OK ? result : saved;
-}
-
-uint64_t pure_app_heard(const PureApp *app, const char *source) {
-    for (unsigned i = 0; i < app->heard_count; ++i)
-        if (!strcmp(app->heard[i].source, source)) return app->heard[i].seq;
-    return 0;
 }
 
 PureResult pure_app_reply(const PureApp *app, bool (*visit)(void *, PureSpan), void *context) {
@@ -3099,7 +3093,9 @@ PureResult pure_app_cell_text(PureApp *app, uint32_t column, size_t row, bool (*
     return result == PURE_OK ? visit_value(app, &app->view_arena, slot.bytes, visit, context) : result;
 }
 
-PureSnapshot *pure_app_snapshot(PureApp *app) {
+PureSnapshot *pure_app_snapshot(PureApp *app) { return pure_save_snapshot(app, false); }
+
+PureSnapshot *pure_save_snapshot(PureApp *app, bool heard) {
     if (app->open || app->reading) return NULL;
     const PureModule *m = app->module;
     PureSnapshot *made = calloc(1, sizeof(*made)), *last = app->snapshot;
@@ -3118,6 +3114,7 @@ PureSnapshot *pure_app_snapshot(PureApp *app) {
         } else
             ok = (made->lists[i] = pure_list_share(app->lists[i], &app->retired)) != NULL;
     }
+    if (ok && heard) ok = (made->heard = pure_list_share(app->heard, &app->retired)) != NULL;
     if (!ok) {
         pure_snapshot_release(made);
         return NULL;
@@ -3256,6 +3253,11 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     bool lists_stored = stored && app->data.directory && app->data.directory(app->data.context);
     if (old && app->checkpoint) return PURE_CONFLICT; /* the host has a checkpoint of the running module out */
     PureResult result = !old && lists_stored ? pure_save_open_log(app) : PURE_OK;
+    /* The numbers heard belong to the app, whatever its module. */
+    PureSaved heard = {0};
+    if (!old && result == PURE_OK)
+        result = lists_stored ? pure_save_open_heard(app, &app->heard, &heard) :
+                 (app->heard = pure_heard_new()) ? PURE_OK : PURE_ALLOCATION;
     for (uint32_t i = 0; i < module->states; ++i) {
         int previous = old ? pure_module_state(old, module->state_names[i]) : -1;
         kept[i] = previous >= 0 && old->state_type[previous] == module->state_type[i] ? previous : -1;
@@ -3310,7 +3312,9 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     }
     if (result == PURE_OK && stored) result = pure_save_open_values(app, module, values, kept, texts, lists);
     /* Outputs keep their sends and numbers by name. */
-    if (result == PURE_OK) result = old ? remap_outputs(app, old, module, false) : stored ? pure_save_open_links(app, module) : PURE_OK;
+    bool heard_moved = false;
+    if (result == PURE_OK) result = old ? remap_outputs(app, old, module, false) : stored ? pure_save_open_links(app, module, &heard_moved) : PURE_OK;
+    heard.rewrite = heard.rewrite || (heard_moved && lists_stored);
     for (uint32_t i = 0; i < module->states; ++i) {
         uint32_t list = module->state_ref[i];
         if (module->state_type[i] == PURE_STATE_INDEX && moved[list] && values[i] < (double)pure_list_count(lists[list]))
@@ -3332,6 +3336,8 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i)
         if (rewrite[i] && (result = pure_save_image(app, module, i, lists[i])) == PURE_OK)
             listed[i] = (PureSaved){.image = app->seq};
+    if (result == PURE_OK && heard.rewrite && (result = pure_save_heard_image(app)) == PURE_OK)
+        heard = (PureSaved){.image = app->seq};
     if (imaged && result != PURE_OK && old) app->uncertain = true;
     if (result != PURE_OK) {
         for (uint32_t i = 0; i < module->states; ++i) {
@@ -3366,6 +3372,12 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         app->image_seq[i] = listed[i].image;
         app->logged_since[i] = listed[i].since;
         app->logged[i] = listed[i].logged;
+    }
+    if (!old) {
+        app->image_seq[PURE_LIST_HEARD] = heard.image;
+        app->logged_since[PURE_LIST_HEARD] = heard.since;
+        app->logged[PURE_LIST_HEARD] = heard.logged;
+        if (lists_stored) pure_list_journal(app->heard, true);
     }
     pure_save_release(app);
     for (uint32_t i = 0; i < module->states; ++i) {

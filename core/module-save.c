@@ -42,12 +42,21 @@ unsigned long pure_save_test_checkpoints;
 enum { JOURNAL_MIN = 1 << 20 };
 #define LOG_KEPT (UINT64_C(64) << 20)
 #endif
-/* links: "PLK1"; u8 outputs, each {u8 name length, name, u8 field count, the
+/* links: "PLK2"; u8 outputs, each {u8 name length, name, u8 field count, the
  * fields' types, u64le last number} (the module's outputs, then those it
- * dropped, without fields); u16le sources, each {u8 length, the name, u64le
- * last number heard}; then the sent messages to the end, each {u8 output (in
- * the table), u64le number, u32le size, payload}. */
-static const unsigned char links_magic[4] = {'P', 'L', 'K', '1'};
+ * dropped, without fields); then the sent messages to the end, each {u8
+ * output (in the table), u64le number, u32le size, payload}. Before the
+ * heard list, "PLK1" kept the numbers heard between the two: u16le sources,
+ * each {u8 length, the name, u64le last number heard}; a start moves them to
+ * the heard list.
+ *
+ * The heard list (module.h, PureApp) is stored as a list state is, by a name
+ * no state has (a state's is an identifier), with the fields source (text)
+ * and seq (number): the numbers of every source, which only grow with the
+ * sources a node hears from, cost a save only the records of their changes. */
+static const unsigned char links_magic[4] = {'P', 'L', 'K', '2'}, links_magic_1[4] = {'P', 'L', 'K', '1'};
+static const char heard_name[] = "0heard", heard_names[2][PURE_MODULE_NAME] = {"source", "seq"};
+static const uint8_t heard_text[2] = {1, 0};
 static const PureVersion unsaved = {UINT64_MAX, UINT64_MAX};
 
 static unsigned char *put_le(unsigned char *at, uint64_t value, unsigned width) {
@@ -135,20 +144,36 @@ PURE_COLD PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint
 
 enum { IMAGE_HEADER = 5 + PURE_RECORD_FIELDS * (2 + PURE_MODULE_NAME) + 8 };
 
-static size_t image_header(const PureModule *m, uint32_t record, uint64_t seq, unsigned char *out) {
-    const PureRecord *r = &m->record[record];
+static size_t header_of(unsigned count, const uint8_t *text, const char (*names)[PURE_MODULE_NAME], uint64_t seq,
+                        unsigned char *out) {
     size_t at = 0;
     memcpy(out, image_magic, 4);
     at = 4;
-    out[at++] = (unsigned char)r->count;
-    for (unsigned f = 0; f < r->count; ++f) {
-        const char *name = m->record_field_names[r->first + f];
-        out[at++] = m->record_field_text[r->first + f];
-        out[at++] = (unsigned char)strlen(name);
-        memcpy(out + at, name, strlen(name));
-        at += strlen(name);
+    out[at++] = (unsigned char)count;
+    for (unsigned f = 0; f < count; ++f) {
+        out[at++] = text[f];
+        out[at++] = (unsigned char)strlen(names[f]);
+        memcpy(out + at, names[f], strlen(names[f]));
+        at += strlen(names[f]);
     }
     return (size_t)(put_le(out + at, seq, 8) - out);
+}
+
+static size_t image_header(const PureModule *m, uint32_t record, uint64_t seq, unsigned char *out) {
+    const PureRecord *r = &m->record[record];
+    return header_of(r->count, m->record_field_text + r->first, m->record_field_names + r->first, seq, out);
+}
+
+PureList *pure_heard_new(void) { return pure_list_new(2, heard_text); }
+
+/* A stored list by its place: a list state, or the heard list (PURE_LIST_HEARD). */
+static PureList *stored_list(const PureApp *app, uint32_t i) {
+    if (i == PURE_LIST_HEARD) return app->heard;
+    return i < app->module->states && app->module->state_type[i] == PURE_STATE_LIST ? app->lists[i] : NULL;
+}
+
+static const char *stored_name(const PureApp *app, uint32_t i) {
+    return i == PURE_LIST_HEARD ? heard_name : app->module->state_names[i];
 }
 
 static const char *directory_of(const PureApp *app) {
@@ -257,7 +282,7 @@ PURE_COLD PureResult pure_save_open_log(PureApp *app) {
 void pure_save_release(PureApp *app) {
     if (!app->log) return;
     uint64_t kept = app->seq + 1;
-    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i)
+    for (uint32_t i = 0; i <= PURE_LIST_HEARD; ++i)
         if (app->logged_since[i] && app->logged_since[i] < kept) kept = app->logged_since[i];
     pure_log_release(app->log, kept - 1);
 }
@@ -408,6 +433,49 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     return result;
 }
 
+PURE_COLD PureResult pure_save_open_heard(PureApp *app, PureList **out, PureSaved *saved) {
+    *saved = (PureSaved){0};
+    *out = NULL;
+    if (!directory_of(app)) return PURE_STORE_ERROR;
+    unsigned char *bytes = NULL, header[IMAGE_HEADER];
+    size_t size = 0, length = header_of(2, heard_text, heard_names, 0, header) - 8;
+    PureResult result = pure_image_read(directory_of(app), heard_name, &bytes, &size);
+    bool image = result == PURE_OK;
+    uint64_t holds = image && size >= length + 8 && !memcmp(bytes, header, length) ? get_le(bytes + length, 8) : 0;
+    if (image && (size < length + 8 || memcmp(bytes, header, length))) result = PURE_STORE_ERROR;
+    else if (image || result == PURE_NOT_FOUND) {
+        result = (*out = pure_heard_new()) ? PURE_OK : PURE_ALLOCATION;
+        if (result == PURE_OK && image) result = pure_list_read(*out, bytes + length + 8, size - length - 8);
+    }
+    free(bytes);
+    /* Then the changes logged after the save it holds (an image is written
+     * before any change of the list is logged). */
+    struct Named *logged = app->start_log ? named_list(app->start_log, heard_name, strlen(heard_name), false) : NULL;
+    for (size_t k = 0; result == PURE_OK && logged && k < logged->count; ++k) {
+        const Logged *change = &logged->changes[k];
+        if (change->seq <= holds) continue;
+        if (!image) result = PURE_STORE_ERROR;
+        else if ((result = pure_list_replay(*out, change->records.data, change->records.size)) == PURE_OK) {
+            if (!saved->since) saved->since = change->seq;
+            saved->logged += change->records.size;
+        }
+    }
+    if (result != PURE_OK) {
+        pure_list_free(*out);
+        *out = NULL;
+        return result;
+    }
+    if (image) saved->image = holds;
+    else saved->rewrite = true;
+    return PURE_OK;
+}
+
+PureResult pure_save_heard_image(PureApp *app) {
+    unsigned char header[IMAGE_HEADER];
+    size_t header_size = header_of(2, heard_text, heard_names, app->seq, header);
+    return write_image(directory_of(app), heard_name, header, header_size, app->heard);
+}
+
 /* ---- Checkpoints */
 
 struct PureCheckpoint {
@@ -425,32 +493,33 @@ PureCheckpoint *pure_app_checkpoint(PureApp *app) {
     const PureModule *m = app->module;
     if (!app->log || app->checkpoint || app->open || app->uncertain || app->reading) return NULL;
     /* A list whose logged changes outgrew its items, or, when the log grew
-     * past LOG_KEPT, the one that holds it back most. */
+     * past LOG_KEPT, the one that holds it back most: the heard list is one. */
     int due = -1, oldest = -1;
-    for (uint32_t i = 0; i < m->states && due < 0; ++i) {
-        if (m->state_type[i] != PURE_STATE_LIST || !app->logged_since[i]) continue;
-        size_t items = pure_list_size(app->lists[i]);
-        if (app->logged[i] > (items > JOURNAL_MIN ? items : JOURNAL_MIN)) due = (int)i;
+    uint64_t items = 0;
+    for (uint32_t i = 0; i <= PURE_LIST_HEARD && due < 0; ++i) {
+        const PureList *list = stored_list(app, i);
+        size_t size = list ? pure_list_size(list) : 0;
+        items += size;
+        if (!list || !app->logged_since[i]) continue;
+        if (app->logged[i] > (size > JOURNAL_MIN ? size : JOURNAL_MIN)) due = (int)i;
         else if (oldest < 0 || app->logged_since[i] < app->logged_since[oldest]) oldest = (int)i;
     }
-    uint64_t items = 0;
-    for (uint32_t i = 0; due < 0 && i < m->states; ++i)
-        if (m->state_type[i] == PURE_STATE_LIST && app->lists[i]) items += pure_list_size(app->lists[i]);
     int pick = due >= 0 ? due : pure_log_bytes(app->log) > (items > LOG_KEPT ? items : LOG_KEPT) ? oldest : -1;
     if (pick < 0) return NULL;
     PureCheckpoint *c = calloc(1, sizeof(*c));
     const char *directory = directory_of(app);
     size_t length = strlen(directory) + 1;
     if (c && (c->directory = malloc(length))) memcpy(c->directory, directory, length);
-    if (!c || !c->directory || !(c->snapshot = pure_app_snapshot(app))) {
+    if (!c || !c->directory || !(c->snapshot = pure_save_snapshot(app, pick == PURE_LIST_HEARD))) {
         if (c) free(c->directory);
         free(c);
         return NULL;
     }
     c->state = (uint32_t)pick;
-    snprintf(c->name, sizeof(c->name), "%s", m->state_names[pick]);
+    snprintf(c->name, sizeof(c->name), "%s", stored_name(app, (uint32_t)pick));
     c->seq = app->seq;
-    c->header_size = image_header(m, m->state_ref[pick], c->seq, c->header);
+    c->header_size = pick == PURE_LIST_HEARD ? header_of(2, heard_text, heard_names, c->seq, c->header) :
+                                               image_header(m, m->state_ref[pick], c->seq, c->header);
     c->logged = app->logged[pick];
     c->since = app->logged_since[pick];
     app->checkpoint = c;
@@ -563,14 +632,13 @@ static unsigned char *encode_links(const PureApp *app, size_t *size) {
     const PureModule *m = app->module;
     unsigned outputs = 0;
     uint8_t table[PURE_MODULE_INPUTS];
-    size_t total = 4 + 1 + 2;
+    size_t total = 4 + 1;
     for (uint32_t i = 0; i < m->inputs; ++i)
         if (m->input[i].kind == PURE_KIND_OUTPUT) {
             table[i] = (uint8_t)outputs++;
             total += 2 + strlen(m->input_names[i]) + m->input[i].field_count + 8;
         }
     for (unsigned c = 0; c < app->carried_count; ++c) total += 2 + strlen(app->carried[c].name) + 8;
-    for (unsigned h = 0; h < app->heard_count; ++h) total += 1 + strlen(app->heard[h].source) + 8;
     for (size_t s = 0; s < app->sent_count; ++s)
         if (!app->sent[s].trimmed) total += 1 + 8 + 4 + app->sent[s].size;
     unsigned char *bytes = malloc(total), *at = bytes;
@@ -596,13 +664,6 @@ static unsigned char *encode_links(const PureApp *app, size_t *size) {
         *at++ = 0;
         at = put_le(at, app->carried[c].last, 8);
     }
-    at = put_le(at, app->heard_count, 2);
-    for (unsigned h = 0; h < app->heard_count; ++h) {
-        size_t length = strlen(app->heard[h].source);
-        *at++ = (unsigned char)length;
-        memcpy(at, app->heard[h].source, length);
-        at = put_le(at + length, app->heard[h].seq, 8);
-    }
     for (size_t s = 0; s < app->sent_count; ++s) {
         const struct PureSent *sent = &app->sent[s];
         if (sent->trimmed) continue;
@@ -616,11 +677,22 @@ static unsigned char *encode_links(const PureApp *app, size_t *size) {
     return bytes;
 }
 
+/* A number heard, as links kept it before the heard list. */
+PURE_COLD static PureResult heard_before(PureApp *app, const unsigned char *source, size_t length, uint64_t seq) {
+    PureCell key = {.text = (unsigned char *)source, .size = length};
+    bool found;
+    size_t at = pure_list_seek(app->heard, 0, key, &found);
+    if (!found) return pure_list_insert(app->heard, at, (PureCell[2]){key, {.num = (double)seq}}, NULL);
+    if (pure_list_get(app->heard, at, 1).num >= (double)seq) return PURE_OK;
+    return pure_list_set(app->heard, at, 1, (PureCell){.num = (double)seq}, NULL);
+}
+
 /* The stored links of a starting app: outputs by name (an output whose
  * fields changed or that the module lacks refuses the start while it has
  * sends left: CONFLICT; one without sends keeps its number for later),
- * sources and sent messages. */
-PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m) {
+ * sources kept before the heard list, and sent messages. */
+PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, bool *moved) {
+    *moved = false;
     PureResult result = app->stored_links ? PURE_OK : open_state(app, "", "links", &app->stored_links);
     if (result != PURE_OK || !pure_draft_revision(app->stored_links)) return result;
     unsigned char *bytes;
@@ -629,8 +701,9 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m) {
     int output[256];
     bool fits[256];
     size_t at = 5;
-    unsigned outputs = size >= 5 && !memcmp(bytes, links_magic, 4) ? bytes[4] : 0;
-    result = size >= 5 && !memcmp(bytes, links_magic, 4) ? PURE_OK : PURE_STORE_ERROR;
+    bool first = size >= 5 && !memcmp(bytes, links_magic_1, 4), known = first || (size >= 5 && !memcmp(bytes, links_magic, 4));
+    unsigned outputs = known ? bytes[4] : 0;
+    result = known ? PURE_OK : PURE_STORE_ERROR;
     for (unsigned t = 0; t < outputs && result == PURE_OK; ++t) {
         char name[PURE_MODULE_NAME];
         size_t length = at < size ? bytes[at] : 0;
@@ -655,18 +728,18 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m) {
             grown[app->carried_count++].last = last;
         }
     }
-    unsigned sources = result == PURE_OK && size - at >= 2 ? (unsigned)get_le(bytes + at, 2) : 0;
-    if (result == PURE_OK && size - at < 2) result = PURE_STORE_ERROR;
-    at += 2;
-    if (result == PURE_OK && sources && !(app->heard = calloc(sources, sizeof(*app->heard)))) result = PURE_ALLOCATION;
-    app->heard_capacity = sources;
+    unsigned sources = result == PURE_OK && first && size - at >= 2 ? (unsigned)get_le(bytes + at, 2) : 0;
+    if (result == PURE_OK && first && size - at < 2) result = PURE_STORE_ERROR;
+    at += first ? 2 : 0;
     for (unsigned h = 0; h < sources && result == PURE_OK; ++h) {
         size_t length = at < size ? bytes[at] : 0;
         if (!length || length > PURE_SOURCE || size - at < 1 + length + 8) { result = PURE_STORE_ERROR; break; }
-        struct PureHeard *heard = &app->heard[app->heard_count++];
-        memcpy(heard->source, bytes + at + 1, length);
-        heard->seq = heard->saved = get_le(bytes + at + 1 + length, 8);
+        uint64_t seq = get_le(bytes + at + 1 + length, 8);
+        if (seq > PURE_SEQ_MOST) { result = PURE_STORE_ERROR; break; }
+        result = heard_before(app, bytes + at + 1, length, seq);
         at += 1 + length + 8;
+        *moved = true;
+        app->links_changed = true; /* stored again without them */
     }
     while (result == PURE_OK && at < size) {
         if (size - at < 13 || bytes[at] >= outputs) { result = PURE_STORE_ERROR; break; }
@@ -698,18 +771,19 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m) {
 /* The lists' changes since the last save, as one log entry: per list changed,
  * its name and its records. NULL with size 0 when no list changed. */
 static unsigned char *list_changes(const PureApp *app, size_t *size) {
-    const PureModule *m = app->module;
     *size = 0;
-    for (uint32_t i = 0; i < m->states; ++i)
-        if (m->state_type[i] == PURE_STATE_LIST && app->lists[i] && pure_list_changes(app->lists[i]).size)
-            *size += 1 + strlen(m->state_names[i]) + 4 + pure_list_changes(app->lists[i]).size;
+    for (uint32_t i = 0; i <= PURE_LIST_HEARD; ++i) {
+        const PureList *list = stored_list(app, i);
+        if (list && pure_list_changes(list).size) *size += 1 + strlen(stored_name(app, i)) + 4 + pure_list_changes(list).size;
+    }
     unsigned char *payload = *size ? malloc(*size) : NULL, *at = payload;
-    for (uint32_t i = 0; payload && i < m->states; ++i) {
-        PureSpan changes = m->state_type[i] == PURE_STATE_LIST && app->lists[i] ? pure_list_changes(app->lists[i]) : (PureSpan){0};
+    for (uint32_t i = 0; payload && i <= PURE_LIST_HEARD; ++i) {
+        const PureList *list = stored_list(app, i);
+        PureSpan changes = list ? pure_list_changes(list) : (PureSpan){0};
         if (!changes.size) continue;
-        size_t length = strlen(m->state_names[i]);
+        size_t length = strlen(stored_name(app, i));
         *at++ = (unsigned char)length;
-        memcpy(at, m->state_names[i], length);
+        memcpy(at, stored_name(app, i), length);
         at = put_le(at + length, changes.size, 4);
         memcpy(at, changes.data, changes.size);
         at += changes.size;
@@ -814,12 +888,13 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
     if (result == PURE_OK) {
         for (size_t k = 0; k < count; ++k)
             if (states[k] != UINT32_MAX) app->saved[states[k]] = pure_draft_version(drafts[k]);
-        for (uint32_t i = 0; i < m->states; ++i) {
-            PureSpan changes = m->state_type[i] == PURE_STATE_LIST && app->lists[i] ? pure_list_changes(app->lists[i]) : (PureSpan){0};
+        for (uint32_t i = 0; i <= PURE_LIST_HEARD; ++i) {
+            PureList *list = stored_list(app, i);
+            PureSpan changes = list ? pure_list_changes(list) : (PureSpan){0};
             if (!changes.size) continue;
             app->logged[i] += changes.size;
             if (!app->logged_since[i]) app->logged_since[i] = seq;
-            pure_list_forget(app->lists[i], 0);
+            pure_list_forget(list, 0);
         }
         if (tree || payload_size) app->seq = seq;
     }

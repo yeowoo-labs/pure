@@ -727,6 +727,15 @@ static const char *state_text(const PureApp *app, uint32_t state) {
     return t.text;
 }
 
+/* A stored value's first four bytes (or fewer). */
+static const char *read_state(const PureDraft *draft) {
+    static Text t;
+    t.size = 0;
+    size_t size = pure_draft_size(draft) < 4 ? pure_draft_size(draft) : 4;
+    CHECK(pure_draft_read(draft, 0, size, text_span, &t) == PURE_OK);
+    return t.text;
+}
+
 static double number_view(PureApp *app, uint32_t view) {
     double value;
     CHECK(pure_app_view(app, view, &value));
@@ -3918,6 +3927,56 @@ static void links(void) {
     CHECK(deliver(&b, "orders.ordered", 2, "ink", 3) == PURE_OK && !b.duplicate && b.values[0] == 5);
     CHECK(pure_app_save(&b) == PURE_OK);
     pure_app_stop(&b);
+    /* Links stored before the heard list kept its numbers: a start moves them
+     * there (the larger number of a source wins) and stores the links without. */
+    PureDraft *stored_links;
+    int64_t revision;
+    unsigned char old_links[64] = "PLK1";
+    size_t at = 5;
+    old_links[4] = 0; /* no outputs */
+    old_links[at++] = 2, old_links[at++] = 0;
+    const char *old_sources[] = {"legacy", "orders.ordered"};
+    uint64_t old_numbers[] = {5, 1};
+    for (unsigned k = 0; k < 2; ++k) {
+        old_links[at++] = (unsigned char)strlen(old_sources[k]);
+        memcpy(old_links + at, old_sources[k], strlen(old_sources[k]));
+        at += strlen(old_sources[k]);
+        for (unsigned i = 0; i < 8; ++i) old_links[at++] = (unsigned char)(old_numbers[k] >> (8 * i));
+    }
+    CHECK(pure_state_open(path_b, "links", &stored_links) == PURE_OK);
+    CHECK(pure_draft_splice(stored_links, 0, pure_draft_size(stored_links), (PureSpan){old_links, at}) == PURE_OK);
+    CHECK(pure_draft_commit(stored_links, &revision) == PURE_OK);
+    pure_draft_close(stored_links);
+    CHECK(pure_app_start(&b, &module_b, pure_tree_data(path_b)) == PURE_OK);
+    CHECK(pure_app_heard(&b, "legacy") == 5 && pure_app_heard(&b, "orders.ordered") == 2 && pure_app_heard(&b, "x") == 1);
+    CHECK(deliver(&b, "legacy", 5, "old", 1) == PURE_OK && b.duplicate && deliver(&b, "legacy", 6, "new", 1) == PURE_OK && !b.duplicate);
+    pure_app_stop(&b);
+    CHECK(pure_state_open(path_b, "links", &stored_links) == PURE_OK && !memcmp(read_state(stored_links), "PLK2", 4));
+    pure_draft_close(stored_links);
+    /* Numbers heard from more sources than two bytes count stay heard across
+     * a start; a save logs only the numbers it changed, and the heard list's
+     * image is written again once they outgrow it (from a snapshot: through a
+     * store handle). */
+    PureStore *store;
+    CHECK(pure_store_open(path_b, &store) == PURE_OK);
+    CHECK(pure_app_start(&b, &module_b, pure_store_data(store)) == PURE_OK && pure_app_heard(&b, "legacy") == 6);
+    unsigned long checkpoints = pure_save_test_checkpoints;
+    for (unsigned k = 0; k < 400; ++k) CHECK(deliver(&b, "s1", 1 + k, "more", 1) == PURE_OK);
+    CHECK(pure_save_test_checkpoints > checkpoints && pure_app_heard(&b, "s1") == 400);
+    CHECK(pure_app_defer(&b, true));
+    char many[16];
+    for (unsigned k = 0; k < 70000; ++k) {
+        snprintf(many, sizeof(many), "s%u", k);
+        CHECK(deliver(&b, many, 400 + k % 3, "one", 1) == PURE_OK && b.duplicate == (k == 1 && k % 3 == 0));
+        if (k % 5000 == 4999) CHECK(pure_app_save(&b) == PURE_OK);
+    }
+    CHECK(pure_app_save(&b) == PURE_OK);
+    pure_app_stop(&b);
+    CHECK(pure_app_start(&b, &module_b, pure_store_data(store)) == PURE_OK && pure_list_count(b.heard) == 70003);
+    CHECK(pure_app_heard(&b, "s0") == 400 && pure_app_heard(&b, "s1") == 401 && pure_app_heard(&b, "s65537") == 402);
+    CHECK(deliver(&b, "s65537", 402, "again", 1) == PURE_OK && b.duplicate);
+    pure_app_stop(&b);
+    pure_store_close(store);
 
     /* Replacing: a module without the output is refused while sends are left
      * on it; once they are trimmed it replaces, and the output's number is
@@ -3970,7 +4029,7 @@ static void links(void) {
         CHECK(pure_app_start(&b, &module_b, pure_tree_data(path_b)) == PURE_OK);
         o = outbox_of(&a);
         CHECK(o.count == (size_t)a.values[0] && (!o.count || o.items[o.count - 1].seq == o.count));
-        heard = b.heard_count ? b.heard[0].seq : 0;
+        heard = pure_app_heard(&b, "orders.ordered");
         CHECK(b.values[0] == (double)heard);
         kept[0] = (size_t)heard;
         kept[1] = o.count;

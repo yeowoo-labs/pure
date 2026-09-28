@@ -80,6 +80,8 @@ typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PUR
 typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3, PURE_KIND_TIMER = 4,
                PURE_KIND_OUTPUT = 5, PURE_KIND_ARGUMENTS = 6 } PureInputKind;
 enum { PURE_TIMER_LONGEST = 86400000, PURE_SOURCE = 64 };
+/* The largest number a delivery may have: it is kept as a binary64. */
+#define PURE_SEQ_MOST (UINT64_C(1) << 53)
 /* A message field: a u32le or a binary64 (fixed, at its offset in the
  * payload's prefix), or bytes, text or rows of any length. The prefix also
  * holds each variable field's u32le length but the last one's (its offset is
@@ -261,6 +263,8 @@ typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
  * at once and a host saves a burst with one commit: an event is durable once
  * a later save succeeds, and each key's document joins a burst once (a second
  * message for it, or one past PURE_APP_PENDING keys, saves the burst first). */
+/* The heard list's place among the stored lists' records (PureApp). */
+enum { PURE_LIST_HEARD = PURE_MODULE_STATES };
 typedef struct {
     const PureModule *module;
     PureData data;
@@ -269,12 +273,13 @@ typedef struct {
     PureList *lists[PURE_MODULE_STATES];
     PureUndo undo; /* list changes of the current event */
     PureDraft *list_drafts[PURE_MODULE_STATES]; /* lists the tree kept before images, until emptied */
-    /* Stored lists (module-save.c): the save each one's image holds, the
-     * first save logged since that changed it (0: none), and the bytes of its
-     * changes logged since; the log, the tree's number of its last save, the
-     * last save's number, and a checkpoint being written. */
-    uint64_t image_seq[PURE_MODULE_STATES], logged_since[PURE_MODULE_STATES];
-    size_t logged[PURE_MODULE_STATES];
+    /* Stored lists (module-save.c), by state, and the heard list's last
+     * (PURE_LIST_HEARD): the save each one's image holds, the first save
+     * logged since that changed it (0: none), and the bytes of its changes
+     * logged since; the log, the tree's number of its last save, the last
+     * save's number, and a checkpoint being written. */
+    uint64_t image_seq[PURE_MODULE_STATES + 1], logged_since[PURE_MODULE_STATES + 1];
+    size_t logged[PURE_MODULE_STATES + 1];
     struct PureLog *log;
     PureDraft *stored_seq;
     uint64_t seq;
@@ -318,15 +323,18 @@ typedef struct {
     /* Links (runtime-owned, saved with the states): messages sent on outputs
      * and not trimmed, in the order sent (the first sent_durable are saved;
      * a trimmed one goes at the next save), each output's last number (and
-     * as saved), those of outputs a module dropped, and the last number
-     * delivered from each source (and as saved). */
+     * as saved), and those of outputs a module dropped. */
     struct PureSent { uint32_t output; uint64_t seq; unsigned char *payload; size_t size; bool trimmed; } *sent;
     size_t sent_count, sent_capacity, sent_durable;
     uint64_t last_sent[PURE_MODULE_INPUTS], saved_sent[PURE_MODULE_INPUTS];
     struct PureCarried { char name[PURE_MODULE_NAME]; uint64_t last; } *carried;
     unsigned carried_count;
-    struct PureHeard { char source[PURE_SOURCE + 1]; uint64_t seq, saved; } *heard;
-    unsigned heard_count, heard_capacity;
+    /* The last number delivered from each source: a list of {source (text),
+     * number}, in order of source, stored as a list state is (module-save.c)
+     * and changed with the events that deliver, so a failed save takes its
+     * numbers back with them; its journal's length when the burst began. */
+    PureList *heard;
+    size_t durable_heard;
     PureDraft *stored_links;
     bool links_changed; /* since the last save */
     bool duplicate;     /* the last delivery was heard before and not applied */
@@ -421,7 +429,9 @@ void pure_app_outbox_newest(const PureApp *, PureSentVisit visit, void *context)
 /* Forget output's saved sends numbered up to through (saved with the next save). */
 void pure_app_trim(PureApp *, uint32_t output, uint64_t through);
 /* Deliver a message event from source (a sender's name, 1 to 64 printable
- * ASCII bytes) numbered seq (from 1, growing per source). A number heard
+ * ASCII bytes) numbered seq (from 1 to PURE_SEQ_MOST, growing per source).
+ * An app whose states are kept takes deliveries only where its lists are
+ * (a directory: the numbers heard are a list). A number heard
  * before is not applied again: it succeeds with app->duplicate set. The
  * number counts as heard with the event's changes, and also when the app
  * refuses the message (a fault: it was delivered, and refused); not when a
