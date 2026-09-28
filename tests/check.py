@@ -781,7 +781,10 @@ def server_links_udp(aup, pure, work, netem=None):
     sender saved exactly once, the refused order (count 150) did not hold
     back the one after it, and every acknowledged order is among the saved
     ones. With netem (in a network namespace of its own), the loopback
-    delays, loses and reorders packets meanwhile."""
+    delays, loses and reorders packets meanwhile. The receiver takes its
+    senders from a file (--senders, the sender among a thousand others) and
+    lets a sender's keys and streams go after 400 ms of quiet
+    (--link-idle-ms): the order after a longer pause arrives all the same."""
     import select
     import signal
     import socket
@@ -830,9 +833,13 @@ def server_links_udp(aup, pure, work, netem=None):
         process.terminate()
         process.communicate(timeout=30)
     port_a, port_b, link_port = free_port(), free_port(), free_port(socket.SOCK_DGRAM)
+    others = random.Random(4242)
+    senders = [f'other{n} {others.getrandbits(256):064x}' for n in range(1000)]
+    senders.insert(500, f'udp-sender.ordered {keys["sender"]}')
+    (work / f'{tag}-senders').write_text('\n'.join(senders) + '\n')
     receiver = [pure / 'build/pure-serve', '--module', receiver_module, '--store', work / f'{tag}-b', '--threads', '2',
                 '--key', work / f'{tag}-receiver.key', '--link-port', link_port,
-                '--sender', f'udp-sender.ordered={keys["sender"]}']
+                '--senders', work / f'{tag}-senders', '--link-idle-ms', '400']
     sender = [pure / 'build/pure-serve', '--module', sender_module, '--store', work / f'{tag}-a',
               '--key', work / f'{tag}-sender.key', '--send', f'ordered=pure://127.0.0.1:{link_port}/order',
               '--seal', f'ordered={keys["receiver"]}']
@@ -883,6 +890,12 @@ def server_links_udp(aup, pure, work, netem=None):
             time.sleep(0.1)
         assert (count, total) == (sent - 1, sent_total - 150), (count, total, sent, sent_total)
         assert sent_total >= sum(acknowledged) + 157 and sum(acknowledged) > 0, (sent_total, acknowledged)
+        time.sleep(1.2)  # the receiver lets the quiet sender go
+        assert post(port_a, '/inputs/buy', {'item': 'late', 'count': 3}) == 200
+        deadline = time.time() + 30
+        while (number(port_b, 'count'), number(port_b, 'total')) != (sent, sent_total - 147) and time.time() < deadline:
+            time.sleep(0.05)
+        assert (number(port_b, 'count'), number(port_b, 'total')) == (sent, sent_total - 147)
     finally:
         stats = {}
         for name, process in hosts.items():
@@ -890,9 +903,11 @@ def server_links_udp(aup, pure, work, netem=None):
             _, error = process.communicate(timeout=30)
             assert process.returncode == 0, error[-1000:]
             stats[name] = [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
+    assert stats['b']['listener_swept'] >= 1 and stats['b']['listener_woken'] >= 2, stats['b']
     return {'orders': sent, 'acknowledged_total': sum(acknowledged),
             'packets_after_restart': stats['a']['link_packets'], 'resent_after_restart': stats['a']['link_resent'],
-            'lost_after_restart': stats['a']['link_lost'], 'received_after_restart': stats['b']['listener_received']}
+            'lost_after_restart': stats['a']['link_lost'], 'received_after_restart': stats['b']['listener_received'],
+            'woken_after_restart': stats['b']['listener_woken'], 'swept_after_restart': stats['b']['listener_swept']}
 
 
 def server_links_udp_lossy(aup, pure, work):

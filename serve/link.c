@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -699,12 +700,22 @@ void pure_link_close(PureLink *l) {
     free(l);
 }
 
-/* ---- The receiving side */
+/* ---- The receiving side
+ *
+ * A sender allowed is a peer: its key and the sources it may send as, a few
+ * bytes each, found by its key's id. What a sending peer needs besides (the
+ * secret its key shares with the node's, its runs' keys and addresses, its
+ * streams) is its active state: made at its first packet (one X25519), let
+ * go once the peer has been quiet for the idle period with nothing of it
+ * waiting here. So a link at rest costs the node its allowing, and the next
+ * packet goes on without a handshake. */
 
 typedef struct { uint64_t first, last; } Range;
+typedef struct Active Active;
 typedef struct {
+    Active *active;
     uint64_t run, seen; /* the sender's run; when it last sent */
-    bool used, ack_due;
+    bool used, ack_due, due;
     PureAead *in, *out;
     unsigned char in_base[PURE_AEAD_NONCE], out_base[PURE_AEAD_NONCE];
     uint64_t next_pn, largest_at;
@@ -714,11 +725,6 @@ typedef struct {
     unsigned got_count;
 } Run;
 typedef struct {
-    unsigned char key[PURE_SEAL_KEY], secret[32];
-    uint32_t id;
-    Run runs[RUNS];
-} Peer;
-typedef struct {
     uint64_t seq;
     unsigned char *bytes;
     uint32_t size, pieces, got;
@@ -726,18 +732,36 @@ typedef struct {
     bool handed;
 } Held;
 typedef struct Stream {
-    Peer *peer;
+    Active *active;
     char source[PURE_SOURCE + 1];
     uint32_t input;
     uint64_t heard;              /* the last number heard (stored), once known */
-    bool known, out, stored_due, gap;
+    bool known, out, stored_due, gap, ready;
     Held *held;                  /* records not yet stored, by number */
     size_t held_count, held_capacity, held_bytes;
     Run *run;                    /* the run that sent to it last: where STORED goes */
     uint64_t run_id;
 } Stream;
+struct Active {
+    uint32_t peer;               /* its place among the peers */
+    unsigned char secret[32];
+    uint64_t seen;
+    size_t place;                /* among the active */
+    Run runs[RUNS];
+    Stream **streams;
+    unsigned stream_count, stream_capacity;
+};
+typedef struct {
+    unsigned char key[PURE_SEAL_KEY];
+    uint32_t id, allowed; /* allowed: the place + 1 of its first source (0: none) */
+    Active *active;
+} Peer;
+typedef struct { uint32_t name, next; } Allowed; /* name: where in names (u8 length, bytes); next: a place + 1 */
 typedef struct { Stream *stream; uint64_t heard; bool stored, gap; } Done;
-typedef struct { char source[PURE_SOURCE + 1]; size_t peer; } Allowed;
+
+/* A peer quiet this long lets its active state go; the active are looked at
+ * that often. */
+static const uint64_t IDLE_FIRST = 30000 * MS, SWEEP_EVERY = 250 * MS;
 
 struct PureLinkListener {
     const PureModule *module;
@@ -745,7 +769,7 @@ struct PureLinkListener {
     unsigned char own_public[PURE_SEAL_KEY];
     uint32_t own_id;
     unsigned port;
-    uint64_t run;
+    uint64_t run, idle, swept;
     int fd, wake;
     pthread_t thread;
     bool started;
@@ -754,11 +778,19 @@ struct PureLinkListener {
     size_t done_count, done_capacity;
     bool stopping;
     Peer *peers;
-    size_t peer_count;
+    size_t peer_count, peer_capacity;
+    uint32_t *index; /* the peers by key id: open addressing, a place + 1 (0: empty) */
+    size_t index_size;
     Allowed *allowed;
-    size_t allowed_count;
-    Stream **streams;
-    size_t stream_count, stream_capacity;
+    size_t allowed_count, allowed_capacity;
+    unsigned char *names;
+    size_t names_size, names_capacity;
+    Active **actives;
+    size_t active_count, active_capacity;
+    Stream **ready; /* streams that may have whole records to hand over */
+    size_t ready_count, ready_capacity;
+    Run **due; /* runs to answer */
+    size_t due_count, due_capacity;
     bool (*deliver)(void *, const PureLinkDelivery *);
     void *context;
     unsigned char *batch;
@@ -781,71 +813,200 @@ PureLinkListener *pure_link_listen(const PureModule *m, unsigned port, const Pur
     memcpy(s->own_public, own_public, PURE_SEAL_KEY);
     s->own_id = key_id(own_public);
     s->port = port;
+    s->idle = IDLE_FIRST;
     s->deliver = deliver;
     s->context = context;
     s->fd = s->wake = -1;
     return s;
 }
 
-bool pure_link_allow(PureLinkListener *s, const char *source, const unsigned char key[PURE_SEAL_KEY], char *error,
-                     size_t size) {
-    size_t p = 0;
-    while (p < s->peer_count && memcmp(s->peers[p].key, key, PURE_SEAL_KEY)) ++p;
-    for (size_t k = 0; p == s->peer_count && k < s->peer_count; ++k)
-        if (s->peers[k].id == key_id(key)) {
-            snprintf(error, size, "two senders' keys have the same id: give one another key");
-            return false;
-        }
-    if (p == s->peer_count) {
-        Peer *grown = realloc(s->peers, (s->peer_count + 1) * sizeof(*grown));
-        if (!grown) {
-            snprintf(error, size, "out of memory");
-            return false;
-        }
-        s->peers = grown;
-        Peer *peer = &s->peers[s->peer_count];
-        *peer = (Peer){.id = key_id(key)};
-        memcpy(peer->key, key, PURE_SEAL_KEY);
-        if (!pure_link_secret(s->own, key, peer->secret)) {
-            snprintf(error, size, "no secret shared with that key");
-            return false;
-        }
-        ++s->peer_count;
+void pure_link_idle(PureLinkListener *s, uint64_t ms) { s->idle = ms * MS; }
+
+/* items (count used of capacity) with room for one more: the same or grown,
+ * or NULL when memory runs out (items stay as they were). */
+static void *room(void *items, size_t *capacity, size_t count, size_t item_size, size_t first) {
+    if (count < *capacity) return items;
+    size_t more = *capacity ? 2 * *capacity : first;
+    void *grown = realloc(items, more * item_size);
+    if (grown) *capacity = more;
+    return grown;
+}
+
+/* The peers by key id again, in an index twice as large. */
+static bool grow_index(PureLinkListener *s) {
+    size_t size = s->index_size ? 2 * s->index_size : 1024;
+    uint32_t *index = calloc(size, sizeof(*index));
+    if (!index) return false;
+    for (size_t p = 0; p < s->peer_count; ++p) {
+        size_t slot = s->peers[p].id & (size - 1);
+        while (index[slot]) slot = (slot + 1) & (size - 1);
+        index[slot] = (uint32_t)p + 1;
     }
-    Allowed *grown = realloc(s->allowed, (s->allowed_count + 1) * sizeof(*grown));
-    if (!grown) {
-        snprintf(error, size, "out of memory");
-        return false;
-    }
-    s->allowed = grown;
-    snprintf(s->allowed[s->allowed_count].source, sizeof(s->allowed[0].source), "%s", source);
-    s->allowed[s->allowed_count++].peer = p;
+    free(s->index);
+    s->index = index;
+    s->index_size = size;
     return true;
 }
 
-static Peer *peer_of(PureLinkListener *s, uint32_t id) {
-    for (size_t p = 0; p < s->peer_count; ++p)
-        if (s->peers[p].id == id) return &s->peers[p];
-    return NULL;
+static bool same_name(const PureLinkListener *s, uint32_t name, const char *source, size_t length) {
+    return s->names[name] == length && !memcmp(s->names + name + 1, source, length);
 }
 
-static Run *run_found(Peer *peer, uint64_t run) {
+/* Keys are found by their ids, which are 32 bits: two keys may share one. */
+bool pure_link_allow(PureLinkListener *s, const char *source, const unsigned char key[PURE_SEAL_KEY], char *error,
+                     size_t size) {
+    size_t length = strlen(source), p = SIZE_MAX;
+    uint32_t id = key_id(key);
+    if (!length || length > PURE_SOURCE) {
+        snprintf(error, size, "a source's name is 1 to %d bytes", PURE_SOURCE);
+        return false;
+    }
+    for (size_t slot = s->index_size ? id & (s->index_size - 1) : 0; s->index_size && s->index[slot];
+         slot = (slot + 1) & (s->index_size - 1)) {
+        const Peer *peer = &s->peers[s->index[slot] - 1];
+        if (peer->id == id && !memcmp(peer->key, key, PURE_SEAL_KEY)) {
+            p = s->index[slot] - 1;
+            break;
+        }
+    }
+    if (p == SIZE_MAX) {
+        Peer *peers = s->peer_count < UINT32_MAX - 1 && ((s->peer_count + 1) * 2 <= s->index_size || grow_index(s)) ?
+                      room(s->peers, &s->peer_capacity, s->peer_count, sizeof(Peer), 64) : NULL;
+        if (!peers) goto full;
+        s->peers = peers;
+        p = s->peer_count++;
+        s->peers[p] = (Peer){.id = id};
+        memcpy(s->peers[p].key, key, PURE_SEAL_KEY);
+        size_t slot = id & (s->index_size - 1);
+        while (s->index[slot]) slot = (slot + 1) & (s->index_size - 1);
+        s->index[slot] = (uint32_t)p + 1;
+    }
+    for (uint32_t a = s->peers[p].allowed; a; a = s->allowed[a - 1].next)
+        if (same_name(s, s->allowed[a - 1].name, source, length)) return true;
+    Allowed *kept = s->allowed_count < UINT32_MAX - 1 && s->names_size + 1 + length <= UINT32_MAX ?
+                    room(s->allowed, &s->allowed_capacity, s->allowed_count, sizeof(Allowed), 64) : NULL;
+    if (!kept) goto full;
+    s->allowed = kept;
+    if (s->names_size + 1 + length > s->names_capacity) {
+        size_t more = s->names_capacity ? 2 * s->names_capacity : 4096;
+        unsigned char *names = realloc(s->names, more);
+        if (!names) goto full;
+        s->names = names;
+        s->names_capacity = more;
+    }
+    s->names[s->names_size] = (unsigned char)length;
+    memcpy(s->names + s->names_size + 1, source, length);
+    s->allowed[s->allowed_count] = (Allowed){(uint32_t)s->names_size, s->peers[p].allowed};
+    s->peers[p].allowed = (uint32_t)++s->allowed_count;
+    s->names_size += 1 + length;
+    return true;
+full:
+    snprintf(error, size, "out of memory");
+    return false;
+}
+
+static void drop_held(Stream *st, size_t k) {
+    st->held_bytes -= st->held[k].size;
+    free(st->held[k].bytes);
+    free(st->held[k].have);
+    memmove(&st->held[k], &st->held[k + 1], (st->held_count - k - 1) * sizeof(Held));
+    --st->held_count;
+}
+
+/* A peer's active state, made at its first packet: the secret its key shares with ours. */
+static Active *activate(PureLinkListener *s, Peer *peer, uint64_t now) {
+    Active *a = calloc(1, sizeof(*a)), **actives = room(s->actives, &s->active_capacity, s->active_count, sizeof(*actives), 64);
+    if (actives) s->actives = actives;
+    if (!a || !actives || !pure_link_secret(s->own, peer->key, a->secret)) {
+        if (a) explicit_bzero(a->secret, sizeof(a->secret));
+        free(a);
+        return NULL;
+    }
+    a->peer = (uint32_t)(peer - s->peers);
+    a->seen = now;
+    a->place = s->active_count;
+    s->actives[s->active_count++] = a;
+    peer->active = a;
+    return a;
+}
+
+static void let_go(PureLinkListener *s, Active *a) {
+    for (unsigned i = 0; i < RUNS; ++i) {
+        pure_aead_free(a->runs[i].in);
+        pure_aead_free(a->runs[i].out);
+    }
+    for (unsigned k = 0; k < a->stream_count; ++k) {
+        while (a->streams[k]->held_count) drop_held(a->streams[k], 0);
+        free(a->streams[k]->held);
+        free(a->streams[k]);
+    }
+    free(a->streams);
+    s->peers[a->peer].active = NULL;
+    s->actives[a->place] = s->actives[--s->active_count];
+    s->actives[a->place]->place = a->place;
+    explicit_bzero(a->secret, sizeof(a->secret));
+    free(a);
+}
+
+/* Whether any of a peer's records or answers waits here. */
+static bool busy(const Active *a) {
+    for (unsigned k = 0; k < a->stream_count; ++k)
+        if (a->streams[k]->out || a->streams[k]->held_count || a->streams[k]->ready) return true;
     for (unsigned i = 0; i < RUNS; ++i)
-        if (peer->runs[i].used && peer->runs[i].run == run) return &peer->runs[i];
+        if (a->runs[i].due) return true;
+    return false;
+}
+
+/* Let go the active state of peers quiet for the idle period; what idle
+ * links held goes back to the system when there was much of it. */
+static void sweep(PureLinkListener *s, uint64_t now) {
+    if (now - s->swept < SWEEP_EVERY) return;
+    s->swept = now;
+    size_t freed = 0;
+    for (size_t k = 0; k < s->active_count;) {
+        Active *a = s->actives[k];
+        if (now - a->seen < s->idle || busy(a)) ++k;
+        else let_go(s, a), ++freed;
+    }
+    s->counts.swept += freed;
+    if (freed >= 1024) malloc_trim(0);
+}
+
+static void mark_ready(PureLinkListener *s, Stream *st) {
+    Stream **ready = st->ready ? NULL : room(s->ready, &s->ready_capacity, s->ready_count, sizeof(*ready), 64);
+    if (!ready) return;
+    s->ready = ready;
+    s->ready[s->ready_count++] = st;
+    st->ready = true;
+}
+
+static void mark_due(PureLinkListener *s, Run *r) {
+    Run **due = r->due ? NULL : room(s->due, &s->due_capacity, s->due_count, sizeof(*due), 64);
+    if (!due) return;
+    s->due = due;
+    s->due[s->due_count++] = r;
+    r->due = true;
+}
+
+static Run *run_found(Active *a, uint64_t run) {
+    for (unsigned i = 0; i < RUNS; ++i)
+        if (a->runs[i].used && a->runs[i].run == run) return &a->runs[i];
     return NULL;
 }
 
 /* A new run's keys, in the slot unused longest: only once its first packet
  * opened with them, so a forged one displaces nothing. */
-static Run *install_run(Peer *peer, const Run *made) {
-    Run *slot = &peer->runs[0];
+static Run *install_run(Active *a, const Run *made) {
+    Run *slot = &a->runs[0];
     for (unsigned i = 0; i < RUNS; ++i) {
-        Run *r = &peer->runs[i];
+        Run *r = &a->runs[i];
         if (!r->used || (slot->used && r->seen < slot->seen)) slot = r;
     }
     pure_aead_free(slot->in);
     pure_aead_free(slot->out);
+    bool due = slot->due; /* the answer list may hold the slot */
     *slot = *made;
+    slot->due = due;
     return slot;
 }
 
@@ -876,46 +1037,36 @@ static void note(Run *r, uint64_t pn, uint64_t now) {
     if (r->got_count && r->got[0].last == pn) r->largest_at = now;
 }
 
-static bool allowed(PureLinkListener *s, const Peer *peer, const char *source) {
-    for (size_t k = 0; k < s->allowed_count; ++k)
-        if (&s->peers[s->allowed[k].peer] == peer && !strcmp(s->allowed[k].source, source)) return true;
+static bool allowed(const PureLinkListener *s, const Peer *peer, const char *source) {
+    for (uint32_t a = peer->allowed; a; a = s->allowed[a - 1].next)
+        if (same_name(s, s->allowed[a - 1].name, source, strlen(source))) return true;
     return false;
 }
 
-/* The stream of peer's source to input, made the first time: NULL when the
- * source is not allowed from peer, or input takes no such messages. */
-static Stream *stream_of(PureLinkListener *s, Peer *peer, const char *source, const char *input, uint32_t shape) {
+/* The stream of a peer's source to input, made the first time: NULL when the
+ * source is not allowed from the peer, or input takes no such messages. */
+static Stream *stream_of(PureLinkListener *s, Active *a, const char *source, const char *input, uint32_t shape) {
     int index = pure_module_input(s->module, input);
     if (index < 0) return NULL;
-    for (size_t k = 0; k < s->stream_count; ++k) {
-        Stream *st = s->streams[k];
-        if (st->peer == peer && st->input == (uint32_t)index && !strcmp(st->source, source)) return st;
+    for (unsigned k = 0; k < a->stream_count; ++k) {
+        Stream *st = a->streams[k];
+        if (st->input == (uint32_t)index && !strcmp(st->source, source)) return st;
     }
     const PureInputShape *in = &s->module->input[index];
-    if (!allowed(s, peer, source) || in->kind != PURE_KIND_MESSAGE || in->keyed || shape_of(s->module, (uint32_t)index) != shape)
+    if (!allowed(s, &s->peers[a->peer], source) || in->kind != PURE_KIND_MESSAGE || in->keyed ||
+        shape_of(s->module, (uint32_t)index) != shape)
         return NULL;
-    if (s->stream_count == s->stream_capacity) {
-        size_t capacity = s->stream_capacity ? 2 * s->stream_capacity : 8;
-        Stream **grown = realloc(s->streams, capacity * sizeof(*grown));
-        if (!grown) return NULL;
-        s->streams = grown;
-        s->stream_capacity = capacity;
-    }
-    Stream *st = calloc(1, sizeof(*st));
-    if (!st) return NULL;
-    st->peer = peer;
+    size_t capacity = a->stream_capacity;
+    Stream **streams = room(a->streams, &capacity, a->stream_count, sizeof(*streams), 2), *st;
+    if (!streams) return NULL;
+    a->streams = streams;
+    a->stream_capacity = (unsigned)capacity;
+    if (!(st = calloc(1, sizeof(*st)))) return NULL;
+    st->active = a;
     st->input = (uint32_t)index;
     snprintf(st->source, sizeof(st->source), "%s", source);
-    s->streams[s->stream_count++] = st;
+    a->streams[a->stream_count++] = st;
     return st;
-}
-
-static void drop_held(Stream *st, size_t k) {
-    st->held_bytes -= st->held[k].size;
-    free(st->held[k].bytes);
-    free(st->held[k].have);
-    memmove(&st->held[k], &st->held[k + 1], (st->held_count - k - 1) * sizeof(Held));
-    --st->held_count;
 }
 
 /* A record's piece, kept until the record is whole and handed over. */
@@ -929,13 +1080,9 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
     while (k < st->held_count && st->held[k].seq < seq) ++k;
     if (k == st->held_count || st->held[k].seq != seq) {
         if (st->held_bytes + size > HELD_MOST) return;
-        if (st->held_count == st->held_capacity) {
-            size_t capacity = st->held_capacity ? 2 * st->held_capacity : 16;
-            Held *grown = realloc(st->held, capacity * sizeof(*grown));
-            if (!grown) return;
-            st->held = grown;
-            st->held_capacity = capacity;
-        }
+        Held *kept = room(st->held, &st->held_capacity, st->held_count, sizeof(Held), 16);
+        if (!kept) return;
+        st->held = kept;
         Held h = {.seq = seq, .size = size, .pieces = size ? (size + PIECE - 1) / PIECE : 1};
         if (!(h.bytes = malloc(size ? size : 1)) || !(h.have = calloc(h.pieces, 1))) {
             free(h.bytes);
@@ -957,19 +1104,20 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
 
 /* Whole records from the one after the last heard, in order, to the host:
  * one delivery a stream at a time. Before the last heard is known (after a
- * restart) they go from the first held: the host says how far it heard. */
-static void hand_over(PureLinkListener *s, Stream *st) {
-    if (st->out) return;
+ * restart) they go from the first held: the host says how far it heard.
+ * False when the host could not take them now. */
+static bool hand_over(PureLinkListener *s, Stream *st) {
+    if (st->out) return true;
     while (st->known && st->held_count && st->held[0].seq <= st->heard) drop_held(st, 0);
-    if (!st->held_count || (st->known && st->held[0].seq != st->heard + 1)) return;
+    if (!st->held_count || (st->known && st->held[0].seq != st->heard + 1)) return true;
     size_t n = 0, bytes = 0;
     while (n < st->held_count && n < BATCH && st->held[n].got == st->held[n].pieces &&
            st->held[n].seq == st->held[0].seq + n)
         bytes += 4 + st->held[n++].size;
-    if (!n) return;
+    if (!n) return true;
     if (bytes > s->batch_capacity) {
         unsigned char *grown = realloc(s->batch, bytes);
-        if (!grown) return;
+        if (!grown) return false;
         s->batch = grown;
         s->batch_capacity = bytes;
     }
@@ -980,26 +1128,31 @@ static void hand_over(PureLinkListener *s, Stream *st) {
         at += 4 + st->held[k].size;
     }
     PureLinkDelivery d = {st->input, st->source, st->held[0].seq, (unsigned)n, s->batch, bytes, st};
-    if (!s->deliver(s->context, &d)) return;
+    if (!s->deliver(s->context, &d)) return false;
     st->out = true;
     for (size_t k = 0; k < n; ++k) st->held[k].handed = true;
     ++s->counts.deliveries;
+    return true;
 }
 
-static void take_packet(PureLinkListener *s, unsigned char *packet, size_t n, const struct sockaddr_storage *from,
-                        socklen_t from_size, uint64_t now) {
-    if (n < HEADER + PURE_AEAD_TAG || n > DATAGRAM || packet[0] != VERSION) return;
-    Peer *peer = peer_of(s, get32(packet + 1));
-    if (!peer) return;
+/* A packet from peer, if it opens with the keys of peer's run (made for a
+ * run not seen yet, and for a peer at rest its active state): its frames. */
+static bool take_from(PureLinkListener *s, Peer *peer, unsigned char *packet, size_t n,
+                      const struct sockaddr_storage *from, socklen_t from_size, uint64_t now) {
     uint64_t pn = get64(packet + 13), run = get64(packet + 5);
-    Run *r = run_found(peer, run), made = {.run = run, .seen = now, .used = true};
+    Active *a = peer->active;
+    Run *r = a ? run_found(a, run) : NULL;
     if (r && had(r, pn)) {
         r->ack_due = true; /* its acknowledgment was lost, perhaps */
-        return;
+        mark_due(s, r);
+        return true;
     }
+    bool woke = !a;
+    if (woke && !(a = activate(s, peer, now))) return false;
+    Run made = {.active = a, .run = run, .seen = now, .used = true};
     if (!r) {
-        made.in = derive(peer->secret, peer->key, s->own_public, run, 0, made.in_base);
-        made.out = derive(peer->secret, s->own_public, peer->key, s->run, run, made.out_base);
+        made.in = derive(a->secret, peer->key, s->own_public, run, 0, made.in_base);
+        made.out = derive(a->secret, s->own_public, peer->key, s->run, run, made.out_base);
     }
     unsigned char plain[DATAGRAM], nonce[PURE_AEAD_NONCE];
     nonce_of(nonce, r ? r->in_base : made.in_base, pn);
@@ -1008,10 +1161,12 @@ static void take_packet(PureLinkListener *s, unsigned char *packet, size_t n, co
     if (!in || (!r && !made.out) || !pure_aead_open(in, nonce, packet, HEADER, packet + HEADER, n - HEADER, plain)) {
         pure_aead_free(made.in);
         pure_aead_free(made.out);
-        return;
+        if (woke) let_go(s, a);
+        return false;
     }
-    if (!r) r = install_run(peer, &made);
-    r->seen = now;
+    if (woke) ++s->counts.woken;
+    if (!r) r = install_run(a, &made);
+    a->seen = r->seen = now;
     note(r, pn, now);
     memcpy(&r->address, from, from_size); /* where it is now: answers go there */
     r->address_size = from_size;
@@ -1024,7 +1179,7 @@ static void take_packet(PureLinkListener *s, unsigned char *packet, size_t n, co
             char source[PURE_SOURCE + 1], input[PURE_MODULE_NAME];
             size_t names = get_names(plain + at, size - at, source, input);
             if (!names || at + names + 4 > size) break;
-            st = stream_of(s, peer, source, input, get32(plain + at + names));
+            st = stream_of(s, a, source, input, get32(plain + at + names));
             if (st) {
                 st->run = r;
                 st->run_id = r->run;
@@ -1035,7 +1190,10 @@ static void take_packet(PureLinkListener *s, unsigned char *packet, size_t n, co
             if (at + RECORD_HEAD - 1 > size) break;
             uint32_t length = get16(plain + at + 16);
             if (at + RECORD_HEAD - 1 + length > size) break;
-            if (st) hold(st, get64(plain + at), get32(plain + at + 8), get32(plain + at + 12), plain + at + 18, length);
+            if (st) {
+                hold(st, get64(plain + at), get32(plain + at + 8), get32(plain + at + 12), plain + at + 18, length);
+                mark_ready(s, st);
+            }
             at += RECORD_HEAD - 1 + length;
             eliciting = true;
         } else if (type == F_PING) {
@@ -1043,7 +1201,33 @@ static void take_packet(PureLinkListener *s, unsigned char *packet, size_t n, co
         } else
             break;
     }
-    if (eliciting) r->ack_due = true;
+    if (eliciting) {
+        r->ack_due = true;
+        mark_due(s, r);
+    }
+    return true;
+}
+
+static void take_packet(PureLinkListener *s, unsigned char *packet, size_t n, const struct sockaddr_storage *from,
+                        socklen_t from_size, uint64_t now) {
+    if (n < HEADER + PURE_AEAD_TAG || n > DATAGRAM || packet[0] != VERSION || !s->index_size) return;
+    uint32_t id = get32(packet + 1);
+    size_t mask = s->index_size - 1;
+    uint64_t run = get64(packet + 5);
+    /* The peers with the packet's key id: first one whose run is known (no
+     * key to make), then any. */
+    for (size_t slot = id & mask; s->index[slot]; slot = (slot + 1) & mask) {
+        Peer *peer = &s->peers[s->index[slot] - 1];
+        if (peer->id == id && peer->active && run_found(peer->active, run) &&
+            take_from(s, peer, packet, n, from, from_size, now))
+            return;
+    }
+    for (size_t slot = id & mask; s->index[slot]; slot = (slot + 1) & mask) {
+        Peer *peer = &s->peers[s->index[slot] - 1];
+        if (peer->id == id && !(peer->active && run_found(peer->active, run)) &&
+            take_from(s, peer, packet, n, from, from_size, now))
+            return;
+    }
 }
 
 /* Acknowledgments and how far each stream is stored, a packet to each run
@@ -1051,41 +1235,43 @@ static void take_packet(PureLinkListener *s, unsigned char *packet, size_t n, co
  * to its run, so a lost word is said again at the next packet. */
 static void answer(PureLinkListener *s, uint64_t now) {
     unsigned char body[BODY], packet[DATAGRAM];
-    for (size_t p = 0; p < s->peer_count; ++p)
-        for (unsigned i = 0; i < RUNS; ++i) {
-            Run *r = &s->peers[p].runs[i];
-            if (!r->used) continue;
-            size_t at = 0;
-            if (r->ack_due && r->got_count) {
-                body[at++] = F_ACK;
-                put64(body + at, r->got[0].last);
-                put32(body + at + 8, (uint32_t)least((now - r->largest_at) / 1000, UINT32_MAX));
-                body[at + 12] = (unsigned char)r->got_count;
-                at += 13;
-                for (unsigned k = 0; k < r->got_count; ++k, at += 16) {
-                    put64(body + at, r->got[k].first);
-                    put64(body + at + 8, r->got[k].last);
-                }
+    for (size_t k = 0; k < s->due_count; ++k) {
+        Run *r = s->due[k];
+        Active *a = r->active;
+        r->due = false;
+        if (!r->used) continue;
+        size_t at = 0;
+        if (r->ack_due && r->got_count) {
+            body[at++] = F_ACK;
+            put64(body + at, r->got[0].last);
+            put32(body + at + 8, (uint32_t)least((now - r->largest_at) / 1000, UINT32_MAX));
+            body[at + 12] = (unsigned char)r->got_count;
+            at += 13;
+            for (unsigned i = 0; i < r->got_count; ++i, at += 16) {
+                put64(body + at, r->got[i].first);
+                put64(body + at + 8, r->got[i].last);
             }
-            for (size_t k = 0; k < s->stream_count; ++k) {
-                Stream *st = s->streams[k];
-                if (!(st->stored_due || r->ack_due) || st->run != r || st->run_id != r->run || !st->known) continue;
-                if (at + 2 + PURE_SOURCE + PURE_MODULE_NAME + 14 > BODY) break;
-                body[at++] = F_STORED;
-                at += put_names(body + at, st->source, s->module->input_names[st->input]);
-                put64(body + at, st->heard);
-                body[at + 8] = st->gap ? STORED_GAP : 0;
-                size_t room = st->held_bytes < HELD_MOST ? CREDIT : 1;
-                put32(body + at + 9, (uint32_t)room);
-                at += 13;
-                st->stored_due = st->gap = false;
-            }
-            r->ack_due = false;
-            if (!at) continue;
-            size_t total = seal_packet(r->out, r->out_base, s->own_id, s->run, r->next_pn++, body, at, packet);
-            if (total && sendto(s->fd, packet, total, 0, (const struct sockaddr *)&r->address, r->address_size) >= 0)
-                ++s->counts.packets;
         }
+        for (unsigned j = 0; j < a->stream_count; ++j) {
+            Stream *st = a->streams[j];
+            if (!(st->stored_due || r->ack_due) || st->run != r || st->run_id != r->run || !st->known) continue;
+            if (at + 2 + PURE_SOURCE + PURE_MODULE_NAME + 14 > BODY) break;
+            body[at++] = F_STORED;
+            at += put_names(body + at, st->source, s->module->input_names[st->input]);
+            put64(body + at, st->heard);
+            body[at + 8] = st->gap ? STORED_GAP : 0;
+            size_t room = st->held_bytes < HELD_MOST ? CREDIT : 1;
+            put32(body + at + 9, (uint32_t)room);
+            at += 13;
+            st->stored_due = st->gap = false;
+        }
+        r->ack_due = false;
+        if (!at) continue;
+        size_t total = seal_packet(r->out, r->out_base, s->own_id, s->run, r->next_pn++, body, at, packet);
+        if (total && sendto(s->fd, packet, total, 0, (const struct sockaddr *)&r->address, r->address_size) >= 0)
+            ++s->counts.packets;
+    }
+    s->due_count = 0;
 }
 
 static void take_done(PureLinkListener *s) {
@@ -1099,14 +1285,29 @@ static void take_done(PureLinkListener *s) {
         Stream *st = done[k].stream;
         st->out = false;
         for (size_t h = 0; h < st->held_count; ++h) st->held[h].handed = false;
+        mark_ready(s, st);
         if (!done[k].stored) continue; /* not saved: handed over again */
         if (!st->known || done[k].heard > st->heard) st->heard = done[k].heard;
         st->known = true;
         st->gap = done[k].gap;
         st->stored_due = true;
+        if (st->run && st->run->used && st->run_id == st->run->run) mark_due(s, st->run);
         s->counts.stored = st->heard;
     }
     free(done);
+}
+
+/* The streams ready, each handed over; one the host could not take now is
+ * tried again at the next turn. */
+static void hand_over_ready(PureLinkListener *s) {
+    size_t count = s->ready_count;
+    for (size_t k = 0; k < count; ++k) {
+        Stream *st = s->ready[k];
+        st->ready = false;
+        if (!hand_over(s, st)) mark_ready(s, st);
+    }
+    memmove(s->ready, s->ready + count, (s->ready_count - count) * sizeof(*s->ready));
+    s->ready_count -= count;
 }
 
 static void *run_listener(void *context) {
@@ -1114,7 +1315,8 @@ static void *run_listener(void *context) {
     unsigned char packet[DATAGRAM + 64];
     for (;;) {
         struct pollfd waits[2] = {{s->fd, POLLIN, 0}, {s->wake, POLLIN, 0}};
-        if (poll(waits, 2, -1) < 0 && errno != EINTR) break;
+        int timeout = s->active_count || s->ready_count ? (int)(SWEEP_EVERY / MS) : -1;
+        if (poll(waits, 2, timeout) < 0 && errno != EINTR) break;
         pthread_mutex_lock(&s->lock);
         bool stopping = s->stopping;
         pthread_mutex_unlock(&s->lock);
@@ -1132,8 +1334,9 @@ static void *run_listener(void *context) {
             take_packet(s, packet, (size_t)n, &from, from_size, now);
         }
         take_done(s);
-        for (size_t k = 0; k < s->stream_count; ++k) hand_over(s, s->streams[k]);
+        hand_over_ready(s);
         answer(s, now);
+        sweep(s, now);
     }
     return NULL;
 }
@@ -1157,6 +1360,7 @@ bool pure_link_serve(PureLinkListener *s, char *error, size_t size) {
     setsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
     setsockopt(s->fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer));
     s->run = random64();
+    s->swept = now_ns();
     s->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (s->wake < 0 || pthread_create(&s->thread, NULL, run_listener, s)) {
         snprintf(error, size, "--link-port %u: cannot start", s->port);
@@ -1189,22 +1393,18 @@ void pure_link_listener_close(PureLinkListener *s, PureLinkCounts *counts) {
         wake(s->wake);
         pthread_join(s->thread, NULL);
     }
-    if (counts) *counts = s->counts;
-    for (size_t k = 0; k < s->stream_count; ++k) {
-        while (s->streams[k]->held_count) drop_held(s->streams[k], 0);
-        free(s->streams[k]->held);
-        free(s->streams[k]);
+    if (counts) {
+        *counts = s->counts;
+        counts->active = s->active_count;
     }
-    for (size_t p = 0; p < s->peer_count; ++p) {
-        for (unsigned i = 0; i < RUNS; ++i) {
-            pure_aead_free(s->peers[p].runs[i].in);
-            pure_aead_free(s->peers[p].runs[i].out);
-        }
-        explicit_bzero(s->peers[p].secret, sizeof(s->peers[p].secret));
-    }
-    free(s->streams);
+    while (s->active_count) let_go(s, s->actives[0]);
+    free(s->actives);
     free(s->peers);
+    free(s->index);
     free(s->allowed);
+    free(s->names);
+    free(s->ready);
+    free(s->due);
     free(s->batch);
     free(s->done);
     if (s->fd >= 0) close(s->fd);

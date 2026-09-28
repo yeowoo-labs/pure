@@ -2473,6 +2473,38 @@ static bool name_senders(const char *const *named, unsigned count) {
     return true;
 }
 
+/* --senders FILE: senders a --link-port takes besides those named, a line
+ * each (NAME KEY, the key as 64 hex digits), as many as memory holds. */
+static bool allow_senders(PureLinkListener *listener, const char *path, char *error, size_t size) {
+    if (!path) return true;
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        snprintf(error, size, "--senders %s: %s", path, strerror(errno));
+        return false;
+    }
+    char *line = NULL;
+    size_t capacity = 0, count = 0;
+    bool ok = true;
+    for (ssize_t length; ok && (length = getline(&line, &capacity, file)) >= 0; ++count) {
+        while (length && (line[length - 1] == '\n' || line[length - 1] == '\r')) line[--length] = 0;
+        char *space = strchr(line, ' ');
+        unsigned char key[PURE_SEAL_KEY];
+        if (!length) continue;
+        if (!space || space == line || (size_t)(space - line) > PURE_SOURCE || !pure_seal_peer(space + 1, key)) {
+            snprintf(error, size, "--senders %s: line %zu is not NAME KEY", path, count + 1);
+            ok = false;
+            break;
+        }
+        *space = 0;
+        for (const char *c = line; *c && ok; ++c) ok = *c > ' ' && *c <= '~';
+        if (!ok) snprintf(error, size, "--senders %s: line %zu names no source", path, count + 1);
+        else ok = pure_link_allow(listener, line, key, error, size);
+    }
+    free(line);
+    fclose(file);
+    return ok;
+}
+
 /* --reply OUTPUT=INPUT: the answers to that output's sends become INPUT's events. */
 static bool wire_replies(Executor *ex, const PureModule *m, const char *const *replies, unsigned count) {
     for (unsigned i = 0; i < count; ++i) {
@@ -2520,11 +2552,11 @@ int main(int argc, char **argv) {
             break;
         }
     const char *surface_path = NULL, *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
-    const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL;
+    const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL, *senders_path = NULL;
     unsigned send_count = 0, reply_count = 0, seal_count = 0, named_count = 0;
     unsigned port = 8767, threads = 1, link_port = 0;
     size_t budget = 64u << 20, capacity = 1024;
-    uint64_t timeout_ms = 10000;
+    uint64_t timeout_ms = 10000, link_idle_ms = 0;
     for (int i = 1; i < options; i += 2) {
         uint64_t value;
         if (!strcmp(argv[i], "--sealed-only")) { sealed_only = true; --i; continue; }
@@ -2541,6 +2573,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sender") && named_count < PURE_MODULE_INPUTS) named[named_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
         else if (!strcmp(argv[i], "--link-port") && number(argv[i + 1], 65535, &value) && value) link_port = (unsigned)value;
+        else if (!strcmp(argv[i], "--senders")) senders_path = argv[i + 1];
+        else if (!strcmp(argv[i], "--link-idle-ms") && number(argv[i + 1], 86400000, &value) && value) link_idle_ms = value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
         else if (!strcmp(argv[i], "--threads") && !strcmp(argv[i + 1], "auto")) threads = 0;
@@ -2624,9 +2658,10 @@ int main(int argc, char **argv) {
             return 2;
         }
         link_listener = pure_link_listen(&module, link_port, seal_key, own_public, link_deliver, &owner, error, sizeof(error));
-        bool allowed = link_listener != NULL;
+        bool allowed = link_listener != NULL && allow_senders(link_listener, senders_path, error, sizeof(error));
         for (unsigned i = 0; allowed && i < sender_count; ++i)
             allowed = pure_link_allow(link_listener, senders[i].name, senders[i].key, error, sizeof(error));
+        if (allowed && link_idle_ms) pure_link_idle(link_listener, link_idle_ms);
         if (!allowed || !pure_link_serve(link_listener, error, sizeof(error))) {
             fprintf(stderr, "--link-port: %s\n", error);
             return 2;
@@ -2700,11 +2735,12 @@ int main(int argc, char **argv) {
             ",\"commit_groups\":%lu,\"grouped_commits\":%lu,\"checkpoints\":%" PRIu64
             ",\"link_packets\":%" PRIu64 ",\"link_records\":%" PRIu64 ",\"link_resent\":%" PRIu64
             ",\"link_lost\":%" PRIu64 ",\"link_acknowledged\":%" PRIu64 ",\"link_stored\":%" PRIu64
-            ",\"listener_packets\":%" PRIu64 ",\"listener_received\":%" PRIu64 ",\"listener_deliveries\":%" PRIu64 "}\n",
+            ",\"listener_packets\":%" PRIu64 ",\"listener_received\":%" PRIu64 ",\"listener_deliveries\":%" PRIu64
+            ",\"listener_woken\":%" PRIu64 ",\"listener_swept\":%" PRIu64 ",\"listener_active\":%" PRIu64 "}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
             owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
-            heard.packets, heard.received, heard.deliveries);
+            heard.packets, heard.received, heard.deliveries, heard.woken, heard.swept, heard.active);
     free(hosts);
     free(thread);
     return 0;
@@ -2712,7 +2748,9 @@ usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
           "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=http[s]://host:port/path ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
-          "[--sender NAME=KEY ...] [--link-port PORT] [--surface LIBRARY [-- ARGUMENTS]]\n"
-          "  --send OUTPUT=pure://host:port/INPUT links to a Pure node's --link-port (UDP; its key by --seal OUTPUT=KEY)\n", stderr);
+          "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] "
+          "[--surface LIBRARY [-- ARGUMENTS]]\n"
+          "  --send OUTPUT=pure://host:port/INPUT links to a Pure node's --link-port (UDP; its key by --seal OUTPUT=KEY)\n"
+          "  --senders FILE: more senders the --link-port takes, a line each: NAME KEY\n", stderr);
     return 2;
 }

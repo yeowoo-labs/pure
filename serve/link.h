@@ -14,7 +14,8 @@
  * A packet is a header in the clear, then frames sealed with AES-128-GCM
  * (the header as associated data):
  *   u8 0x70 (version 0), u32le the key id of the node that sent it (FNV-1a
- *   of its public key), u64le that node's run (random, new each time it
+ *   of its public key; two keys may share an id, and a receiver tries the
+ *   keys it allows with it), u64le that node's run (random, new each time it
  *   starts, so no nonce repeats under a key across restarts), u64le the
  *   packet's number in its run.
  * Keys come from the secret the two nodes' keys share (X25519) by
@@ -61,7 +62,8 @@ bool pure_link_start(PureLink *, void (*notify)(void *), void *context, char *er
 void pure_link_close(PureLink *);
 
 /* The receiving side: packets on a UDP port, from the senders allowed (a
- * source name and the key it seals with). Whole records of a stream, in
+ * source name and the key it seals with, a few bytes each however many
+ * there are: see pure_link_idle). Whole records of a stream, in
  * order, go to deliver (on the listener's thread) as one delivery; the host
  * applies them from the one after the source's last heard number, stops at
  * a gap, saves, and then calls pure_link_done (any thread) with the last
@@ -83,15 +85,21 @@ PureLinkListener *pure_link_listen(const PureModule *m, unsigned port, const Pur
                                    size_t size);
 bool pure_link_allow(PureLinkListener *, const char *source, const unsigned char key[PURE_SEAL_KEY], char *error,
                      size_t size);
+/* A sender quiet for ms (30 s at first) with nothing of it waiting lets its
+ * keys, addresses and streams go: an idle link costs the listener only its
+ * allowing, and the sender's next packet makes them again (one X25519). */
+void pure_link_idle(PureLinkListener *, uint64_t ms);
 bool pure_link_serve(PureLinkListener *, char *error, size_t size);
 /* stored: the delivery's save succeeded; gap: it stopped at a gap. */
 void pure_link_done(PureLinkListener *, void *token, uint64_t heard, bool stored, bool gap);
 
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,
- * the last number stored. A listener's are given when it closes. */
+ * the last number stored; a listener's senders woken (their active state
+ * made), let go when idle, and active when it closed. A listener's are
+ * given when it closes. */
 typedef struct {
-    uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored;
+    uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, woken, swept, active;
 } PureLinkCounts;
 void pure_link_counts(PureLink *, PureLinkCounts *);
 void pure_link_listener_close(PureLinkListener *, PureLinkCounts *counts);
