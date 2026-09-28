@@ -235,7 +235,10 @@ static int take_datagrams(int fd, Taking *t) {
 
 enum { UNSENT, FLYING, RECEIVED };
 typedef struct { uint64_t pn; uint8_t state; } Piece;
-typedef struct { uint64_t seq; unsigned char *bytes; uint32_t size, pieces; Piece *piece; } Record;
+/* A record queued: its bytes at `at` in the link's byte ring, its pieces'
+ * states (one kept here, more beside). */
+typedef struct { uint64_t seq; size_t at; uint32_t size, pieces; Piece *more, one; } Record;
+static Piece *piece_of(Record *r, uint32_t i) { return r->pieces == 1 ? &r->one : &r->more[i]; }
 typedef struct { uint64_t seq; uint32_t piece; } Unit;
 typedef struct {
     uint64_t pn, sent; /* its number; when it went (ns) */
@@ -255,6 +258,10 @@ struct PureLink {
     pthread_mutex_t lock;
     Record *records; /* the sends not yet stored, oldest first (a ring of consecutive numbers) */
     size_t head, count, capacity;
+    /* Their bytes, one after another as queued (a record's never cut by the
+     * ring's end): taken back in order as they are stored. */
+    unsigned char *ring;
+    size_t ring_capacity;
     uint64_t queued, stored, told; /* the last queued; saved by the receiver; told the owner */
     bool stopping, started;
     /* The thread sleeps (in poll), and has been woken since; records were
@@ -345,12 +352,12 @@ static Record *record_of(PureLink *l, uint64_t seq) {
 /* Every change of a piece's state goes through here: the link knows at once
  * how many pieces wait to be stored, and where the unsent ones begin. */
 static void set_piece(PureLink *l, Record *r, uint32_t i, uint8_t state) {
-    uint8_t was = r->piece[i].state;
+    uint8_t was = (*piece_of(r, i)).state;
     if (was == state) return;
     if (was == RECEIVED) --l->received;
     if (state == RECEIVED) ++l->received;
     if (state == UNSENT && r->seq < l->unsent_from) l->unsent_from = r->seq;
-    r->piece[i].state = state;
+    (*piece_of(r, i)).state = state;
 }
 
 static void wake(int fd) {
@@ -358,16 +365,50 @@ static void wake(int fd) {
     if (fd >= 0 && write(fd, &one, sizeof(one)) != sizeof(one)) { /* full: it is readable already */ }
 }
 
+/* Where size bytes go at the end of the byte ring (after the newest record,
+ * or from its start when that is free and the end is not), or SIZE_MAX. */
+static size_t ring_place(PureLink *l, size_t size) {
+    if (!l->count) return size <= l->ring_capacity ? 0 : SIZE_MAX;
+    Record *oldest = record_at(l, 0), *newest = record_at(l, l->count - 1);
+    size_t head = oldest->at, tail = newest->at + newest->size;
+    if (newest->at >= head) /* the bytes are [head, tail): after them, or before them from the start */
+        return l->ring_capacity - tail >= size ? tail : size <= head ? 0 : SIZE_MAX;
+    return head - tail >= size ? tail : SIZE_MAX; /* around the end: between the newest and the oldest */
+}
+
+/* A ring room for size bytes more: twice as large (or more), the records
+ * moved into it one after another. */
+static bool ring_grow(PureLink *l, size_t size) {
+    size_t used = 0;
+    for (size_t k = 0; k < l->count; ++k) used += record_at(l, k)->size;
+    size_t capacity = l->ring_capacity ? 2 * l->ring_capacity : 64 << 10;
+    while (capacity < used + size + 1) capacity *= 2;
+    unsigned char *ring = malloc(capacity);
+    if (!ring) return false;
+    for (size_t k = 0, at = 0; k < l->count; ++k) {
+        Record *r = record_at(l, k);
+        if (r->size) memcpy(ring + at, l->ring + r->at, r->size);
+        r->at = at;
+        at += r->size;
+    }
+    free(l->ring);
+    l->ring = ring;
+    l->ring_capacity = capacity;
+    return true;
+}
+
 bool pure_link_queue(PureLink *l, uint64_t seq, PureSpan payload) {
     Record r = {.seq = seq, .size = (uint32_t)payload.size};
     r.pieces = payload.size ? (uint32_t)((payload.size + PIECE - 1) / PIECE) : 1;
-    /* One allocation: its pieces' states, then its bytes. */
-    if (payload.size > RECORD_MOST || !(r.piece = malloc(r.pieces * sizeof(Piece) + payload.size))) return false;
-    memset(r.piece, 0, r.pieces * sizeof(Piece));
-    r.bytes = (unsigned char *)(r.piece + r.pieces);
-    if (payload.size) memcpy(r.bytes, payload.data, payload.size);
+    if (payload.size > RECORD_MOST || (r.pieces > 1 && !(r.more = calloc(r.pieces, sizeof(Piece))))) return false;
     pthread_mutex_lock(&l->lock);
     bool ok = seq > l->queued && (!l->count || seq == l->queued + 1);
+    size_t at = ok ? ring_place(l, payload.size) : SIZE_MAX;
+    if (ok && at == SIZE_MAX) ok = ring_grow(l, payload.size) && (at = ring_place(l, payload.size)) != SIZE_MAX;
+    if (ok) {
+        r.at = at;
+        if (payload.size) memcpy(l->ring + at, payload.data, payload.size);
+    }
     if (ok && l->count == l->capacity) {
         size_t capacity = l->capacity ? 2 * l->capacity : 64;
         Record *grown = malloc(capacity * sizeof(*grown));
@@ -390,7 +431,7 @@ bool pure_link_queue(PureLink *l, uint64_t seq, PureSpan payload) {
     }
     pthread_mutex_unlock(&l->lock);
     if (!ok) {
-        free(r.piece);
+        free(r.more);
         return false;
     }
     if (signal) wake(l->wake);
@@ -447,7 +488,7 @@ static void lose(PureLink *l, Flight *f, uint64_t now) {
     ++l->counts.lost;
     for (uint16_t u = 0; u < f->count; ++u) {
         Record *r = record_of(l, f->units[u].seq);
-        Piece *p = r ? &r->piece[f->units[u].piece] : NULL;
+        Piece *p = r ? &(*piece_of(r, f->units[u].piece)) : NULL;
         if (p && p->state == FLYING && p->pn == f->pn) {
             set_piece(l, r, f->units[u].piece, UNSENT);
             ++l->counts.resent;
@@ -505,7 +546,7 @@ static void on_ack(PureLink *l, const unsigned char *p, size_t size, uint64_t no
             ++l->counts.acknowledged;
             for (uint16_t u = 0; u < f->count; ++u) {
                 Record *r = record_of(l, f->units[u].seq);
-                if (r && r->piece[f->units[u].piece].state != RECEIVED) {
+                if (r && (*piece_of(r, f->units[u].piece)).state != RECEIVED) {
                     set_piece(l, r, f->units[u].piece, RECEIVED);
                     l->stored_changed = now; /* waits for its save from now */
                 }
@@ -536,8 +577,8 @@ static void on_stored(PureLink *l, const unsigned char *p, size_t size, uint64_t
     if (heard > l->stored) {
         while (l->count && record_at(l, 0)->seq <= heard) {
             Record *r = record_at(l, 0);
-            for (uint32_t i = 0; i < r->pieces; ++i) l->received -= r->piece[i].state == RECEIVED;
-            free(r->piece); /* and its bytes */
+            for (uint32_t i = 0; i < r->pieces; ++i) l->received -= (*piece_of(r, i)).state == RECEIVED;
+            free(r->more); /* its bytes go back with the ring's head */
             l->head = (l->head + 1) % l->capacity;
             --l->count;
         }
@@ -548,7 +589,7 @@ static void on_stored(PureLink *l, const unsigned char *p, size_t size, uint64_t
         for (size_t k = 0; k < l->count && l->received; ++k) {
             Record *r = record_at(l, k);
             for (uint32_t i = 0; i < r->pieces; ++i)
-                if (r->piece[i].state == RECEIVED) set_piece(l, r, i, UNSENT);
+                if ((*piece_of(r, i)).state == RECEIVED) set_piece(l, r, i, UNSENT);
         }
     l->credit = credit ? least(credit, 65536) : 1;
 }
@@ -617,7 +658,7 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
         if (r->seq > base + l->credit) break;
         bool unsent = false;
         for (uint32_t i = 0; i < r->pieces; ++i) {
-            if (r->piece[i].state != UNSENT) continue;
+            if ((*piece_of(r, i)).state != UNSENT) continue;
             uint32_t offset = i * PIECE, length = (uint32_t)least(PIECE, r->size - offset);
             bool whole = r->pieces == 1, joins = whole && run && r->seq == next;
             size_t need = whole ? (joins ? 0 : RECORDS_HEAD) + varint_size(length) + length : RECORD_HEAD + length;
@@ -634,7 +675,7 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
                     at += RECORDS_HEAD;
                 }
                 at += put_varint(body + at, length);
-                if (length) memcpy(body + at, r->bytes, length);
+                if (length) memcpy(body + at, l->ring + r->at, length);
                 at += length;
                 ++body[run];
                 next = r->seq + 1;
@@ -644,12 +685,12 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
                 put32(body + at + 9, r->size);
                 put32(body + at + 13, offset);
                 put16(body + at + 17, length);
-                if (length) memcpy(body + at + RECORD_HEAD, r->bytes + offset, length);
+                if (length) memcpy(body + at + RECORD_HEAD, l->ring + r->at + offset, length);
                 at += RECORD_HEAD + length;
                 run = 0;
             }
             set_piece(l, r, i, FLYING);
-            r->piece[i].pn = f->pn;
+            (*piece_of(r, i)).pn = f->pn;
             f->units[f->count++] = (Unit){r->seq, i};
             ++l->counts.records;
         }
@@ -675,7 +716,7 @@ static void refused(PureLink *l, uint64_t pn) {
     if (!f || f->done) return;
     for (uint16_t u = 0; u < f->count; ++u) {
         Record *r = record_of(l, f->units[u].seq);
-        if (r && r->piece[f->units[u].piece].pn == pn) set_piece(l, r, f->units[u].piece, UNSENT);
+        if (r && (*piece_of(r, f->units[u].piece)).pn == pn) set_piece(l, r, f->units[u].piece, UNSENT);
     }
     settle(l, f);
     f->eliciting = false;
@@ -713,7 +754,7 @@ static bool transmit(PureLink *l, Flight *f, const unsigned char *body, size_t s
     if (!total) { /* not sealed: what it carried is unsent again */
         for (uint16_t u = 0; u < f->count; ++u) {
             Record *r = record_of(l, f->units[u].seq);
-            if (r && r->piece[f->units[u].piece].pn == f->pn) set_piece(l, r, f->units[u].piece, UNSENT);
+            if (r && (*piece_of(r, f->units[u].piece)).pn == f->pn) set_piece(l, r, f->units[u].piece, UNSENT);
         }
         f->done = true;
         f->eliciting = false;
@@ -785,7 +826,7 @@ static void run_timers(PureLink *l, uint64_t now) {
         for (size_t k = 0; k < l->count; ++k) {
             Record *r = record_at(l, k);
             uint32_t i = 0;
-            while (i < r->pieces && r->piece[i].state != FLYING) ++i;
+            while (i < r->pieces && (*piece_of(r, i)).state != FLYING) ++i;
             if (i < r->pieces) {
                 set_piece(l, r, i, UNSENT);
                 ++l->counts.resent;
@@ -799,7 +840,7 @@ static void run_timers(PureLink *l, uint64_t now) {
         for (size_t k = 0; k < l->count && l->received; ++k) {
             Record *r = record_at(l, k);
             for (uint32_t i = 0; i < r->pieces; ++i)
-                if (r->piece[i].state == RECEIVED) set_piece(l, r, i, UNSENT), ++l->counts.resent;
+                if ((*piece_of(r, i)).state == RECEIVED) set_piece(l, r, i, UNSENT), ++l->counts.resent;
         }
         l->stored_changed = now;
     }
@@ -892,9 +933,10 @@ void pure_link_close(PureLink *l) {
         pthread_join(l->thread, NULL);
     }
     for (size_t k = 0; k < l->count; ++k) {
-        free(record_at(l, k)->piece); /* and its bytes */
+        free(record_at(l, k)->more);
     }
     free(l->records);
+    free(l->ring);
     free(l->flights);
     free(l->burst);
     free(l->taking);
