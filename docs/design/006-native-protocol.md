@@ -8,6 +8,9 @@ TLS 1.3/TCP 위에 실은 피어 호스트를 검증했다. [026 — scalar 피�
 [030 — 문서 피어·출력 소비 선택](../research/030-authenticated-document-peer.md)을 본다.
 이 설계의 일반 RPC·QUIC·새 전송 후보가 구현된 것은 아니다.
 
+2026-09-28: 노드 사이 전달의 새 UDP 전송 후보(Pure 전송)는 설계와 quinn·ngtcp2 대비 측정 계획을
+[011](011-pure-transport.md)에 적었다. 아래 "새 UDP 전송은 … 별도 연구 후보로 연다"는 조건은 그 0단계(비용 분해)가 판정한다.
+
 ## 결정
 
 Pure 간 통신은 HTTP 메서드·URL·문자열 헤더를 필수 실행 모델로 삼지 않는다.
