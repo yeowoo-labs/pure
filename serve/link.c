@@ -678,6 +678,7 @@ bool pure_link_start(PureLink *l, void (*notify)(void *), void *context, char *e
         snprintf(error, size, "pure://%s:%s/%s: cannot start (a socket, the keys)", l->host, l->port, l->input);
         return false;
     }
+    pthread_setname_np(l->thread, "pure-link"); /* a link's CPU, seen apart */
     l->started = true;
     return true;
 }
@@ -1439,6 +1440,7 @@ bool pure_link_serve(PureLinkListener *s, char *error, size_t size) {
         snprintf(error, size, "--link-port %u: cannot start", s->port);
         return false;
     }
+    pthread_setname_np(s->thread, "pure-listen");
     s->started = true;
     return true;
 }
