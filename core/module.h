@@ -237,6 +237,10 @@ typedef struct {
     PureResult (*state)(void *context, const char *name, PureDraft **out);
     PureResult (*save)(void *context, void *const *documents, size_t document_count, PureDraft *const *states,
                        size_t count, int64_t *revisions);
+    /* Optional, with state and save: the directory where the app's lists are
+     * kept, their images and the log of their changes (core/log.h); without
+     * one, list states are not stored. */
+    const char *(*directory)(void *context);
 } PureData;
 
 /* A byte or text value inside one event or view: a range of the payload, a
@@ -264,8 +268,20 @@ typedef struct {
     PureDraft *texts[PURE_MODULE_STATES];
     PureList *lists[PURE_MODULE_STATES];
     PureUndo undo; /* list changes of the current event */
-    PureDraft *list_drafts[PURE_MODULE_STATES]; /* stored lists, when kept */
-    size_t journaled[PURE_MODULE_STATES];       /* a stored list's record bytes after its items */
+    PureDraft *list_drafts[PURE_MODULE_STATES]; /* lists the tree kept before images, until emptied */
+    /* Stored lists (module-save.c): the save each one's image holds, the
+     * first save logged since that changed it (0: none), and the bytes of its
+     * changes logged since; the log, the tree's number of its last save, the
+     * last save's number, and a checkpoint being written. */
+    uint64_t image_seq[PURE_MODULE_STATES], logged_since[PURE_MODULE_STATES];
+    size_t logged[PURE_MODULE_STATES];
+    struct PureLog *log;
+    PureDraft *stored_seq;
+    uint64_t seq;
+    struct PureCheckpoint *checkpoint;
+    struct PureStartLog *start_log; /* the log as read at a start, while lists open */
+    bool background_checkpoints;
+    bool uncertain; /* a save may or may not be stored: none follows until a start */
     PureDraft *stored_values;                   /* numbers, cursors and indices, when kept */
     PureVersion saved[PURE_MODULE_STATES];      /* text and list versions at the last save */
     /* Events since the last save: what a failed save returns to, and the
@@ -422,6 +438,18 @@ PureResult pure_app_deliver(PureApp *, uint32_t input, const char *source, uint6
  * without a data host that keeps states), or when memory runs out. The caller
  * gets a reference; the app keeps its own until the next snapshot. */
 typedef struct PureSnapshot PureSnapshot;
+/* Checkpoints (with a directory for lists): a list whose logged changes
+ * outgrew its items gets a new image, written from a snapshot, and then the
+ * log lets go the entries the images hold. By default each save writes the
+ * images due before it returns. With background checkpoints the host takes
+ * one due after a save (NULL: none, or one is still out), writes it on any
+ * thread, and hands the result back on the app's thread before the app stops
+ * or is replaced. */
+typedef struct PureCheckpoint PureCheckpoint;
+void pure_app_background_checkpoints(PureApp *, bool background);
+PureCheckpoint *pure_app_checkpoint(PureApp *);
+PureResult pure_checkpoint_write(PureCheckpoint *);
+void pure_app_checkpointed(PureApp *, PureCheckpoint *, PureResult);
 PureSnapshot *pure_app_snapshot(PureApp *);
 void pure_snapshot_hold(PureSnapshot *);
 /* On any thread; the last reference frees it. */

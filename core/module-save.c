@@ -1,24 +1,46 @@
 #include "module-save.h"
 #include "module-text.h"
+#include "log.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* Stored forms. values: "PVS1", then per state {u8 type, u8 name length,
- * name, binary64 bits (little-endian)}. A list: "PLS2", u8 field count, per
- * field {u8 0 number | 1 text, u8 name length, name}, u64le the bytes of its
- * items, its items, then its journal's records to the end (module-list.h):
- * a save appends the records of the list's changes, and rewrites the items
- * with no records once the records outgrow them. "PLS1" (read, rewritten on
- * start) had no length, no records: its items reached the end. A text state:
- * its UTF-8 bytes. */
-static const unsigned char values_magic[4] = {'P', 'V', 'S', '1'}, list_magic[4] = {'P', 'L', 'S', '2'},
-                           list_magic_1[4] = {'P', 'L', 'S', '1'};
-/* Records a list keeps before its items are stored again: at least this,
- * else as many bytes as its items. So a save writes what changed, and the
- * list's stored bytes stay within twice its items (and this). */
-enum { JOURNAL_MIN = 1 << 16 };
+ * name, binary64 bits (little-endian)}. A text state: its UTF-8 bytes.
+ *
+ * A list lives in an image and in the log (core/log.h). Its image, the file
+ * image-NAME beside the store: "PLI1", u8 field count, per field {u8 0 number
+ * | 1 text, u8 name length, name}, u64le the number of the save it holds,
+ * then its items (module-list.h). The log has an entry for each save that
+ * changed lists: per list changed, {u8 name length, the name, u32le length,
+ * the records of its changes (module-list.h) in its image's fields}. A save
+ * with such an entry that also commits the tree (numbers, texts, links,
+ * documents) stores its number there as the state "seq": the entry counts
+ * only when the tree holds its number (or a later one), so both are kept or
+ * neither. A start
+ * reads each list's image and makes again the changes logged after the save
+ * it holds. A list gets an image before any change of it is logged (a new
+ * one, one stored before images, one whose record changed: in its new
+ * fields), and once its logged changes outgrow its items (and JOURNAL_MIN) a
+ * checkpoint writes its image anew from a snapshot; the log then lets go the
+ * entries every image holds. Before images a list was the tree's value
+ * "list-NAME": "PLS2" (the header, u64le the bytes of its items, its items,
+ * then records) or "PLS1" (the header, then items); a start reads it, writes
+ * its image and empties it. */
+static const unsigned char values_magic[4] = {'P', 'V', 'S', '1'}, image_magic[4] = {'P', 'L', 'I', '1'},
+                           list_magic[4] = {'P', 'L', 'S', '2'}, list_magic_1[4] = {'P', 'L', 'S', '1'};
+/* Logged changes a list keeps before its image is written again: at least
+ * JOURNAL_MIN, else as many bytes as its items; and whatever the lists, the
+ * log is kept within LOG_KEPT by writing the image that holds it back. */
+#ifdef PURE_STORE_TEST
+enum { JOURNAL_MIN = 256 };
+#define LOG_KEPT (UINT64_C(64) << 10)
+unsigned long pure_save_test_checkpoints;
+#else
+enum { JOURNAL_MIN = 1 << 20 };
+#define LOG_KEPT (UINT64_C(64) << 20)
+#endif
 /* links: "PLK1"; u8 outputs, each {u8 name length, name, u8 field count, the
  * fields' types, u64le last number} (the module's outputs, then those it
  * dropped, without fields); u16le sources, each {u8 length, the name, u64le
@@ -108,10 +130,14 @@ PURE_COLD PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint
     return result;
 }
 
-static size_t list_header(const PureModule *m, uint32_t record, uint64_t items, unsigned char *out) {
+/* ---- Lists: images and the log */
+
+enum { IMAGE_HEADER = 5 + PURE_RECORD_FIELDS * (2 + PURE_MODULE_NAME) + 8 };
+
+static size_t image_header(const PureModule *m, uint32_t record, uint64_t seq, unsigned char *out) {
     const PureRecord *r = &m->record[record];
     size_t at = 0;
-    memcpy(out, list_magic, 4);
+    memcpy(out, image_magic, 4);
     at = 4;
     out[at++] = (unsigned char)r->count;
     for (unsigned f = 0; f < r->count; ++f) {
@@ -121,91 +147,309 @@ static size_t list_header(const PureModule *m, uint32_t record, uint64_t items, 
         memcpy(out + at, name, strlen(name));
         at += strlen(name);
     }
-    for (unsigned b = 0; b < 8; ++b) out[at++] = (unsigned char)(items >> (8 * b));
-    return at;
+    return (size_t)(put_le(out + at, seq, 8) - out);
 }
 
-PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, const PureList *list, PureDraft *draft) {
-    size_t items = pure_list_size(list), length;
-    unsigned char header[5 + PURE_RECORD_FIELDS * (2 + PURE_MODULE_NAME) + 8], *bytes = malloc(sizeof(header) + items);
+static const char *directory_of(const PureApp *app) {
+    return app->data.directory ? app->data.directory(app->data.context) : NULL;
+}
+
+/* A list's changes as the log's entries had them at the start: the save, and
+ * the records, in the list's image's fields (valid while the log is open). */
+typedef struct { uint64_t seq; PureSpan records; } Logged;
+struct PureStartLog {
+    struct Named { char name[PURE_MODULE_NAME]; Logged *changes; size_t count, capacity; } *lists;
+    size_t count, capacity;
+    uint64_t tree, last; /* the tree's last save; the last entry that counts */
+    bool stopped, damaged;
+};
+
+static struct Named *named_list(struct PureStartLog *index, const char *name, size_t length, bool add) {
+    for (size_t i = 0; i < index->count; ++i)
+        if (strlen(index->lists[i].name) == length && !memcmp(index->lists[i].name, name, length)) return &index->lists[i];
+    if (!add) return NULL;
+    if (index->count == index->capacity) {
+        size_t capacity = index->capacity ? 2 * index->capacity : 8;
+        struct Named *grown = realloc(index->lists, capacity * sizeof(*grown));
+        if (!grown) return NULL;
+        index->lists = grown;
+        index->capacity = capacity;
+    }
+    struct Named *n = &index->lists[index->count++];
+    *n = (struct Named){{0}, NULL, 0, 0};
+    memcpy(n->name, name, length);
+    return n;
+}
+
+/* Each entry, while its save counts (a save that committed the tree counts
+ * when the tree holds its number): its lists' records, by list. */
+static bool index_entry(void *context, uint64_t seq, bool tree, PureSpan payload) {
+    struct PureStartLog *index = context;
+    if (tree && seq > index->tree) {
+        index->stopped = true;
+        return false;
+    }
+    for (size_t at = 0; at < payload.size;) {
+        size_t length = payload.data[at++];
+        if (!length || length >= PURE_MODULE_NAME || payload.size - at < length + 4) { index->damaged = true; return false; }
+        const char *name = (const char *)payload.data + at;
+        size_t records = (size_t)get_le(payload.data + at + length, 4);
+        at += length + 4;
+        if (records > payload.size - at) { index->damaged = true; return false; }
+        struct Named *list = named_list(index, name, length, true);
+        if (!list) { index->damaged = true; return false; }
+        if (list->count == list->capacity) {
+            size_t capacity = list->capacity ? 2 * list->capacity : 16;
+            Logged *grown = realloc(list->changes, capacity * sizeof(*grown));
+            if (!grown) { index->damaged = true; return false; }
+            list->changes = grown;
+            list->capacity = capacity;
+        }
+        list->changes[list->count++] = (Logged){seq, {payload.data + at, records}};
+        at += records;
+    }
+    index->last = seq;
+    return true;
+}
+
+void pure_save_close_start(PureApp *app) {
+    struct PureStartLog *index = app->start_log;
+    if (!index) return;
+    for (size_t i = 0; i < index->count; ++i) free(index->lists[i].changes);
+    free(index->lists);
+    free(index);
+    app->start_log = NULL;
+}
+
+PURE_COLD PureResult pure_save_open_log(PureApp *app) {
+    const char *directory = directory_of(app);
+    if (!directory) return PURE_OK;
+    PureResult result = pure_log_open(directory, &app->log);
+    if (result == PURE_OK) result = open_state(app, "", "seq", &app->stored_seq);
+    struct PureStartLog *index = result == PURE_OK ? calloc(1, sizeof(*index)) : NULL;
+    if (result == PURE_OK && !index) result = PURE_ALLOCATION;
+    if (result == PURE_OK && pure_draft_revision(app->stored_seq)) {
+        unsigned char *bytes;
+        size_t size;
+        result = read_whole(app->stored_seq, &bytes, &size);
+        if (result == PURE_OK) {
+            if (size == 8) index->tree = get_le(bytes, 8);
+            else result = PURE_STORE_ERROR;
+            free(bytes);
+        }
+    }
+    if (result == PURE_OK) result = pure_log_read(app->log, 0, index_entry, index);
+    if (result == PURE_OK && index->damaged) result = PURE_STORE_ERROR;
+    if (result != PURE_OK) {
+        app->start_log = index;
+        pure_save_close_start(app);
+        return result;
+    }
+    /* The entries after the last that counts are no longer the log's. */
+    if (index->stopped) pure_log_end(app->log, index->last);
+    app->seq = index->tree > index->last ? index->tree : index->last;
+    app->start_log = index;
+    return PURE_OK;
+}
+
+/* The log keeps the entries some image does not hold yet. */
+void pure_save_release(PureApp *app) {
+    if (!app->log) return;
+    uint64_t kept = app->seq + 1;
+    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i)
+        if (app->logged_since[i] && app->logged_since[i] < kept) kept = app->logged_since[i];
+    pure_log_release(app->log, kept - 1);
+}
+
+PureResult pure_save_image(PureApp *app, const PureModule *m, uint32_t state, const PureList *list) {
+    size_t items = pure_list_size(list);
+    unsigned char header[IMAGE_HEADER], *bytes = malloc(items ? items : 1);
     if (!bytes) return PURE_ALLOCATION;
-    length = list_header(m, m->state_ref[state], items, header);
-    memcpy(bytes, header, length);
-    pure_list_encode(list, bytes + length);
-    PureResult result = pure_draft_splice(draft, 0, pure_draft_size(draft), (PureSpan){bytes, length + items});
+    pure_list_encode(list, bytes);
+    PureSpan parts[2] = {{header, image_header(m, m->state_ref[state], app->seq, header)}, {bytes, items}};
+    PureResult result = pure_image_write(directory_of(app), m->state_names[state], parts, 2);
     free(bytes);
     return result;
 }
 
-PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint32_t state, PureList **out, PureDraft **draft,
-                               PureVersion *saved, size_t *journaled) {
+PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint32_t state, PureList **out,
+                                         PureDraft **legacy, PureSaved *saved) {
     uint32_t record = m->state_ref[state];
     const PureRecord *r = &m->record[record];
+    const char *name = m->state_names[state];
     *out = NULL;
-    PureResult result = open_state(app, "list-", m->state_names[state], draft);
-    if (result != PURE_OK) return result;
+    *legacy = NULL;
+    *saved = (PureSaved){0};
+    if (!directory_of(app)) return PURE_STORE_ERROR;
+    /* Its image, else what the tree kept before images. */
     unsigned char *bytes = NULL;
     size_t size = 0;
-    if (pure_draft_revision(*draft)) result = read_whole(*draft, &bytes, &size);
+    PureResult result = pure_image_read(directory_of(app), name, &bytes, &size);
+    bool image = result == PURE_OK;
+    if (result == PURE_NOT_FOUND) {
+        result = open_state(app, "list-", name, legacy);
+        if (result == PURE_OK && pure_draft_revision(*legacy) && pure_draft_size(*legacy))
+            result = read_whole(*legacy, &bytes, &size);
+    }
     /* The stored record: its fields' kinds and names. */
     char names[PURE_RECORD_FIELDS][PURE_MODULE_NAME] = {{0}};
     uint8_t text[PURE_RECORD_FIELDS] = {0};
     unsigned count = 0;
     size_t at = 0, items = 0;
-    bool stored = result == PURE_OK && bytes, first = stored && size >= 4 && !memcmp(bytes, list_magic_1, 4);
+    uint64_t holds = 0;
+    bool stored = result == PURE_OK && bytes, first = stored && !image && size >= 4 && !memcmp(bytes, list_magic_1, 4);
     if (stored) {
-        bool ok = size >= 5 && (first || !memcmp(bytes, list_magic, 4)) && bytes[4] <= PURE_RECORD_FIELDS;
+        const unsigned char *magic = image ? image_magic : first ? list_magic_1 : list_magic;
+        bool ok = size >= 5 && !memcmp(bytes, magic, 4) && bytes[4] <= PURE_RECORD_FIELDS;
         count = ok ? bytes[4] : 0;
         at = 5;
         for (unsigned f = 0; ok && f < count; ++f) {
             ok = named(bytes, size, &at, 0, &text[f], names[f]) && text[f] <= 1;
             for (unsigned k = 0; k < f; ++k) ok = ok && strcmp(names[k], names[f]);
         }
-        if (ok && !first) {
+        if (ok && image) { /* the save it holds, then its items */
+            ok = size - at >= 8;
+            holds = ok ? get_le(bytes + at, 8) : 0;
+            at += 8;
+            items = size - at;
+        } else if (ok && !first) {
             ok = size - at >= 8 && (items = (size_t)get_le(bytes + at, 8)) <= size - at - 8;
             at += 8;
         } else items = size - at;
         if (!ok) result = PURE_STORE_ERROR;
     }
-    /* The stored items, then the changes since they were stored. */
     PureList *from = NULL;
     if (result == PURE_OK && stored) {
         from = pure_list_new(count, text);
         result = from ? pure_list_read(from, bytes + at, items) : PURE_ALLOCATION;
-        if (result == PURE_OK) result = pure_list_replay(from, bytes + at + items, size - at - items);
+        if (result == PURE_OK && !image) result = pure_list_replay(from, bytes + at + items, size - at - items);
     }
-    *journaled = result == PURE_OK && stored ? size - at - items : 0;
     free(bytes);
+    /* Then the changes logged after the save it holds: only an image's
+     * list has any (one is written before any change of a list is logged). */
+    struct Named *logged = app->start_log ? named_list(app->start_log, name, strlen(name), false) : NULL;
+    for (size_t k = 0; result == PURE_OK && logged && k < logged->count; ++k) {
+        const Logged *change = &logged->changes[k];
+        if (change->seq <= holds) continue;
+        if (!image) result = PURE_STORE_ERROR;
+        else if ((result = pure_list_replay(from, change->records.data, change->records.size)) == PURE_OK) {
+            if (!saved->since) saved->since = change->seq;
+            saved->logged += change->records.size;
+        }
+    }
     bool same = stored && count == r->count;
     for (unsigned f = 0; same && f < count; ++f)
         same = text[f] == m->record_field_text[r->first + f] && !strcmp(names[f], m->record_field_names[r->first + f]);
-    if (result == PURE_OK && same && !first) {
+    if (result == PURE_OK && same && image) {
         *out = from;
-        *saved = pure_draft_version(*draft);
+        saved->image = holds;
         return PURE_OK;
     }
     if (result == PURE_OK) {
-        /* New, or stored with another record: its items move by field name. */
+        /* New, stored before images, or stored with another record (its items
+         * move by field name): its image is written before anything else of it. */
         const char *field_names[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < count; ++f) field_names[f] = names[f];
-        if (same) { /* stored in the earlier form: the same items, stored again */
+        if (same) {
             *out = from;
             from = NULL;
         } else if (from) result = pure_list_migrate(out, from, field_names, text, count, m, record);
         else if (!(*out = pure_list_new(r->count, m->record_field_text + r->first))) result = PURE_ALLOCATION;
     }
     pure_list_free(from);
-    *journaled = 0;
-    if (result == PURE_OK) result = pure_save_rewrite_list(m, state, *out, *draft);
     if (result != PURE_OK) {
         pure_list_free(*out);
-        pure_draft_close(*draft);
+        pure_draft_close(*legacy);
         *out = NULL;
-        *draft = NULL;
+        *legacy = NULL;
         return result;
     }
-    *saved = unsaved;
-    return PURE_OK;
+    *saved = (PureSaved){.rewrite = true};
+    /* What the tree kept goes: the image holds it now. */
+    if (*legacy && pure_draft_size(*legacy)) result = pure_draft_splice(*legacy, 0, pure_draft_size(*legacy), (PureSpan){0});
+    else {
+        pure_draft_close(*legacy);
+        *legacy = NULL;
+    }
+    return result;
+}
+
+/* ---- Checkpoints */
+
+struct PureCheckpoint {
+    PureSnapshot *snapshot;
+    uint32_t state;
+    char name[PURE_MODULE_NAME], *directory;
+    unsigned char header[IMAGE_HEADER];
+    size_t header_size, logged;
+    uint64_t seq, since;
+};
+
+void pure_app_background_checkpoints(PureApp *app, bool background) { app->background_checkpoints = background; }
+
+PureCheckpoint *pure_app_checkpoint(PureApp *app) {
+    const PureModule *m = app->module;
+    if (!app->log || app->checkpoint || app->open || app->uncertain || app->reading) return NULL;
+    /* A list whose logged changes outgrew its items, or, when the log grew
+     * past LOG_KEPT, the one that holds it back most. */
+    int due = -1, oldest = -1;
+    for (uint32_t i = 0; i < m->states && due < 0; ++i) {
+        if (m->state_type[i] != PURE_STATE_LIST || !app->logged_since[i]) continue;
+        size_t items = pure_list_size(app->lists[i]);
+        if (app->logged[i] > (items > JOURNAL_MIN ? items : JOURNAL_MIN)) due = (int)i;
+        else if (oldest < 0 || app->logged_since[i] < app->logged_since[oldest]) oldest = (int)i;
+    }
+    int pick = due >= 0 ? due : pure_log_bytes(app->log) > LOG_KEPT ? oldest : -1;
+    if (pick < 0) return NULL;
+    PureCheckpoint *c = calloc(1, sizeof(*c));
+    const char *directory = directory_of(app);
+    size_t length = strlen(directory) + 1;
+    if (c && (c->directory = malloc(length))) memcpy(c->directory, directory, length);
+    if (!c || !c->directory || !(c->snapshot = pure_app_snapshot(app))) {
+        if (c) free(c->directory);
+        free(c);
+        return NULL;
+    }
+    c->state = (uint32_t)pick;
+    snprintf(c->name, sizeof(c->name), "%s", m->state_names[pick]);
+    c->seq = app->seq;
+    c->header_size = image_header(m, m->state_ref[pick], c->seq, c->header);
+    c->logged = app->logged[pick];
+    c->since = app->logged_since[pick];
+    app->checkpoint = c;
+    return c;
+}
+
+PureResult pure_checkpoint_write(PureCheckpoint *c) {
+    const PureList *list = pure_snapshot_list(c->snapshot, c->state);
+    size_t items = pure_list_size(list);
+    unsigned char *bytes = malloc(items ? items : 1);
+    if (!bytes) return PURE_ALLOCATION;
+    pure_list_encode(list, bytes);
+    PureSpan parts[2] = {{c->header, c->header_size}, {bytes, items}};
+    PureResult result = pure_image_write(c->directory, c->name, parts, 2);
+    free(bytes);
+    return result;
+}
+
+void pure_app_checkpointed(PureApp *app, PureCheckpoint *c, PureResult result) {
+    if (!c) return;
+    uint32_t i = c->state;
+    if (result == PURE_OK && app->checkpoint == c) {
+        /* The image holds every change logged up to its save: those logged
+         * since stay (counted from the save after it). */
+        app->image_seq[i] = c->seq;
+        app->logged[i] -= c->logged;
+        app->logged_since[i] = app->logged[i] ? c->seq + 1 : 0;
+        pure_save_release(app);
+#ifdef PURE_STORE_TEST
+        ++pure_save_test_checkpoints;
+#endif
+    }
+    if (app->checkpoint == c) app->checkpoint = NULL;
+    pure_snapshot_release(c->snapshot);
+    free(c->directory);
+    free(c);
 }
 
 static bool scalar(uint8_t type) {
@@ -422,21 +666,26 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m) {
     return result;
 }
 
-/* After a save of lists (the first count of states): kept, each list's
- * changes are stored (its journal empties), or, failed, each draft is as it
- * was; the holds the save took go either way. */
-static void settle_lists(PureApp *app, PureDraft *const *drafts, const uint32_t *states, size_t count,
-                         const PureVersion *before, const size_t *journaled, bool saved) {
-    for (size_t k = 0; k < count; ++k) {
-        uint32_t i = states[k];
-        if (app->module->state_type[i] != PURE_STATE_LIST) continue;
-        if (!saved) pure_draft_restore(drafts[k], before[i]);
-        else {
-            pure_list_forget(app->lists[i], 0);
-            app->journaled[i] = journaled[i];
-        }
-        pure_draft_hold(drafts[k], false);
+/* The lists' changes since the last save, as one log entry: per list changed,
+ * its name and its records. NULL with size 0 when no list changed. */
+static unsigned char *list_changes(const PureApp *app, size_t *size) {
+    const PureModule *m = app->module;
+    *size = 0;
+    for (uint32_t i = 0; i < m->states; ++i)
+        if (m->state_type[i] == PURE_STATE_LIST && app->lists[i] && pure_list_changes(app->lists[i]).size)
+            *size += 1 + strlen(m->state_names[i]) + 4 + pure_list_changes(app->lists[i]).size;
+    unsigned char *payload = *size ? malloc(*size) : NULL, *at = payload;
+    for (uint32_t i = 0; payload && i < m->states; ++i) {
+        PureSpan changes = m->state_type[i] == PURE_STATE_LIST && app->lists[i] ? pure_list_changes(app->lists[i]) : (PureSpan){0};
+        if (!changes.size) continue;
+        size_t length = strlen(m->state_names[i]);
+        *at++ = (unsigned char)length;
+        memcpy(at, m->state_names[i], length);
+        at = put_le(at + length, changes.size, 4);
+        memcpy(at, changes.data, changes.size);
+        at += changes.size;
     }
+    return payload;
 }
 
 PureResult pure_save_commit(PureApp *app, const double *values, void *const *documents, size_t document_count,
@@ -448,103 +697,103 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
             result = app->data.commit(app->data.context, documents[i], &revisions[i]);
         return result;
     }
+    /* A save that may or may not have been stored: until the app starts again
+     * from what the store has, no save follows it. */
+    if (app->uncertain) return PURE_CONFLICT;
     const PureModule *m = app->module;
-    PureDraft *drafts[2 * PURE_MODULE_STATES + 2];
-    uint32_t states[2 * PURE_MODULE_STATES + 2];
+    PureDraft *drafts[2 * PURE_MODULE_STATES + 3];
+    uint32_t states[2 * PURE_MODULE_STATES + 3];
     size_t count = 0;
     for (uint32_t i = 0; i < m->states; ++i) {
         PureDraft *draft = m->state_type[i] == PURE_STATE_TEXT ? app->texts[i] :
                            m->state_type[i] == PURE_STATE_LIST ? app->list_drafts[i] : NULL;
-        if (draft && (!same_version(pure_draft_version(draft), app->saved[i]) ||
-                      (m->state_type[i] == PURE_STATE_LIST && pure_list_changes(app->lists[i]).size))) {
+        if (draft && !same_version(pure_draft_version(draft), app->saved[i])) {
             states[count] = i;
             drafts[count++] = draft;
         }
     }
-    /* A list's changes go after its stored records, or, once the records
-     * would outgrow its items, the items are stored again with none. */
-    PureVersion lists_before[PURE_MODULE_STATES];
-    size_t journaled[PURE_MODULE_STATES];
-    for (size_t k = 0; k < count; ++k) {
-        uint32_t i = states[k];
-        if (m->state_type[i] != PURE_STATE_LIST) continue;
-        PureSpan changes = pure_list_changes(app->lists[i]);
-        size_t items = pure_list_size(app->lists[i]);
-        lists_before[i] = pure_draft_version(drafts[k]);
-        pure_draft_hold(drafts[k], true);
-        PureResult result = PURE_OK;
-        if (!changes.size) journaled[i] = app->journaled[i];
-        else if (app->journaled[i] + changes.size > (items > JOURNAL_MIN ? items : JOURNAL_MIN)) {
-            result = pure_save_rewrite_list(m, i, app->lists[i], drafts[k]);
-            journaled[i] = 0;
-        } else {
-            result = pure_draft_splice(drafts[k], pure_draft_size(drafts[k]), 0, changes);
-            journaled[i] = app->journaled[i] + changes.size;
-        }
-        if (result != PURE_OK) {
-            settle_lists(app, drafts, states, k + 1, lists_before, journaled, false);
-            return result;
-        }
-    }
-    size_t list_count = count;
     /* Numbers, cursors and indices: stored again only when their bytes change. */
-    PureVersion values_before = {0, 0};
-    bool values_changed = false;
+    PureVersion values_before = {0, 0}, links_before = {0, 0}, seq_before = {0, 0};
+    bool values_changed = false, links_written = false, seq_written = false;
+    PureResult result = PURE_OK;
     if (app->stored_values) {
         unsigned char encoded[VALUES_BYTES], *stored;
         size_t length = encode_values(m, values, encoded), size;
-        PureResult result = read_whole(app->stored_values, &stored, &size);
-        if (result != PURE_OK) {
-            settle_lists(app, drafts, states, list_count, lists_before, journaled, false);
-            return result;
+        result = read_whole(app->stored_values, &stored, &size);
+        if (result == PURE_OK) {
+            values_changed = size != length || memcmp(stored, encoded, length);
+            free(stored);
         }
-        values_changed = size != length || memcmp(stored, encoded, length);
-        free(stored);
         if (values_changed) {
             values_before = pure_draft_version(app->stored_values);
             pure_draft_hold(app->stored_values, true);
             result = pure_draft_splice(app->stored_values, 0, size, (PureSpan){encoded, length});
-            if (result != PURE_OK) {
-                pure_draft_hold(app->stored_values, false);
-                settle_lists(app, drafts, states, list_count, lists_before, journaled, false);
-                return result;
-            }
             states[count] = UINT32_MAX;
             drafts[count++] = app->stored_values;
         }
     }
     /* The links, written whole when they changed. */
-    PureVersion links_before = {0, 0};
-    bool links_written = false;
-    if (app->links_changed) {
-        PureResult result = app->stored_links ? PURE_OK : open_state(app, "", "links", &app->stored_links);
+    if (result == PURE_OK && app->links_changed) {
+        result = app->stored_links ? PURE_OK : open_state(app, "", "links", &app->stored_links);
         size_t length;
         unsigned char *encoded = result == PURE_OK ? encode_links(app, &length) : NULL;
         if (result == PURE_OK && !encoded) result = PURE_ALLOCATION;
         if (result == PURE_OK) {
             links_before = pure_draft_version(app->stored_links);
             pure_draft_hold(app->stored_links, true);
+            links_written = true;
             result = pure_draft_splice(app->stored_links, 0, pure_draft_size(app->stored_links), (PureSpan){encoded, length});
-            if (result != PURE_OK) pure_draft_hold(app->stored_links, false);
+            states[count] = UINT32_MAX;
+            drafts[count++] = app->stored_links;
         }
         free(encoded);
-        if (result != PURE_OK) {
-            if (values_changed) {
-                pure_draft_restore(app->stored_values, values_before);
-                pure_draft_hold(app->stored_values, false);
-            }
-            settle_lists(app, drafts, states, list_count, lists_before, journaled, false);
-            return result;
-        }
-        links_written = true;
-        states[count] = UINT32_MAX;
-        drafts[count++] = app->stored_links;
     }
-    if (!count && !document_count) return PURE_OK;
-    PureResult result = app->data.save(app->data.context, documents, document_count, drafts, count, revisions);
-    for (size_t k = 0; result == PURE_OK && k < count; ++k)
-        if (states[k] != UINT32_MAX) app->saved[states[k]] = pure_draft_version(drafts[k]);
-    settle_lists(app, drafts, states, list_count, lists_before, journaled, result == PURE_OK);
+    /* The lists' changes go to the log, one entry a save. A save that also
+     * commits the tree stores its number there: its entry counts only with it. */
+    size_t payload_size = 0;
+    unsigned char *payload = result == PURE_OK ? list_changes(app, &payload_size) : NULL;
+    if (payload_size && !payload) result = PURE_ALLOCATION;
+    bool tree = count || document_count;
+    uint64_t seq = app->seq + 1;
+    if (result == PURE_OK && tree && payload_size && app->log) {
+        result = app->stored_seq ? PURE_OK : open_state(app, "", "seq", &app->stored_seq);
+        if (result == PURE_OK) {
+            unsigned char number[8];
+            put_le(number, seq, 8);
+            seq_before = pure_draft_version(app->stored_seq);
+            pure_draft_hold(app->stored_seq, true);
+            seq_written = true;
+            result = pure_draft_splice(app->stored_seq, 0, pure_draft_size(app->stored_seq), (PureSpan){number, 8});
+            states[count] = UINT32_MAX;
+            drafts[count++] = app->stored_seq;
+        }
+    }
+    if (result == PURE_OK && payload_size) {
+        result = app->log ? pure_log_append(app->log, seq, tree, (PureSpan){payload, payload_size}) : PURE_STORE_ERROR;
+        if (result == PURE_UNCERTAIN) app->uncertain = true;
+    }
+    free(payload);
+    if (result == PURE_OK && tree) {
+        result = app->data.save(app->data.context, documents, document_count, drafts, count, revisions);
+        /* The logged entry is on the device: taken back when the tree's commit
+         * failed, or, when that may yet be stored, no save follows. */
+        if (result != PURE_OK && payload_size) {
+            if (result == PURE_UNCERTAIN) app->uncertain = true;
+            else pure_log_retract(app->log);
+        }
+    }
+    if (result == PURE_OK) {
+        for (size_t k = 0; k < count; ++k)
+            if (states[k] != UINT32_MAX) app->saved[states[k]] = pure_draft_version(drafts[k]);
+        for (uint32_t i = 0; i < m->states; ++i) {
+            PureSpan changes = m->state_type[i] == PURE_STATE_LIST && app->lists[i] ? pure_list_changes(app->lists[i]) : (PureSpan){0};
+            if (!changes.size) continue;
+            app->logged[i] += changes.size;
+            if (!app->logged_since[i]) app->logged_since[i] = seq;
+            pure_list_forget(app->lists[i], 0);
+        }
+        if (tree || payload_size) app->seq = seq;
+    }
     if (values_changed) {
         if (result != PURE_OK) pure_draft_restore(app->stored_values, values_before);
         pure_draft_hold(app->stored_values, false);
@@ -552,6 +801,10 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
     if (links_written) {
         if (result != PURE_OK) pure_draft_restore(app->stored_links, links_before);
         pure_draft_hold(app->stored_links, false);
+    }
+    if (seq_written) {
+        if (result != PURE_OK) pure_draft_restore(app->stored_seq, seq_before);
+        pure_draft_hold(app->stored_seq, false);
     }
     return result;
 }

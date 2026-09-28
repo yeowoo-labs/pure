@@ -4,6 +4,7 @@
 #include "module-text.h"
 #include "store.h"
 #include <dirent.h>
+#include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -506,7 +507,7 @@ static void fake_close(void *context, void *document) {
 }
 
 static PureData fake_data(Memory *m) {
-    return (PureData){m, fake_open, fake_version, fake_read, fake_splice, fake_commit, fake_close, NULL, NULL};
+    return (PureData){m, fake_open, fake_version, fake_read, fake_splice, fake_commit, fake_close, NULL, NULL, NULL};
 }
 
 typedef struct { unsigned char bytes[256]; size_t size, spans; } Collected;
@@ -1725,6 +1726,25 @@ static void stored_crashes(void) {
         CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected);
         pure_app_stop(&app);
     }
+    /* The list's change goes to the log before the tree commits: dying before
+     * or after writing it there, the save's entry does not count (the tree
+     * has not its number), and all three are as before. */
+    for (int stage = PURE_LOG_BEFORE_WRITE; stage <= PURE_LOG_BEFORE_SYNC; ++stage) {
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (!child) {
+            PureApp doomed;
+            if (pure_app_start(&doomed, &module_a, pure_tree_data(path)) != PURE_OK) _exit(1);
+            crash = 1;
+            fail_stage = stage;
+            pure_app_input(&doomed, 0, PURE_EDGE_DOWN);
+            _exit(0);
+        }
+        int status;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 77);
+        CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected);
+        pure_app_stop(&app);
+    }
     /* A failed commit leaves the app and the store as they were; after an
      * uncertain one the app no longer matches the store and its events fail
      * until it starts again, from what the store has. */
@@ -1739,6 +1759,21 @@ static void stored_crashes(void) {
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected + 1);
     CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && consistent(&app) == expected + 2);
+    /* The log refusing its entry fails the save and changes nothing; the log
+     * failing its sync leaves it uncertain: no save follows until the app
+     * starts again, and then the entry does not count (the tree has not its
+     * number). */
+    fail_stage = PURE_LOG_BEFORE_WRITE;
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_STORE_ERROR && consistent(&app) == expected + 2);
+    fail_stage = PURE_LOG_BEFORE_SYNC;
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_UNCERTAIN && consistent(&app) == expected + 2);
+    fail_stage = -1;
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_CONFLICT);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected + 2);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && consistent(&app) == expected + 3);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected + 3);
     pure_app_stop(&app);
     remove_store(path);
 }
@@ -1853,17 +1888,24 @@ static void stored_migration(void) {
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
     CHECK(app.values[0] == 9 && app.values[2] == 0 && app.values[4] == 0);
     pure_app_stop(&app);
-    /* Damaged stored lists and texts are refused, not replaced. */
-    const char *damaged[] = {"list-tasks", "text-note"};
-    for (unsigned k = 0; k < 2; ++k) {
-        PureDraft *draft;
-        CHECK(pure_state_open(path, damaged[k], &draft) == PURE_OK);
-        CHECK(pure_draft_splice(draft, 0, 0, (PureSpan){(const unsigned char *)"\xff", 1}) == PURE_OK);
-        CHECK(pure_draft_commit(draft, &revision) == PURE_OK);
-        CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_STORE_ERROR);
-        CHECK(pure_draft_splice(draft, 0, 1, (PureSpan){0}) == PURE_OK && pure_draft_commit(draft, &revision) == PURE_OK);
-        pure_draft_close(draft);
-    }
+    /* Damaged stored lists (their images) and texts are refused, not replaced. */
+    char image[128];
+    snprintf(image, sizeof(image), "%s/image-tasks", path);
+    int fd = open(image, O_RDWR);
+    unsigned char byte;
+    CHECK(fd >= 0 && pread(fd, &byte, 1, 20) == 1);
+    byte ^= 0x40;
+    CHECK(pwrite(fd, &byte, 1, 20) == 1);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_STORE_ERROR);
+    byte ^= 0x40;
+    CHECK(pwrite(fd, &byte, 1, 20) == 1 && !close(fd));
+    PureDraft *draft;
+    CHECK(pure_state_open(path, "text-note", &draft) == PURE_OK);
+    CHECK(pure_draft_splice(draft, 0, 0, (PureSpan){(const unsigned char *)"\xff", 1}) == PURE_OK);
+    CHECK(pure_draft_commit(draft, &revision) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_STORE_ERROR);
+    CHECK(pure_draft_splice(draft, 0, 1, (PureSpan){0}) == PURE_OK && pure_draft_commit(draft, &revision) == PURE_OK);
+    pure_draft_close(draft);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
     CHECK(pure_list_count(app.lists[TASKS]) == 3 && pure_draft_size(app.texts[NOTE]) == 3 && app.values[0] == 9);
     pure_app_stop(&app);
@@ -1871,10 +1913,14 @@ static void stored_migration(void) {
     remove_store(path);
 }
 
+extern unsigned long pure_save_test_checkpoints;
+
 static void stored_states(void) {
     static const char *const list_words[] = {"a", "\xea\xb0\x80", "", "\n", "\xf0\x9f\x98\x80"};
     static const char *const text_words[] = {"a", "\xea\xb0\x80", "\n", "\xf0\x9f\x98\x80", "xy\nz", ""};
+    unsigned long checkpoints = pure_save_test_checkpoints;
     stored_equivalence(list_spec, list_words, LEN(list_words), 0x9e3779b9u);
+    CHECK(pure_save_test_checkpoints > checkpoints + 5); /* images written again as the log grew */
     stored_equivalence(text_spec, text_words, LEN(text_words), 0x7f4a7c15u);
     stored_crashes();
     stored_frames();
@@ -3468,8 +3514,9 @@ static void snapshots_kept(Spec spec, const Spec *other, void (*event)(PureApp *
         event(&app, &seed);
         if (!app.open) continue;
         CHECK(!pure_app_snapshot(&app));
-        fail_stage = PURE_AFTER_HEADER;
-        saved = pure_app_save(&app); /* OK when the event changed nothing */
+        /* Its lists' changes fail before the log has them, the rest before the tree does. */
+        fail_stage = tries % 2 ? PURE_AFTER_HEADER : PURE_LOG_BEFORE_WRITE;
+        saved = pure_app_save(&app); /* OK when the event changed nothing the stage stores */
         fail_stage = -1;
     }
     CHECK(saved == PURE_STORE_ERROR);

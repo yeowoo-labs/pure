@@ -58,6 +58,10 @@ static PureResult save(void *context, void *const *documents, size_t document_co
     return result;
 }
 
+static const char *path_directory(void *context) { return context; }
+
+static const char *handle_directory(void *context) { return pure_store_path(context); }
+
 /* Through a store handle: documents and states share its mapping. */
 static PureResult open_handle_document(void *context, uint32_t collection, const char *key, void **document,
                                        int64_t *revision) {
@@ -78,11 +82,11 @@ static PureResult handle_state(void *context, const char *name, PureDraft **out)
 PureData pure_store_data(PureStore *store) {
     return (PureData){.context = store, .open = open_handle_document, .version = version, .read = read,
                       .splice = splice, .commit = commit, .close = close_document, .state = handle_state,
-                      .save = save};
+                      .save = save, .directory = handle_directory};
 }
 
 PureData pure_tree_data(const char *path) {
     return (PureData){.context = (void *)path, .open = open_document, .version = version,
                       .read = read, .splice = splice, .commit = commit, .close = close_document,
-                      .state = state, .save = save};
+                      .state = state, .save = save, .directory = path_directory};
 }

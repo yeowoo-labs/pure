@@ -1,5 +1,6 @@
 #include "module.h"
 #include "module-save.h"
+#include "log.h"
 #include "module-text.h"
 #include <math.h>
 #include <stdio.h>
@@ -2439,7 +2440,7 @@ static void open_burst(PureApp *app) {
             pure_draft_hold(app->texts[i], true);
             app->durable_texts[i] = pure_draft_version(app->texts[i]);
         }
-        if (app->list_drafts[i]) app->durable_lists[i] = pure_list_changes(app->lists[i]).size;
+        if (app->lists[i]) app->durable_lists[i] = pure_list_changes(app->lists[i]).size;
     }
     app->open = true;
 }
@@ -2459,7 +2460,7 @@ static void close_burst(PureApp *app, bool keep) {
             if (!keep) pure_draft_restore(app->texts[i], app->durable_texts[i]);
             pure_draft_hold(app->texts[i], false);
         }
-        if (app->list_drafts[i] && !keep) pure_list_forget(app->lists[i], app->durable_lists[i]);
+        if (app->lists[i] && !keep) pure_list_forget(app->lists[i], app->durable_lists[i]);
     }
     if (keep) pure_undo_commit(&app->undo);
     else {
@@ -2512,6 +2513,9 @@ PureResult pure_app_save(PureApp *app) {
     PureResult result = pure_save_commit(app, app->values, documents, count, revisions);
     settle_links(app, result == PURE_OK);
     close_burst(app, result == PURE_OK);
+    /* Images due are written now, unless the host writes them on another thread. */
+    for (PureCheckpoint *c; result == PURE_OK && !app->background_checkpoints && (c = pure_app_checkpoint(app));)
+        pure_app_checkpointed(app, c, pure_checkpoint_write(c));
     return result;
 }
 
@@ -2537,6 +2541,8 @@ struct PureSnapshot {
 };
 
 void pure_snapshot_hold(PureSnapshot *snapshot) { __atomic_add_fetch(&snapshot->refs, 1, __ATOMIC_RELAXED); }
+
+const PureList *pure_snapshot_list(const PureSnapshot *snapshot, uint32_t state) { return snapshot->lists[state]; }
 
 void pure_snapshot_release(PureSnapshot *snapshot) {
     while (snapshot && !__atomic_sub_fetch(&snapshot->refs, 1, __ATOMIC_ACQ_REL)) {
@@ -2571,6 +2577,9 @@ void pure_app_stop(PureApp *app) {
     free(app->heard);
     free(app->carried);
     pure_draft_close(app->stored_links);
+    pure_draft_close(app->stored_seq);
+    pure_save_close_start(app);
+    pure_log_close(app->log);
     free(app->pending);
     pure_undo_free(&app->undo);
     for (unsigned i = 0; i < app->row_tables; ++i) free(app->rows[i].items);
@@ -2595,7 +2604,7 @@ static void mark_event(PureApp *app, Mark *mark) {
     open_burst(app);
     for (uint32_t i = 0; i < app->module->states; ++i) {
         if (app->texts[i]) mark->texts[i] = pure_draft_version(app->texts[i]);
-        if (app->list_drafts[i]) mark->lists[i] = pure_list_changes(app->lists[i]).size;
+        if (app->lists[i]) mark->lists[i] = pure_list_changes(app->lists[i]).size;
     }
     mark->undo = app->undo.count;
     mark->sent = app->sent_count;
@@ -2605,7 +2614,7 @@ static void mark_event(PureApp *app, Mark *mark) {
 static void undo_event(PureApp *app, const Mark *mark) {
     for (uint32_t i = 0; i < app->module->states; ++i) {
         if (app->texts[i]) pure_draft_restore(app->texts[i], mark->texts[i]);
-        if (app->list_drafts[i]) pure_list_forget(app->lists[i], mark->lists[i]);
+        if (app->lists[i]) pure_list_forget(app->lists[i], mark->lists[i]);
     }
     pure_undo_rollback(&app->undo, mark->undo);
     drop_sent(app, mark->sent);
@@ -3233,15 +3242,18 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     double values[PURE_MODULE_STATES] = {0};
     PureDraft *texts[PURE_MODULE_STATES] = {0}, *list_drafts[PURE_MODULE_STATES] = {0};
     PureList *lists[PURE_MODULE_STATES] = {0};
-    PureVersion saved[PURE_MODULE_STATES] = {{0, 0}}, before[PURE_MODULE_STATES] = {{0, 0}};
-    size_t journaled[PURE_MODULE_STATES] = {0};
+    PureVersion saved[PURE_MODULE_STATES] = {{0, 0}};
+    PureSaved listed[PURE_MODULE_STATES] = {{0}};
     int kept[PURE_MODULE_STATES];
     bool rewrite[PURE_MODULE_STATES] = {false};
-    PureResult result = PURE_OK;
+    /* Lists are stored where the host names a directory for them (module-save.c). */
+    bool lists_stored = stored && app->data.directory && app->data.directory(app->data.context);
+    if (old && app->checkpoint) return PURE_CONFLICT; /* the host has a checkpoint of the running module out */
+    PureResult result = !old && lists_stored ? pure_save_open_log(app) : PURE_OK;
     for (uint32_t i = 0; i < module->states; ++i) {
         int previous = old ? pure_module_state(old, module->state_names[i]) : -1;
         kept[i] = previous >= 0 && old->state_type[previous] == module->state_type[i] ? previous : -1;
-        if (kept[i] >= 0) saved[i] = app->saved[kept[i]], journaled[i] = app->journaled[kept[i]];
+        if (kept[i] >= 0) saved[i] = app->saved[kept[i]];
         if (module->state_type[i] == PURE_STATE_TEXT) {
             if (kept[i] >= 0) texts[i] = app->texts[kept[i]];
             else if (result == PURE_OK)
@@ -3249,13 +3261,17 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
                          new_text(&texts[i], module, module->state_ref[i]);
         } else if (module->state_type[i] == PURE_STATE_LIST) {
             if (result != PURE_OK) continue;
+            bool rows = module->state_flags[i] & PURE_LIST_ROWS >> 8; /* rows are never stored */
             if (kept[i] >= 0) {
                 result = keep_list(&lists[i], app->lists[kept[i]], old, old->state_ref[kept[i]], module,
                                    module->state_ref[i]);
                 list_drafts[i] = app->list_drafts[kept[i]];
-                rewrite[i] = result == PURE_OK && list_drafts[i] && lists[i] != app->lists[kept[i]];
-            } else if (stored && !(module->state_flags[i] & PURE_LIST_ROWS >> 8)) { /* rows are never stored */
-                result = pure_save_open_list(app, module, i, &lists[i], &list_drafts[i], &saved[i], &journaled[i]);
+                listed[i] = (PureSaved){app->image_seq[kept[i]], app->logged_since[kept[i]], app->logged[kept[i]], false};
+                /* Its record changed: its image, in the new fields, holds it before any change is logged. */
+                rewrite[i] = result == PURE_OK && lists_stored && !rows && lists[i] != app->lists[kept[i]];
+            } else if (lists_stored && !rows) {
+                result = pure_save_open_list(app, module, i, &lists[i], &list_drafts[i], &listed[i]);
+                rewrite[i] = result == PURE_OK && listed[i].rewrite;
             } else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
         } else values[i] = kept[i] >= 0 ? app->values[kept[i]] : module->initial[i];
     }
@@ -3276,7 +3292,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         }
         if (kept[i] < 0 || lists[i] != app->lists[kept[i]]) pure_list_free(lists[i]);
         lists[i] = sorted;
-        rewrite[i] = list_drafts[i] != NULL;
+        rewrite[i] = lists_stored && !(module->state_flags[i] & PURE_LIST_ROWS >> 8);
     }
     /* A cursor or index keeps its position only while its text or list is the
      * one it belonged to. */
@@ -3295,23 +3311,22 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
             values[i] = (double)moved[list][(size_t)values[i]];
     }
     for (uint32_t i = 0; i < module->states; ++i) free(moved[i]);
-    /* Store the lists whose record or order changed last, so that a failure
-     * can put every draft back as it was. */
-    for (uint32_t i = 0; i < module->states; ++i)
-        if (rewrite[i]) {
-            before[i] = pure_draft_version(list_drafts[i]);
-            pure_draft_hold(list_drafts[i], true);
-        }
+    if (!old) pure_save_close_start(app);
+    /* Images last, once nothing else can fail: first of the lists the new
+     * module drops whose changes are only logged (the log lets them go),
+     * then of the lists that need one. An image written cannot be taken
+     * back: a running app that fails here saves nothing more until it starts
+     * again, from what the store has. */
+    bool imaged = result == PURE_OK;
+    for (uint32_t j = 0; result == PURE_OK && old && j < old->states; ++j) {
+        bool dropped = old->state_type[j] == PURE_STATE_LIST && app->logged_since[j];
+        for (uint32_t i = 0; dropped && i < module->states; ++i) dropped = kept[i] != (int)j;
+        if (dropped) result = pure_save_image(app, old, j, app->lists[j]);
+    }
     for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i)
-        if (rewrite[i]) {
-            result = pure_save_rewrite_list(module, i, lists[i], list_drafts[i]);
-            journaled[i] = 0;
-        }
-    for (uint32_t i = 0; i < module->states; ++i)
-        if (rewrite[i]) {
-            if (result != PURE_OK) pure_draft_restore(list_drafts[i], before[i]);
-            pure_draft_hold(list_drafts[i], false);
-        }
+        if (rewrite[i] && (result = pure_save_image(app, module, i, lists[i])) == PURE_OK)
+            listed[i] = (PureSaved){.image = app->seq};
+    if (imaged && result != PURE_OK && old) app->uncertain = true;
     if (result != PURE_OK) {
         for (uint32_t i = 0; i < module->states; ++i) {
             if (kept[i] >= 0) {
@@ -3340,10 +3355,17 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     memcpy(app->texts, texts, sizeof(texts));
     memcpy(app->lists, lists, sizeof(lists));
     memcpy(app->list_drafts, list_drafts, sizeof(list_drafts));
-    memcpy(app->journaled, journaled, sizeof(journaled));
     memcpy(app->saved, saved, sizeof(saved));
+    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
+        app->image_seq[i] = listed[i].image;
+        app->logged_since[i] = listed[i].since;
+        app->logged[i] = listed[i].logged;
+    }
+    pure_save_release(app);
     for (uint32_t i = 0; i < module->states; ++i) {
-        if (list_drafts[i]) pure_list_journal(lists[i], true); /* a stored list's changes are recorded from now on */
+        /* A stored list's changes are recorded from now on. */
+        if (lists_stored && module->state_type[i] == PURE_STATE_LIST && !(module->state_flags[i] & PURE_LIST_ROWS >> 8))
+            pure_list_journal(lists[i], true);
         /* Without memory for its keys a keyed list is still searched, only slower. */
         if (module->state_type[i] == PURE_STATE_LIST)
             (void)pure_list_keyed(lists[i], module->state_key[i] ? (int)module->state_key[i] - 1 : -1);

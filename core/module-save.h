@@ -4,25 +4,33 @@
 
 /* App states a data host keeps (docs/design/008-module-format.md), internal
  * to the module executor. Each text state is a stored draft, each list state
- * a stored draft of its items and the records of its changes since, and
- * numbers, cursors and indices are one stored value by name. A save
- * publishes what changed, all or nothing. */
+ * an image and the changes logged since, and numbers, cursors and indices
+ * are one stored value by name. A save publishes what changed, all or
+ * nothing. */
 
 bool pure_save_enabled(const PureApp *);
 /* A text state of m: its stored value, or its initial constant when none. */
 PureResult pure_save_open_text(PureApp *, const PureModule *m, uint32_t state, PureDraft **out, PureVersion *saved);
-/* A list state of m: its stored items with its stored changes made again,
- * fields moved by name when the stored record differs from m's; journaled is
- * the bytes of the records stored after its items. */
-PureResult pure_save_open_list(PureApp *, const PureModule *m, uint32_t state, PureList **out, PureDraft **draft,
-                               PureVersion *saved, size_t *journaled);
+/* Stored lists (module-save.c): at a start, the log opened and read for the
+ * lists (pure_save_open_log), each list opened from its image with its
+ * logged changes made again (pure_save_open_list; saved says what its image
+ * holds, or that it needs one: pure_save_image writes it, holding the last
+ * save), then the start's reading let go (pure_save_close_start). */
+typedef struct { uint64_t image, since; size_t logged; bool rewrite; } PureSaved;
+PureResult pure_save_open_log(PureApp *);
+PureResult pure_save_open_list(PureApp *, const PureModule *m, uint32_t state, PureList **out, PureDraft **legacy,
+                               PureSaved *saved);
+PureResult pure_save_image(PureApp *, const PureModule *m, uint32_t state, const PureList *list);
+void pure_save_close_start(PureApp *);
+/* The log keeps only the entries some list's image does not hold yet. */
+void pure_save_release(PureApp *);
+/* A snapshot's list (module.c). */
+const PureList *pure_snapshot_list(const PureSnapshot *, uint32_t state);
 /* Open the stored numbers, cursors and indices, and put each stored one of the
  * same name and kind that still fits into values, for the states of m that
  * kept marks as new (-1); texts and lists are m's. */
 PureResult pure_save_open_values(PureApp *, const PureModule *m, double *values, const int *kept,
                                  PureDraft *const *texts, PureList *const *lists);
-/* Store a list in its draft anew: header and items, no records. */
-PureResult pure_save_rewrite_list(const PureModule *m, uint32_t state, const PureList *list, PureDraft *draft);
 /* The stored links of a starting app (module.h, PureApp); CONFLICT when an
  * output with sends left is missing or has other fields. */
 PureResult pure_save_open_links(PureApp *, const PureModule *m);

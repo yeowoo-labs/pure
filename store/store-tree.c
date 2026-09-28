@@ -1418,6 +1418,8 @@ PureResult pure_store_open(const char *path, PureStore **out) {
     return PURE_OK;
 }
 
+const char *pure_store_path(const PureStore *store) { return store->path; }
+
 void pure_store_close(PureStore *store) {
     if (!store) return;
     release_mapping(store->mapping);

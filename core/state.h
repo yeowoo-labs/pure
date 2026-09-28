@@ -27,6 +27,7 @@ PureResult pure_state_open(const char *path, const char *name, PureDraft **out);
  * its drafts. */
 typedef struct PureStore PureStore;
 PureResult pure_store_open(const char *path, PureStore **out);
+const char *pure_store_path(const PureStore *);
 void pure_store_close(PureStore *);
 PureResult pure_store_draft(PureStore *, const char *key, PureDraft **out);
 PureResult pure_store_state(PureStore *, const char *name, PureDraft **out);

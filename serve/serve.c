@@ -193,7 +193,90 @@ typedef struct {
     unsigned wire_count;
     uint64_t trimmed[PURE_MODULE_INPUTS], answers;
     bool held[PURE_MODULE_INPUTS]; /* an answer failed to apply: the wire's sends stay until a restart */
+    struct Writer *writer; /* the thread writing the app's checkpoints, once one was due */
+    uint64_t checkpoints;  /* images it wrote */
 } Executor;
+
+/* The images of the app's lists are written on a thread of their own
+ * (pure_app_checkpoint): the owner hands one over after a save, and takes
+ * it back, written, after a later one. */
+typedef struct Writer {
+    pthread_mutex_t lock;
+    pthread_cond_t wake;
+    pthread_t thread;
+    PureCheckpoint *taken, *written;
+    PureResult result;
+    bool stopping;
+} Writer;
+
+static void *run_writer(void *context) {
+    Writer *w = context;
+    pthread_mutex_lock(&w->lock);
+    for (;;) {
+        while (!w->taken && !w->stopping) pthread_cond_wait(&w->wake, &w->lock);
+        if (!w->taken) break;
+        PureCheckpoint *c = w->taken;
+        pthread_mutex_unlock(&w->lock);
+        PureResult result = pure_checkpoint_write(c);
+        pthread_mutex_lock(&w->lock);
+        w->taken = NULL;
+        w->written = c;
+        w->result = result;
+    }
+    pthread_mutex_unlock(&w->lock);
+    return NULL;
+}
+
+/* After a save: a checkpoint written is handed back, and one due handed over. */
+static void checkpoint_round(Executor *ex) {
+    Writer *w = ex->writer;
+    if (w) {
+        pthread_mutex_lock(&w->lock);
+        PureCheckpoint *written = w->written;
+        PureResult result = w->result;
+        w->written = NULL;
+        pthread_mutex_unlock(&w->lock);
+        if (written) {
+            pure_app_checkpointed(&ex->app, written, result);
+            ex->checkpoints += result == PURE_OK;
+        }
+    }
+    PureCheckpoint *due = pure_app_checkpoint(&ex->app);
+    if (!due) return;
+    if (!w) {
+        w = calloc(1, sizeof(*w));
+        if (!w || pthread_mutex_init(&w->lock, NULL) || pthread_cond_init(&w->wake, NULL) ||
+            pthread_create(&w->thread, NULL, run_writer, w)) {
+            free(w); /* written here instead */
+            pure_app_checkpointed(&ex->app, due, pure_checkpoint_write(due));
+            return;
+        }
+        ex->writer = w;
+    }
+    pthread_mutex_lock(&w->lock);
+    w->taken = due;
+    pthread_cond_signal(&w->wake);
+    pthread_mutex_unlock(&w->lock);
+}
+
+/* The writer finishes the image it writes, which goes back to the app. */
+static void stop_writer(Executor *ex) {
+    Writer *w = ex->writer;
+    if (!w) return;
+    pthread_mutex_lock(&w->lock);
+    w->stopping = true;
+    pthread_cond_signal(&w->wake);
+    pthread_mutex_unlock(&w->lock);
+    pthread_join(w->thread, NULL);
+    if (w->written) {
+        pure_app_checkpointed(&ex->app, w->written, w->result);
+        ex->checkpoints += w->result == PURE_OK;
+    }
+    pthread_mutex_destroy(&w->lock);
+    pthread_cond_destroy(&w->wake);
+    free(w);
+    ex->writer = NULL;
+}
 
 /* A request made ready: its effect, what it names, and the thread that
  * answers it (or, for a surface's event, the waiter it wakes). */
@@ -1402,6 +1485,7 @@ static bool find_fresh(void *context, uint32_t output, uint64_t seq, PureSpan pa
 
 static void after_save(Executor *ex) {
     publish(ex);
+    checkpoint_round(ex);
     if (!ex->wire_count) return;
     Queueing q = {.executor = ex};
     pure_app_outbox_newest(&ex->app, find_fresh, &q);
@@ -2045,10 +2129,12 @@ static bool start_executor(Executor *ex, const PureModule *module, uint32_t show
         fputs("Cannot start the module on the store\n", stderr);
         return false;
     }
+    pure_app_background_checkpoints(&ex->app, true);
     return true;
 }
 
 static void stop_executor(Executor *ex) {
+    stop_writer(ex);
     pure_snapshot_release(ex->published);
     pure_app_stop(&ex->app);
     pure_store_close(ex->store);
@@ -2428,7 +2514,7 @@ int main(int argc, char **argv) {
     }
     size_t active = 0, retained = 0;
     uint64_t accepted = 0, requests = 0, bursts = owner.executor.bursts, events = owner.executor.burst_events, expired = 0,
-             ticks = owner.executor.ticks, shown = 0;
+             ticks = owner.executor.ticks, shown = 0, checkpoints = 0;
     for (unsigned i = 0; i < threads; ++i) {
         shown += hosts[i].shown;
         active += hosts[i].active;
@@ -2450,7 +2536,9 @@ int main(int argc, char **argv) {
         pure_wire_close(owner.executor.wires[i]); /* what was not delivered stays in the outbox */
     }
     if (owned) {
+        checkpoints = owner.executor.checkpoints;
         stop_executor(&owner.executor);
+        checkpoints = owner.executor.checkpoints;
         free(owner.jobs);
     }
     unsigned long groups, grouped;
@@ -2459,9 +2547,10 @@ int main(int argc, char **argv) {
             ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"ticks\":%" PRIu64 ",\"expired\":%" PRIu64
             ",\"threads\":%u,\"owner\":%s,\"snapshots\":%" PRIu64 ",\"views_from_snapshots\":%" PRIu64
             ",\"delivered\":%" PRIu64 ",\"delivery_attempts\":%" PRIu64 ",\"answers\":%" PRIu64
-            ",\"commit_groups\":%lu,\"grouped_commits\":%lu}\n",
+            ",\"commit_groups\":%lu,\"grouped_commits\":%lu,\"checkpoints\":%" PRIu64 "}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
-            owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped);
+            owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped,
+            checkpoints);
     free(hosts);
     free(thread);
     return 0;
