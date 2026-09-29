@@ -57,11 +57,13 @@ enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 28 };
 
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,
- * the last number stored; a receiver's senders woken (their active state
- * made), of them with a secret remembered (no X25519), let go when idle,
- * and active now. */
+ * the last number stored; packets called lost that came late, and
+ * congestion events undone for it; a receiver's senders woken (their
+ * active state made), of them with a secret remembered (no X25519), let go
+ * when idle, and active now. */
 typedef struct {
-    uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, woken, remembered, swept, active;
+    uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, late, undone, woken, remembered,
+        swept, active;
 } PureLinkCounts;
 
 /* ---- The sending side: one output's saved sends to a receiver's input, as

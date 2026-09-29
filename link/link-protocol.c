@@ -4,6 +4,7 @@
 #include "link-protocol.h"
 #include <fcntl.h>
 #include <malloc.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,12 @@ enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PIN
 enum { RECORDS_HEAD = 10 }; /* type, the first number, the count */
 enum { RANGES = 32, RUNS = 2, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
 enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
+/* Reordering awaited (see PureLinkSender): at first and at most; congestion
+ * events with no late packet before the patience halves. */
+enum { REORDER_FIRST = 3, REORDER_PACKETS_MOST = 256, REORDER_QUARTERS_MOST = 8, CALM = 16 };
+/* CUBIC's constants (RFC 9438): the cubic's scale, and the window kept at a
+ * congestion event. */
+static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7;
 #define MS UINT64_C(1000000)
 /* RFC 9002's values, but a first RTT of 100 ms (a LAN's, not the 333 ms of
  * the Internet at large); a probe at least every second while a receiver is
@@ -150,8 +157,11 @@ static Piece *piece_of(Record *r, uint32_t i) { return r->pieces == 1 ? &r->one 
 typedef struct { uint64_t seq; uint32_t piece; } Unit;
 typedef struct {
     uint64_t pn, sent; /* its number; when it went (ns) */
+    uint64_t largest_then; /* lost: the largest number acknowledged when it was called lost */
+    uint64_t episode;      /* lost: the congestion episode it counted in */
     uint32_t bytes;
     bool eliciting, done; /* acknowledged or lost */
+    bool lost, by_time;   /* called lost (by time, or by later ones acknowledged), and not acknowledged since */
     uint16_t count;
     Unit units[UNITS];
 } Flight;
@@ -177,6 +187,28 @@ struct PureLinkSender {
     uint64_t largest_acked, latest_rtt, smoothed_rtt, rtt_var, min_rtt;
     bool acked_any, sampled;
     uint64_t loss_time, last_eliciting, credit, stored_changed;
+    /* Reordering: later packets acknowledged before a packet is lost (3 at
+     * first), and the time past the RTT, in quarters of the least RTT (0:
+     * RFC 9002's eighth of the RTT); both grow when a packet called lost
+     * turns out late. Congestion events one after another while losses of
+     * the first are still unsettled make an episode; one whose losses all
+     * turn out late is undone. Its window, threshold and recovery before
+     * it; its losses unsettled; whether none of them was real. */
+    uint64_t reorder_packets, reorder_quarters, calm_events;
+    uint64_t episode, undo_window, undo_threshold, undo_recovery, undo_losses;
+    bool undo_ok;
+    /* Congestion avoidance is CUBIC (RFC 9438), in datagrams and seconds:
+     * the window before the last event, the time the cubic takes to reach
+     * it again, when the epoch began (0: none yet), and what Reno would have
+     * (the window never grows slower). As they were before an episode, for
+     * its undoing. */
+    double cubic_max, cubic_k, cubic_reno;
+    uint64_t cubic_epoch;
+    double undo_cubic_max, undo_cubic_k, undo_cubic_reno;
+    uint64_t undo_cubic_epoch;
+    /* The window went unused (nothing to send, or no credit) when the
+     * sender last looked: it does not grow then (RFC 9002 §7.8). */
+    bool unused;
     uint64_t received;    /* pieces received and not yet stored */
     uint64_t unsent_from; /* no record before this number has a piece unsent */
     unsigned pto_count, probes;
@@ -301,8 +333,11 @@ static void settle(PureLinkSender *l, Flight *f) {
 }
 
 /* A packet lost: what it carried and was not received otherwise goes again. */
-static void lose(PureLinkSender *l, Flight *f, uint64_t now) {
+static void lose(PureLinkSender *l, Flight *f, uint64_t now, bool by_time) {
     settle(l, f);
+    f->lost = true;
+    f->by_time = by_time;
+    f->largest_then = l->largest_acked;
     ++l->counts.lost;
     for (uint16_t u = 0; u < f->count; ++u) {
         Record *r = record_of(l, f->units[u].seq);
@@ -313,22 +348,85 @@ static void lose(PureLinkSender *l, Flight *f, uint64_t now) {
         }
     }
     if (f->sent > l->recovery_start) { /* one congestion event per round trip */
+        if (!l->undo_losses) { /* an episode begins */
+            ++l->episode;
+            l->undo_window = l->window;
+            l->undo_threshold = l->threshold;
+            l->undo_recovery = l->recovery_start;
+            l->undo_cubic_max = l->cubic_max, l->undo_cubic_k = l->cubic_k, l->undo_cubic_reno = l->cubic_reno;
+            l->undo_cubic_epoch = l->cubic_epoch;
+            l->undo_ok = true;
+        }
         l->recovery_start = now;
-        l->window = most(l->window / 2, WINDOW_LEAST);
+        double w = (double)l->window / DATAGRAM;
+        l->cubic_max = w < l->cubic_max ? w * (1 + CUBIC_BETA) / 2 : w; /* fast convergence: another flow came */
+        l->window = most((uint64_t)((double)l->window * CUBIC_BETA), WINDOW_LEAST);
         l->threshold = l->window;
+        l->cubic_k = cbrt(l->cubic_max * (1 - CUBIC_BETA) / CUBIC_C);
+        l->cubic_epoch = now;
+        l->cubic_reno = (double)l->window / DATAGRAM;
+        if (++l->calm_events >= CALM) { /* many events, none of them late packets: less patience */
+            l->reorder_packets = most(REORDER_FIRST, l->reorder_packets / 2);
+            l->reorder_quarters /= 2;
+            l->calm_events = 0;
+        }
     }
+    f->episode = l->episode;
+    ++l->undo_losses;
+}
+
+/* A loss of the episode settled: it came late, or it was real. */
+static void settle_loss(PureLinkSender *l, const Flight *f, bool real) {
+    if (f->episode != l->episode || !l->undo_losses) return;
+    if (real) l->undo_ok = false;
+    if (!--l->undo_losses && l->undo_ok) {
+        l->window = most(l->window, l->undo_window);
+        l->threshold = l->undo_threshold;
+        l->recovery_start = l->undo_recovery;
+        l->cubic_max = l->undo_cubic_max, l->cubic_k = l->undo_cubic_k, l->cubic_reno = l->undo_cubic_reno;
+        l->cubic_epoch = l->undo_cubic_epoch;
+        ++l->counts.undone;
+    }
+}
+
+/* A packet called lost acknowledged after all: it came late. What it
+ * carried was received (not sent again, if it waits to be); later packets
+ * are awaited longer; and when every loss of the last congestion event
+ * came late, the event is undone. */
+static void came_late(PureLinkSender *l, Flight *f, uint64_t now) {
+    f->lost = false;
+    ++l->counts.late;
+    for (uint16_t u = 0; u < f->count; ++u) {
+        Record *r = record_of(l, f->units[u].seq);
+        if (r && (*piece_of(r, f->units[u].piece)).state != RECEIVED) {
+            set_piece(l, r, f->units[u].piece, RECEIVED);
+            l->stored_changed = now;
+        }
+    }
+    if (f->by_time) l->reorder_quarters = least(l->reorder_quarters + 1, REORDER_QUARTERS_MOST);
+    else l->reorder_packets = least(most(l->reorder_packets, l->largest_acked - f->pn + 1), REORDER_PACKETS_MOST);
+    l->calm_events = 0;
+    settle_loss(l, f, false);
+}
+
+/* How long past the RTT a packet may come before it is called lost. */
+static uint64_t reorder_time(const PureLinkSender *l, uint64_t rtt) {
+    uint64_t wait = rtt / 8;
+    if (l->reorder_quarters && l->sampled) wait = most(wait, l->min_rtt / 4 * l->reorder_quarters);
+    return least(wait, rtt);
 }
 
 static void detect_lost(PureLinkSender *l, uint64_t now) {
     l->loss_time = 0;
     if (!l->acked_any) return;
     uint64_t rtt = most(l->latest_rtt, l->sampled ? l->smoothed_rtt : FIRST_RTT);
-    uint64_t delay = most(rtt * 9 / 8, GRANULARITY);
+    uint64_t delay = most(rtt + reorder_time(l, rtt), GRANULARITY);
     for (size_t k = 0; k < l->flight_count; ++k) {
         Flight *f = &l->flights[(l->flight_head + k) % l->flight_capacity];
         if (f->pn >= l->largest_acked) break;
         if (f->done) continue;
-        if (f->sent + delay <= now || l->largest_acked >= f->pn + 3) lose(l, f, now);
+        bool late = f->sent + delay <= now;
+        if (late || l->largest_acked >= f->pn + l->reorder_packets) lose(l, f, now, late);
         else if (!l->loss_time || f->sent + delay < l->loss_time) l->loss_time = f->sent + delay;
     }
 }
@@ -349,16 +447,42 @@ static void sample_rtt(PureLinkSender *l, uint64_t latest, uint64_t ack_delay) {
     l->smoothed_rtt = (7 * l->smoothed_rtt + adjusted) / 8;
 }
 
+/* The window after bytes acknowledged: slow start below the threshold,
+ * then CUBIC. The cubic's target is where it will be an RTT on, and the
+ * window closes on it by the share of the window acknowledged. */
+static void grow(PureLinkSender *l, uint64_t bytes, uint64_t now) {
+    if (l->window < l->threshold) {
+        l->window += bytes;
+        return;
+    }
+    double w = (double)l->window / DATAGRAM, acked = (double)bytes / DATAGRAM;
+    if (!l->cubic_epoch) { /* no event yet: the cubic starts where the window is */
+        l->cubic_epoch = now;
+        l->cubic_max = l->cubic_reno = w;
+        l->cubic_k = 0;
+    }
+    double t = (double)(now - l->cubic_epoch) / 1e9, rtt = (double)(l->sampled ? l->smoothed_rtt : FIRST_RTT) / 1e9;
+    l->cubic_reno += (l->cubic_reno < l->cubic_max ? 3 * (1 - CUBIC_BETA) / (1 + CUBIC_BETA) : 1) * acked / w;
+    double d = t - l->cubic_k, at = CUBIC_C * d * d * d + l->cubic_max;
+    d += rtt;
+    double target = CUBIC_C * d * d * d + l->cubic_max;
+    target = target < w ? w : target > 1.5 * w ? 1.5 * w : target;
+    double next = at < l->cubic_reno ? l->cubic_reno : w + (target - w) * acked / w;
+    l->window = most(l->window, (uint64_t)(next * DATAGRAM));
+}
+
 static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint64_t now) {
     if (size < 13 || size < 13 + 16u * p[12]) return;
     uint64_t largest = get64(p), delay = (uint64_t)get32(p + 8) * 1000;
     Flight *top = NULL;
+    if (!l->acked_any || largest > l->largest_acked) l->largest_acked = largest;
     for (unsigned k = 0; k < p[12]; ++k) {
         uint64_t first = get64(p + 13 + 16 * k), last = get64(p + 21 + 16 * k);
         if (first > last || !l->flight_count) continue;
         uint64_t oldest = l->flights[l->flight_head].pn, newest = oldest + l->flight_count - 1;
         for (uint64_t pn = most(first, oldest); pn <= least(last, newest); ++pn) {
             Flight *f = flight_of(l, pn);
+            if (f && f->lost) came_late(l, f, now);
             if (!f || f->done) continue;
             settle(l, f);
             ++l->counts.acknowledged;
@@ -369,17 +493,21 @@ static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint6
                     l->stored_changed = now; /* waits for its save from now */
                 }
             }
-            if (f->eliciting && f->sent > l->recovery_start)
-                l->window += l->window < l->threshold ? f->bytes : (uint64_t)DATAGRAM * f->bytes / l->window;
+            if (f->eliciting && f->sent > l->recovery_start && !l->unused) grow(l, f->bytes, now);
             if (pn == largest) top = f;
         }
     }
-    if (!l->acked_any || largest > l->largest_acked) l->largest_acked = largest;
     l->acked_any = true;
     if (top && top->eliciting) sample_rtt(l, now - top->sent, delay);
     l->pto_count = 0;
     detect_lost(l, now);
-    while (l->flight_count && l->flights[l->flight_head].done) {
+    /* Done ones go; one called lost stays a while, so it is known if it
+     * comes late. */
+    uint64_t keep = 2 * most(l->latest_rtt, l->sampled ? l->smoothed_rtt : FIRST_RTT);
+    while (l->flight_count) {
+        Flight *f = &l->flights[l->flight_head];
+        if (!f->done || (f->lost && f->sent + keep > now)) break;
+        if (f->lost) settle_loss(l, f, true); /* not late: lost */
         l->flight_head = (l->flight_head + 1) % l->flight_capacity;
         --l->flight_count;
     }
@@ -571,11 +699,13 @@ static size_t transmit(PureLinkSender *l, Flight *f, const unsigned char *body, 
 size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DATAGRAM], bool whole, uint64_t now,
                                uint64_t *number) {
     bool probe = l->probes > 0;
+    if (!probe && l->in_flight + DATAGRAM > l->window) l->unused = false;
     if (!l->out || (!probe && l->in_flight + DATAGRAM > l->window) || !flight_room(l)) return 0;
     unsigned char body[BODY];
     Flight f = {.pn = l->next_pn, .eliciting = true};
     size_t size = fill(l, body, &f, whole);
     if (!size) {
+        l->unused = true;
         if (!probe) return 0;
         body[0] = F_PING; /* nothing to send again: a probe all the same */
         size = 1;
@@ -653,6 +783,7 @@ PureLinkSender *pure_link_sender(const char *source, const char *input, uint32_t
     l->window = WINDOW_FIRST;
     l->threshold = UINT64_MAX;
     l->credit = CREDIT;
+    l->reorder_packets = REORDER_FIRST;
     return l;
 }
 

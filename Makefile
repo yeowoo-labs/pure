@@ -78,7 +78,7 @@ $(BUILD)/test-module: core/test-module.c $(MODEL) $(STORE) $(HEADERS)
 # A link's two sides through a network of the test's own (pure-crypto.so beside it).
 $(BUILD)/test-link: link/test-link.c $(BUILD)/libpure-link.a $(BUILD)/pure-crypto.so $(wildcard link/*.h)
 	@mkdir -p $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) link/test-link.c $(BUILD)/libpure-link.a $(LDFLAGS) -pthread -ldl $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) link/test-link.c $(BUILD)/libpure-link.a $(LDFLAGS) -lm -pthread -ldl $(LDLIBS) -o $@
 
 $(BUILD)/test-message-json: serve/test-message-json.c serve/message-json.c $(BUILD)/libpure.a $(HEADERS)
 	@mkdir -p $(BUILD)
