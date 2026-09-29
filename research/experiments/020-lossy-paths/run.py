@@ -18,8 +18,11 @@ GSO: a qdisc takes a GSO burst as one packet.
          queued (written) to handed over (read): p50, p99, max.
   share  Pure, quinn or a second TCP flow beside a TCP CUBIC flow, each a
          process of its own, started together, for --share-seconds; each
-         one's share of the goodput from 10 s on (CUBIC's flows converge
-         slowly at an RTT of 100 ms).
+         one's share of the goodput from 20 s on (CUBIC's flows converge
+         slowly at an RTT of 100 ms). The path's delay wavers by 1 ms: with
+         a fixed delay a drop-tail queue drops one flow's packets far more
+         than the other's by their phases alone (Floyd and Jacobson, 1992),
+         and which flow that is says nothing of either.
 
     python3 research/experiments/020-lossy-paths/run.py [--rounds 3] [--out FILE]
 """
@@ -228,8 +231,8 @@ def inner(case):
         else:
             theirs = finish_quinn(start_quinn(work, seconds), seconds)['timeline_100ms']
         mine = finish_tcp(tcp, seconds)
-        row['mbit'] = goodput(theirs, SIZE + 13, 10.0, seconds - 1)
-        row['tcp_mbit'] = goodput(mine, 1, 10.0, seconds - 1)
+        row['mbit'] = goodput(theirs, SIZE + 13, 20.0, seconds - 1)
+        row['tcp_mbit'] = goodput(mine, 1, 20.0, seconds - 1)
         total = row['mbit'] + row['tcp_mbit']
         row['share'] = round(row['mbit'] / total, 3) if total else 0.0
     return row
@@ -248,14 +251,14 @@ def cases(seconds, share_seconds):
             for who in ('pure', 'quinn'):
                 yield {'kind': 'paced', 'who': who, 'rtt_ms': rtt, 'loss': loss, 'jitter_ms': 0, 'seconds': seconds}
         for who in ('pure', 'quinn', 'tcp'):
-            yield {'kind': 'share', 'who': who, 'rtt_ms': rtt, 'loss': 0, 'jitter_ms': 0, 'seconds': share_seconds}
+            yield {'kind': 'share', 'who': who, 'rtt_ms': rtt, 'loss': 0, 'jitter_ms': 1, 'seconds': share_seconds}
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--rounds', type=int, default=1)
     parser.add_argument('--seconds', type=int, default=20)
-    parser.add_argument('--share-seconds', type=int, default=40)
+    parser.add_argument('--share-seconds', type=int, default=60)
     parser.add_argument('--only', default=None, help='kinds to run, for example bulk,share')
     parser.add_argument('--out', type=Path, default=None)
     parser.add_argument('--inner', default=None, help=argparse.SUPPRESS)
