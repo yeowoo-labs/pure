@@ -241,7 +241,7 @@ struct PureLinkSender {
     /* The datagram's size now; a probe of the largest flies; when the next
      * may go, and how many were lost (RFC 8899). */
     uint32_t datagram;
-    bool reaching;
+    bool reaching, filled; /* filled: a packet was full with more to go (a larger one would carry more) */
     uint64_t reach_at;
     unsigned reach_lost;
     uint64_t received;    /* parts received and not yet stored */
@@ -666,20 +666,24 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
     }
 }
 
-/* A packet of what is not sent yet, in order, within the receiver's credit:
- * its body's size, or 0 when there is none. */
-static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) {
+/* A packet of what is not sent yet, in order, within the receiver's credit
+ * (or a probe's, which goes all the same): its body's size, or 0 when there
+ * is none. */
+static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad, bool probe) {
     size_t at = 0, most = l->datagram - HEADER - PURE_AEAD_TAG;
     body[at++] = F_STREAM;
     at += put_names(body + at, l->source, l->input);
     put32(body + at, l->shape);
     at += 4;
-    bool responded = l->responding;
-    for (unsigned k = 0; k < l->responding; ++k, at += 9) { /* the receiver's challenges, said back */
+    /* The receiver's challenges, said back in the next packet that goes,
+     * never in one of their own: that would be a packet more for each
+     * address checked. Until then the answers there are at most three
+     * times what came from it, and the answers to a packet are less; when
+     * they are held back, a probe or a record sent again says it back. */
+    for (unsigned k = 0; k < l->responding; ++k, at += 9) { /* let go once the packet goes */
         body[at] = F_RESPONSE;
         put64(body + at + 1, l->respond[k]);
     }
-    l->responding = 0;
     /* The credit counts from the oldest record not stored: after a restart
      * the sender does not know yet how far the receiver stored. */
     uint64_t base = l->count ? record_at(l, 0)->seq - 1 : l->stored;
@@ -741,6 +745,7 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
         if (before && !full) l->unsent_from = r->seq + 1;
         before = before && !full;
         if (full) { /* the packet is full: whole, so it can go in a burst */
+            l->filled = true;
             if (pad && f->count) {
                 memset(body + at, F_PADDING, most - at);
                 at = most;
@@ -748,7 +753,9 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
             break;
         }
     }
-    return f->count || responded ? at : 0;
+    if (!f->count && !(probe && l->responding)) return 0;
+    l->responding = 0;
+    return at;
 }
 
 /* Its number is spent all the same. */
@@ -813,7 +820,7 @@ size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DA
     if (!probe && !paced(l, now)) return 0;
     unsigned char body[BODY_MOST];
     Flight f = {.pn = l->next_pn, .eliciting = true};
-    if (l->datagram < DATAGRAM_MOST && !l->reaching && l->sampled && now >= l->reach_at &&
+    if (l->datagram < DATAGRAM_MOST && l->filled && !l->reaching && l->sampled && now >= l->reach_at &&
         l->in_flight + DATAGRAM_MOST <= l->window) { /* the path may carry more: a PING of the most, padded */
         body[0] = F_PING;
         memset(body + 1, F_PADDING, BODY_MOST - 1);
@@ -824,7 +831,7 @@ size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DA
         *number = f.pn;
         return total;
     }
-    size_t size = fill(l, body, &f, whole);
+    size_t size = fill(l, body, &f, whole, probe);
     if (!size) {
         l->unused = true;
         if (!probe) return 0;

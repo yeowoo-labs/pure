@@ -68,7 +68,8 @@
  *                whole, with 1 to 3 bytes of framing, not the 19 of RECORD
  *   0x07 CHALLENGE u64: a receiver's, until its sender says it back from
  *                the address the answers go to
- *   0x08 RESPONSE u64: a challenge said back (the last few had)
+ *   0x08 RESPONSE u64: a challenge said back (the last few had), in the next
+ *                packet that goes (records, or a probe)
  *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
  *                a whole datagram
  * Losses are detected as RFC 9002 says, with RACK's patience for packets
@@ -76,9 +77,11 @@
 
 /* A packet is PURE_LINK_DATAGRAM bytes at most at first, and up to
  * PURE_LINK_DATAGRAM_MOST once the path is found to carry that many (a
- * probe of that size acknowledged: DPLPMTUD, RFC 8899); a source's or an
- * input's name is 1 to PURE_LINK_NAME bytes; a receiver keeps where a
- * packet came from (the socket's address) in PURE_LINK_ADDRESS bytes. */
+ * probe of that size acknowledged: DPLPMTUD, RFC 8899; a link probes once
+ * a packet of its was full, else a larger one would carry nothing more); a
+ * source's or an input's name is 1 to PURE_LINK_NAME bytes; a receiver
+ * keeps where a packet came from (the socket's address) in
+ * PURE_LINK_ADDRESS bytes. */
 enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 28 };
 
 /* Counts for a host's report: packets and records sent, records sent again,
