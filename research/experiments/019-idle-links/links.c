@@ -291,8 +291,9 @@ typedef struct {
     PureLinkSender *sender;
     int fd;
     uint64_t made, stored;    /* records made and stored: numbers 1..made, 1..stored */
-    uint64_t made_at[OUTBOX]; /* when each record not stored was made (ns), by number % OUTBOX */
     uint64_t next_make;       /* when the next record is made */
+    uint64_t due;             /* its sender's next timer (0: none), as it was when last touched */
+    uint64_t made_at[OUTBOX]; /* when each record not stored was made (ns), by number % OUTBOX */
 } Device;
 
 static int run_all(char **argv) {
@@ -315,6 +316,7 @@ static int run_all(char **argv) {
     uint32_t *timeline = calloc(buckets, sizeof(*timeline));
     size_t latency_capacity = 1024, latency_count = 0;
     double *latency = malloc(latency_capacity * sizeof(*latency));
+    uint32_t *made_second = malloc(latency_capacity * sizeof(*made_second)); /* when each was made */
     uint64_t made = 0, stored = 0, last_report = began, last_scan = 0;
     struct epoll_event events[256];
     for (;;) {
@@ -331,12 +333,17 @@ static int run_all(char **argv) {
             for (uint64_t seq = d->stored + 1; seq <= heard; ++seq) {
                 size_t bucket = (size_t)((now - began) / 100000000u);
                 if (bucket < buckets) ++timeline[bucket];
-                if (latency_count == latency_capacity) latency = realloc(latency, (latency_capacity *= 2) * sizeof(*latency));
+                if (latency_count == latency_capacity) {
+                    latency = realloc(latency, (latency_capacity *= 2) * sizeof(*latency));
+                    made_second = realloc(made_second, latency_capacity * sizeof(*made_second));
+                }
+                made_second[latency_count] = (uint32_t)((d->made_at[seq % OUTBOX] - began) / 1000000000u);
                 latency[latency_count++] = (double)(now - d->made_at[seq % OUTBOX]) / 1e6;
                 ++stored;
             }
             if (heard > d->stored) d->stored = heard;
             send_packets(d->sender, d->fd, now); /* what the answer let go */
+            d->due = pure_link_sender_due(d->sender);
         }
         if (now - last_scan < 5000000u) continue; /* the devices' clocks, every 5 ms */
         last_scan = now;
@@ -350,20 +357,36 @@ static int run_all(char **argv) {
                 if (!pure_link_sender_queue(d->sender, d->made, payload, payload_size)) fail("cannot queue");
                 more = true;
             }
-            uint64_t due = pure_link_sender_due(d->sender);
-            if (due && due <= now) pure_link_sender_tick(d->sender, now), more = true;
-            if (more) send_packets(d->sender, d->fd, now);
+            /* A device's own timer: its sender's, which changes only when the
+             * sender is touched (so ten thousand at rest cost a glance each). */
+            if (d->due && d->due <= now) pure_link_sender_tick(d->sender, now), more = true;
+            if (more) {
+                send_packets(d->sender, d->fd, now);
+                d->due = pure_link_sender_due(d->sender);
+            }
         }
         if (now - last_report >= 1000000000u) {
             last_report = now;
             fprintf(stderr, "{\"t\":%.1f,\"made\":%" PRIu64 ",\"stored\":%" PRIu64 "}\n", (double)(now - began) / 1e9, made, stored);
         }
     }
-    uint64_t again = 0;
+    uint64_t again = 0, keyed = 0, secrets = 0;
     for (size_t k = 0; k < count; ++k) {
         PureLinkCounts c;
         pure_link_sender_counts(devices[k].sender, &c);
-        again += c.resent;
+        again += c.resent, keyed += c.keyed, secrets += c.secrets;
+    }
+    /* The p50 and p99 of the records made in each second: where the slow ones are. */
+    size_t seconds_made = (size_t)seconds + 1;
+    double *p50_by_second = calloc(seconds_made, sizeof(double)), *p99_by_second = calloc(seconds_made, sizeof(double)),
+           *some = malloc(latency_count * sizeof(double));
+    for (size_t second = 0; second < seconds_made; ++second) {
+        size_t n = 0;
+        for (size_t i = 0; i < latency_count; ++i)
+            if (made_second[i] == second) some[n++] = latency[i];
+        qsort(some, n, sizeof(*some), by_value);
+        p50_by_second[second] = n ? some[n / 2] : 0;
+        p99_by_second[second] = n ? some[n * 99 / 100] : 0;
     }
     qsort(latency, latency_count, sizeof(*latency), by_value);
     /* The longest time without a record stored, from the first to the last one stored. */
@@ -381,6 +404,10 @@ static int run_all(char **argv) {
            latency_count ? latency[latency_count * 99 / 100] : 0, latency_count ? latency[latency_count - 1] : 0,
            longest * 100, gap * 100);
     for (size_t b = 0; b <= last; ++b) printf("%s%u", b ? "," : "", timeline[b]);
+    printf("],\"keyed\":%" PRIu64 ",\"secrets\":%" PRIu64 ",\"p50_ms_by_second_made\":[", keyed, secrets);
+    for (size_t second = 0; second < seconds_made; ++second) printf("%s%.2f", second ? "," : "", p50_by_second[second]);
+    printf("],\"p99_ms_by_second_made\":[");
+    for (size_t second = 0; second < seconds_made; ++second) printf("%s%.2f", second ? "," : "", p99_by_second[second]);
     printf("]}\n");
     freeaddrinfo(found);
     return stored == made ? 0 : 1;
