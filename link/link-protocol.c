@@ -1544,23 +1544,28 @@ static void drop_first(Stream *st) {
     if (!--st->held_count) st->held_first = 0;
 }
 
-/* The memo of secrets (pure_link_remember): a header, then a place a peer
- * in the order allowed, each the first 28 bytes of its key, a check (FNV-1a
- * of its whole key and the secret) and the secret. A place whose check
- * fails (never made, another key, cut short by a crash) is made again.
- * From MEMO_EPOCH on, the epoch last accepted for the peer's run: the run,
- * the epoch, a check (FNV-1a of the rest), its secret, the one before, the
- * key the sender offered and ours; written secrets first, the run last. A
- * node that starts again goes on in the sender's epoch, no key made. */
+/* The memo of secrets (pure_link_remember): a header, MEMO_MORE places
+ * beside (below), then a place a peer in the order allowed, each the first
+ * 28 bytes of its key, a check (FNV-1a of its whole key and the secret) and
+ * the secret. A place whose check fails (never made, another key, cut short
+ * by a crash) is made again. From MEMO_EPOCH on, the epoch last accepted
+ * for the peer's run: the run, the epoch, a check (FNV-1a of the rest), its
+ * secret, the one before, the key the sender offered and ours; written
+ * secrets first, the run last. A node that starts again goes on in the
+ * sender's epoch, no key made. A peer's other runs that send while the one
+ * its place has does (a node's outputs to this one) keep theirs beside:
+ * the peer (+ 1), then an epoch as a place has it, in one of two places
+ * its peer and run find. */
 enum { MEMO_HEAD = 64, MEMO_PLACE = 256, MEMO_EPOCH = 64, MEMO_EPOCH_SIZE = 144 };
-static const unsigned char memo_magic[8] = {'P', 'L', 'M', '2', 0, 0, 0, 0};
+enum { MEMO_MORE = 1024, MEMO_MORE_PLACE = 16 + MEMO_EPOCH_SIZE, MEMO_PLACES = MEMO_HEAD + MEMO_MORE * MEMO_MORE_PLACE };
+static const unsigned char memo_magic[8] = {'P', 'L', 'M', '3', 0, 0, 0, 0};
 
 static uint32_t memo_check(const unsigned char key[PURE_SEAL_KEY], const unsigned char secret[32]) {
     return fnv(fnv(2166136261u, key, PURE_SEAL_KEY), secret, 32);
 }
 
 static unsigned char *memo_place(const PureLinkReceiver *s, uint32_t peer) {
-    size_t at = MEMO_HEAD + (size_t)peer * MEMO_PLACE;
+    size_t at = MEMO_PLACES + (size_t)peer * MEMO_PLACE;
     return s->memo && at + MEMO_PLACE <= s->memo_size ? s->memo + at : NULL;
 }
 
@@ -1568,18 +1573,53 @@ static uint32_t epoch_check(const unsigned char *e) {
     return fnv(fnv(2166136261u, e, 12), e + 16, MEMO_EPOCH_SIZE - 16);
 }
 
-/* The epoch the memo has for the peer's run (its place's epoch part), or NULL. */
-static const unsigned char *memo_epoch(const PureLinkReceiver *s, uint32_t peer, uint64_t run) {
-    const unsigned char *place = memo_place(s, peer), *e = place ? place + MEMO_EPOCH : NULL;
-    return e && get64(e) == run && get32(e + 12) == epoch_check(e) ? e : NULL;
+static bool epoch_of(const unsigned char *e, uint64_t run) { return get64(e) == run && get32(e + 12) == epoch_check(e); }
+
+/* The two places beside where a peer's run may be kept. */
+static void memo_beside(const PureLinkReceiver *s, uint32_t peer, uint64_t run, unsigned char *ways[2]) {
+    unsigned char key[12];
+    put32(key, peer), put64(key + 4, run);
+    size_t k = fnv(2166136261u, key, sizeof(key)) & (MEMO_MORE - 1);
+    ways[0] = s->memo + MEMO_HEAD + k * MEMO_MORE_PLACE;
+    ways[1] = s->memo + MEMO_HEAD + (k ^ 1) * MEMO_MORE_PLACE;
 }
 
-static void remember_epoch(PureLinkReceiver *s, uint32_t peer, const Run *r) {
-    unsigned char *place = memo_place(s, peer);
+/* The epoch the memo has for the peer's run (its place's epoch part, or
+ * beside), or NULL. */
+static const unsigned char *memo_epoch(const PureLinkReceiver *s, uint32_t peer, uint64_t run) {
+    const unsigned char *place = memo_place(s, peer), *e = place ? place + MEMO_EPOCH : NULL;
+    if (!e || epoch_of(e, run)) return e;
+    unsigned char *ways[2];
+    memo_beside(s, peer, run, ways);
+    for (unsigned w = 0; w < 2; ++w)
+        if (get32(ways[w]) == peer + 1 && epoch_of(ways[w] + 16, run)) return ways[w] + 16;
+    return NULL;
+}
+
+/* The epoch accepted for r, in the peer's place, or beside when the run
+ * the place has still sends: in the way that has r, else an empty one,
+ * else the first. What a run had beside goes once its place has it (an
+ * epoch's secrets are kept only until the next one's are). */
+static Run *run_found(Active *a, uint64_t run);
+static void remember_epoch(PureLinkReceiver *s, uint32_t peer, const Run *r, uint64_t now) {
+    unsigned char *place = memo_place(s, peer), *ways[2], *beside = NULL;
     if (!place) return;
     unsigned char *e = place + MEMO_EPOCH;
+    Active *a = s->peers[peer].active;
+    const Run *other = a && get64(e) != r->run && epoch_of(e, get64(e)) ? run_found(a, get64(e)) : NULL;
+    memo_beside(s, peer, r->run, ways);
+    if (other && now - other->seen < s->idle) {
+        for (unsigned w = 0; w < 2 && !beside; ++w)
+            if (get32(ways[w]) == peer + 1 && get64(ways[w] + 16) == r->run) beside = ways[w];
+        for (unsigned w = 0; w < 2 && !beside; ++w)
+            if (!epoch_of(ways[w] + 16, get64(ways[w] + 16))) beside = ways[w];
+        e = (beside = beside ? beside : ways[0]) + 16;
+    } else
+        for (unsigned w = 0; w < 2; ++w)
+            if (get32(ways[w]) == peer + 1 && get64(ways[w] + 16) == r->run) explicit_bzero(ways[w], MEMO_MORE_PLACE);
     memset(e, 0, 16);
     __atomic_thread_fence(__ATOMIC_RELEASE);
+    if (beside) put32(beside, peer + 1);
     memcpy(e + 16, r->next.secret, 32);
     memcpy(e + 48, r->now.secret, 32);
     memcpy(e + 80, r->offered, PURE_SEAL_KEY);
@@ -1594,7 +1634,7 @@ bool pure_link_remember(PureLinkReceiver *s, const char *path, char *error, size
     int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     struct stat info;
     unsigned char head[MEMO_HEAD];
-    size_t needed = MEMO_HEAD + (s->peer_count ? s->peer_count : 1) * MEMO_PLACE;
+    size_t needed = MEMO_PLACES + (s->peer_count ? s->peer_count : 1) * MEMO_PLACE;
     bool ok = fd >= 0 && !fstat(fd, &info) && S_ISREG(info.st_mode) && !(info.st_mode & 077);
     /* Another node's key, or none yet: begun again. */
     bool ours = ok && pread(fd, head, MEMO_HEAD, 0) == MEMO_HEAD && !memcmp(head, memo_magic, 8) &&
@@ -2115,7 +2155,7 @@ static void accept_waiting(PureLinkReceiver *s, uint64_t now) {
         if (base == a->secret && r->now.n && epoch_made(s, peer, r, &zero, 0, a->secret)) /* begun again from 0: so are its answers */
             epoch_now(s, peer, r, &zero);
         explicit_bzero(&zero, sizeof(zero));
-        remember_epoch(s, a->peer, r);
+        remember_epoch(s, a->peer, r, now);
         mark_due(s, r);
     }
     s->offer_count = 0;

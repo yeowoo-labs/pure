@@ -244,7 +244,9 @@ void pure_link_idle(PureLinkReceiver *, uint64_t ms);
  * (path, 0600; begun again for another node's key): a place a sender in
  * the order allowed, mapped, so a sender at rest takes no memory for it.
  * A node that starts again then makes no X25519 for a sender it heard from
- * before. After the senders are allowed, before the first packet. */
+ * before, and goes on in the epoch of each of its runs (a key's runs that
+ * send beside its first, as a node's outputs to this one do, in 1,024
+ * places beside). After the senders are allowed, before the first packet. */
 bool pure_link_remember(PureLinkReceiver *, const char *path, char *error, size_t size);
 /* A packet that came from an address (from_size bytes, at most
  * PURE_LINK_ADDRESS kept): answers to its sender go there. */

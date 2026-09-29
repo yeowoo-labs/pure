@@ -657,8 +657,15 @@ static void flood(const char *dir) {
 /* Three outputs of one node to this one: three senders with one key, each a
  * run of its own, sending at once. Each run keeps a place of its own (none
  * pushes another out, which sent its answers to the wrong run), each keyed
- * once, and every stream's records are delivered once, in order. */
-typedef struct { uint64_t now, heard[3]; PureLinkSender *senders[3]; PureLinkDone done[64]; size_t done_count; } Outputs;
+ * once, and every stream's records are delivered once, in order. Then,
+ * each in an epoch past 0, the receiver starts again (kill -9) with its
+ * memo: every run goes on in its epoch, none told LOST, no X25519 made. */
+typedef struct {
+    uint64_t now, heard[3], queued;
+    PureLinkSender *senders[3];
+    PureLinkDone done[64];
+    size_t done_count;
+} Outputs;
 static int output_input(void *context, const char *name, uint32_t shape) {
     (void)context;
     return shape != 0x5eed ? -1 : !strcmp(name, "one") ? 0 : !strcmp(name, "two") ? 1 : !strcmp(name, "three") ? 2 : -1;
@@ -695,49 +702,96 @@ static bool output_answer(void *context, const unsigned char *packet, size_t siz
     for (unsigned i = 0; i < 3; ++i) pure_link_sender_take(o->senders[i], packet, size, o->now); /* its run's opens */
     return true;
 }
-static void outputs(const char *dir) {
-    unsigned char public_a[PURE_SEAL_KEY], public_b[PURE_SEAL_KEY], out[PURE_LINK_DATAGRAM_MOST];
+static PureLinkReceiver *outputs_receiver(Outputs *o, const PureSealKey *b, const unsigned char *public_b,
+                                          const unsigned char *public_a, const char *memo) {
     char error[256];
-    static unsigned char bytes[20200];
-    PureSealKey *a = key(dir, "a.key", public_a), *b = key(dir, "b.key", public_b);
-    Outputs o = {0};
-    PureLinkReceiver *r = pure_link_receiver(b, public_b, &(PureLinkHost){output_input, output_deliver, &o}, error,
+    PureLinkReceiver *r = pure_link_receiver(b, public_b, &(PureLinkHost){output_input, output_deliver, o}, error,
                                              sizeof(error));
-    if (!r || !pure_link_allow(r, "test.ordered", public_a, error, sizeof(error))) exit(1);
-    const char *inputs[3] = {"one", "two", "three"};
-    for (unsigned i = 0; i < 3; ++i) {
-        PureLinkSender *s = o.senders[i] = pure_link_sender("test.ordered", inputs[i], 0x5eed, a, public_a);
-        if (!s || !pure_link_sender_peer(s, public_b)) exit(1);
-        for (uint64_t seq = 1; seq <= 1000; ++seq) {
+    if (!r || !pure_link_allow(r, "test.ordered", public_a, error, sizeof(error)) ||
+        !pure_link_remember(r, memo, error, sizeof(error))) {
+        fprintf(stderr, "test-link: %s\n", error);
+        exit(1);
+    }
+    return r;
+}
+/* Each sender's records to last queued. */
+static void outputs_queue(Outputs *o, uint64_t last) {
+    static unsigned char bytes[20200];
+    for (unsigned i = 0; i < 3; ++i)
+        for (uint64_t seq = o->queued + 1; seq <= last; ++seq) {
             size_t size = record_size(seq);
             for (size_t k = 0; k < size; ++k) bytes[k] = record_byte(seq, k);
-            if (!pure_link_sender_queue(s, seq, bytes, size)) exit(1);
+            if (!pure_link_sender_queue(o->senders[i], seq, bytes, size)) exit(1);
         }
-    }
-    uint64_t number;
-    bool all = false;
-    for (; o.now < 60000 * MS && !all; o.now += MS) {
+    o->queued = last;
+}
+/* Until each sender's records are stored, or a minute; when epochs, a record
+ * more each 50 ms until each is in an epoch past 0 (an offer goes in a
+ * packet of records). */
+static void outputs_until(Outputs *o, PureLinkReceiver *r, bool epochs) {
+    unsigned char out[PURE_LINK_DATAGRAM_MOST];
+    uint64_t number, end = o->now + 60000 * MS;
+    for (bool all = false; o->now < end && !all; o->now += MS) {
+        if (epochs && o->now % (50 * MS) == 0) outputs_queue(o, o->queued + 1);
         for (unsigned i = 0; i < 3; ++i)
-            for (size_t size; (size = pure_link_sender_packet(o.senders[i], out, false, o.now, &number));)
-                pure_link_receiver_take(r, out, size, "sender0", 7, o.now);
+            for (size_t size; (size = pure_link_sender_packet(o->senders[i], out, false, o->now, &number));)
+                pure_link_receiver_take(r, out, size, "sender0", 7, o->now);
         PureLinkDone told[64];
-        size_t count = o.done_count;
-        memcpy(told, o.done, count * sizeof(*told));
-        o.done_count = 0;
-        pure_link_receiver_turn(r, told, count, o.now, output_answer, &o);
+        size_t count = o->done_count;
+        memcpy(told, o->done, count * sizeof(*told));
+        o->done_count = 0;
+        pure_link_receiver_turn(r, told, count, o->now, output_answer, o);
         all = true;
         for (unsigned i = 0; i < 3; ++i) {
-            pure_link_sender_tick(o.senders[i], o.now);
-            all = all && pure_link_sender_stored(o.senders[i]) == 1000;
+            PureLinkCounts c;
+            pure_link_sender_tick(o->senders[i], o->now);
+            pure_link_sender_counts(o->senders[i], &c);
+            all = all && pure_link_sender_stored(o->senders[i]) == o->queued && (!epochs || c.epochs >= 1);
         }
     }
-    PureLinkCounts heard;
-    pure_link_receiver_counts(r, &heard);
-    CHECK(all && o.heard[0] == 1000 && o.heard[1] == 1000 && o.heard[2] == 1000 && heard.keyed == 3,
-          "outputs: heard %llu, %llu, %llu of 1000 each, %llu runs keyed (3 runs)", (unsigned long long)o.heard[0],
-          (unsigned long long)o.heard[1], (unsigned long long)o.heard[2], (unsigned long long)heard.keyed);
-    printf("{\"case\":\"outputs\",\"runs\":3,\"records\":3000,\"virtual_ms\":%llu,\"keyed\":%llu,\"packets\":%llu}\n",
-           (unsigned long long)(o.now / MS), (unsigned long long)heard.keyed, (unsigned long long)heard.received);
+}
+static void outputs(const char *dir) {
+    unsigned char public_a[PURE_SEAL_KEY], public_b[PURE_SEAL_KEY];
+    char memo[512];
+    PureSealKey *a = key(dir, "a.key", public_a), *b = key(dir, "b.key", public_b);
+    snprintf(memo, sizeof(memo), "%s/b.key.links", dir);
+    unlink(memo);
+    Outputs o = {0};
+    PureLinkReceiver *r = outputs_receiver(&o, b, public_b, public_a, memo);
+    const char *inputs[3] = {"one", "two", "three"};
+    for (unsigned i = 0; i < 3; ++i)
+        if (!(o.senders[i] = pure_link_sender("test.ordered", inputs[i], 0x5eed, a, public_a)) ||
+            !pure_link_sender_peer(o.senders[i], public_b))
+            exit(1);
+    outputs_queue(&o, 500);
+    outputs_until(&o, r, false);
+    PureLinkCounts first;
+    pure_link_receiver_counts(r, &first);
+    uint64_t took = o.now / MS;
+    outputs_until(&o, r, true); /* a new epoch a second for a peer: the third's after two */
+    pure_link_receiver_free(r); /* kill -9: what it held is gone, the memo stays */
+    o.done_count = 0;
+    r = outputs_receiver(&o, b, public_b, public_a, memo);
+    outputs_queue(&o, 1000);
+    outputs_until(&o, r, false);
+    PureLinkCounts again, sent = {0};
+    pure_link_receiver_counts(r, &again);
+    for (unsigned i = 0; i < 3; ++i) {
+        PureLinkCounts c;
+        pure_link_sender_counts(o.senders[i], &c);
+        sent.fallbacks += c.fallbacks;
+        CHECK(pure_link_sender_stored(o.senders[i]) == 1000 && o.heard[i] == 1000, "outputs: %u stored %llu, heard %llu",
+              i, (unsigned long long)pure_link_sender_stored(o.senders[i]), (unsigned long long)o.heard[i]);
+    }
+    CHECK(first.keyed == 3 && took < 1000, "outputs: %llu runs keyed (3 runs), stored in %llu ms",
+          (unsigned long long)first.keyed, (unsigned long long)took);
+    CHECK(!sent.fallbacks && !again.secrets && again.keyed == 3,
+          "outputs, started again: %llu epochs taken for lost, %llu secrets made, %llu runs keyed",
+          (unsigned long long)sent.fallbacks, (unsigned long long)again.secrets, (unsigned long long)again.keyed);
+    printf("{\"case\":\"outputs\",\"runs\":3,\"records\":3000,\"stored_ms\":%llu,\"keyed\":%llu,"
+           "\"keyed_again\":%llu,\"secrets_again\":%llu,\"fallbacks\":%llu}\n",
+           (unsigned long long)took, (unsigned long long)first.keyed, (unsigned long long)again.keyed,
+           (unsigned long long)again.secrets, (unsigned long long)sent.fallbacks);
     for (unsigned i = 0; i < 3; ++i) pure_link_sender_free(o.senders[i]);
     pure_link_receiver_free(r);
     pure_seal_key_free(a), pure_seal_key_free(b);
