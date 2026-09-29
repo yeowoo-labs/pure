@@ -221,6 +221,12 @@ struct PureLinkSender {
     /* The window went unused (nothing to send, or no credit) when the
      * sender last looked: it does not grow then (RFC 9002 §7.8). */
     bool unused;
+    /* Pacing (RFC 9002 §7.7): bytes it may send now, filled as time goes
+     * at the window an RTT (a quarter more; twice in slow start), up to 2 ms
+     * of it (10 to 256 datagrams); when that was last done; when there will
+     * be enough for the next packet, while it waits for that. */
+    double pace_bytes;
+    uint64_t pace_at, pace_due;
     /* The datagram's size now; a probe of the largest flies; when the next
      * may go, and how many were lost (RFC 8899). */
     uint32_t datagram;
@@ -522,7 +528,12 @@ static void grow(PureLinkSender *l, uint64_t bytes, uint64_t now) {
         l->cubic_k = 0;
     }
     double t = (double)(now - l->cubic_epoch) / 1e9, rtt = (double)(l->sampled ? l->smoothed_rtt : FIRST_RTT) / 1e9;
+    /* Reno's pace: as the acknowledgments come (RFC 9438), or as time goes
+     * (RFC 8312), whichever is ahead: a link its app holds back (a few
+     * records a second) does not fall behind it for that. */
     l->cubic_reno += (l->cubic_reno < l->cubic_max ? 3 * (1 - CUBIC_BETA) / (1 + CUBIC_BETA) : 1) * acked / w;
+    double by_time = l->cubic_max * CUBIC_BETA + 3 * (1 - CUBIC_BETA) / (1 + CUBIC_BETA) * t / rtt;
+    if (by_time > l->cubic_reno) l->cubic_reno = by_time;
     double d = t - l->cubic_k, at = CUBIC_C * d * d * d + l->cubic_max;
     d += rtt;
     double target = CUBIC_C * d * d * d + l->cubic_max;
@@ -734,6 +745,7 @@ static size_t transmit(PureLinkSender *l, Flight *f, const unsigned char *body, 
     }
     push_flight(l, f);
     ++l->counts.packets;
+    l->pace_bytes = l->pace_bytes > (double)total ? l->pace_bytes - (double)total : 0;
     if (f->eliciting) {
         ++l->eliciting;
         l->in_flight += f->bytes;
@@ -742,11 +754,28 @@ static size_t transmit(PureLinkSender *l, Flight *f, const unsigned char *body, 
     return total;
 }
 
+/* Whether pacing lets a packet go now (else when it will, in pace_due). */
+static bool paced(PureLinkSender *l, uint64_t now) {
+    double rtt = (double)(l->sampled ? l->smoothed_rtt : FIRST_RTT);
+    double rate = (double)l->window * (l->window < l->threshold ? 2.0 : 1.25) / rtt; /* bytes a ns */
+    double most = rate * 2e6, least = 10.0 * l->datagram, top = 256.0 * l->datagram;
+    most = most < least ? least : most > top ? top : most;
+    l->pace_bytes += rate * (double)(now - l->pace_at);
+    if (l->pace_bytes > most) l->pace_bytes = most;
+    l->pace_at = now;
+    l->pace_due = 0;
+    if (l->pace_bytes >= l->datagram) return true;
+    l->pace_due = now + (uint64_t)(((double)l->datagram - l->pace_bytes) / rate) + 1;
+    return false;
+}
+
 size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DATAGRAM_MOST], bool whole, uint64_t now,
                                uint64_t *number) {
     bool probe = l->probes > 0;
+    l->pace_due = 0; /* set again only when pacing holds a packet back */
     if (!probe && l->in_flight + l->datagram > l->window) l->unused = false;
     if (!l->out || (!probe && l->in_flight + l->datagram > l->window) || !flight_room(l)) return 0;
+    if (!probe && !paced(l, now)) return 0;
     unsigned char body[BODY_MOST];
     Flight f = {.pn = l->next_pn, .eliciting = true};
     if (l->datagram < DATAGRAM_MOST && !l->reaching && l->sampled && now >= l->reach_at &&
@@ -785,6 +814,7 @@ static bool waiting_for_save(const PureLinkSender *l) { return l->received > 0; 
 
 uint64_t pure_link_sender_due(const PureLinkSender *l) {
     uint64_t due = l->loss_time;
+    if (l->pace_due && (!due || l->pace_due < due)) due = l->pace_due;
     if (l->eliciting) {
         uint64_t pto = l->last_eliciting + pto_period(l);
         if (!due || pto < due) due = pto;
