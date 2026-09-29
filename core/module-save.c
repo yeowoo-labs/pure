@@ -895,12 +895,11 @@ PureResult pure_save_commit(PureApp *app, const double *values, void *const *doc
     free(payload);
     if (result == PURE_OK && tree) {
         result = app->data.save(app->data.context, documents, document_count, drafts, count, revisions);
-        /* The logged entry is on the device: taken back when the tree's commit
-         * failed, or, when that may yet be stored, no save follows. */
-        if (result != PURE_OK && payload_size) {
-            if (result == PURE_UNCERTAIN) app->uncertain = true;
-            else pure_log_retract(app->log);
-        }
+        /* A commit that may yet be stored leaves the app apart from its store,
+         * whatever the save changed: no save follows until it starts again.
+         * One that failed takes back the logged entry, which is on the device. */
+        if (result == PURE_UNCERTAIN) app->uncertain = true;
+        else if (result != PURE_OK && payload_size) pure_log_retract(app->log);
     }
     if (result == PURE_OK) {
         for (size_t k = 0; k < count; ++k)

@@ -1806,6 +1806,42 @@ static void stored_crashes(void) {
     remove_store(path);
 }
 
+/* A save that changes numbers alone (no list, so no log entry) and whose
+ * commit may yet be stored leaves the app uncertain all the same: the next
+ * event, which changes a list alone, is refused, and starting again finds
+ * what the store has (review 004, F2). */
+static void uncertain_numbers(void) {
+    char *path = new_store();
+    static const S nums[] = {{"n", 0}};
+    static const T states[] = {{"rows", 3, 0}};
+    static const RF fields[] = {{"value", 0, 0}};
+    static const R records[] = {{"row", fields, 1}};
+    static const I inputs[] = {KEY("inc", "KeyI"), KEY("add", "KeyA")};
+    static const O code[] = {
+        {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, /* n = n + 1 */
+        {L, 0, 0}, {LA, 1, 0},                         /* rows.append(row { n }) */
+    };
+    static const H handlers[] = {{1, 0, 4}, {3, 4, 2}};
+    Spec spec = {nums, 1, inputs, 2, NULL, 0, handlers, 2, code, LEN(code), NULL, 0, states, 1, NULL, 0, NULL, 0,
+                 records, 1, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    fail_stage = PURE_BEFORE_DIR_SYNC;
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_UNCERTAIN && app.uncertain && app.values[0] == 0);
+    fail_stage = -1;
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_CONFLICT && !pure_list_count(app.lists[1]));
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 1 &&
+          !pure_list_count(app.lists[1]));
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_list_get(app.lists[1], 0, 0).num == 1);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 1 &&
+          pure_list_count(app.lists[1]) == 1 && pure_list_get(app.lists[1], 0, 0).num == 1);
+    pure_app_stop(&app);
+    remove_store(path);
+}
+
 /* Frame changes are stored by the next event or by a save; a stop alone
  * leaves them out. */
 static void stored_frames(void) {
@@ -1951,6 +1987,7 @@ static void stored_states(void) {
     CHECK(pure_save_test_checkpoints > checkpoints + 5); /* images written again as the log grew */
     stored_equivalence(text_spec, text_words, LEN(text_words), 0x7f4a7c15u);
     stored_crashes();
+    uncertain_numbers();
     stored_frames();
     stored_messages();
     stored_migration();
