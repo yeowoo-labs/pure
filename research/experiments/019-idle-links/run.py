@@ -29,9 +29,17 @@ network namespace of its own (unshare -rn) whose loopback delays UDP:
 senders the node never heard from, and new quinn clients, each send one
 order and wait until it is stored, one at a time.
 
+With --transport SIZE:COUNT,... (M5), transport.c drains a backlog of
+COUNT records through a link and a listener in one process (no app, no
+store), then quinn sends as many messages of the same size over one
+stream; --rounds times each. With --drain SIZES (M5 as the design says),
+two pure-serve nodes: the sender's app saves --counts orders while the
+receiver is away, then the receiver starts and the link drains them;
+quinn does the same over one stream.
+
     python3 research/experiments/019-idle-links/run.py [--counts 1000,10000]
         [--store DIRECTORY] [--out FILE.jsonl] [--quic] [--restart [--no-memo]]
-        [--first-contact 5,25,50]
+        [--first-contact 5,25,50] [--transport 48:200000 --rounds 5] [--drain 48,1000]
 """
 import argparse
 import json
@@ -384,6 +392,143 @@ with tempfile.TemporaryDirectory(prefix='pure-m4-') as d:
             file.write(line + '\n')
 
 
+def thread_cpu(pid, name):
+    """CPU ms of the process's threads named name (all threads when None),
+    from the scheduler's nanoseconds (schedstat), not clock ticks."""
+    total = 0
+    for task in Path(f'/proc/{pid}/task').iterdir():
+        try:
+            if name and (task / 'comm').read_text().strip() != name:
+                continue
+            total += int((task / 'schedstat').read_text().split()[0])
+        except OSError:
+            pass
+    return total / 1e6
+
+
+def post_all(port, n, size, threads=8):
+    """n orders (item of size bytes) posted to the sender app, over threads connections."""
+    import http.client
+    import threading
+    body = json.dumps({'item': 'x' * size, 'count': 1}).encode()
+    left = [n]
+    lock = threading.Lock()
+
+    def work():
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=60)
+        while True:
+            with lock:
+                if not left[0]:
+                    break
+                left[0] -= 1
+            connection.request('POST', '/inputs/buy', body, {'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            response.read()
+            assert response.status == 200, response.status
+        connection.close()
+    workers = [threading.Thread(target=work) for _ in range(threads)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+
+
+def drain_pure(work, n, size):
+    """M5 for Pure: n saved sends of an order whose item is size bytes wait
+    in the sender's outbox (the receiver is not there); then the receiver
+    starts, and the link drains them. Rate from the first applied to the
+    last; CPU of both nodes, and of their link threads alone."""
+    sender_module, receiver_module = work / 'drain-sender.pmod', work / 'drain-receiver.pmod'
+    for module, text in ((sender_module, check.LINK_SENDER), (receiver_module, check.LINK_RECEIVER)):
+        source = module.with_suffix('.aup')
+        source.write_text(text)
+        check.compile_module(Path(os.environ.get('AUP', ROOT.parent / 'aup/build/aup')), source, module)
+    keys = {}
+    for name in ('a', 'b'):
+        node, info = start([ROOT / 'build/pure-serve', '--module', receiver_module, '--store', work / f'key-{name}',
+                            '--port', free_port(socket.SOCK_STREAM), '--key', work / f'{name}.key'])
+        keys[name] = info['public_key']
+        node.terminate()
+        node.communicate(timeout=60)
+    (work / 'drain-senders').write_text(f'drain-sender.ordered {keys["a"]}\n')
+    link_port, port_a, port_b = free_port(socket.SOCK_DGRAM), free_port(socket.SOCK_STREAM), free_port(socket.SOCK_STREAM)
+    a, _ = start([ROOT / 'build/pure-serve', '--module', sender_module, '--store', work / 'drain-a', '--port', port_a,
+                  '--threads', '2', '--key', work / 'a.key', '--send', f'ordered=pure://127.0.0.1:{link_port}/order',
+                  '--seal', f'ordered={keys["b"]}'])
+    post_all(port_a, n, size)
+    assert view(port_a, 'sent') == n
+    b, _ = start([ROOT / 'build/pure-serve', '--module', receiver_module, '--store', work / 'drain-b', '--port', port_b,
+                  '--threads', '2', '--key', work / 'b.key', '--link-port', link_port, '--senders', work / 'drain-senders'])
+    cpu = {name: (thread_cpu(pid, None), thread_cpu(pid, thread)) for name, pid, thread in
+           (('sender', a.pid, 'pure-link'), ('receiver', b.pid, 'pure-listen'))}
+    import http.client
+    connection = http.client.HTTPConnection('127.0.0.1', port_b, timeout=30)
+    first = None
+    while True:  # the count every 2 ms, over one connection
+        connection.request('GET', '/views/count')
+        count = json.loads(connection.getresponse().read())
+        now = time.monotonic()
+        if count and first is None:
+            first = (now, count)
+        if count >= n:
+            break
+        time.sleep(0.002)
+    connection.close()
+    seconds = now - first[0]
+    row = {'messages': n, 'item_bytes': size, 'first_seen': first[1], 'seconds': round(seconds, 4),
+           'per_second': round((n - first[1]) / seconds) if seconds else None}
+    for name, pid, thread in (('sender', a.pid, 'pure-link'), ('receiver', b.pid, 'pure-listen')):
+        total, link = thread_cpu(pid, None) - cpu[name][0], thread_cpu(pid, thread) - cpu[name][1]
+        row[f'{name}_cpu_us_per_message'] = round(total * 1000 / n, 2)
+        row[f'{name}_link_cpu_us_per_message'] = round(link * 1000 / n, 2)
+    for name, node in (('sender', a), ('receiver', b)):
+        node.terminate()
+        _, error = node.communicate(timeout=120)
+        stats = [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
+        keys = ('link_packets', 'link_records', 'link_resent', 'link_lost') if name == 'sender' else \
+               ('listener_received', 'listener_deliveries', 'bursts')
+        row[name] = {k: stats[k] for k in keys}
+    subprocess.run(['rm', '-rf', str(work / 'drain-a'), str(work / 'drain-b')], check=True)  # tmpfs: room for the next
+    return row
+
+
+def drain_quic(work, n, size):
+    """The same over quinn: one connection, one stream, n messages; CPU of
+    both sides. The service only counts them (no store)."""
+    binary = Path(__file__).parent / 'quic/target/release/idle-quic'
+    import resource
+    server, info = start([binary, 'serve', work / 'cert.der', work / 'key.der'])
+    before, children = thread_cpu(server.pid, None), resource.getrusage(resource.RUSAGE_CHILDREN)
+    # The same bytes as Pure's record: its prefix (count, item's length), the item and the city ("Seoul").
+    client = subprocess.run([str(binary), 'drain', str(info['port']), str(n), str(size + 8 + 5)], capture_output=True,
+                            timeout=600)
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    row = json.loads(client.stdout)
+    server_cpu = thread_cpu(server.pid, None) - before
+    client_cpu = (after.ru_utime + after.ru_stime - children.ru_utime - children.ru_stime) * 1000
+    row['client_cpu_us_per_message'] = round(client_cpu * 1000 / n, 2)
+    server.kill()
+    server.wait()
+    row['service_cpu_us_per_message'] = round(server_cpu * 1000 / n, 2)
+    return row
+
+
+def transport(work, size, n):
+    """The transport alone (transport.c): a backlog of n records of an order
+    with a size-byte item drained through a link and a listener in one
+    process, no app and no store."""
+    modules = {}
+    for name, text in (('sender', check.LINK_SENDER), ('receiver', check.LINK_RECEIVER)):
+        source = work / f'{name}.aup'
+        source.write_text(text)
+        modules[name] = work / f'{name}.pmod'
+        check.compile_module(Path(os.environ.get('AUP', ROOT.parent / 'aup/build/aup')), source, modules[name])
+    done = subprocess.run([str(ROOT / 'build/link-transport'), str(modules['sender']), str(modules['receiver']), str(n),
+                           str(size), '0'], capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--counts', default='1000,10000,100000,1000000')
@@ -399,8 +544,54 @@ def main():
     parser.add_argument('--kill-at', type=int, default=20)
     parser.add_argument('--first-contact', type=str, default=None,
                         help='M4: one-way delays in ms (for example 5,25,50), each in a namespace of its own')
+    parser.add_argument('--drain', type=str, default=None,
+                        help='M5: item sizes in bytes (for example 48,1000,16000); --counts gives the messages')
+    parser.add_argument('--transport', type=str, default=None,
+                        help='M5: SIZE:COUNT pairs (for example 48:200000,1000:50000): the transport alone and quinn')
+    parser.add_argument('--rounds', type=int, default=1)
     args = parser.parse_args()
     counts = [int(c) for c in args.counts.split(',')]
+    if args.transport:
+        subprocess.run(['make', '-s', '-C', str(ROOT), 'build/libpure.a', 'build/pure-crypto.so'], check=True)
+        subprocess.run(['cc', '-O2', '-g', '-std=c17', '-Wall', '-Wextra', '-Werror', f'-I{ROOT}/core', f'-I{ROOT}/serve',
+                        '-DPURE_ASYNC_EFFECTS', str(Path(__file__).parent / 'transport.c'), str(ROOT / 'serve/link.c'),
+                        str(ROOT / 'serve/crypto.c'), str(ROOT / 'build/libpure.a'), '-lm', '-pthread', '-ldl', '-o',
+                        str(ROOT / 'build/link-transport')], check=True)
+        subprocess.run(['cargo', 'build', '--release', '--offline', '--quiet'], cwd=Path(__file__).parent / 'quic', check=True)
+        with tempfile.TemporaryDirectory(prefix='pure-m5-', dir=args.store) as directory:
+            work = Path(directory)
+            make_certificate(work)
+            for pair in args.transport.split(','):
+                size, n = (int(x) for x in pair.split(':'))
+                for _ in range(args.rounds):
+                    for name, measure in (('pure', lambda: transport(work, size, n)), ('quinn', lambda: drain_quic(work, n, size))):
+                        row = {'side': name, 'item_bytes': size, **measure()}
+                        line = json.dumps(row)
+                        print(line, flush=True)
+                        if args.out:
+                            with open(args.out, 'a') as out:
+                                out.write(line + '\n')
+        return
+    if args.drain:
+        subprocess.run(['cargo', 'build', '--release', '--offline', '--quiet'], cwd=Path(__file__).parent / 'quic', check=True)
+        with tempfile.TemporaryDirectory(prefix='pure-m5-', dir=args.store) as directory:
+            work = Path(directory)
+            make_certificate(work)
+            for size in (int(s) for s in args.drain.split(',')):
+                for round_, n in enumerate(counts):
+                    for name, measure in (('pure', drain_pure), ('quinn', drain_quic)):
+                        case = work / f'{name}-{size}-{n}-{round_}'
+                        case.mkdir()
+                        if name == 'quinn':
+                            for f in ('cert.der', 'key.der'):
+                                (case / f).write_bytes((work / f).read_bytes())
+                        row = {'side': name, **measure(case, n, size)}
+                        line = json.dumps(row)
+                        print(line, flush=True)
+                        if args.out:
+                            with open(args.out, 'a') as out:
+                                out.write(line + '\n')
+        return
     if args.first_contact:
         subprocess.run(['cargo', 'build', '--release', '--offline', '--quiet'], cwd=Path(__file__).parent / 'quic', check=True)
         for delay in args.first_contact.split(','):

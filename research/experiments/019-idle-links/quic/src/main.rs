@@ -116,24 +116,27 @@ fn serve(cert: Vec<u8>, key: Vec<u8>, port: u16) {
 /// A drain's stream begins with these bytes; an order's never does (a client number that large).
 const DRAIN: &[u8; 4] = b"pure";
 
-/// Messages each after its u32 length until a length of 0; then how many, as the answer.
+/// Messages each after its u32 length until a length of 0, read a chunk at
+/// a time as they come; then how many, as the answer.
 async fn drain(send: &mut quinn::SendStream, recv: &mut quinn::RecvStream) {
-    let mut count = 0u64;
-    let mut buffer = Vec::new();
-    loop {
-        let mut length = [0u8; 4];
-        if recv.read_exact(&mut length).await.is_err() {
-            return;
+    let (mut count, mut pending, mut done) = (0u64, Vec::<u8>::new(), false);
+    while !done {
+        let Ok(Some(chunk)) = recv.read_chunk(1 << 20, true).await else { return };
+        pending.extend_from_slice(&chunk.bytes);
+        let mut at = 0;
+        while pending.len() - at >= 4 {
+            let length = u32::from_le_bytes(pending[at..at + 4].try_into().unwrap()) as usize;
+            if length == 0 {
+                done = true;
+                break;
+            }
+            if pending.len() - at - 4 < length {
+                break;
+            }
+            at += 4 + length;
+            count += 1;
         }
-        let length = u32::from_le_bytes(length) as usize;
-        if length == 0 {
-            break;
-        }
-        buffer.resize(length, 0);
-        if recv.read_exact(&mut buffer).await.is_err() {
-            return;
-        }
-        count += 1;
+        pending.drain(..at);
     }
     let _ = send.write_all(&count.to_le_bytes()).await;
     let _ = send.finish();
@@ -356,12 +359,18 @@ fn drain_client(port: u16, count: u64, size: usize) {
         endpoint.set_default_client_config(client_config());
         let connection = endpoint.connect(SocketAddr::from(([127, 0, 0, 1], port)), "localhost").unwrap().await.unwrap();
         let (mut send, mut recv) = connection.open_bi().await.unwrap();
-        let message = vec![b'x'; size];
+        // The messages, each after its length, written 64 KiB at a time.
+        let mut frame = (size as u32).to_le_bytes().to_vec();
+        frame.extend(std::iter::repeat_n(b'x', size));
+        let per_chunk = ((64 << 10) / frame.len()).max(1);
+        let chunk: Vec<u8> = frame.iter().copied().cycle().take(frame.len() * per_chunk).collect();
         let began = Instant::now();
         send.write_all(DRAIN).await.unwrap();
-        for _ in 0..count {
-            send.write_all(&(size as u32).to_le_bytes()).await.unwrap();
-            send.write_all(&message).await.unwrap();
+        let mut left = count as usize;
+        while left > 0 {
+            let n = left.min(per_chunk);
+            send.write_all(&chunk[..n * frame.len()]).await.unwrap();
+            left -= n;
         }
         send.write_all(&0u32.to_le_bytes()).await.unwrap();
         send.finish().unwrap();
