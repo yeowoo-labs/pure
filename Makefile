@@ -85,6 +85,10 @@ $(BUILD)/test-message-json: serve/test-message-json.c serve/message-json.c $(BUI
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve serve/test-message-json.c serve/message-json.c $(BUILD)/libpure.a \
 		$(LDFLAGS) -lm $(LDLIBS) -o $@
 
+# A module run ranged and not from the same inputs, compared (tests/check.py).
+$(BUILD)/module-probe: tests/module-probe.c $(BUILD)/libpure.a $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) tests/module-probe.c $(BUILD)/libpure.a $(LDFLAGS) -lm $(LDLIBS) -o $@
+
 $(BUILD)/test-log: store/test-log.c store/store-log.c $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -DPURE_STORE_TEST store/test-log.c store/store-log.c $(LDFLAGS) $(LDLIBS) -o $@
@@ -96,7 +100,8 @@ $(BUILD)/test-tree-store: store/test-tree-store.c $(STORE) $(HEADERS)
 # The HTTP host's checks build their apps with aup (the sibling checkout) and
 # compare documents with the earlier document server.
 AUP ?= ../aup
-check: all $(BUILD)/test-module $(BUILD)/test-tree-store $(BUILD)/test-log $(BUILD)/test-link $(BUILD)/test-message-json
+check: all $(BUILD)/test-module $(BUILD)/test-tree-store $(BUILD)/test-log $(BUILD)/test-link $(BUILD)/test-message-json \
+		$(BUILD)/module-probe
 	$(BUILD)/test-tree-store
 	$(BUILD)/test-log
 	$(BUILD)/test-module

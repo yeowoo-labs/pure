@@ -946,6 +946,60 @@ print(json.dumps(check.server_links_udp(Path({str(aup)!r}), Path({str(pure)!r}),
     return json.loads(done.stdout.strip().splitlines()[-1])
 
 
+RANGES_SOURCE = """record Item { id = 0 }
+state rows: list of Item by id
+state other: list of Item by id
+state at: index of other
+state limit = 2
+state done = 0
+state below = 0
+input seed = key KeyS
+input go = key KeyG
+input count = key KeyC
+on seed.down {
+  rows.add(Item { id: 0 })
+  rows.add(Item { id: 1 })
+  rows.add(Item { id: 2 })
+  rows.add(Item { id: 3 })
+  rows.add(Item { id: 4 })
+  other.add(Item { id: 100 })
+}
+on go.down {
+  for r in rows where r.id <= at.position {
+    other.add(Item { id: -r.id - 1 - done })
+    done = done + 1
+  }
+}
+on count.down {
+  for r in rows where r.id <= limit {
+    below = below + 1
+  }
+}
+view total = done
+view counted = below
+"""
+
+
+def module_ranges(aup, pure, work):
+    """A walk whose where reads an index into a list its body inserts into:
+    each insert before the index's item moves the index on, so the walk's
+    bound moves with it and all five rows pass, twice (review 004, F1). The
+    module runs ranged and not from the same keys (build/module-probe), and
+    the two must end the same, state for state; a walk whose bound its body
+    cannot move stays ranged."""
+    source, module = work / 'ranges.aup', work / 'ranges.pmod'
+    source.write_text(RANGES_SOURCE)
+    compile_module(aup, source, module)
+    done = subprocess.run([str(pure / 'build/module-probe'), str(module), 'seed', 'go', 'count', 'go'],
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    row = json.loads(done.stdout)
+    states = row['states']
+    assert states['done'] == 10 and states['at'] == 10 and states['below'] == 3, row
+    assert row['ranged'] >= 1, row
+    return row
+
+
 def server_links_refused(aup, pure, work):
     """A link to an input the receiver's app does not have: the receiver
     says so (REFUSED), and the sender says it once on stderr, as a wire says
@@ -2471,6 +2525,7 @@ def main():
     report = {}
     with tempfile.TemporaryDirectory(prefix='pure-check-') as directory:
         work = Path(directory)
+        report['module_ranges'] = module_ranges(aup, pure, work)
         report['server_parity_requests'] = sum(server_parity(aup, pure, work, range(args.seeds), threads=threads)
                                                for threads in (1, 3))
         report['server_pipelined_answers'] = server_pipelining(aup, pure, work)

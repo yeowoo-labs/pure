@@ -690,8 +690,10 @@ PURE_COLD static uint8_t keep_range(PureModule *m, const PureRange *range) {
 }
 
 /* Whether a walk's bounds read nothing its block writes: the states and
- * locals it stores, the lists it changes. A bound is found once, before
- * the walk; the walk's where reads it anew for every item. */
+ * locals it stores, the lists it changes, and what those changes move with
+ * them (an insert or remove moves the indices into the list, a text's
+ * change the cursors in it). A bound is found once, before the walk; the
+ * walk's where reads it anew for every item. */
 PURE_COLD static bool bounds_fixed(const PureModule *m, const PureRange *range, PureBlock body) {
     uint64_t states = 0, locals = 0, lists = 0;
     for (uint32_t pc = body.start; pc < body.start + body.length; ++pc) {
@@ -707,15 +709,24 @@ PURE_COLD static bool bounds_fixed(const PureModule *m, const PureRange *range, 
         default: break;
         }
     }
+    for (uint32_t s = 0; s < m->states; ++s) {
+        uint32_t ref = m->state_ref[s];
+        if ((m->state_type[s] == PURE_STATE_INDEX && lists >> (ref & 63) & 1) ||
+            (m->state_type[s] == PURE_STATE_CURSOR && states >> (ref & 63) & 1))
+            states |= (uint64_t)1 << (s & 63);
+    }
     for (unsigned side = 0; side < 2; ++side) {
         PureBlock bound = side ? range->upper : range->lower;
         if (!(side ? range->upper_relation : range->lower_relation)) continue;
         for (uint32_t pc = bound.start; pc < bound.start + bound.length; ++pc) {
             const PureOp *op = &m->code[pc];
             int list = list_read(op);
-            if ((op->op == PURE_OP_LOAD || op->op == PURE_OP_INDEX_LOAD) && states >> (op->arg & 63) & 1) return false;
+            if ((op->op == PURE_OP_LOAD || op->op == PURE_OP_INDEX_LOAD || op->op == PURE_OP_CUR_LOAD) &&
+                states >> (op->arg & 63) & 1)
+                return false;
             if (op->op == PURE_OP_LOCAL_LOAD && locals >> (op->arg & 63) & 1) return false;
             if (list >= 0 && lists >> (list & 63) & 1) return false;
+            if (op->op == PURE_OP_INDEX_MOVE && lists) return false; /* the count of its index's list, whichever */
         }
     }
     return true;
