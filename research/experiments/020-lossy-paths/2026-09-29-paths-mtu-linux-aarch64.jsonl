@@ -1,0 +1,42 @@
+{"kind": "bulk", "who": "pure", "rtt_ms": 20, "loss": 0, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 45.38, "resent": 508, "lost": 254, "late": 0, "undone": 0, "packets": 84092}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 20, "loss": 0, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 46.85, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 20, "loss": 0, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 45.39, "resent": 595, "lost": 300, "late": 30, "undone": 7, "packets": 84947}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 20, "loss": 0, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 1.97, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 20, "loss": 1, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 8.24, "resent": 276, "lost": 138, "late": 0, "undone": 0, "packets": 16368}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 20, "loss": 1, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 7.35, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 20, "loss": 1, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 7.4, "resent": 386, "lost": 201, "late": 41, "undone": 16, "packets": 14204}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 20, "loss": 1, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 1.75, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 20, "loss": 5, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 2.8, "resent": 609, "lost": 281, "late": 0, "undone": 0, "packets": 5591}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 20, "loss": 5, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 2.9, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 20, "loss": 5, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 3.07, "resent": 669, "lost": 344, "late": 35, "undone": 16, "packets": 6092}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 20, "loss": 5, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 1.68, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "paced", "who": "pure", "rtt_ms": 20, "loss": 0, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 10.04, "waited_ms_p99": 10.133, "waited_ms_max": 10.34, "resent": 0, "lost": 0, "late": 0, "undone": 0, "packets": 1001}
+{"kind": "paced", "who": "quinn", "rtt_ms": 20, "loss": 0, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 10.066, "waited_ms_p99": 10.186, "waited_ms_max": 10.64}
+{"kind": "paced", "who": "pure", "rtt_ms": 20, "loss": 1, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 10.041, "waited_ms_p99": 50.1, "waited_ms_max": 70.041, "resent": 15, "lost": 15, "late": 0, "undone": 0, "packets": 1016}
+{"kind": "paced", "who": "quinn", "rtt_ms": 20, "loss": 1, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 10.063, "waited_ms_p99": 50.309, "waited_ms_max": 82.509}
+{"kind": "paced", "who": "pure", "rtt_ms": 20, "loss": 5, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 10.047, "waited_ms_p99": 104.06, "waited_ms_max": 151.181, "resent": 68, "lost": 63, "late": 0, "undone": 0, "packets": 1048}
+{"kind": "paced", "who": "quinn", "rtt_ms": 20, "loss": 5, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.4, "waited_ms_p50": 10.064, "waited_ms_p99": 90.592, "waited_ms_max": 130.957}
+{"kind": "share", "who": "pure", "rtt_ms": 20, "loss": 0, "jitter_ms": 0, "seconds": 40, "round": 0, "mbit": 30.87, "tcp_mbit": 15.28, "share": 0.669}
+{"kind": "share", "who": "quinn", "rtt_ms": 20, "loss": 0, "jitter_ms": 0, "seconds": 40, "round": 0, "mbit": 21.72, "tcp_mbit": 25.62, "share": 0.459}
+{"kind": "share", "who": "tcp", "rtt_ms": 20, "loss": 0, "jitter_ms": 0, "seconds": 40, "round": 0, "mbit": 21.34, "tcp_mbit": 26.48, "share": 0.446}
+{"kind": "bulk", "who": "pure", "rtt_ms": 100, "loss": 0, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 44.86, "resent": 0, "lost": 0, "late": 0, "undone": 0, "packets": 107911}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 100, "loss": 0, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 47.28, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 100, "loss": 0, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 45.23, "resent": 33, "lost": 16, "late": 16, "undone": 11, "packets": 85848}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 100, "loss": 0, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 1.06, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 100, "loss": 1, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 1.38, "resent": 74, "lost": 37, "late": 0, "undone": 0, "packets": 3528}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 100, "loss": 1, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 1.72, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 100, "loss": 1, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 1.33, "resent": 140, "lost": 73, "late": 24, "undone": 10, "packets": 4579}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 100, "loss": 1, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 0.82, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 100, "loss": 5, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.67, "resent": 129, "lost": 62, "late": 0, "undone": 0, "packets": 1484}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 100, "loss": 5, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.68, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "bulk", "who": "pure", "rtt_ms": 100, "loss": 5, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 0.66, "resent": 126, "lost": 63, "late": 7, "undone": 2, "packets": 1343}
+{"kind": "bulk", "who": "quinn", "rtt_ms": 100, "loss": 5, "jitter_ms": 3, "seconds": 20, "round": 0, "mbit": 0.53, "waited_ms_p50": 0.0, "waited_ms_p99": 0.0, "waited_ms_max": 0.0}
+{"kind": "paced", "who": "pure", "rtt_ms": 100, "loss": 0, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 50.047, "waited_ms_p99": 50.128, "waited_ms_max": 50.373, "resent": 0, "lost": 0, "late": 0, "undone": 0, "packets": 1001}
+{"kind": "paced", "who": "quinn", "rtt_ms": 100, "loss": 0, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 50.066, "waited_ms_p99": 50.184, "waited_ms_max": 50.277}
+{"kind": "paced", "who": "pure", "rtt_ms": 100, "loss": 1, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.4, "waited_ms_p50": 50.051, "waited_ms_p99": 190.172, "waited_ms_max": 230.342, "resent": 9, "lost": 8, "late": 0, "undone": 0, "packets": 983}
+{"kind": "paced", "who": "quinn", "rtt_ms": 100, "loss": 1, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 50.076, "waited_ms_p99": 150.235, "waited_ms_max": 183.894}
+{"kind": "paced", "who": "pure", "rtt_ms": 100, "loss": 5, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 130.073, "waited_ms_p99": 591.842, "waited_ms_max": 671.202, "resent": 69, "lost": 47, "late": 0, "undone": 0, "packets": 889}
+{"kind": "paced", "who": "quinn", "rtt_ms": 100, "loss": 5, "jitter_ms": 0, "seconds": 20, "round": 0, "mbit": 0.41, "waited_ms_p50": 66.619, "waited_ms_p99": 310.289, "waited_ms_max": 358.401}
+{"kind": "share", "who": "pure", "rtt_ms": 100, "loss": 0, "jitter_ms": 0, "seconds": 40, "round": 0, "mbit": 28.18, "tcp_mbit": 18.07, "share": 0.609}
+{"kind": "share", "who": "quinn", "rtt_ms": 100, "loss": 0, "jitter_ms": 0, "seconds": 40, "round": 0, "mbit": 19.98, "tcp_mbit": 27.38, "share": 0.422}
+{"kind": "share", "who": "tcp", "rtt_ms": 100, "loss": 0, "jitter_ms": 0, "seconds": 40, "round": 0, "mbit": 22.92, "tcp_mbit": 24.9, "share": 0.479}
