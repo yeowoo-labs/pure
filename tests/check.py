@@ -1019,6 +1019,229 @@ def server_links_refused(aup, pure, work):
     return {'said': said[0]['error'], 'packets': stats['a']['link_packets']}
 
 
+def server_links_independent(aup, pure, work):
+    """A receiver written from docs/design/012-link-protocol.md alone, in
+    Python with the cryptography package and no code of link/: a Pure node
+    links to it (pure://). It checks the node's address with a CHALLENGE,
+    opens the node's packets, takes its records in order, answers with ACK
+    and STORED, and accepts its epoch 1, so the node goes on in the epoch
+    the two made. In the end the node knows every order it saved stored,
+    and some of them came sealed in epoch 1. None where the cryptography
+    package is not there."""
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    except ImportError:
+        return None
+    import os
+    import select
+    import socket
+    import struct
+    import threading
+    import time
+
+    def hkdf(secret, info, size):
+        return HKDF(algorithm=hashes.SHA256(), length=size, salt=b'pure link 0', info=info).derive(secret)
+
+    def raw(key):
+        return key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+    def key_id(public):
+        h = 2166136261
+        for byte in public:
+            h = (h ^ byte) * 16777619 & 0xffffffff
+        return h
+
+    def packet_keys(secret, sender, receiver, sender_run, receiver_run):
+        out = hkdf(secret, b'pure link 0 keys' + sender + receiver + struct.pack('<QQ', sender_run, receiver_run), 28)
+        return AESGCM(out[:16]), out[16:]
+
+    def nonce(base, pn):
+        return base[:4] + bytes(a ^ b for a, b in zip(base[4:], struct.pack('>Q', pn)))
+
+    def names(body, at):
+        a = body[at]
+        b = body[at + 1 + a]
+        return body[at + 1:at + 1 + a], body[at + 2 + a:at + 2 + a + b], at + 2 + a + b
+
+    def varint(body, at):
+        value = shift = 0
+        while True:
+            byte = body[at]
+            value |= (byte & 0x7f) << shift
+            at += 1
+            if not byte & 0x80:
+                return value, at
+            shift += 7
+
+    module = work / 'independent-sender.pmod'
+    source = module.with_suffix('.aup')
+    source.write_text(LINK_SENDER)
+    compile_module(aup, source, module)
+
+    def start(args, port):
+        process = subprocess.Popen([str(a) for a in args] + ['--port', str(port)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        line = process.stdout.readline() if ready else b''
+        assert line, f'host did not start: {process.stderr.read(2000) if process.poll() is not None else ""}'
+        return process, json.loads(line)
+
+    mine = X25519PrivateKey.generate()
+    my_public = raw(mine)
+    link = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    link.bind(('127.0.0.1', 0))
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+    node, info = start([pure / 'build/pure-serve', '--module', module, '--store', work / 'independent-a',
+                        '--key', work / 'independent.key', '--send',
+                        f'ordered=pure://127.0.0.1:{link.getsockname()[1]}/order', '--seal', f'ordered={my_public.hex()}'],
+                       port)
+    theirs = bytes.fromhex(info['public_key'])
+    static = mine.exchange(X25519PublicKey.from_public_bytes(theirs))
+    orders = 200
+
+    def buy():
+        import http.client
+        for n in range(orders):
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+            body = json.dumps({'item': f'i{n}', 'count': 1}).encode()
+            connection.request('POST', '/inputs/buy', body, {'Content-Length': str(len(body)),
+                                                             'Content-Type': 'application/json'})
+            assert connection.getresponse().status == 200
+            connection.close()
+
+    buyer = threading.Thread(target=buy)
+    buyer.start()
+    runs = {}  # the node's runs: their epochs, answers and the numbers had
+    stream, heard, early = None, 0, {}
+    opened = {0: 0, 1: 0}
+    deadline, done_at = time.time() + 30, None
+    try:
+        while time.time() < deadline and (done_at is None or time.time() < done_at):
+            ready, _, _ = select.select([link], [], [], 0.05)
+            if not ready:
+                continue
+            packet, address = link.recvfrom(2048)
+            if not 37 <= len(packet) <= 1452 or packet[0] >> 4 != 0x7:
+                continue
+            key, run, pn = struct.unpack_from('<IQQ', packet, 1)
+            assert key == key_id(theirs), 'a packet under another key id'
+            r = runs.setdefault(run, {'epochs': {0: static}, 'now': 0, 'next': None, 'answer_run': 0, 'pn': 0,
+                                      'had': set(), 'address': None, 'challenge': int.from_bytes(os.urandom(8), 'little'),
+                                      'checked': False, 'bytes_in': 0, 'bytes_out': 0})
+            if not r['answer_run']:
+                r['answer_run'] = int.from_bytes(os.urandom(8), 'little') or 1
+            epoch = packet[0] & 15
+            tried = [n for n in {r['now'], r['next'][0] if r['next'] else r['now']} if n & 15 == epoch]
+            if epoch == 0 and r['now']:
+                tried.append(0)
+            body = None
+            for n in tried:
+                secret = r['epochs'][n] if n in r['epochs'] else r['next'][1]
+                aead, base = packet_keys(secret, theirs, my_public, run, 0)
+                try:
+                    body = aead.decrypt(nonce(base, pn), packet[21:], packet[:21])
+                except Exception:
+                    continue
+                if r['next'] and n == r['next'][0]:  # the epoch accepted is used: it is the run's now
+                    r['epochs'][n], r['now'], r['next'] = r['next'][1], n, None
+                opened[min(n, 1)] += 1
+                break
+            assert body is not None, f'a packet of the node did not open (epoch {epoch})'
+            if pn in r['had']:
+                continue
+            newest = not r['had'] or pn > max(r['had'])
+            r['had'].add(pn)
+            if newest and address != r['address']:
+                r['address'], r['checked'], r['bytes_in'], r['bytes_out'] = address, False, 0, 0
+            r['bytes_in'] += len(packet)
+            at, offer = 0, None
+            while at < len(body):
+                kind = body[at]
+                at += 1
+                if kind == 0x01:  # STREAM
+                    source_name, input_name, at = names(body, at)
+                    at += 4
+                    stream = (source_name, input_name)
+                    assert input_name == b'order' and source_name == b'independent-sender.ordered', stream
+                elif kind == 0x02:  # RECORD: small sends come whole
+                    number, size, offset, length = struct.unpack_from('<QIIH', body, at)
+                    at += 18
+                    assert offset == 0 and length == size, 'a part of a small send'
+                    early[number] = body[at:at + length]
+                    at += length
+                elif kind == 0x06:  # RECORDS
+                    first, count = struct.unpack_from('<QB', body, at)
+                    at += 9
+                    for k in range(count):
+                        size, at = varint(body, at)
+                        early[first + k] = body[at:at + size]
+                        at += size
+                elif kind == 0x08:  # RESPONSE
+                    if struct.unpack_from('<Q', body, at)[0] == r['challenge']:
+                        r['checked'] = True
+                    at += 8
+                elif kind == 0x09:  # OFFER
+                    offer = struct.unpack_from('<I', body, at)[0], body[at + 4:at + 36]
+                    at += 36
+                elif kind != 0x05:
+                    break
+            while heard + 1 in early:  # applied and saved, in order
+                heard += 1
+                del early[heard]
+            if offer and not (r['next'] and r['next'][0] == offer[0] and r['next'][3] == offer[1]):
+                n, their_half = offer
+                if (n == 1 and epoch == 0) or (n == r['now'] + 1 and epoch == r['now'] & 15):
+                    half = X25519PrivateKey.generate()
+                    fresh = half.exchange(X25519PublicKey.from_public_bytes(their_half))
+                    chained = r['epochs'][0] if n == 1 else r['epochs'][r['now']]
+                    secret = hkdf(fresh, b'pure link 0 epoch' + struct.pack('<I', n) + chained, 32)
+                    r['next'] = (n, secret, raw(half), their_half)
+            answer = b''
+            if not r['checked']:
+                answer += b'\x07' + struct.pack('<Q', r['challenge'])
+            if r['next']:
+                answer += b'\x0a' + struct.pack('<I', r['next'][0]) + r['next'][2] + r['next'][3][:4]
+            had = sorted(r['had'], reverse=True)
+            ranges = []
+            for number in had:
+                if ranges and ranges[-1][0] == number + 1:
+                    ranges[-1][0] = number
+                elif len(ranges) < 32:
+                    ranges.append([number, number])
+                else:
+                    break
+            answer += b'\x03' + struct.pack('<QIB', had[0], 0, len(ranges))
+            answer += b''.join(struct.pack('<QQ', first, last) for first, last in ranges)
+            if stream:
+                answer += (b'\x04' + bytes([len(stream[0])]) + stream[0] + bytes([len(stream[1])]) + stream[1] +
+                           struct.pack('<QBI', heard, 0, 1024))
+            head = bytes([0x70 | r['now'] & 15]) + struct.pack('<IQQ', key_id(my_public), r['answer_run'], r['pn'])
+            aead, base = packet_keys(r['epochs'][r['now']], my_public, theirs, r['answer_run'], run)
+            sealed = head + aead.encrypt(nonce(base, r['pn']), answer, head)
+            r['pn'] += 1
+            if r['checked'] or r['bytes_out'] + len(sealed) <= 3 * r['bytes_in']:
+                link.sendto(sealed, r['address'])
+                r['bytes_out'] += 0 if r['checked'] else len(sealed)
+            if heard == orders and done_at is None:
+                done_at = time.time() + 0.5  # the last STORED heard, and answered a while
+    finally:
+        buyer.join()
+        node.terminate()
+        _, error = node.communicate(timeout=30)
+        link.close()
+    assert node.returncode == 0, error[-1000:]
+    stats = [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
+    assert heard == orders and stats['link_stored'] == orders, (heard, stats)
+    assert opened[1] > 0 and all(r['checked'] for r in runs.values()), (opened, runs.keys())
+    return {'orders': orders, 'opened_in_epoch_0': opened[0], 'opened_in_epoch_1': opened[1],
+            'node_packets': stats['link_packets']}
+
+
 def server_links_moved(aup, pure, work):
     """A receiver's store moved to another address (H3 of
     docs/design/011-pure-transport.md), in namespaces of its own (unshare
@@ -2266,6 +2489,7 @@ def main():
         report['server_links_udp'] = server_links_udp(aup, pure, work)
         report['server_links_udp_lossy'] = server_links_udp_lossy(aup, pure, work)
         report['server_links_refused'] = server_links_refused(aup, pure, work)
+        report['server_links_independent'] = server_links_independent(aup, pure, work)
         report['server_links_moved'] = server_links_moved(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)
         report['server_sealed'] = server_sealed(aup, pure, work)
