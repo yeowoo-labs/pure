@@ -1,15 +1,21 @@
-/* M5 over ngtcp2 (docs/design/011-pure-transport.md): what the quinn
- * harness (../quic) does, in C, with OpenSSL 3.5's QUIC TLS (ngtcp2's ossl
- * backend), so a second QUIC stands beside Pure's links.
+/* M5 and M6 over ngtcp2 (docs/design/011-pure-transport.md): what the
+ * quinn harness (../quic) does, in C, with OpenSSL 3.5's QUIC TLS (ngtcp2's
+ * ossl backend), so a second QUIC stands beside Pure's links.
  *
  *   drain serve CERT.der KEY.der [PORT]   prints {"port":N}, then serves
- *   drain drain PORT COUNT SIZE           one connection, one stream
+ *   drain drain PORT COUNT SIZE [RATE [SECONDS]]
+ *                                         one connection, one stream
  *
  * The client writes "pure", then COUNT messages each after its u32 length
  * (SIZE bytes), then a length of 0, and ends the stream; the service counts
- * the messages (no store) and answers the count (u64). Packets go in bursts
- * with UDP GSO (DRAIN_GSO=0: one by one), as quinn's and Pure's do. Built by
- * build.sh against ngtcp2 1.25.0 fetched into build/third. */
+ * the messages (no store) and answers the count (u64). RATE: messages a
+ * second (0: as fast as it may), each with the time it was written (ns
+ * since the epoch) in its first 8 bytes, after "pace"; SECONDS: no more
+ * written after that long. The service writes a line of JSON for each
+ * stream, as quinn's does: the messages read in each 100 ms, and (paced)
+ * how long they took. Packets go in bursts with UDP GSO (DRAIN_GSO=0: one
+ * by one), as quinn's and Pure's do. Built by build.sh against ngtcp2
+ * 1.25.0 fetched into build/third. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <netdb.h>
@@ -46,6 +52,12 @@ static uint64_t now_ns(void) {
     return (uint64_t)t.tv_sec * NGTCP2_SECONDS + (uint64_t)t.tv_nsec;
 }
 
+static uint64_t epoch_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return (uint64_t)t.tv_sec * NGTCP2_SECONDS + (uint64_t)t.tv_nsec;
+}
+
 static void fail(const char *what) {
     fprintf(stderr, "drain: %s\n", what);
     exit(1);
@@ -63,19 +75,28 @@ typedef struct {
     ngtcp2_ccerr error;
     /* The client's stream: its bytes are a function of their offset, so
      * what ngtcp2 keeps to send again points into buffers that never change:
-     * "pure", then the messages (a pattern of one period), then a length of
-     * 0. */
+     * "pure" (or "pace"), then the messages up to end (a pattern of one
+     * period, or those written so far when paced), then a length of 0 once
+     * there are no more (the stream's total). */
     int64_t stream;
-    uint64_t count, size, offset, total;
-    unsigned char *pattern;
+    uint64_t count, size, offset, total, end;
+    unsigned char *pattern, *paced;
     size_t period;
-    /* The service's count, and where it is in a message. */
-    uint64_t messages, need, skip;
-    unsigned char length[4];
-    unsigned have;
-    bool header, answered;
+    double rate, seconds;
+    uint64_t began, written;
+    bool finished;
+    /* The service's count, where it is in a message (and its stamp, when
+     * paced), the messages read in each 100 ms and how long each took. */
+    uint64_t messages, need, skip, stream_began;
+    unsigned char length[4], head[4], stamp[8];
+    unsigned have, stamped;
+    bool header, pacing, answered;
     unsigned char answer[8];
     uint64_t read;
+    uint32_t *timeline;
+    size_t buckets;
+    uint64_t *waited;
+    size_t waits, waits_capacity;
 } Side;
 
 static void log_line(void *user, const char *format, ...) {
@@ -102,16 +123,55 @@ static int new_cid(ngtcp2_conn *conn, ngtcp2_cid *cid, ngtcp2_stateless_reset_to
     return 0;
 }
 
-/* The client: its stream opened once the service allows one. */
+/* The client: its stream opened once the service allows one; its messages
+ * are timed from then. */
 static int streams_allowed(ngtcp2_conn *conn, uint64_t most, void *user) {
     (void)most;
     Side *c = user;
     if (c->stream < 0 && ngtcp2_conn_open_bidi_stream(conn, &c->stream, NULL)) c->stream = -1;
+    if (c->stream >= 0 && !c->began) c->began = now_ns();
     return 0;
 }
 
-/* The service: messages counted as they come, over any cut; at the length of
- * 0 the count goes back and the stream ends. */
+static int by_value(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+/* The service's line for a stream: as quinn's. */
+static void report(Side *s) {
+    qsort(s->waited, s->waits, sizeof(*s->waited), by_value);
+    double at[2] = {0, 0};
+    for (int q = 0; q < 2 && s->waits; ++q) {
+        size_t k = s->waits * (q ? 99 : 50) / 100;
+        at[q] = (double)s->waited[k < s->waits ? k : s->waits - 1] / 1e6;
+    }
+    printf("{\"drained\":%llu,\"waited_ms_p50\":%.3f,\"waited_ms_p99\":%.3f,\"waited_ms_max\":%.3f,\"timeline_100ms\":[",
+           (unsigned long long)s->messages, at[0], at[1], s->waits ? (double)s->waited[s->waits - 1] / 1e6 : 0.0);
+    size_t last = s->buckets; /* to the last with a message, as quinn's */
+    while (last && !s->timeline[last - 1]) --last;
+    for (size_t b = 0; b < last; ++b) printf("%s%u", b ? "," : "", s->timeline[b]);
+    printf("]}\n");
+    fflush(stdout);
+}
+
+/* A message read whole: counted in its 100 ms. */
+static void message_read(Side *s) {
+    size_t bucket = (size_t)((now_ns() - s->stream_began) / (100 * NGTCP2_MILLISECONDS));
+    if (bucket >= s->buckets) {
+        size_t buckets = bucket + 64;
+        uint32_t *grown = realloc(s->timeline, buckets * sizeof(*grown));
+        if (!grown) fail("memory");
+        memset(grown + s->buckets, 0, (buckets - s->buckets) * sizeof(*grown));
+        s->timeline = grown, s->buckets = buckets;
+    }
+    ++s->timeline[bucket];
+    ++s->messages;
+}
+
+/* The service: messages counted as they come, over any cut (with the time
+ * each was written, when paced); at the length of 0 the count goes back and
+ * the stream ends. */
 static int stream_data(ngtcp2_conn *conn, uint32_t flags, int64_t stream, uint64_t offset, const uint8_t *data, size_t n,
                        void *user, void *stream_user) {
     (void)offset, (void)stream_user;
@@ -120,14 +180,33 @@ static int stream_data(ngtcp2_conn *conn, uint32_t flags, int64_t stream, uint64
         for (size_t i = 0; i < n && s->read < 8; ++i) s->answer[s->read++] = data[i];
         if ((flags & NGTCP2_STREAM_DATA_FLAG_FIN) || s->read >= 8) s->done = true;
     } else
-        for (size_t i = 0; i < n;) {
-            if (!s->header) { /* "pure" */
-                if (++s->have == 4) s->header = true, s->have = 0;
-                ++i;
+        for (size_t i = 0; i < n && !s->answered;) {
+            if (!s->header) { /* "pure" or "pace" */
+                s->head[s->have++] = data[i++];
+                if (s->have < 4) continue;
+                s->header = true, s->have = 0;
+                s->pacing = !memcmp(s->head, "pace", 4);
+                s->stream_began = now_ns();
             } else if (s->skip) {
-                size_t take = n - i < s->skip ? n - i : (size_t)s->skip;
-                s->skip -= take;
-                i += take;
+                if (s->pacing && s->stamped < 8) { /* the time it was written */
+                    s->stamp[s->stamped++] = data[i++];
+                    --s->skip;
+                    if (s->stamped == 8) {
+                        uint64_t stamp = 0;
+                        for (int b = 7; b >= 0; --b) stamp = stamp << 8 | s->stamp[b];
+                        if (s->waits == s->waits_capacity) {
+                            s->waits_capacity = s->waits_capacity ? 2 * s->waits_capacity : 1024;
+                            if (!(s->waited = realloc(s->waited, s->waits_capacity * sizeof(*s->waited)))) fail("memory");
+                        }
+                        uint64_t now = epoch_ns();
+                        s->waited[s->waits++] = now > stamp ? now - stamp : 0;
+                    }
+                } else {
+                    size_t take = n - i < s->skip ? n - i : (size_t)s->skip;
+                    s->skip -= take;
+                    i += take;
+                }
+                if (!s->skip) message_read(s);
             } else {
                 s->length[s->have++] = data[i++];
                 if (s->have < 4) continue;
@@ -138,10 +217,10 @@ static int stream_data(ngtcp2_conn *conn, uint32_t flags, int64_t stream, uint64
                     s->answered = true;
                     s->stream = stream;
                     for (int b = 0; b < 8; ++b) s->answer[b] = (unsigned char)(s->messages >> 8 * b);
+                    report(s);
                     break;
                 }
-                ++s->messages;
-                s->skip = length;
+                s->skip = length, s->stamped = 0;
             }
         }
     ngtcp2_conn_extend_max_stream_offset(conn, stream, n);
@@ -185,17 +264,44 @@ static void windows(ngtcp2_transport_params *p) {
 
 /* The client's next bytes at its offset: a pointer into what never changes. */
 static size_t next_bytes(Side *c, ngtcp2_vec *v) {
-    static const unsigned char head[4] = {'p', 'u', 'r', 'e'}, tail[4] = {0};
-    uint64_t messages_end = 4 + c->count * c->period;
+    static const unsigned char pure[4] = {'p', 'u', 'r', 'e'}, pace[4] = {'p', 'a', 'c', 'e'}, tail[4] = {0};
     if (c->offset >= c->total) return 0;
-    if (c->offset < 4) v->base = (uint8_t *)head + c->offset, v->len = 4 - c->offset;
-    else if (c->offset < messages_end) {
-        uint64_t phase = (c->offset - 4) % c->period, left = messages_end - c->offset;
-        v->base = c->pattern + phase;
+    if (c->offset < 4) v->base = (uint8_t *)(c->rate > 0 ? pace : pure) + c->offset, v->len = 4 - c->offset;
+    else if (c->offset < c->end) {
+        uint64_t left = c->end - c->offset;
+        v->base = c->rate > 0 ? c->paced + (c->offset - 4) : c->pattern + (c->offset - 4) % c->period;
         v->len = left < CHUNK ? left : CHUNK;
     } else
-        v->base = (uint8_t *)tail + (c->offset - messages_end), v->len = c->total - c->offset;
+        v->base = (uint8_t *)tail + (c->offset - c->end), v->len = c->total - c->offset;
     return 1;
+}
+
+/* The client's messages to now: paced, those due written (stamped); then,
+ * past its seconds (or all written), the stream ends after the message it
+ * is in. When the next is due (ns), or 0. */
+static uint64_t write_due(Side *c) {
+    if (!c->began || c->finished) return 0;
+    uint64_t now = now_ns(), limit = c->seconds > 0 ? c->began + (uint64_t)(c->seconds * 1e9) : UINT64_MAX;
+    if (c->rate > 0) {
+        for (;;) {
+            uint64_t due = c->began + (uint64_t)((double)c->written / c->rate * 1e9);
+            if (c->written == c->count || due >= limit) break;
+            if (due > now) return due;
+            unsigned char *m = c->paced + c->written * c->period, *stamp = m + 4;
+            uint64_t time = epoch_ns();
+            for (int b = 0; b < 8; ++b) stamp[b] = (unsigned char)(time >> 8 * b);
+            ++c->written;
+            c->end = c->total = 4 + c->written * c->period;
+        }
+    } else if (now < limit)
+        return limit;
+    else if (c->offset > 4) /* the message it is in, whole */
+        c->end = 4 + ((c->offset - 4 + c->period - 1) / c->period) * c->period;
+    else
+        c->end = 4;
+    c->total = c->end + 4;
+    c->finished = true;
+    return 0;
 }
 
 static ngtcp2_ssize write_one(ngtcp2_conn *conn, ngtcp2_path *path, ngtcp2_pkt_info *pi, uint8_t *dest, size_t size,
@@ -208,7 +314,7 @@ static ngtcp2_ssize write_one(ngtcp2_conn *conn, ngtcp2_path *path, ngtcp2_pkt_i
         uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE | NGTCP2_WRITE_STREAM_FLAG_PADDING;
         if (!s->server && s->stream >= 0 && (count = next_bytes(s, &v))) {
             stream = s->stream;
-            if (s->offset + v.len >= s->total) flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
+            if (s->finished && s->offset + v.len >= s->total) flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
         } else if (s->server && s->answered && s->read < 8) { /* the count, then the end */
             stream = s->stream, v.base = s->answer + s->read, v.len = 8 - s->read, count = 1;
             flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
@@ -307,8 +413,10 @@ static void read_in(Side *s) {
 
 static void run(Side *s) {
     while (!s->done) {
+        uint64_t due = s->server ? 0 : write_due(s);
         if (s->conn) write_out(s);
         ngtcp2_tstamp expiry = s->conn ? ngtcp2_conn_get_expiry2(s->conn) : UINT64_MAX, now = now_ns();
+        if (due && due < expiry) expiry = due;
         int timeout = expiry == UINT64_MAX ? 1000 : expiry <= now ? 0 : (int)((expiry - now) / NGTCP2_MILLISECONDS) + 1;
         struct pollfd wait = {s->fd, POLLIN, 0};
         if (poll(&wait, 1, timeout) < 0 && errno != EINTR) fail("poll");
@@ -383,15 +491,30 @@ static _Noreturn void serve(const char *cert, const char *key, unsigned port) {
         ngtcp2_conn_del(s.conn);
         ngtcp2_crypto_ossl_ctx_del(s.tls);
         SSL_free(s.ssl);
+        free(s.timeline);
+        free(s.waited);
         Side next = {.server = true, .stream = -1, .gso = s.gso, .fd = s.fd, .local = s.local, .local_size = s.local_size};
         s = next;
     }
 }
 
-static int drain(unsigned port, uint64_t count, uint64_t size) {
-    Side c = {.stream = -1, .count = count, .size = size, .gso = !getenv("DRAIN_GSO") || strcmp(getenv("DRAIN_GSO"), "0")};
+static int drain(unsigned port, uint64_t count, uint64_t size, double rate, double seconds) {
+    Side c = {.stream = -1, .count = count, .size = size, .rate = rate, .seconds = seconds,
+              .gso = !getenv("DRAIN_GSO") || strcmp(getenv("DRAIN_GSO"), "0")};
     c.period = 4 + size;
-    c.total = 4 + count * c.period + 4;
+    c.end = 4 + count * c.period;
+    c.total = c.end + 4;
+    c.finished = rate <= 0 && seconds <= 0;
+    if (rate > 0) { /* the messages written as they are due: room for them all, none yet */
+        if (seconds > 0 && (double)count > rate * seconds + 1) c.count = count = (uint64_t)(rate * seconds) + 1;
+        if (size < 8 || !(c.paced = malloc(count * c.period))) fail("paced messages of 8 bytes or more, in memory");
+        for (uint64_t k = 0; k < count; ++k) {
+            unsigned char *m = c.paced + k * c.period;
+            for (int b = 0; b < 4; ++b) m[b] = (unsigned char)(size >> 8 * b);
+            memset(m + 4, 'x', size);
+        }
+        c.end = c.total = 4;
+    }
     size_t periods = CHUNK / c.period + 2;
     if (!(c.pattern = malloc(periods * c.period))) fail("memory");
     for (size_t p = 0; p < periods; ++p) {
@@ -428,11 +551,12 @@ static int drain(unsigned port, uint64_t count, uint64_t size) {
     ngtcp2_conn_set_tls_native_handle(c.conn, c.tls);
     uint64_t began = now_ns();
     run(&c);
-    double seconds = (double)(now_ns() - began) / 1e9;
+    double took = (double)(now_ns() - began) / 1e9;
     uint64_t read = 0;
     for (int b = 7; b >= 0; --b) read = read << 8 | c.answer[b];
+    uint64_t sent = c.rate > 0 ? c.written : (c.end - 4) / c.period;
     printf("{\"messages\":%llu,\"size\":%llu,\"read\":%llu,\"seconds\":%.3f,\"per_second\":%.0f}\n",
-           (unsigned long long)count, (unsigned long long)size, (unsigned long long)read, seconds, (double)count / seconds);
+           (unsigned long long)sent, (unsigned long long)size, (unsigned long long)read, took, (double)sent / took);
     ngtcp2_path_storage ps;
     ngtcp2_path_storage_zero(&ps);
     ngtcp2_pkt_info pi;
@@ -440,15 +564,16 @@ static int drain(unsigned port, uint64_t count, uint64_t size) {
     ngtcp2_ccerr_default(&c.error);
     ngtcp2_ssize n = ngtcp2_conn_write_connection_close(c.conn, &ps.path, &pi, close, sizeof(close), &c.error, now_ns());
     if (n > 0) send(c.fd, close, (size_t)n, 0);
-    return read == count ? 0 : 1;
+    return read == sent ? 0 : 1;
 }
 
 int main(int argc, char **argv) {
     if (ngtcp2_crypto_ossl_init()) fail("ngtcp2's OpenSSL");
     if (argc >= 4 && argc <= 5 && !strcmp(argv[1], "serve"))
         serve(argv[2], argv[3], argc == 5 ? (unsigned)strtoul(argv[4], NULL, 10) : 0);
-    if (argc == 5 && !strcmp(argv[1], "drain"))
-        return drain((unsigned)strtoul(argv[2], NULL, 10), strtoull(argv[3], NULL, 10), strtoull(argv[4], NULL, 10));
-    fputs("drain serve CERT.der KEY.der [PORT] | drain drain PORT COUNT SIZE\n", stderr);
+    if (argc >= 5 && argc <= 7 && !strcmp(argv[1], "drain"))
+        return drain((unsigned)strtoul(argv[2], NULL, 10), strtoull(argv[3], NULL, 10), strtoull(argv[4], NULL, 10),
+                     argc > 5 ? strtod(argv[5], NULL) : 0, argc > 6 ? strtod(argv[6], NULL) : 0);
+    fputs("drain serve CERT.der KEY.der [PORT] | drain drain PORT COUNT SIZE [RATE [SECONDS]]\n", stderr);
     return 2;
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """M6 of docs/design/011-pure-transport.md: a link on a path of delay, loss,
-reordering and a bottleneck, against quinn, and beside TCP CUBIC.
+reordering and a bottleneck, against quinn and ngtcp2, and beside TCP CUBIC.
 
 Each case runs in `unshare -rn` (an unprivileged network namespace) whose
 loopback is the path: MTU 1500, and TCP's segments no larger
@@ -8,15 +8,15 @@ loopback is the path: MTU 1500, and TCP's segments no larger
 RTT), jitter (packets reorder) and random loss; the way to the receivers
 (ports 40000-40007) then goes through a 50 Mbit/s bottleneck (tbf) whose
 queue holds a round trip of it, and the way back (answers, TCP's
-acknowledgments) does not queue behind it. Pure and quinn send without UDP
-GSO: a qdisc takes a GSO burst as one packet.
+acknowledgments) does not queue behind it. Pure and the QUICs send without
+UDP GSO: a qdisc takes a GSO burst as one packet.
 
   bulk   a backlog of 1 KiB records for --seconds (Pure: a link and a
-         listener, transport.c; quinn: one stream); the goodput from the
-         receiver's records in each 100 ms, the first 2 s left out.
+         listener, transport.c; quinn and ngtcp2: one stream); the goodput
+         from the receiver's records in each 100 ms, the first 2 s left out.
   paced  50 records a second for --seconds (well within what each carries); the time each took from
          queued (written) to handed over (read): p50, p99, max.
-  share  Pure, quinn or a second TCP flow beside a TCP CUBIC flow, each a
+  share  Pure, quinn, ngtcp2 or a second TCP flow beside a TCP CUBIC flow, each a
          process of its own, started together, for --share-seconds; each
          one's share of the goodput from 20 s on (CUBIC's flows converge
          slowly at an RTT of 100 ms). The path's delay wavers by 1 ms: with
@@ -24,7 +24,7 @@ GSO: a qdisc takes a GSO burst as one packet.
          than the other's by their phases alone (Floyd and Jacobson, 1992),
          and which flow that is says nothing of either.
 
-    python3 research/experiments/020-lossy-paths/run.py [--rounds 3] [--out FILE]
+    python3 research/experiments/020-lossy-paths/run.py [--rounds 3] [--who pure,ngtcp2] [--out FILE]
 """
 import argparse
 import json
@@ -42,15 +42,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 HERE = Path(__file__).resolve().parent
 QUINN = ROOT / 'research/experiments/019-idle-links/quic/target/release/idle-quic'
+NGTCP2 = ROOT / 'build/third/ngtcp2-drain'
 TC = shutil.which('tc') or '/usr/sbin/tc'
 IP = shutil.which('ip') or '/usr/sbin/ip'
 RATE_MBIT, SIZE = 50, 1000
-PURE_PORT, QUINN_PORT, TCP_PORT, OTHER_TCP_PORT = 40001, 40002, 40003, 40004  # the receivers, beyond the bottleneck
+PURE_PORT, QUINN_PORT, TCP_PORT, OTHER_TCP_PORT, NGTCP2_PORT = 40001, 40002, 40003, 40004, 40005  # the receivers, beyond the bottleneck
 sys.path.insert(0, str(ROOT / 'tests'))
 
 
 def build(work):
-    """The transport harness, quinn's, the two modules and a certificate."""
+    """The transport harness, quinn's, ngtcp2's, the two modules and a certificate."""
     import check
     import importlib.util
     spec = importlib.util.spec_from_file_location('idle_links', ROOT / 'research/experiments/019-idle-links/run.py')
@@ -63,6 +64,7 @@ def build(work):
                     str(ROOT / 'build/libpure.a'), '-lm', '-pthread', '-ldl', '-o', str(ROOT / 'build/link-transport')],
                    check=True)
     subprocess.run(['cargo', 'build', '--release', '--offline', '--quiet'], cwd=QUINN.parents[2], check=True)
+    subprocess.run(['sh', str(ROOT / 'research/experiments/019-idle-links/ngtcp2/build.sh')], check=True)
     for name, text in (('sender', check.LINK_SENDER), ('receiver', check.LINK_RECEIVER)):
         (work / f'{name}.aup').write_text(text)
         check.compile_module(Path(os.environ.get('AUP', ROOT.parent / 'aup/build/aup')), work / f'{name}.aup',
@@ -144,8 +146,20 @@ def finish_quinn(started, seconds):
     return json.loads(line)
 
 
-def quinn(work, seconds, rate=0):
-    return finish_quinn(start_quinn(work, seconds, rate), seconds)
+def start_ngtcp2(work, seconds, rate=0, count=2000000):
+    """As quinn's: the same messages over ngtcp2 (019's ngtcp2/drain.c)."""
+    env = {**os.environ, 'DRAIN_GSO': '0'}
+    server = subprocess.Popen([str(NGTCP2), 'serve', str(work / 'cert.der'), str(work / 'key.der'), str(NGTCP2_PORT)],
+                              stdout=subprocess.PIPE, text=True, env=env)
+    port = json.loads(server.stdout.readline())['port']
+    client = subprocess.Popen([str(NGTCP2), 'drain', str(port), str(count), str(SIZE + 8 + 5), str(rate), str(seconds)],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    return server, client
+
+
+def quic(who, work, seconds, rate=0):
+    started = (start_quinn if who == 'quinn' else start_ngtcp2)(work, seconds, rate)
+    return finish_quinn(started, seconds)
 
 
 def start_tcp(port, seconds):
@@ -216,7 +230,7 @@ def inner(case):
     del row['work']
     if kind in ('bulk', 'paced'):
         rate = 50 if kind == 'paced' else 0
-        result = pure(work, seconds, rate) if who == 'pure' else quinn(work, seconds, rate)
+        result = pure(work, seconds, rate) if who == 'pure' else quic(who, work, seconds, rate)
         timeline = result['timeline_100ms']
         row['mbit'] = goodput(timeline, SIZE + 13, 2.0, seconds)
         for key in ('waited_ms_p50', 'waited_ms_p99', 'waited_ms_max', 'resent', 'lost', 'late', 'undone', 'packets'):
@@ -229,7 +243,7 @@ def inner(case):
         elif who == 'pure':
             theirs = finish_pure(start_pure(work, seconds), seconds)['timeline_100ms']
         else:
-            theirs = finish_quinn(start_quinn(work, seconds), seconds)['timeline_100ms']
+            theirs = finish_quinn((start_quinn if who == 'quinn' else start_ngtcp2)(work, seconds), seconds)['timeline_100ms']
         mine = finish_tcp(tcp, seconds)
         row['mbit'] = goodput(theirs, SIZE + 13, 20.0, seconds - 1)
         row['tcp_mbit'] = goodput(mine, 1, 20.0, seconds - 1)
@@ -241,17 +255,21 @@ def inner(case):
 # ---- Outside
 
 
-def cases(seconds, share_seconds):
+def cases(seconds, share_seconds, whom=('pure', 'quinn', 'ngtcp2', 'tcp')):
     for rtt in (20, 100):
         for loss in (0, 1, 5):
             for jitter in (0, 3):
-                for who in ('pure', 'quinn'):
-                    yield {'kind': 'bulk', 'who': who, 'rtt_ms': rtt, 'loss': loss, 'jitter_ms': jitter, 'seconds': seconds}
+                for who in ('pure', 'quinn', 'ngtcp2'):
+                    if who in whom:
+                        yield {'kind': 'bulk', 'who': who, 'rtt_ms': rtt, 'loss': loss, 'jitter_ms': jitter,
+                               'seconds': seconds}
         for loss in (0, 1, 5):
-            for who in ('pure', 'quinn'):
-                yield {'kind': 'paced', 'who': who, 'rtt_ms': rtt, 'loss': loss, 'jitter_ms': 0, 'seconds': seconds}
-        for who in ('pure', 'quinn', 'tcp'):
-            yield {'kind': 'share', 'who': who, 'rtt_ms': rtt, 'loss': 0, 'jitter_ms': 1, 'seconds': share_seconds}
+            for who in ('pure', 'quinn', 'ngtcp2'):
+                if who in whom:
+                    yield {'kind': 'paced', 'who': who, 'rtt_ms': rtt, 'loss': loss, 'jitter_ms': 0, 'seconds': seconds}
+        for who in ('pure', 'quinn', 'ngtcp2', 'tcp'):
+            if who in whom:
+                yield {'kind': 'share', 'who': who, 'rtt_ms': rtt, 'loss': 0, 'jitter_ms': 1, 'seconds': share_seconds}
 
 
 def main():
@@ -260,6 +278,7 @@ def main():
     parser.add_argument('--seconds', type=int, default=20)
     parser.add_argument('--share-seconds', type=int, default=60)
     parser.add_argument('--only', default=None, help='kinds to run, for example bulk,share')
+    parser.add_argument('--who', default='pure,quinn,ngtcp2,tcp', help='whom to run, for example pure,ngtcp2')
     parser.add_argument('--out', type=Path, default=None)
     parser.add_argument('--inner', default=None, help=argparse.SUPPRESS)
     parser.add_argument('--tcp', default=None, help=argparse.SUPPRESS)
@@ -278,7 +297,7 @@ def main():
         build(work)
         only = set(args.only.split(',')) if args.only else None
         for round_ in range(args.rounds):
-            for case in cases(args.seconds, args.share_seconds):
+            for case in cases(args.seconds, args.share_seconds, tuple(args.who.split(','))):
                 if only and case['kind'] not in only:
                     continue
                 case = {**case, 'round': round_, 'work': str(work)}
