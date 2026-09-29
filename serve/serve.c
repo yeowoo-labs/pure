@@ -2746,6 +2746,7 @@ int main(int argc, char **argv) {
         pure_link_counts(owner.executor.links[i], &c);
         sent.packets += c.packets, sent.records += c.records, sent.resent += c.resent, sent.lost += c.lost;
         sent.acknowledged += c.acknowledged, sent.received += c.received, sent.stored += c.stored;
+        sent.refused += c.refused;
         pure_link_close(owner.executor.links[i]); /* what was not stored stays in the outbox */
     }
     if (owned) {
@@ -2763,25 +2764,27 @@ int main(int argc, char **argv) {
             ",\"commit_groups\":%lu,\"grouped_commits\":%lu,\"checkpoints\":%" PRIu64
             ",\"link_packets\":%" PRIu64 ",\"link_records\":%" PRIu64 ",\"link_resent\":%" PRIu64
             ",\"link_lost\":%" PRIu64 ",\"link_acknowledged\":%" PRIu64 ",\"link_stored\":%" PRIu64
-            ",\"listener_packets\":%" PRIu64 ",\"listener_received\":%" PRIu64 ",\"listener_deliveries\":%" PRIu64
-            ",\"listener_woken\":%" PRIu64 ",\"listener_remembered\":%" PRIu64 ",\"listener_swept\":%" PRIu64
-            ",\"listener_active\":%" PRIu64 ",\"listener_keyed\":%" PRIu64 ",\"listener_secrets\":%" PRIu64
-            ",\"listener_epochs\":%" PRIu64 "}\n",
+            ",\"link_refused\":%" PRIu64 ",\"listener_packets\":%" PRIu64 ",\"listener_received\":%" PRIu64
+            ",\"listener_deliveries\":%" PRIu64 ",\"listener_woken\":%" PRIu64 ",\"listener_remembered\":%" PRIu64
+            ",\"listener_swept\":%" PRIu64 ",\"listener_active\":%" PRIu64 ",\"listener_keyed\":%" PRIu64
+            ",\"listener_secrets\":%" PRIu64 ",\"listener_epochs\":%" PRIu64 ",\"listener_refused\":%" PRIu64 "}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
             owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
-            heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept, heard.active,
-            heard.keyed, heard.secrets, heard.epochs);
+            sent.refused, heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept,
+            heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused);
     free(hosts);
     free(thread);
     return 0;
 usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
-          "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=http[s]://host:port/path ...] [--name NAME] "
+          "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=URL ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
           "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] "
           "[--surface LIBRARY [-- ARGUMENTS]]\n"
-          "  --send OUTPUT=pure://host:port/INPUT links to a Pure node's --link-port (UDP; its key by --seal OUTPUT=KEY)\n"
+          "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
+          "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"
+          "  --send OUTPUT=http[s]://host:port/path: to anything else, over HTTP\n"
           "  --senders FILE: more senders the --link-port takes, a line each: NAME KEY\n", stderr);
     return 2;
 }

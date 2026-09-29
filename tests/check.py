@@ -1070,6 +1070,7 @@ def server_links_refused(aup, pure, work):
                 said += [json.loads(line) for line in lines if line.startswith('{"link"')]
     assert len(said) == 1, said
     assert stats['a']['link_packets'] <= 8 and stats['a']['link_records'] <= 4, stats['a']
+    assert stats['a']['link_refused'] >= 2 and stats['b']['listener_refused'] >= 2, (stats['a'], stats['b'])
     return {'said': said[0]['error'], 'packets': stats['a']['link_packets']}
 
 
