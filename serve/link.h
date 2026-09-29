@@ -29,8 +29,8 @@
  *                shape of the messages (the sender's output and the
  *                receiver's input must have the same): the stream the
  *                records after it are of
- *   0x02 RECORD  u64 number, u32 size, u32 offset, u16 length, bytes: a saved
- *                send as stored, or a piece of one
+ *   0x02 RECORD  u64 number, u32 size, u32 offset, u16 length, bytes: a piece
+ *                of a saved send (pieces are 1000 bytes, the last shorter)
  *   0x03 ACK     u64 largest number, u32 delay (µs), u8 ranges, each as u64
  *                first and u64 last, newest first
  *   0x04 STORED  source, input (as STREAM), u64 the last number heard
@@ -40,8 +40,8 @@
  *   0x05 PING    to be acknowledged
  *   0x06 RECORDS u64 the first one's number, u8 count, then whole records one
  *                after another (numbers following on), each its size (a
- *                varint: LEB128) and its bytes: small sends, 1 or 2 bytes
- *                of framing each, not the 19 of RECORD
+ *                varint: LEB128) and its bytes: a send that fits the packet
+ *                whole, with 1 to 3 bytes of framing, not the 19 of RECORD
  *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
  *                a whole datagram
  * Losses are detected as RFC 9002 says; congestion control is its NewReno

@@ -27,11 +27,24 @@
 static PureModule sender, receiver;
 static PureLinkListener *listener;
 static atomic_uint_fast64_t delivered;
+static unsigned char *payload;
+static size_t payload_size;
+static uint64_t heard, wrong; /* the last record taken; deliveries not as sent */
 
+/* Records as sent, each once, in order: the one after the last taken on
+ * (one taken before would be a delivery again), of the payload's bytes. */
 static bool deliver(void *context, const PureLinkDelivery *d) {
     (void)context;
+    const unsigned char *at = d->records;
+    for (unsigned k = 0; k < d->count; ++k) {
+        uint32_t size = (uint32_t)at[0] | (uint32_t)at[1] << 8 | (uint32_t)at[2] << 16 | (uint32_t)at[3] << 24;
+        if (d->first + k != heard + 1 + k || size != payload_size || memcmp(at + 4, payload, size)) ++wrong;
+        at += 4 + size;
+    }
+    if ((size_t)(at - d->records) != d->size || d->first > heard + 1) ++wrong;
+    if (d->first + d->count - 1 > heard) heard = d->first + d->count - 1;
     atomic_fetch_add(&delivered, d->count);
-    pure_link_done(listener, d->token, d->first + d->count - 1, true, false);
+    pure_link_done(listener, d->token, heard, true, false);
     return true;
 }
 
@@ -128,8 +141,9 @@ int main(int argc, char **argv) {
     if (!link) return fprintf(stderr, "transport: %s\n", error), 1;
     pure_link_peer(link, public_b);
     int output = pure_module_input(&sender, "ordered");
-    unsigned char *payload = malloc(size + 256);
-    size_t payload_size = order(&sender, (uint32_t)output, size, payload);
+    payload = malloc(size + 256);
+    payload_size = order(&sender, (uint32_t)output, size, payload);
+    for (size_t i = 0; i < payload_size; ++i) payload[i] ^= (unsigned char)(i * 7); /* bytes that differ by place */
     uint64_t first = 1;
     if (!window) /* a backlog: all queued before the link starts */
         for (; first <= count; ++first)
@@ -153,13 +167,13 @@ int main(int argc, char **argv) {
     PureLinkCounts sent;
     pure_link_counts(link, &sent);
     printf("{\"records\":%llu,\"record_bytes\":%zu,\"seconds\":%.3f,\"per_second\":%.0f,\"packets\":%llu,"
-           "\"resent\":%llu,\"link_us_per_record\":%.3f,\"listener_us_per_record\":%.3f,\"other_us_per_record\":%.3f}\n",
+           "\"wrong\":%llu,\"resent\":%llu,\"link_us_per_record\":%.3f,\"listener_us_per_record\":%.3f,\"other_us_per_record\":%.3f}\n",
            (unsigned long long)count, payload_size, seconds, (double)count / seconds, (unsigned long long)sent.packets,
-           (unsigned long long)sent.resent, (double)link_ns / 1e3 / (double)count, (double)listen_ns / 1e3 / (double)count,
+           (unsigned long long)wrong, (unsigned long long)sent.resent, (double)link_ns / 1e3 / (double)count, (double)listen_ns / 1e3 / (double)count,
            (double)(all_ns - link_ns - listen_ns) / 1e3 / (double)count);
     pure_link_close(link);
     PureLinkCounts heard;
     pure_link_listener_close(listener, &heard);
     snprintf(path, sizeof(path), "rm -rf %s", dir);
-    return system(path) ? 0 : 0;
+    return system(path) || wrong ? 1 : 0;
 }

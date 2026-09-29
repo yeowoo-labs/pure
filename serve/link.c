@@ -649,37 +649,47 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
      * it are sent, and every one found sent moves that mark on. */
     size_t k = l->count && l->unsent_from > base + 1 ? (size_t)(l->unsent_from - base - 1) : 0;
     bool before = true;
-    /* Whole records whose numbers follow on share a RECORDS frame (its count
-     * at run); a piece of a larger one goes alone (RECORD). */
+    /* A record none of whose pieces went yet goes whole when it fits what is
+     * left of the packet: whole records whose numbers follow on share a
+     * RECORDS frame (its count at run). Else its unsent pieces go, each in a
+     * RECORD frame. */
     size_t run = 0;
     uint64_t next = 0;
     for (; k < l->count && f->count < UNITS; ++k) {
         Record *r = record_at(l, k);
         if (r->seq > base + l->credit) break;
-        bool unsent = false;
-        for (uint32_t i = 0; i < r->pieces; ++i) {
-            if ((*piece_of(r, i)).state != UNSENT) continue;
-            uint32_t offset = i * PIECE, length = (uint32_t)least(PIECE, r->size - offset);
-            bool whole = r->pieces == 1, joins = whole && run && r->seq == next;
-            size_t need = whole ? (joins ? 0 : RECORDS_HEAD) + varint_size(length) + length : RECORD_HEAD + length;
-            if (f->count == UNITS || at + need > BODY) {
-                unsent = true;
-                break;
+        bool unsent = false, fresh = true, joins = run && r->seq == next;
+        for (uint32_t i = 0; i < r->pieces && fresh; ++i) fresh = piece_of(r, i)->state == UNSENT;
+        size_t whole = (joins ? 0 : RECORDS_HEAD) + varint_size(r->size) + r->size;
+        if (fresh && f->count + r->pieces <= UNITS && at + whole <= BODY) {
+            if (!joins) {
+                body[at] = F_RECORDS;
+                put64(body + at + 1, r->seq);
+                body[at + 9] = 0;
+                run = at + 9;
+                at += RECORDS_HEAD;
             }
-            if (whole) {
-                if (!joins) {
-                    body[at] = F_RECORDS;
-                    put64(body + at + 1, r->seq);
-                    body[at + 9] = 0;
-                    run = at + 9;
-                    at += RECORDS_HEAD;
+            at += put_varint(body + at, r->size);
+            if (r->size) memcpy(body + at, l->ring + r->at, r->size);
+            at += r->size;
+            ++body[run];
+            next = r->seq + 1;
+            for (uint32_t i = 0; i < r->pieces; ++i) {
+                set_piece(l, r, i, FLYING);
+                piece_of(r, i)->pn = f->pn;
+                f->units[f->count++] = (Unit){r->seq, i};
+            }
+            ++l->counts.records;
+        } else if (fresh && r->pieces == 1)
+            unsent = true; /* too large for what is left: the next packet */
+        else
+            for (uint32_t i = 0; i < r->pieces; ++i) {
+                if (piece_of(r, i)->state != UNSENT) continue;
+                uint32_t offset = i * PIECE, length = (uint32_t)least(PIECE, r->size - offset);
+                if (f->count == UNITS || at + RECORD_HEAD + length > BODY) {
+                    unsent = true;
+                    break;
                 }
-                at += put_varint(body + at, length);
-                if (length) memcpy(body + at, l->ring + r->at, length);
-                at += length;
-                ++body[run];
-                next = r->seq + 1;
-            } else {
                 body[at] = F_RECORD;
                 put64(body + at + 1, r->seq);
                 put32(body + at + 9, r->size);
@@ -688,12 +698,11 @@ static size_t fill(PureLink *l, unsigned char *body, Flight *f) {
                 if (length) memcpy(body + at + RECORD_HEAD, l->ring + r->at + offset, length);
                 at += RECORD_HEAD + length;
                 run = 0;
+                set_piece(l, r, i, FLYING);
+                piece_of(r, i)->pn = f->pn;
+                f->units[f->count++] = (Unit){r->seq, i};
+                ++l->counts.records;
             }
-            set_piece(l, r, i, FLYING);
-            (*piece_of(r, i)).pn = f->pn;
-            f->units[f->count++] = (Unit){r->seq, i};
-            ++l->counts.records;
-        }
         if (before && !unsent) l->unsent_from = r->seq + 1;
         before = before && !unsent;
         if (unsent) { /* the packet is full: whole, so it can go in a burst */
@@ -1172,10 +1181,11 @@ static Held *held_at(Stream *st, size_t k) { return &st->held[st->held_first + k
 static uint64_t line_end(const Stream *st) { return st->line_first + st->line_count; }
 
 /* Room for more bytes at the line's end: its front let go given back
- * first, else a longer line. */
+ * first when that is at least half of it (so no byte moves twice in a
+ * doubling), else a longer line. */
 static bool line_room(Stream *st, size_t more) {
     if (st->line_size + more <= st->line_capacity) return true;
-    if (st->line_head) {
+    if (st->line_head && st->line_head >= st->line_capacity / 2) {
         memmove(st->line, st->line + st->line_head, st->line_size - st->line_head);
         st->line_size -= st->line_head;
         st->line_head = 0;
@@ -1454,7 +1464,7 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
     }
     if ((st->known && seq > st->heard + CREDIT) || size > RECORD_MOST) return;
     if (st->known && seq < line_end(st)) return; /* on the line already */
-    if (st->known && seq == line_end(st) && !offset && length == size && size <= PIECE) { /* the next, whole */
+    if (st->known && seq == line_end(st) && !offset && length == size) { /* the next, whole */
         if (st->held_bytes + (st->line_size - st->line_head) + size <= HELD_MOST && line_append(st, bytes, size))
             line_pull(st);
         return;
@@ -1487,10 +1497,15 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
         st->held_bytes += size;
     }
     Held *h = held_at(st, k);
-    uint32_t piece = offset / PIECE;
-    if (h->size != size || offset % PIECE || piece >= h->pieces || length != least(PIECE, size - offset) ||
-        h->bytes[size + piece])
+    if (h->size != size) return;
+    if (!offset && length == size) { /* whole: every piece had */
+        if (size) memcpy(h->bytes, bytes, size);
+        memset(h->bytes + size, 1, h->pieces);
+        h->got = h->pieces;
         return;
+    }
+    uint32_t piece = offset / PIECE;
+    if (offset % PIECE || piece >= h->pieces || length != least(PIECE, size - offset) || h->bytes[size + piece]) return;
     if (length) memcpy(h->bytes + offset, bytes, length);
     h->bytes[size + piece] = 1;
     ++h->got;
@@ -1606,7 +1621,7 @@ static bool take_from(PureLinkListener *s, Peer *peer, unsigned char *packet, si
             at += RECORDS_HEAD - 1;
             unsigned i = 0;
             for (size_t used; i < count && (used = get_varint(plain + at, size - at, &length)) &&
-                              length <= PIECE && length <= size - at - used; ++i) {
+                              length <= size - at - used; ++i) {
                 if (st) hold(st, first + i, (uint32_t)length, 0, plain + at + used, (uint32_t)length);
                 at += used + length;
             }
