@@ -23,9 +23,28 @@
  *   packet's number in its run.
  * Keys come from the secret the two nodes' keys share (X25519) by
  * HKDF-SHA256, with both public keys and the sending node's run: a sender's
- * packets use its own run; a receiver's answers add the run they answer,
- * so an answer opens only in that run. The nonce is the key's base with the
- * packet's number in its last eight bytes (XOR, big-endian, as QUIC does).
+ * packets use its own run. A receiver's answers use a run drawn for each
+ * sender's run it keeps (made again when a sender at rest comes back, so no
+ * nonce repeats), and add the run they answer, so an answer opens only in
+ * that run. The nonce is the key's base with the packet's number in its
+ * last eight bytes (XOR, big-endian, as QUIC does).
+ *
+ * What an attacker on the path may do, and what it gets (link/test-link.c
+ * does each):
+ *   - change a packet: it does not open, and it is answered by nothing
+ *     (a packet is opened before it is looked at).
+ *   - send a packet of the past again: its records are applied once (the
+ *     heard numbers), its word is taken only as the most said (STORED's
+ *     limit), and it moves nothing: answers go where the newest packet of
+ *     the run came from. A new address is sent a challenge the sender says
+ *     back (the attacker cannot); until then answers there are at most
+ *     three times the bytes that came from it (RFC 9000 §8).
+ *   - send as a key or a source not allowed: nothing opens or is delivered.
+ *     (Anyone who has the receiver's private key can seal as any sender to
+ *     it: static-static keys, as Noise KK's first message.)
+ *   - flood made-up packets under a known key's id, runs never seen: keys
+ *     made for a run that did not open cost a token, 256 a second, so at
+ *     most that many HKDFs a second; X25519 once a sender (remembered).
  *
  * Frames (numbers little-endian):
  *   0x01 STREAM  source (u8 length, bytes), input (u8 length, bytes), u32 the
@@ -40,16 +59,20 @@
  *   0x04 STORED  source, input (as STREAM), u64 the last number heard
  *                (applied and saved), u8 flags (1: a record after a gap was
  *                not taken: send what follows it again), u32 credit (records
- *                it takes past that)
+ *                it takes past that: the sender sends up to the most heard
+ *                and credit it was told)
  *   0x05 PING    to be acknowledged
  *   0x06 RECORDS u64 the first one's number, u8 count, then whole records one
  *                after another (numbers following on), each its size (a
  *                varint: LEB128) and its bytes: a send that fits the packet
  *                whole, with 1 to 3 bytes of framing, not the 19 of RECORD
+ *   0x07 CHALLENGE u64: a receiver's, until its sender says it back from
+ *                the address the answers go to
+ *   0x08 RESPONSE u64: a challenge said back (the last few had)
  *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
  *                a whole datagram
- * Losses are detected as RFC 9002 says; congestion control is its NewReno
- * (RFC 9002 §7). */
+ * Losses are detected as RFC 9002 says, with RACK's patience for packets
+ * that come late; congestion control is CUBIC (RFC 9438), paced. */
 
 /* A packet is PURE_LINK_DATAGRAM bytes at most at first, and up to
  * PURE_LINK_DATAGRAM_MOST once the path is found to carry that many (a
@@ -61,12 +84,13 @@ enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,
  * the last number stored; packets called lost that came late, and
- * congestion events undone for it; a receiver's senders woken (their
- * active state made), of them with a secret remembered (no X25519), let go
- * when idle, and active now. */
+ * congestion events undone for it; runs keyed (keys made from a secret)
+ * and secrets made (X25519); a receiver's senders woken (their active
+ * state made), of them with a secret remembered (no X25519), let go when
+ * idle, and active now. */
 typedef struct {
-    uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, late, undone, woken, remembered,
-        swept, active;
+    uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, late, undone, keyed, secrets,
+        woken, remembered, swept, active;
 } PureLinkCounts;
 
 /* ---- The sending side: one output's saved sends to a receiver's input, as

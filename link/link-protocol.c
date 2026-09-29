@@ -18,7 +18,8 @@ enum { DATAGRAM_MOST = PURE_LINK_DATAGRAM_MOST, BODY_MOST = DATAGRAM_MOST - HEAD
 /* A record that does not fit what is left of a packet goes in part, when
  * at least this much of it fits. */
 enum { PART_LEAST = 64 };
-enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, F_RECORDS = 6, STORED_GAP = 1 };
+enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, F_RECORDS = 6, F_CHALLENGE = 7,
+       F_RESPONSE = 8, STORED_GAP = 1 };
 enum { RECORDS_HEAD = 10 }; /* type, the first number, the count */
 enum { RANGES = 32, RUNS = 2, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
 enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
@@ -28,6 +29,9 @@ enum { REORDER_FIRST = 3, REORDER_PACKETS_MOST = 256, REORDER_QUARTERS_MOST = 8,
 /* A probe of a larger datagram lost is tried again a second on, three
  * times, then ten minutes on. */
 enum { REACH_TRIES = 3 };
+/* Challenges a sender keeps to say back, the newest first. */
+enum { RESPONSES = 4 };
+enum { KEYINGS = 256 };
 /* CUBIC's constants (RFC 9438): the cubic's scale, and the window kept at a
  * congestion event. */
 static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7, RENO_PACE = 3 * (1 - 0.7) / (1 + 0.7);
@@ -198,7 +202,14 @@ struct PureLinkSender {
     uint64_t in_flight, window, threshold, recovery_start, eliciting;
     uint64_t largest_acked, latest_rtt, smoothed_rtt, rtt_var, min_rtt;
     bool acked_any, sampled;
-    uint64_t loss_time, last_eliciting, credit, stored_changed;
+    /* limit: the highest number the receiver takes (the last it stored and
+     * its credit past that, the most it said: a word of the past sent again
+     * lowers nothing; 0 before it said any). Challenges to say back in the
+     * next packet (the receiver checks the path so): the last few, as an
+     * answer of the past sent again may bring an old one. */
+    uint64_t loss_time, last_eliciting, limit, stored_changed;
+    uint64_t respond[RESPONSES];
+    unsigned responding;
     /* Reordering: later packets acknowledged before a packet is lost (3 at
      * first), and the time past the RTT, in quarters of the least RTT (0:
      * RFC 9002's eighth of the RTT); both grow when a packet called lost
@@ -603,13 +614,13 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
         l->stored = heard;
         l->stored_changed = now;
     }
-    if (flags & STORED_GAP) /* it did not keep what came after a gap: send it again */
+    if ((flags & STORED_GAP) && heard >= l->stored) /* it did not keep what came after a gap: send it again */
         for (size_t k = 0; k < l->count && l->received; ++k) {
             Record *r = record_at(l, k);
             for (uint32_t i = 0; i < r->parts; ++i)
                 if (part_of(r, i)->state == RECEIVED) set_part(l, r, part_of(r, i), UNSENT);
         }
-    l->credit = credit ? least(credit, 65536) : 1;
+    l->limit = most(l->limit, heard + (credit ? least(credit, 65536) : 1));
 }
 
 void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_t n, uint64_t now) {
@@ -620,6 +631,7 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
     if (!l->in || l->in_run != run) {
         pure_aead_free(l->in);
         l->in = aead_of(l->secret, l->peer, l->own_public, run, l->run, l->in_base);
+        ++l->counts.keyed;
         l->in_run = run;
         if (!l->in) return;
     }
@@ -638,6 +650,17 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
             if (!names || at + names + 13 > size) break;
             on_stored(l, plain + at, size - at, now);
             at += names + 13;
+        } else if (type == F_CHALLENGE) { /* said back in the next packet */
+            if (at + 8 > size) break;
+            uint64_t challenge = get64(plain + at);
+            unsigned k = 0;
+            while (k < l->responding && l->respond[k] != challenge) ++k;
+            if (k == l->responding) { /* not had yet: first, the oldest let go */
+                memmove(&l->respond[1], &l->respond[0], (RESPONSES - 1) * sizeof(uint64_t));
+                l->respond[0] = challenge;
+                if (l->responding < RESPONSES) ++l->responding;
+            }
+            at += 8;
         } else if (type != F_PING)
             break; /* padding, or what this side does not know: the rest */
     }
@@ -651,6 +674,12 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
     at += put_names(body + at, l->source, l->input);
     put32(body + at, l->shape);
     at += 4;
+    bool responded = l->responding;
+    for (unsigned k = 0; k < l->responding; ++k, at += 9) { /* the receiver's challenges, said back */
+        body[at] = F_RESPONSE;
+        put64(body + at + 1, l->respond[k]);
+    }
+    l->responding = 0;
     /* The credit counts from the oldest record not stored: after a restart
      * the sender does not know yet how far the receiver stored. */
     uint64_t base = l->count ? record_at(l, 0)->seq - 1 : l->stored;
@@ -666,7 +695,7 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
     uint64_t next = 0;
     for (; k < l->count && f->count < UNITS; ++k) {
         Record *r = record_at(l, k);
-        if (r->seq > base + l->credit) break;
+        if (r->seq > (l->limit ? l->limit : base + CREDIT)) break;
         bool full = false, fresh = !r->more && r->one.state == UNSENT, joins = run && r->seq == next;
         size_t whole = (joins ? 0 : RECORDS_HEAD) + varint_size(r->size) + r->size;
         if (fresh && at + whole <= most) {
@@ -719,7 +748,7 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
             break;
         }
     }
-    return f->count ? at : 0;
+    return f->count || responded ? at : 0;
 }
 
 /* Its number is spent all the same. */
@@ -875,7 +904,6 @@ PureLinkSender *pure_link_sender(const char *source, const char *input, uint32_t
     l->run = random64();
     l->window = WINDOW_FIRST;
     l->threshold = UINT64_MAX;
-    l->credit = CREDIT;
     l->reorder_packets = REORDER_FIRST;
     l->datagram = DATAGRAM;
     return l;
@@ -890,8 +918,9 @@ static bool keyed(PureLinkSender *l, const unsigned char peer[PURE_SEAL_KEY], co
     pure_aead_free(l->in);
     l->out = l->in = NULL;
     if (secret) memcpy(l->secret, secret, 32);
+    if (!secret) ++l->counts.secrets;
     return (secret || (l->own && pure_link_secret(l->own, l->peer, l->secret))) &&
-           (l->out = aead_of(l->secret, l->own_public, l->peer, l->run, 0, l->out_base));
+           (l->out = aead_of(l->secret, l->own_public, l->peer, l->run, 0, l->out_base)) && ++l->counts.keyed;
 }
 
 bool pure_link_sender_peer(PureLinkSender *l, const unsigned char peer[PURE_SEAL_KEY]) { return keyed(l, peer, NULL); }
@@ -938,7 +967,16 @@ typedef struct Active Active;
 typedef struct {
     Active *active;
     uint64_t run, seen; /* the sender's run; when it last sent */
+    /* The run its answers are sealed in, drawn when the slot is made: a
+     * slot made again for the same sender's run (after it rested) never
+     * seals under a key and nonce used before. */
+    uint64_t answer_run;
     bool used, ack_due, due;
+    /* The address answers go to is checked once the sender says back the
+     * challenge sent there; until then they are at most three times the
+     * bytes that came from it (RFC 9000 §8). */
+    bool checked;
+    uint64_t challenge, bytes_in, bytes_out;
     unsigned char in_key[PURE_AEAD_KEY], out_key[PURE_AEAD_KEY], in_base[PURE_AEAD_NONCE], out_base[PURE_AEAD_NONCE];
     uint64_t next_pn, largest_at;
     _Alignas(8) unsigned char address[PURE_LINK_ADDRESS]; /* where it sends from: a socket's address */
@@ -1005,7 +1043,13 @@ struct PureLinkReceiver {
     const PureSealKey *own;
     unsigned char own_public[PURE_SEAL_KEY];
     uint32_t own_id;
-    uint64_t run, idle, swept, trimmed, untrimmed;
+    uint64_t idle, swept, trimmed, untrimmed;
+    /* Keys made for a run that then did not open cost a token; tokens come
+     * back KEYINGS a second, up to KEYINGS. Under a flood of made-up
+     * packets keys are made for that many a second at most, while senders
+     * whose packets open (a thousand waking at once) cost none. */
+    double key_tokens;
+    uint64_t key_at;
     PureAead *aead; /* keyed by each packet's run */
     unsigned char open_key[PURE_AEAD_KEY], seal_key[PURE_AEAD_KEY]; /* the keys it has now */
     bool open_keyed, seal_keyed;
@@ -1048,7 +1092,6 @@ PureLinkReceiver *pure_link_receiver(const PureSealKey *own, const unsigned char
     s->own = own;
     memcpy(s->own_public, own_public, PURE_SEAL_KEY);
     s->own_id = key_id(own_public);
-    s->run = random64();
     s->idle = IDLE_FIRST;
     return s;
 }
@@ -1259,7 +1302,7 @@ static Active *activate(PureLinkReceiver *s, Peer *peer, uint64_t now) {
     if (place && !memcmp(place, peer->key, 28) && get32(place + 28) == memo_check(peer->key, place + 32)) {
         memcpy(a->secret, place + 32, 32);
         ++s->counts.remembered;
-    } else if (pure_link_secret(s->own, peer->key, a->secret)) {
+    } else if (++s->counts.secrets && pure_link_secret(s->own, peer->key, a->secret)) {
         if (place) {
             memset(place, 0, 28);
             __atomic_thread_fence(__ATOMIC_RELEASE);
@@ -1571,11 +1614,15 @@ static bool hand_over(PureLinkReceiver *s, Stream *st) {
         ++s->counts.deliveries;
         return true;
     }
-    if (!st->held_count || (st->known && held_at(st, 0)->seq != st->heard + 1)) return true;
+    /* From the first whole record held: one held before it in part may be
+     * of the past (a packet sent again) and never come whole; the host's
+     * word on this delivery says how far it heard, and lets that go. */
+    size_t first = 0;
+    while (first < st->held_count && !held_at(st, first)->whole) ++first;
     size_t n = 0, bytes = 0;
-    while (n < st->held_count && n < BATCH && held_at(st, n)->whole &&
-           held_at(st, n)->seq == held_at(st, 0)->seq + n)
-        bytes += 4 + held_at(st, n++)->size;
+    while (first + n < st->held_count && n < BATCH && held_at(st, first + n)->whole &&
+           held_at(st, first + n)->seq == held_at(st, first)->seq + n)
+        bytes += 4 + held_at(st, first + n++)->size;
     if (!n) return true;
     if (bytes > s->batch_capacity) {
         unsigned char *grown = realloc(s->batch, bytes);
@@ -1584,12 +1631,12 @@ static bool hand_over(PureLinkReceiver *s, Stream *st) {
         s->batch_capacity = bytes;
     }
     size_t at = 0;
-    for (size_t k = 0; k < n; ++k) {
+    for (size_t k = first; k < first + n; ++k) {
         put32(s->batch + at, held_at(st, k)->size);
         memcpy(s->batch + at + 4, held_at(st, k)->bytes, held_at(st, k)->size);
         at += 4 + held_at(st, k)->size;
     }
-    PureLinkDelivery d = {st->input, st->source, held_at(st, 0)->seq, (unsigned)n, s->batch, bytes, st};
+    PureLinkDelivery d = {st->input, st->source, held_at(st, first)->seq, (unsigned)n, s->batch, bytes, st};
     if (!s->host.deliver(s->host.context, &d)) return false;
     st->out = true;
     ++s->counts.deliveries;
@@ -1598,21 +1645,27 @@ static bool hand_over(PureLinkReceiver *s, Stream *st) {
 
 /* A packet from peer, if it opens with the keys of peer's run (made for a
  * run not seen yet, and for a peer at rest its active state): its frames. */
+/* Whether keys may be made for a run not seen (a token is there). */
+static bool may_key(PureLinkReceiver *s, uint64_t now) {
+    if (!s->key_at) s->key_tokens = KEYINGS;
+    s->key_tokens += (double)(now - s->key_at) * KEYINGS / 1e9;
+    if (s->key_tokens > KEYINGS) s->key_tokens = KEYINGS;
+    s->key_at = now;
+    return s->key_tokens >= 1;
+}
+
 static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *packet, size_t n, const void *from,
                       size_t from_size, uint64_t now) {
     uint64_t pn = get64(packet + 13), run = get64(packet + 5);
     Active *a = peer->active;
     Run *r = a ? run_found(a, run) : NULL;
-    if (r && had(r, pn)) {
-        r->ack_due = true; /* its acknowledgment was lost, perhaps */
-        mark_due(s, r);
-        return true;
-    }
+    if (!r && !may_key(s, now)) return false;
     bool woke = !a;
     if (woke && !(a = activate(s, peer, now))) return false;
     Run made = {.active = a, .run = run, .seen = now, .used = true};
-    bool keyed = r || (derive(a->secret, peer->key, s->own_public, run, 0, made.in_key, made.in_base) &&
-                       derive(a->secret, s->own_public, peer->key, s->run, run, made.out_key, made.out_base));
+    if (!r) made.answer_run = random64();
+    bool keyed = r || (++s->counts.keyed && derive(a->secret, peer->key, s->own_public, run, 0, made.in_key, made.in_base) &&
+                       derive(a->secret, s->own_public, peer->key, made.answer_run, run, made.out_key, made.out_base));
     unsigned char plain[DATAGRAM_MOST], nonce[PURE_AEAD_NONCE];
     nonce_of(nonce, r ? r->in_base : made.in_base, pn);
     size_t size = n - HEADER - PURE_AEAD_TAG;
@@ -1621,15 +1674,33 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
     else if (keyed) memcpy(s->open_key, key, PURE_AEAD_KEY), s->open_keyed = true;
     if (!keyed || !pure_aead_open(s->aead, give, nonce, packet, HEADER, packet + HEADER, n - HEADER, plain)) {
         explicit_bzero(&made, sizeof(made));
+        if (!r) s->key_tokens = s->key_tokens > 1 ? s->key_tokens - 1 : 0; /* keys for nothing */
         if (woke) let_go(s, a);
         return false;
     }
     if (woke) ++s->counts.woken;
+    bool fresh = !r;
     if (!r) r = install_run(a, &made);
+    if (!fresh && had(r, pn)) { /* again (opened first: nothing unsealed answers): its acknowledgment was lost, perhaps */
+        r->ack_due = true;
+        mark_due(s, r);
+        return true;
+    }
+    bool newest = fresh || !r->got_count || pn > r->got[0].last;
     a->seen = r->seen = now;
     note(r, pn, now);
-    r->address_size = from_size <= sizeof(r->address) ? from_size : sizeof(r->address);
-    memcpy(r->address, from, r->address_size); /* where it is now: answers go there */
+    /* Where it is now, if this is its newest packet (one of the past sent
+     * again moves nothing): answers go there, the address checked first. */
+    size_t at_size = from_size <= sizeof(r->address) ? from_size : sizeof(r->address);
+    bool elsewhere = r->address_size != at_size || memcmp(r->address, from, at_size);
+    if (elsewhere && newest) {
+        memcpy(r->address, from, at_size);
+        r->address_size = at_size;
+        r->checked = false;
+        r->challenge = random64();
+        r->bytes_in = r->bytes_out = 0;
+    }
+    if (!elsewhere || newest) r->bytes_in += n;
     ++s->counts.received;
     Stream *st = NULL;
     bool eliciting = false;
@@ -1671,6 +1742,11 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
             eliciting = true;
             if (i < count) break; /* cut short: the rest is not read */
         } else if (type == F_PING) {
+            eliciting = true;
+        } else if (type == F_RESPONSE) { /* the challenge said back: the address is the sender's */
+            if (at + 8 > size) break;
+            if (!r->checked && get64(plain + at) == r->challenge) r->checked = true;
+            at += 8;
             eliciting = true;
         } else
             break; /* padding, or what this side does not know: the rest */
@@ -1715,6 +1791,11 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
         r->due = false;
         if (!r->used) continue;
         size_t at = 0;
+        if (!r->checked) { /* the address not checked yet: a challenge */
+            body[at++] = F_CHALLENGE;
+            put64(body + at, r->challenge);
+            at += 8;
+        }
         if (r->ack_due && r->got_count) {
             body[at++] = F_ACK;
             put64(body + at, r->got[0].last);
@@ -1741,11 +1822,15 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
         }
         r->ack_due = false;
         if (!at) continue;
+        if (!r->checked && r->bytes_out + HEADER + at + PURE_AEAD_TAG > 3 * r->bytes_in) continue; /* no amplifier */
         const unsigned char *give = r->out_key;
         if (s->seal_keyed && !memcmp(s->seal_key, r->out_key, PURE_AEAD_KEY)) give = NULL; /* the key it has */
         else memcpy(s->seal_key, r->out_key, PURE_AEAD_KEY), s->seal_keyed = true;
-        size_t total = seal_packet(s->aead, give, r->out_base, s->own_id, s->run, r->next_pn++, body, at, packet);
-        if (total && send(context, packet, total, r->address, r->address_size)) ++s->counts.packets;
+        size_t total = seal_packet(s->aead, give, r->out_base, s->own_id, r->answer_run, r->next_pn++, body, at, packet);
+        if (total && send(context, packet, total, r->address, r->address_size)) {
+            ++s->counts.packets;
+            if (!r->checked) r->bytes_out += total;
+        }
     }
     s->due_count = 0;
 }
