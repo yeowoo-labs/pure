@@ -407,7 +407,11 @@ static void read_in(Side *s) {
         ngtcp2_pkt_info pi = {0};
         int rv = ngtcp2_conn_read_pkt(s->conn, &path, &pi, bytes, (size_t)n, now_ns());
         if (rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING) s->done = true;
-        else if (rv) fail(ngtcp2_strerror(rv));
+        else if (s->server && (rv == NGTCP2_ERR_RETRY || rv == NGTCP2_ERR_DROP_CONN)) {
+            s->done = true; /* a connection not to keep (its first Initial came late): the client's next begins again */
+            return;
+        } else if (rv)
+            fail(ngtcp2_strerror(rv));
     }
 }
 
@@ -459,6 +463,9 @@ static void tls(Side *s, SSL_CTX *ctx) {
     if (s->server) SSL_set_accept_state(s->ssl);
     else {
         SSL_set_connect_state(s->ssl);
+        /* X25519 alone, as Pure's links: OpenSSL 3.5's default adds ML-KEM, and a
+         * ClientHello in two Initials the path may reorder. */
+        SSL_set1_groups_list(s->ssl, "X25519");
         SSL_set_alpn_protos(s->ssl, ALPN, sizeof(ALPN) - 1);
         SSL_set_tlsext_host_name(s->ssl, "localhost");
     }
