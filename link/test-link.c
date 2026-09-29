@@ -652,6 +652,95 @@ static void flood(const char *dir) {
     free(w.packets);
 }
 
+/* Three outputs of one node to this one: three senders with one key, each a
+ * run of its own, sending at once. Each run keeps a place of its own (none
+ * pushes another out, which sent its answers to the wrong run), each keyed
+ * once, and every stream's records are delivered once, in order. */
+typedef struct { uint64_t now, heard[3]; PureLinkSender *senders[3]; PureLinkDone done[64]; size_t done_count; } Outputs;
+static int output_input(void *context, const char *name, uint32_t shape) {
+    (void)context;
+    return shape != 0x5eed ? -1 : !strcmp(name, "one") ? 0 : !strcmp(name, "two") ? 1 : !strcmp(name, "three") ? 2 : -1;
+}
+static bool output_deliver(void *context, const PureLinkDelivery *d) {
+    Outputs *o = context;
+    if (o->done_count == sizeof(o->done) / sizeof(o->done[0])) return false;
+    uint64_t heard = o->heard[d->input];
+    bool gap = false;
+    const unsigned char *at = d->records;
+    for (unsigned k = 0; k < d->count; ++k) {
+        uint32_t size = (uint32_t)at[0] | (uint32_t)at[1] << 8 | (uint32_t)at[2] << 16 | (uint32_t)at[3] << 24;
+        uint64_t seq = d->first + k;
+        if (seq > heard + 1) {
+            gap = true;
+            break;
+        }
+        if (seq == heard + 1) {
+            bool same = size == record_size(seq);
+            for (size_t i = 0; same && i < size; ++i) same = at[4 + i] == record_byte(seq, i);
+            CHECK(same, "outputs: record %llu of input %u is not as it was sent", (unsigned long long)seq, d->input);
+            heard = seq;
+        }
+        at += 4 + size;
+    }
+    o->heard[d->input] = heard;
+    o->done[o->done_count++] = (PureLinkDone){d->token, heard, true, gap};
+    return true;
+}
+static bool output_answer(void *context, const unsigned char *packet, size_t size, const unsigned char *to,
+                          size_t to_size) {
+    (void)to, (void)to_size;
+    Outputs *o = context;
+    for (unsigned i = 0; i < 3; ++i) pure_link_sender_take(o->senders[i], packet, size, o->now); /* its run's opens */
+    return true;
+}
+static void outputs(const char *dir) {
+    unsigned char public_a[PURE_SEAL_KEY], public_b[PURE_SEAL_KEY], out[PURE_LINK_DATAGRAM_MOST];
+    char error[256];
+    static unsigned char bytes[20200];
+    PureSealKey *a = key(dir, "a.key", public_a), *b = key(dir, "b.key", public_b);
+    Outputs o = {0};
+    PureLinkReceiver *r = pure_link_receiver(b, public_b, &(PureLinkHost){output_input, output_deliver, &o}, error,
+                                             sizeof(error));
+    if (!r || !pure_link_allow(r, "test.ordered", public_a, error, sizeof(error))) exit(1);
+    const char *inputs[3] = {"one", "two", "three"};
+    for (unsigned i = 0; i < 3; ++i) {
+        PureLinkSender *s = o.senders[i] = pure_link_sender("test.ordered", inputs[i], 0x5eed, a, public_a);
+        if (!s || !pure_link_sender_peer(s, public_b)) exit(1);
+        for (uint64_t seq = 1; seq <= 1000; ++seq) {
+            size_t size = record_size(seq);
+            for (size_t k = 0; k < size; ++k) bytes[k] = record_byte(seq, k);
+            if (!pure_link_sender_queue(s, seq, bytes, size)) exit(1);
+        }
+    }
+    uint64_t number;
+    bool all = false;
+    for (; o.now < 60000 * MS && !all; o.now += MS) {
+        for (unsigned i = 0; i < 3; ++i)
+            for (size_t size; (size = pure_link_sender_packet(o.senders[i], out, false, o.now, &number));)
+                pure_link_receiver_take(r, out, size, "sender0", 7, o.now);
+        PureLinkDone told[64];
+        size_t count = o.done_count;
+        memcpy(told, o.done, count * sizeof(*told));
+        o.done_count = 0;
+        pure_link_receiver_turn(r, told, count, o.now, output_answer, &o);
+        all = true;
+        for (unsigned i = 0; i < 3; ++i) {
+            pure_link_sender_tick(o.senders[i], o.now);
+            all = all && pure_link_sender_stored(o.senders[i]) == 1000;
+        }
+    }
+    PureLinkCounts heard;
+    pure_link_receiver_counts(r, &heard);
+    CHECK(all && o.heard[0] == 1000 && o.heard[1] == 1000 && o.heard[2] == 1000 && heard.keyed == 3,
+          "outputs: heard %llu, %llu, %llu of 1000 each, %llu runs keyed (3 runs)", (unsigned long long)o.heard[0],
+          (unsigned long long)o.heard[1], (unsigned long long)o.heard[2], (unsigned long long)heard.keyed);
+    printf("{\"case\":\"outputs\",\"runs\":3,\"records\":3000,\"virtual_ms\":%llu,\"keyed\":%llu,\"packets\":%llu}\n",
+           (unsigned long long)(o.now / MS), (unsigned long long)heard.keyed, (unsigned long long)heard.received);
+    for (unsigned i = 0; i < 3; ++i) pure_link_sender_free(o.senders[i]);
+    pure_link_receiver_free(r);
+    pure_seal_key_free(a), pure_seal_key_free(b);
+}
+
 /* The largest send (PURE_LINK_RECORD_MOST) goes whole, over a receiver that
  * never heard of the stream before; one byte more is not taken to send. */
 typedef struct { World *w; PureLinkSender *s; } Largest;
@@ -768,6 +857,7 @@ int main(void) {
           o.hole ? "opened" : "never opened", o.datagram);
     impostors(dir);
     flood(dir);
+    outputs(dir);
     largest(dir);
     char command[600];
     snprintf(command, sizeof(command), "rm -rf %s", dir);

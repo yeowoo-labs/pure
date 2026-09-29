@@ -26,7 +26,11 @@ enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PIN
  * (a sender may offer an epoch again with another key). */
 enum { EPOCH_MASK = 15, EPOCH_FRAME = 1 + 4 + PURE_SEAL_KEY, ANSWERS = 4, ACCEPT_FRAME = EPOCH_FRAME + ANSWERS };
 enum { RECORDS_HEAD = 10 }; /* type, the first number, the count */
-enum { RANGES = 32, RUNS = 2, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
+enum { RANGES = 32, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
+/* A receiver keeps a peer's runs in RUNS places (its sender's, and the one
+ * before a restart), and more beside when more of them send at once (a
+ * node's outputs to this one, each a sender of its own), RUNS_MOST in all. */
+enum { RUNS = 2, RUNS_MOST = 64 };
 enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
 /* Reordering awaited (see PureLinkSender): at first and at most; congestion
  * events with no late packet before the patience halves. */
@@ -1238,7 +1242,8 @@ struct Active {
     uint64_t seen;
     uint64_t accepted_at;        /* its last new epoch: one a second, whatever its runs */
     size_t place;                /* among the active */
-    Run runs[RUNS];
+    Run runs[RUNS], **more;      /* its runs: more_count more beside, each made once and kept */
+    unsigned more_count;
     Stream **streams;
     unsigned stream_count, stream_capacity;
 };
@@ -1606,6 +1611,11 @@ static void let_go(PureLinkReceiver *s, Active *a) {
         free(a->streams[k]);
     }
     free(a->streams);
+    for (unsigned i = 0; i < a->more_count; ++i) {
+        explicit_bzero(a->more[i], sizeof(*a->more[i]));
+        free(a->more[i]);
+    }
+    free(a->more);
     s->peers[a->peer].active = NULL;
     s->actives[a->place] = s->actives[--s->active_count];
     s->actives[a->place]->place = a->place;
@@ -1613,14 +1623,16 @@ static void let_go(PureLinkReceiver *s, Active *a) {
     free(a);
 }
 
+static Run *run_at(const Active *a, unsigned i) { return i < RUNS ? (Run *)&a->runs[i] : a->more[i - RUNS]; }
+
 /* Whether any of a peer's records or answers waits here. */
 static bool busy(const Active *a) {
     for (unsigned k = 0; k < a->stream_count; ++k)
         if (a->streams[k]->out || a->streams[k]->held_count || a->streams[k]->line_count || a->streams[k]->tail ||
             a->streams[k]->ready)
             return true;
-    for (unsigned i = 0; i < RUNS; ++i)
-        if (a->runs[i].due) return true;
+    for (unsigned i = 0; i < RUNS + a->more_count; ++i)
+        if (run_at(a, i)->due) return true;
     return false;
 }
 
@@ -1661,18 +1673,26 @@ static void mark_due(PureLinkReceiver *s, Run *r) {
 }
 
 static Run *run_found(Active *a, uint64_t run) {
-    for (unsigned i = 0; i < RUNS; ++i)
-        if (a->runs[i].used && a->runs[i].run == run) return &a->runs[i];
+    for (unsigned i = 0; i < RUNS + a->more_count; ++i)
+        if (run_at(a, i)->used && run_at(a, i)->run == run) return run_at(a, i);
     return NULL;
 }
 
-/* A new run's keys, in the slot unused longest: only once its first packet
- * opened with them, so a forged one displaces nothing. */
-static Run *install_run(Active *a, const Run *made) {
+/* A new run's keys, in the place of the run heard from longest ago when that
+ * one is quiet the idle period (a sender that started again), else in a
+ * place more (up to RUNS_MOST, then that one's all the same): only once its
+ * first packet opened with them, so a forged one displaces nothing. A place
+ * is kept while the peer is active, so what points to it stays good. */
+static Run *install_run(const PureLinkReceiver *s, Active *a, const Run *made, uint64_t now) {
     Run *slot = &a->runs[0];
-    for (unsigned i = 0; i < RUNS; ++i) {
-        Run *r = &a->runs[i];
+    for (unsigned i = 0; i < RUNS + a->more_count; ++i) {
+        Run *r = run_at(a, i);
         if (!r->used || (slot->used && r->seen < slot->seen)) slot = r;
+    }
+    if (slot->used && now - slot->seen < s->idle && RUNS + a->more_count < RUNS_MOST) {
+        Run **more = realloc(a->more, (a->more_count + 1) * sizeof(*more)), *r = more ? calloc(1, sizeof(*r)) : NULL;
+        if (more) a->more = more;
+        if (r) a->more[a->more_count++] = slot = r;
     }
     bool due = slot->due; /* the answer list may hold the slot */
     *slot = *made;
@@ -2132,7 +2152,7 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
     }
     if (woke) ++s->counts.woken, s->counts.remembered += a->remembered; /* counted once it opens */
     bool fresh = !r;
-    if (!r) r = install_run(a, &made);
+    if (!r) r = install_run(s, a, &made, now);
     explicit_bzero(&made, sizeof(made));
     if (uses_next) confirm(s, peer, r);
     if (!fresh && had(r, pn)) { /* again (opened first: nothing unsealed answers): its acknowledgment was lost, perhaps */
