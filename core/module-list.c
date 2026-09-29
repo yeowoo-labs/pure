@@ -497,7 +497,7 @@ PureList *pure_list_new(unsigned fields, const uint8_t *text_fields) {
     l->fields = fields;
     size_t at = sizeof(Node);
     for (unsigned f = 0; f < fields; ++f) {
-        l->text_fields[f] = text_fields[f] != 0;
+        l->text_fields[f] = text_fields[f]; /* 1 text (UTF-8), 2 bytes */
         l->column[f] = (uint32_t)at;
         at += FANOUT * (l->text_fields[f] ? sizeof(PureSpan) : sizeof(double));
         if (l->text_fields[f]) l->text_field[l->texts++] = (uint8_t)f;
@@ -635,7 +635,8 @@ static bool decode_cell(const Layout *l, unsigned field, const unsigned char *by
         memcpy(&cell->num, &bits, sizeof(bits));
         return isfinite(cell->num);
     }
-    if (bits > size - *at || !pure_utf8_valid((PureSpan){bytes + *at, (size_t)bits})) return false;
+    if (bits > size - *at || (l->text_fields[field] == 1 && !pure_utf8_valid((PureSpan){bytes + *at, (size_t)bits})))
+        return false;
     *cell = (PureCell){0, (unsigned char *)bytes + *at, (size_t)bits};
     *at += (size_t)bits;
     return true;
@@ -697,7 +698,8 @@ static bool get_compact(const Layout *l, unsigned field, const unsigned char *by
     *cell = (PureCell){0};
     if (!get_varint(bytes, size, at, &value)) return false;
     if (l->text_fields[field]) {
-        if (value > size - *at || !pure_utf8_valid((PureSpan){bytes + *at, (size_t)value})) return false;
+        if (value > size - *at || (l->text_fields[field] == 1 && !pure_utf8_valid((PureSpan){bytes + *at, (size_t)value})))
+            return false;
         *cell = (PureCell){0, (unsigned char *)bytes + *at, (size_t)value};
         *at += (size_t)value;
         return true;

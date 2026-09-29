@@ -24,27 +24,29 @@ PureResult pure_save_image(PureApp *, const PureModule *m, uint32_t state, const
 void pure_save_close_start(PureApp *);
 /* The log keeps only the entries some list's image does not hold yet. */
 void pure_save_release(PureApp *);
-/* A snapshot's list (module.c): a state's, or the heard list's
- * (PURE_LIST_HEARD) in a snapshot made with it (pure_save_snapshot). */
+/* A snapshot's list (module.c): a state's, or a runtime list's (place
+ * PURE_LIST_HEARD on) in a snapshot made with it (pure_save_snapshot;
+ * UINT32_MAX: none). */
 const PureList *pure_snapshot_list(const PureSnapshot *, uint32_t state);
-PureSnapshot *pure_save_snapshot(PureApp *, bool heard);
-/* The heard list of a starting app (module.h, PureApp): from its image with
- * its logged changes made again, or new (saved.rewrite: it needs an image,
- * which pure_save_heard_image writes). */
-PureResult pure_save_open_heard(PureApp *, PureList **out, PureSaved *saved);
-PureResult pure_save_heard_image(PureApp *);
-/* An empty heard list. */
-PureList *pure_heard_new(void);
+PureSnapshot *pure_save_snapshot(PureApp *, uint32_t runtime);
+/* A runtime list of a starting app (module.h, PureApp; place is
+ * PURE_LIST_HEARD or PURE_LIST_OUTBOX): from its image with its logged
+ * changes made again, or new (saved.rewrite: it needs an image, which
+ * pure_save_runtime_image writes). */
+PureResult pure_save_open_runtime(PureApp *, uint32_t place, PureList **out, PureSaved *saved);
+PureResult pure_save_runtime_image(PureApp *, uint32_t place);
+/* An empty runtime list. */
+PureList *pure_runtime_list_new(uint32_t place);
 /* Open the stored numbers, cursors and indices, and put each stored one of the
  * same name and kind that still fits into values, for the states of m that
  * kept marks as new (-1); texts and lists are m's. */
 PureResult pure_save_open_values(PureApp *, const PureModule *m, double *values, const int *kept,
                                  PureDraft *const *texts, PureList *const *lists);
-/* The stored links of a starting app (module.h, PureApp); CONFLICT when an
- * output with sends left is missing or has other fields. Links stored before
- * the heard list kept the numbers heard: they go to it (moved: it needs an
- * image). */
-PureResult pure_save_open_links(PureApp *, const PureModule *m, bool *moved);
+/* The stored links of a starting app (module.h, PureApp), after its runtime
+ * lists; CONFLICT when an output with sends left in the outbox is missing or
+ * has other fields. Links stored before the runtime lists kept the numbers
+ * heard and the sends: they go to them (moved: they need images). */
+PureResult pure_save_open_links(PureApp *, const PureModule *m, bool *heard_moved, bool *sent_moved);
 /* Publish the documents and every state changed since the last save
  * (values are the states' numbers); revisions are the documents'. */
 PureResult pure_save_commit(PureApp *, const double *values, void *const *documents, size_t document_count,

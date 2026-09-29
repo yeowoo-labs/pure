@@ -46,6 +46,8 @@ typedef struct {
 /* A list holds up to PURE_LIST_ITEMS items, a run up to PURE_LIST_RUN. */
 enum { PURE_LIST_ITEMS = 1 << 24, PURE_LIST_RUN = 32 };
 
+/* text_fields: a field's kind, 0 a number, 1 a text (UTF-8, checked when
+ * read), 2 bytes (any: a runtime list's). */
 PureList *pure_list_new(unsigned fields, const uint8_t *text_fields);
 void pure_list_free(PureList *);
 /* Let every item go (retired where a shared copy may read it). */

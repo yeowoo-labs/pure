@@ -263,8 +263,9 @@ typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
  * at once and a host saves a burst with one commit: an event is durable once
  * a later save succeeds, and each key's document joins a burst once (a second
  * message for it, or one past PURE_APP_PENDING keys, saves the burst first). */
-/* The heard list's place among the stored lists' records (PureApp). */
-enum { PURE_LIST_HEARD = PURE_MODULE_STATES };
+/* The runtime's lists' places among the stored lists' records (PureApp):
+ * the numbers heard, and the outbox. */
+enum { PURE_LIST_HEARD = PURE_MODULE_STATES, PURE_LIST_OUTBOX, PURE_LISTS_STORED };
 typedef struct {
     const PureModule *module;
     PureData data;
@@ -273,13 +274,13 @@ typedef struct {
     PureList *lists[PURE_MODULE_STATES];
     PureUndo undo; /* list changes of the current event */
     PureDraft *list_drafts[PURE_MODULE_STATES]; /* lists the tree kept before images, until emptied */
-    /* Stored lists (module-save.c), by state, and the heard list's last
-     * (PURE_LIST_HEARD): the save each one's image holds, the first save
+    /* Stored lists (module-save.c), by state, then the runtime's (the heard
+     * list and the outbox): the save each one's image holds, the first save
      * logged since that changed it (0: none), and the bytes of its changes
      * logged since; the log, the tree's number of its last save, the last
      * save's number, and a checkpoint being written. */
-    uint64_t image_seq[PURE_MODULE_STATES + 1], logged_since[PURE_MODULE_STATES + 1];
-    size_t logged[PURE_MODULE_STATES + 1];
+    uint64_t image_seq[PURE_LISTS_STORED], logged_since[PURE_LISTS_STORED];
+    size_t logged[PURE_LISTS_STORED];
     struct PureLog *log;
     PureDraft *stored_seq;
     uint64_t seq;
@@ -320,12 +321,15 @@ typedef struct {
     unsigned char *copied;
     int64_t revision;
     PureArena arena, view_arena;
-    /* Links (runtime-owned, saved with the states): messages sent on outputs
-     * and not trimmed, in the order sent (the first sent_durable are saved;
-     * a trimmed one goes at the next save), each output's last number (and
-     * as saved), and those of outputs a module dropped. */
-    struct PureSent { uint32_t output; uint64_t seq; unsigned char *payload; size_t size; bool trimmed; } *sent;
-    size_t sent_count, sent_capacity, sent_durable;
+    /* Links (runtime-owned, saved with the states): the outbox, messages sent
+     * on outputs and not trimmed, in the order sent, a list of {output (its
+     * name), seq, payload (bytes)} stored as a list state is (module-save.c)
+     * and changed with the events that send (the first sent_saved are saved:
+     * the host sees only those; a trim lets go at once, and a failed save
+     * takes it back); each output's last number (and as saved), and those of
+     * outputs a module dropped. */
+    PureList *outbox;
+    size_t sent_saved, durable_sent_saved, durable_outbox;
     uint64_t last_sent[PURE_MODULE_INPUTS], saved_sent[PURE_MODULE_INPUTS];
     struct PureCarried { char name[PURE_MODULE_NAME]; uint64_t last; } *carried;
     unsigned carried_count;

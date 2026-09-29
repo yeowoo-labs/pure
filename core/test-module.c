@@ -3787,6 +3787,15 @@ static void message_fields(void) {
 enum { SEND = PURE_OP_SEND };
 typedef struct { uint32_t output; uint64_t seq; unsigned char payload[64]; size_t size; } Sent;
 typedef struct { Sent items[16]; size_t count; } Outbox;
+typedef struct { size_t count; uint64_t first, last; } Tally;
+
+static bool tally_sent(void *context, uint32_t output, uint64_t seq, PureSpan payload) {
+    (void)output, (void)payload;
+    Tally *t = context;
+    if (!t->count++) t->first = seq;
+    t->last = seq;
+    return true;
+}
 
 static bool collect_sent(void *context, uint32_t output, uint64_t seq, PureSpan payload) {
     Outbox *o = context;
@@ -3875,7 +3884,7 @@ static void links(void) {
     CHECK(pure_app_message(&a, 2, NULL, -1, sent) == PURE_INVALID);
     /* Trimmed, a send is gone at once for the host and from the store at the next save. */
     pure_app_trim(&a, 2, 1);
-    CHECK(outbox_of(&a).count == 0 && pure_app_save(&a) == PURE_OK && a.sent_count == 0);
+    CHECK(outbox_of(&a).count == 0 && pure_app_save(&a) == PURE_OK && pure_list_count(a.outbox) == 0);
     CHECK(buy(&a, 0, "cap", 1) == PURE_OK && outbox_of(&a).items[0].seq == 2);
     pure_app_stop(&a);
     pure_app_stop(&b);
@@ -3951,8 +3960,59 @@ static void links(void) {
     CHECK(pure_app_heard(&b, "legacy") == 5 && pure_app_heard(&b, "orders.ordered") == 2 && pure_app_heard(&b, "x") == 1);
     CHECK(deliver(&b, "legacy", 5, "old", 1) == PURE_OK && b.duplicate && deliver(&b, "legacy", 6, "new", 1) == PURE_OK && !b.duplicate);
     pure_app_stop(&b);
-    CHECK(pure_state_open(path_b, "links", &stored_links) == PURE_OK && !memcmp(read_state(stored_links), "PLK2", 4));
+    CHECK(pure_state_open(path_b, "links", &stored_links) == PURE_OK && !memcmp(read_state(stored_links), "PLK3", 4));
     pure_draft_close(stored_links);
+    /* Links stored before the outbox list kept the sends: a start moves them
+     * to it; numbering goes on from the output's last number. */
+    char path_c[64];
+    PureApp c;
+    snprintf(path_c, sizeof(path_c), "%s", new_store());
+    unsigned char sends[128] = "PLK2";
+    at = 5;
+    sends[4] = 1; /* one output: ordered {item, count, total} */
+    sends[at++] = 7;
+    memcpy(sends + at, "ordered", 7);
+    at += 7;
+    sends[at++] = 3, sends[at++] = PURE_FIELD_TEXT, sends[at++] = PURE_FIELD_U32, sends[at++] = PURE_FIELD_NUMBER;
+    for (unsigned i = 0; i < 8; ++i) sends[at++] = i ? 0 : 2; /* its last number */
+    for (unsigned k = 1; k <= 2; ++k) {
+        sends[at++] = 0;
+        for (unsigned i = 0; i < 8; ++i) sends[at++] = i ? 0 : (unsigned char)k;
+        for (unsigned i = 0; i < 4; ++i) sends[at++] = i ? 0 : 4;
+        memcpy(sends + at, "abcd", 4);
+        at += 4;
+    }
+    CHECK(pure_state_open(path_c, "links", &stored_links) == PURE_OK);
+    CHECK(pure_draft_splice(stored_links, 0, pure_draft_size(stored_links), (PureSpan){sends, at}) == PURE_OK);
+    CHECK(pure_draft_commit(stored_links, &revision) == PURE_OK);
+    pure_draft_close(stored_links);
+    CHECK(pure_app_start(&c, &module_a, pure_tree_data(path_c)) == PURE_OK);
+    o = outbox_of(&c);
+    CHECK(o.count == 2 && o.items[0].output == 2 && o.items[0].seq == 1 && o.items[1].seq == 2 && o.items[1].size == 4 &&
+          !memcmp(o.items[1].payload, "abcd", 4));
+    CHECK(buy(&c, 0, "next", 1) == PURE_OK && outbox_of(&c).items[2].seq == 3);
+    pure_app_stop(&c);
+    CHECK(pure_state_open(path_c, "links", &stored_links) == PURE_OK && !memcmp(read_state(stored_links), "PLK3", 4));
+    pure_draft_close(stored_links);
+    /* A large outbox costs a save only its changes: the links stay small, the
+     * sends and trims come back after a start. */
+    CHECK(pure_app_start(&c, &module_a, pure_tree_data(path_c)) == PURE_OK && pure_list_count(c.outbox) == 3);
+    CHECK(pure_app_defer(&c, true));
+    for (unsigned k = 0; k < 20000; ++k) {
+        CHECK(buy(&c, 0, "many", 1) == PURE_OK);
+        if (k % 1000 == 999) CHECK(pure_app_save(&c) == PURE_OK);
+    }
+    CHECK(pure_state_open(path_c, "links", &stored_links) == PURE_OK && pure_draft_size(stored_links) < 256);
+    pure_draft_close(stored_links);
+    pure_app_trim(&c, 2, 15000);
+    CHECK(pure_list_count(c.outbox) == 20003 - 15000 && pure_app_save(&c) == PURE_OK);
+    pure_app_stop(&c);
+    CHECK(pure_app_start(&c, &module_a, pure_tree_data(path_c)) == PURE_OK);
+    Tally tally = {0};
+    pure_app_outbox(&c, tally_sent, &tally);
+    CHECK(tally.count == 5003 && tally.first == 15001 && tally.last == 20003);
+    pure_app_stop(&c);
+    remove_store(path_c);
     /* Numbers heard from more sources than two bytes count stay heard across
      * a start; a save logs only the numbers it changed, and the heard list's
      * image is written again once they outgrow it (from a snapshot: through a
