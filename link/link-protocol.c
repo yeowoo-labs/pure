@@ -30,7 +30,7 @@ enum { REORDER_FIRST = 3, REORDER_PACKETS_MOST = 256, REORDER_QUARTERS_MOST = 8,
 enum { REACH_TRIES = 3 };
 /* CUBIC's constants (RFC 9438): the cubic's scale, and the window kept at a
  * congestion event. */
-static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7;
+static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7, RENO_PACE = 3 * (1 - 0.7) / (1 + 0.7);
 #define MS UINT64_C(1000000)
 /* RFC 9002's values, but a first RTT of 100 ms (a LAN's, not the 333 ms of
  * the Internet at large); a probe at least every second while a receiver is
@@ -528,11 +528,13 @@ static void grow(PureLinkSender *l, uint64_t bytes, uint64_t now) {
         l->cubic_k = 0;
     }
     double t = (double)(now - l->cubic_epoch) / 1e9, rtt = (double)(l->sampled ? l->smoothed_rtt : FIRST_RTT) / 1e9;
-    /* Reno's pace: as the acknowledgments come (RFC 9438), or as time goes
-     * (RFC 8312), whichever is ahead: a link its app holds back (a few
-     * records a second) does not fall behind it for that. */
-    l->cubic_reno += (l->cubic_reno < l->cubic_max ? 3 * (1 - CUBIC_BETA) / (1 + CUBIC_BETA) : 1) * acked / w;
-    double by_time = l->cubic_max * CUBIC_BETA + 3 * (1 - CUBIC_BETA) / (1 + CUBIC_BETA) * t / rtt;
+    /* Reno's pace, 0.53 datagrams an RTT as the CUBIC deployed (Linux's,
+     * quinn's) keeps it, not RFC 9438's whole datagram once past the window
+     * before the event: as the acknowledgments come, or as time goes (RFC
+     * 8312), whichever is ahead, so a link its app holds back does not fall
+     * behind it. */
+    l->cubic_reno += RENO_PACE * acked / w;
+    double by_time = l->cubic_max * CUBIC_BETA + RENO_PACE * t / rtt;
     if (by_time > l->cubic_reno) l->cubic_reno = by_time;
     double d = t - l->cubic_k, at = CUBIC_C * d * d * d + l->cubic_max;
     d += rtt;
