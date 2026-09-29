@@ -208,6 +208,16 @@ typedef struct {
     Unit units[UNITS];
 } Flight;
 
+/* A sender's window (bytes it may have in flight), the threshold of slow
+ * start, and when its last congestion event began; then CUBIC (RFC 9438),
+ * in datagrams and seconds: the window before the last event, the time the
+ * cubic takes to reach it again, when the cubic began (0: none yet), and
+ * what Reno would have (the window never grows slower). */
+typedef struct {
+    uint64_t window, threshold, recovery_start, cubic_epoch;
+    double cubic_max, cubic_k, cubic_reno;
+} Congestion;
+
 struct PureLinkSender {
     uint32_t shape, own_id, peer_id;
     char input[PURE_LINK_NAME + 1], source[PURE_LINK_NAME + 1];
@@ -225,7 +235,8 @@ struct PureLinkSender {
     unsigned char out_base[PURE_AEAD_NONCE], in_base[PURE_AEAD_NONCE];
     Flight *flights; /* one for each number sent, oldest first (a ring) */
     size_t flight_head, flight_count, flight_capacity;
-    uint64_t in_flight, window, threshold, recovery_start, eliciting;
+    uint64_t in_flight, eliciting;
+    Congestion cc; /* now; and as it was before an episode, for its undoing */
     uint64_t largest_acked, latest_rtt, smoothed_rtt, rtt_var, min_rtt;
     bool acked_any, sampled;
     /* limit: the highest number the receiver takes (the last it stored and
@@ -241,20 +252,12 @@ struct PureLinkSender {
      * RFC 9002's eighth of the RTT); both grow when a packet called lost
      * turns out late. Congestion events one after another while losses of
      * the first are still unsettled make an episode; one whose losses all
-     * turn out late is undone. Its window, threshold and recovery before
-     * it; its losses unsettled; whether none of them was real. */
+     * turn out late is undone: the congestion state before it, its losses
+     * unsettled, whether none of them was real. */
     uint64_t reorder_packets, reorder_quarters, calm_events;
-    uint64_t episode, undo_window, undo_threshold, undo_recovery, undo_losses;
+    uint64_t episode, undo_losses;
+    Congestion undo;
     bool undo_ok;
-    /* Congestion avoidance is CUBIC (RFC 9438), in datagrams and seconds:
-     * the window before the last event, the time the cubic takes to reach
-     * it again, when the epoch began (0: none yet), and what Reno would have
-     * (the window never grows slower). As they were before an episode, for
-     * its undoing. */
-    double cubic_max, cubic_k, cubic_reno;
-    uint64_t cubic_epoch;
-    double undo_cubic_max, undo_cubic_k, undo_cubic_reno;
-    uint64_t undo_cubic_epoch;
     /* The window went unused (nothing to send, or no credit) when the
      * sender last looked: it does not grow then (RFC 9002 §7.8). */
     bool unused;
@@ -474,24 +477,20 @@ static void lose(PureLinkSender *l, Flight *f, uint64_t now, bool by_time) {
     f->largest_then = l->largest_acked;
     ++l->counts.lost;
     for (uint16_t u = 0; u < f->count; ++u) l->counts.resent += carried(l, &f->units[u], f->pn, false, now);
-    if (f->sent > l->recovery_start) { /* one congestion event per round trip */
+    if (f->sent > l->cc.recovery_start) { /* one congestion event per round trip */
         if (!l->undo_losses) { /* an episode begins */
             ++l->episode;
-            l->undo_window = l->window;
-            l->undo_threshold = l->threshold;
-            l->undo_recovery = l->recovery_start;
-            l->undo_cubic_max = l->cubic_max, l->undo_cubic_k = l->cubic_k, l->undo_cubic_reno = l->cubic_reno;
-            l->undo_cubic_epoch = l->cubic_epoch;
+            l->undo = l->cc;
             l->undo_ok = true;
         }
-        l->recovery_start = now;
-        double w = (double)l->window / l->datagram;
-        l->cubic_max = w < l->cubic_max ? w * (1 + CUBIC_BETA) / 2 : w; /* fast convergence: another flow came */
-        l->window = most((uint64_t)((double)l->window * CUBIC_BETA), WINDOW_LEAST);
-        l->threshold = l->window;
-        l->cubic_k = cbrt(l->cubic_max * (1 - CUBIC_BETA) / CUBIC_C);
-        l->cubic_epoch = now;
-        l->cubic_reno = (double)l->window / l->datagram;
+        l->cc.recovery_start = now;
+        double w = (double)l->cc.window / l->datagram;
+        l->cc.cubic_max = w < l->cc.cubic_max ? w * (1 + CUBIC_BETA) / 2 : w; /* fast convergence: another flow came */
+        l->cc.window = most((uint64_t)((double)l->cc.window * CUBIC_BETA), WINDOW_LEAST);
+        l->cc.threshold = l->cc.window;
+        l->cc.cubic_k = cbrt(l->cc.cubic_max * (1 - CUBIC_BETA) / CUBIC_C);
+        l->cc.cubic_epoch = now;
+        l->cc.cubic_reno = (double)l->cc.window / l->datagram;
         if (++l->calm_events >= CALM) { /* many events, none of them late packets: less patience */
             l->reorder_packets = most(REORDER_FIRST, l->reorder_packets / 2);
             l->reorder_quarters /= 2;
@@ -507,11 +506,9 @@ static void settle_loss(PureLinkSender *l, const Flight *f, bool real) {
     if (f->episode != l->episode || !l->undo_losses) return;
     if (real) l->undo_ok = false;
     if (!--l->undo_losses && l->undo_ok) {
-        l->window = most(l->window, l->undo_window);
-        l->threshold = l->undo_threshold;
-        l->recovery_start = l->undo_recovery;
-        l->cubic_max = l->undo_cubic_max, l->cubic_k = l->undo_cubic_k, l->cubic_reno = l->undo_cubic_reno;
-        l->cubic_epoch = l->undo_cubic_epoch;
+        uint64_t window = l->cc.window; /* the window grown since stays */
+        l->cc = l->undo;
+        l->cc.window = most(window, l->cc.window);
         ++l->counts.undone;
     }
 }
@@ -576,31 +573,31 @@ static uint64_t rtt_now(const PureLinkSender *l) { return most(l->sampled ? l->s
  * then CUBIC. The cubic's target is where it will be an RTT on, and the
  * window closes on it by the share of the window acknowledged. */
 static void grow(PureLinkSender *l, uint64_t bytes, uint64_t now) {
-    if (l->window < l->threshold) {
-        l->window += bytes;
+    if (l->cc.window < l->cc.threshold) {
+        l->cc.window += bytes;
         return;
     }
-    double w = (double)l->window / l->datagram, acked = (double)bytes / l->datagram;
-    if (!l->cubic_epoch) { /* no event yet: the cubic starts where the window is */
-        l->cubic_epoch = now;
-        l->cubic_max = l->cubic_reno = w;
-        l->cubic_k = 0;
+    double w = (double)l->cc.window / l->datagram, acked = (double)bytes / l->datagram;
+    if (!l->cc.cubic_epoch) { /* no event yet: the cubic starts where the window is */
+        l->cc.cubic_epoch = now;
+        l->cc.cubic_max = l->cc.cubic_reno = w;
+        l->cc.cubic_k = 0;
     }
-    double t = (double)(now - l->cubic_epoch) / 1e9, rtt = (double)rtt_now(l) / 1e9;
+    double t = (double)(now - l->cc.cubic_epoch) / 1e9, rtt = (double)rtt_now(l) / 1e9;
     /* Reno's pace, 0.53 datagrams an RTT as the CUBIC deployed (Linux's,
      * quinn's) keeps it, not RFC 9438's whole datagram once past the window
      * before the event: as the acknowledgments come, or as time goes (RFC
      * 8312), whichever is ahead, so a link its app holds back does not fall
      * behind it. */
-    l->cubic_reno += RENO_PACE * acked / w;
-    double by_time = l->cubic_max * CUBIC_BETA + RENO_PACE * t / rtt;
-    if (by_time > l->cubic_reno) l->cubic_reno = by_time;
-    double d = t - l->cubic_k, at = CUBIC_C * d * d * d + l->cubic_max;
+    l->cc.cubic_reno += RENO_PACE * acked / w;
+    double by_time = l->cc.cubic_max * CUBIC_BETA + RENO_PACE * t / rtt;
+    if (by_time > l->cc.cubic_reno) l->cc.cubic_reno = by_time;
+    double d = t - l->cc.cubic_k, at = CUBIC_C * d * d * d + l->cc.cubic_max;
     d += rtt;
-    double target = CUBIC_C * d * d * d + l->cubic_max;
+    double target = CUBIC_C * d * d * d + l->cc.cubic_max;
     target = target < w ? w : target > 1.5 * w ? 1.5 * w : target;
-    double next = at < l->cubic_reno ? l->cubic_reno : w + (target - w) * acked / w;
-    l->window = most(l->window, (uint64_t)(next * l->datagram));
+    double next = at < l->cc.cubic_reno ? l->cc.cubic_reno : w + (target - w) * acked / w;
+    l->cc.window = most(l->cc.window, (uint64_t)(next * l->datagram));
 }
 
 static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint64_t now) {
@@ -620,7 +617,7 @@ static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint6
             ++l->counts.acknowledged;
             if (f->reach) l->datagram = DATAGRAM_MOST, l->reaching = false; /* the path carries it */
             for (uint16_t u = 0; u < f->count; ++u) carried(l, &f->units[u], f->pn, true, now);
-            if (f->eliciting && f->sent > l->recovery_start && !l->unused) grow(l, f->bytes, now);
+            if (f->eliciting && f->sent > l->cc.recovery_start && !l->unused) grow(l, f->bytes, now);
             if (pn == largest) top = f;
         }
     }
@@ -868,7 +865,7 @@ static size_t transmit(PureLinkSender *l, Flight *f, const unsigned char *body, 
 /* Whether pacing lets a packet go now (else when it will, in pace_due). */
 static bool paced(PureLinkSender *l, uint64_t now) {
     double rtt = (double)rtt_now(l);
-    double rate = (double)l->window * (l->window < l->threshold ? 2.0 : 1.25) / rtt; /* bytes a ns */
+    double rate = (double)l->cc.window * (l->cc.window < l->cc.threshold ? 2.0 : 1.25) / rtt; /* bytes a ns */
     double most = rate * 2e6, least = 10.0 * l->datagram, top = 256.0 * l->datagram;
     most = most < least ? least : most > top ? top : most;
     l->pace_bytes += rate * (double)(now - l->pace_at);
@@ -884,8 +881,8 @@ size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DA
                                uint64_t *number) {
     bool probe = l->probes > 0;
     l->pace_due = 0; /* set again only when pacing holds a packet back */
-    if (!probe && l->in_flight + l->datagram > l->window) l->unused = false;
-    if (!l->out || (!probe && l->in_flight + l->datagram > l->window) || !flight_room(l)) return 0;
+    if (!probe && l->in_flight + l->datagram > l->cc.window) l->unused = false;
+    if (!l->out || (!probe && l->in_flight + l->datagram > l->cc.window) || !flight_room(l)) return 0;
     if (!probe && !paced(l, now)) return 0;
     if (!l->offering && !l->renegotiating && (now - l->epoch_at >= l->epoch_every || l->epoch_bytes >= l->epoch_most))
         offer(l, l->epoch + 1); /* on to the next epoch: a key made for it goes in the packets until accepted */
@@ -896,7 +893,7 @@ size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DA
     unsigned char body[BODY_MOST];
     Flight f = {.pn = l->next_pn, .eliciting = true};
     if (l->datagram < DATAGRAM_MOST && l->filled && !l->reaching && l->sampled && now >= l->reach_at &&
-        l->in_flight + DATAGRAM_MOST <= l->window) { /* the path may carry more: a PING of the most, padded */
+        l->in_flight + DATAGRAM_MOST <= l->cc.window) { /* the path may carry more: a PING of the most, padded */
         body[0] = F_PING;
         memset(body + 1, F_PADDING, BODY_MOST - 1);
         f.reach = true;
@@ -995,8 +992,8 @@ PureLinkSender *pure_link_sender(const char *source, const char *input, uint32_t
     memcpy(l->own_public, own_public, PURE_SEAL_KEY);
     l->own_id = key_id(own_public);
     l->run = random64();
-    l->window = WINDOW_FIRST;
-    l->threshold = UINT64_MAX;
+    l->cc.window = WINDOW_FIRST;
+    l->cc.threshold = UINT64_MAX;
     l->reorder_packets = REORDER_FIRST;
     l->datagram = DATAGRAM;
     l->epoch_every = EPOCH_EVERY;

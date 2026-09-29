@@ -149,8 +149,8 @@ int main(int argc, char **argv) {
         }
         now = next > now ? next : now;
         while (now >= sample_at) {
-            window_sum += s->window, rtt_sum += s->smoothed_rtt, ++samples;
-            if (s->window < window_least) window_least = s->window;
+            window_sum += s->cc.window, rtt_sum += s->smoothed_rtt, ++samples;
+            if (s->cc.window < window_least) window_least = s->cc.window;
             sample_at += 100 * MS;
         }
         for (size_t k = 0; k < packet_count;) {
