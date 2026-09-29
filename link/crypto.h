@@ -8,7 +8,7 @@
  * first time a server seals, opens a seal or connects to an https receiver
  * (link/crypto.c): one that does none of these maps no OpenSSL, 2.3 MiB
  * less resident and 0.6 MiB less of its own. */
-enum { PURE_CRYPTO_VERSION = 4 };
+enum { PURE_CRYPTO_VERSION = 5 };
 
 typedef struct {
     unsigned version;
@@ -35,6 +35,8 @@ typedef struct {
     void (*opener_free)(PureOpener *);
     /* Links, as link/seal.h says. */
     bool (*link_secret)(const PureSealKey *, const unsigned char peer[PURE_SEAL_KEY], unsigned char out[32]);
+    bool (*link_ephemeral)(unsigned char private_key[32], unsigned char public_key[PURE_SEAL_KEY]);
+    bool (*link_agree)(const unsigned char private_key[32], const unsigned char peer[PURE_SEAL_KEY], unsigned char out[32]);
     bool (*link_derive)(const unsigned char secret[32], const unsigned char *info, size_t info_size, unsigned char *out,
                         size_t out_size);
     PureAead *(*aead)(const unsigned char key[PURE_AEAD_KEY]);

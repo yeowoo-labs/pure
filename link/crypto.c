@@ -141,6 +141,16 @@ bool pure_link_secret(const PureSealKey *own, const unsigned char peer[PURE_SEAL
     return c && own && c->link_secret(own, peer, out);
 }
 
+bool pure_link_ephemeral(unsigned char private_key[32], unsigned char public_key[PURE_SEAL_KEY]) {
+    const PureCrypto *c = loaded(NULL, 0);
+    return c && c->link_ephemeral(private_key, public_key);
+}
+
+bool pure_link_agree(const unsigned char private_key[32], const unsigned char peer[PURE_SEAL_KEY], unsigned char out[32]) {
+    const PureCrypto *c = loaded(NULL, 0);
+    return c && c->link_agree(private_key, peer, out);
+}
+
 bool pure_link_derive(const unsigned char secret[32], const unsigned char *info, size_t info_size, unsigned char *out,
                       size_t out_size) {
     const PureCrypto *c = loaded(NULL, 0);

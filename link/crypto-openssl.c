@@ -207,6 +207,32 @@ static bool link_secret(const PureSealKey *own, const unsigned char peer[PURE_SE
     return ok && any;
 }
 
+/* A pair made for once (X25519): an epoch's half, raw. */
+static bool link_ephemeral(unsigned char private_key[32], unsigned char public_key[PURE_SEAL_KEY]) {
+    EVP_PKEY *key = EVP_PKEY_Q_keygen(NULL, NULL, "X25519");
+    size_t a = 32, b = PURE_SEAL_KEY;
+    bool ok = key && EVP_PKEY_get_raw_private_key(key, private_key, &a) == 1 &&
+              EVP_PKEY_get_raw_public_key(key, public_key, &b) == 1 && a == 32 && b == PURE_SEAL_KEY;
+    EVP_PKEY_free(key);
+    return ok;
+}
+
+/* The secret a raw private half shares with a peer's public key. */
+static bool link_agree(const unsigned char private_key[32], const unsigned char peer[PURE_SEAL_KEY], unsigned char out[32]) {
+    EVP_PKEY *mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, private_key, 32);
+    EVP_PKEY *theirs = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, peer, PURE_SEAL_KEY);
+    EVP_PKEY_CTX *context = mine && theirs ? EVP_PKEY_CTX_new(mine, NULL) : NULL;
+    size_t length = 32;
+    bool ok = context && EVP_PKEY_derive_init(context) == 1 && EVP_PKEY_derive_set_peer(context, theirs) == 1 &&
+              EVP_PKEY_derive(context, out, &length) == 1 && length == 32;
+    EVP_PKEY_CTX_free(context);
+    EVP_PKEY_free(mine);
+    EVP_PKEY_free(theirs);
+    unsigned char any = 0; /* a small-order key makes zeros: no secret */
+    for (size_t i = 0; ok && i < 32; ++i) any |= out[i];
+    return ok && any;
+}
+
 /* HKDF, fetched once. */
 static EVP_KDF *hkdf(void) {
     static EVP_KDF *kept;
@@ -281,4 +307,5 @@ static bool aead_open(PureAead *a, const unsigned char *key, const unsigned char
 
 const PureCrypto pure_crypto = {PURE_CRYPTO_VERSION, tls_start, tls_open, tls_read, tls_write, tls_close,
                                 seal_key, seal_key_free, sealer, seal, sealer_free, opener, unseal, opener_free,
-                                link_secret, link_derive, aead, aead_seal, aead_open, aead_free};
+                                link_secret, link_ephemeral, link_agree, link_derive, aead, aead_seal, aead_open,
+                                aead_free};

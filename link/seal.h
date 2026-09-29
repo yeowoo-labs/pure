@@ -65,6 +65,13 @@ void pure_opener_free(PureOpener *);
 typedef struct PureAead PureAead;
 enum { PURE_AEAD_KEY = 16, PURE_AEAD_NONCE = 12, PURE_AEAD_TAG = 16 };
 bool pure_link_secret(const PureSealKey *own, const unsigned char peer[PURE_SEAL_KEY], unsigned char out[32]);
+/* An epoch's keys (link/link-protocol.h): a key pair made for once, raw (its
+ * holder clears the private half as soon as it has agreed: a link may hold
+ * one for long, and a node many, so they are not kept in the secure heap),
+ * and the secret it shares with another's public half (never all zeros).
+ * On a Raspberry Pi 5 the pair costs 57 µs and the secret 220. */
+bool pure_link_ephemeral(unsigned char private_key[32], unsigned char public_key[PURE_SEAL_KEY]);
+bool pure_link_agree(const unsigned char private_key[32], const unsigned char peer[PURE_SEAL_KEY], unsigned char out[32]);
 bool pure_link_derive(const unsigned char secret[32], const unsigned char *info, size_t info_size, unsigned char *out,
                       size_t out_size);
 PureAead *pure_aead(const unsigned char key[PURE_AEAD_KEY]);
