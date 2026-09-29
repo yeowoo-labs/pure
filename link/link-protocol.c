@@ -656,14 +656,23 @@ PureLinkSender *pure_link_sender(const char *source, const char *input, uint32_t
     return l;
 }
 
-bool pure_link_sender_peer(PureLinkSender *l, const unsigned char peer[PURE_SEAL_KEY]) {
+/* The receiver's key, with the secret made (or given) into l->secret: the
+ * keys of packets to it. */
+static bool keyed(PureLinkSender *l, const unsigned char peer[PURE_SEAL_KEY], const unsigned char *secret) {
     memcpy(l->peer, peer, PURE_SEAL_KEY);
     l->peer_id = key_id(peer);
     pure_aead_free(l->out);
     pure_aead_free(l->in);
     l->out = l->in = NULL;
-    return l->own && pure_link_secret(l->own, l->peer, l->secret) &&
+    if (secret) memcpy(l->secret, secret, 32);
+    return (secret || (l->own && pure_link_secret(l->own, l->peer, l->secret))) &&
            (l->out = aead_of(l->secret, l->own_public, l->peer, l->run, 0, l->out_base));
+}
+
+bool pure_link_sender_peer(PureLinkSender *l, const unsigned char peer[PURE_SEAL_KEY]) { return keyed(l, peer, NULL); }
+
+bool pure_link_sender_shared(PureLinkSender *l, const unsigned char peer[PURE_SEAL_KEY], const unsigned char secret[32]) {
+    return keyed(l, peer, secret);
 }
 
 uint64_t pure_link_sender_queued(const PureLinkSender *l) { return l->queued; }

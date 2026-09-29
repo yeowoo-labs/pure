@@ -67,14 +67,18 @@ typedef struct {
 /* ---- The sending side: one output's saved sends to a receiver's input, as
  * source (the receiver's name for it), their messages of shape (the
  * receiver's input must have the same: core/module.h's pure_module_shape),
- * from own (this node's key, whose public half is own_public). NULL when
- * the names are not 1 to PURE_LINK_NAME bytes, or memory runs out. */
+ * from own (this node's key, whose public half is own_public; NULL when
+ * the secret comes from elsewhere). NULL when the names are not 1 to
+ * PURE_LINK_NAME bytes, or memory runs out. */
 typedef struct PureLinkSender PureLinkSender;
 PureLinkSender *pure_link_sender(const char *source, const char *input, uint32_t shape, const PureSealKey *own,
                                  const unsigned char own_public[PURE_SEAL_KEY]);
 /* The receiver's public key: the keys made from it (one X25519). A sender
  * makes no packet before it has one. */
 bool pure_link_sender_peer(PureLinkSender *, const unsigned char peer[PURE_SEAL_KEY]);
+/* The same with the secret own's key shares with peer's made elsewhere (by
+ * a key kept in hardware, say, or a test's many keys): no X25519 here. */
+bool pure_link_sender_shared(PureLinkSender *, const unsigned char peer[PURE_SEAL_KEY], const unsigned char secret[32]);
 /* A saved send, numbered one past the last queued (any number when none
  * waits); false when it cannot be kept. */
 bool pure_link_sender_queue(PureLinkSender *, uint64_t seq, const unsigned char *bytes, size_t size);

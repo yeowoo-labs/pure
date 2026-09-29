@@ -138,7 +138,7 @@ def one(n, work, keys, module, idle_ms, window):
     links = [ROOT / 'build/links', 'send', keys, module, 'order', '127.0.0.1', link_port, node_key]
     cpu = cpu_ms(node.pid)
     sent = subprocess.run([str(a) for a in links + [0, n, 1, window]], capture_output=True, text=True)
-    assert sent.returncode == 0, sent.stderr
+    assert sent.returncode == 0, sent.stderr + sent.stdout
     row['send'] = json.loads(sent.stdout)
     row['node_cpu_ms_per_send'] = round((cpu_ms(node.pid) - cpu) / n, 4)
     row['sent'] = memory(node.pid)
@@ -148,7 +148,7 @@ def one(n, work, keys, module, idle_ms, window):
     first = random.Random(n).randrange(0, n - wake + 1)
     cpu = cpu_ms(node.pid)
     woken = subprocess.run([str(a) for a in links + [first, wake, 2, 1]], capture_output=True, text=True)
-    assert woken.returncode == 0, woken.stderr
+    assert woken.returncode == 0, woken.stderr + woken.stdout
     row['wake'] = json.loads(woken.stdout)
     row['node_cpu_ms_per_wake'] = round((cpu_ms(node.pid) - cpu) / wake, 4)
     assert view(port, 'count') == n + wake
@@ -625,10 +625,11 @@ def main():
         with tempfile.TemporaryDirectory(prefix='pure-m1-quic-', dir=args.store) as directory:
             quic(counts, Path(directory), args.window, args.out)
         return
-    subprocess.run(['make', '-s', '-C', str(ROOT), 'build/pure-serve', 'build/pure-crypto.so', 'build/libpure.a'], check=True)
-    subprocess.run(['cc', '-O2', '-g', '-std=c17', '-Wall', '-Wextra', '-Werror', f'-I{ROOT}/core',
-                    str(Path(__file__).parent / 'links.c'), str(ROOT / 'build/libpure.a'), '-lcrypto', '-lm', '-pthread',
-                    '-o', str(ROOT / 'build/links')], check=True)
+    subprocess.run(['make', '-s', '-C', str(ROOT), 'build/pure-serve', 'build/pure-crypto.so', 'build/libpure.a',
+                    'build/libpure-link.a'], check=True)
+    subprocess.run(['cc', '-O2', '-g', '-std=c17', '-Wall', '-Wextra', '-Werror', f'-I{ROOT}/core', f'-I{ROOT}/link',
+                    str(Path(__file__).parent / 'links.c'), str(ROOT / 'build/libpure-link.a'), str(ROOT / 'build/libpure.a'),
+                    '-lcrypto', '-lm', '-pthread', '-ldl', '-o', str(ROOT / 'build/links')], check=True)
     with tempfile.TemporaryDirectory(prefix='pure-m1-', dir=args.store) as directory:
         work = Path(directory)
         source = work / 'receiver.aup'
