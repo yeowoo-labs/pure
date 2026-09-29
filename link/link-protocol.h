@@ -38,18 +38,24 @@
  * go. The sender seals in it from the ACCEPT on; the receiver takes it once
  * a packet of it opens, and opens the late ones of the epoch before. So what
  * went in epoch 1 and on cannot be opened by one who later has both nodes'
- * keys: only a run's first packets, before its first answer, are sealed
+ * keys: only a run's first packets, before its first epoch, are sealed
  * under the static keys. A new epoch every hour or GiB
  * (pure_link_sender_epochs). A receiver that remembers (pure_link_remember)
  * writes the epoch it accepted for each sender's run, and goes on in it after
- * it starts again; a sender that hears nothing for 2 s over 4 probes (the
- * receiver forgot) offers again in epoch 0, with no records, and the chain
- * begins again from the nodes' keys.
+ * it starts again. One that does not know a run's epoch (it forgot) answers
+ * its packet with LOST, under the nodes' keys, naming the packet: its
+ * sender, if the packet is one it has out, begins again as a run begins, in
+ * epoch 0 with records until an epoch is accepted. A sender that hears
+ * nothing for 2 s over 4 probes (an attacker may keep the answers from it)
+ * offers again in epoch 0 with no records, and the chain begins again from
+ * the nodes' keys.
  *
  * What an attacker on the path may do, and what it gets (link/test-link.c
  * does each):
- *   - change a packet: it does not open, and it is answered by nothing
- *     (a packet is opened before it is looked at).
+ *   - change a packet: it does not open, and it is answered by nothing but,
+ *     when its run is one the receiver does not know in an epoch past 0, a
+ *     LOST (as QUIC's stateless reset: smaller than the packet, LOSTS a
+ *     second at most, telling nothing but that).
  *   - send a packet of the past again: its records are applied once (the
  *     heard numbers), its word is taken only as the most said (STORED's
  *     limit), and it moves nothing: answers go where the newest packet of
@@ -98,6 +104,8 @@
  *                same; one a second for a sender), then the first four
  *                bytes of the key offered it answers (a sender that took
  *                its epoch for lost offers epoch 1 again with another)
+ *   0x0b LOST    u64 a packet's number: a receiver knows no epoch of its run
+ *                (sealed in epoch 0, in a run of answers of its own)
  *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
  *                a whole datagram
  * Losses are detected as RFC 9002 says, with RACK's patience for packets

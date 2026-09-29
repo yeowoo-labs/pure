@@ -90,6 +90,7 @@ typedef struct {
     /* A black hole: from when the sender's datagram grew, the path carries
      * nothing larger than PURE_LINK_DATAGRAM (and says nothing of it). */
     bool black_hole, hole;
+    uint64_t forgot_at; /* when the receiver started again with no memo (it lost its epochs) */
     /* The receiving app: its last heard (kept across the receiver's
      * restarts), what it said of deliveries (given at the next turn). */
     uint64_t heard, applied, deliveries;
@@ -200,9 +201,15 @@ typedef struct {
     bool black_hole;   /* larger packets lost from when the path was found to carry them */
 } Case;
 
+/* Answers to a packet no one should answer: counted, but a LOST (a packet
+ * of 46 bytes: a run unknown here, in an epoch past 0, as QUIC's stateless
+ * reset) apart. */
+typedef struct { unsigned answers, lost; size_t lost_bytes; } Answers;
 static bool nothing_sent(void *context, const unsigned char *packet, size_t size, const unsigned char *to, size_t to_size) {
-    (void)packet, (void)size, (void)to, (void)to_size;
-    ++*(unsigned *)context;
+    (void)packet, (void)to, (void)to_size;
+    Answers *a = context;
+    if (size == 46) ++a->lost, a->lost_bytes += size;
+    else ++a->answers;
     return true;
 }
 
@@ -218,7 +225,7 @@ static void tamper(World *w, PureLinkSender *s, PureLinkReceiver *r, const Packe
         else if (change == 1) size -= 1 + next_random() % 16;
         else bent[size++] = (unsigned char)next_random();
         PureLinkCounts before, after;
-        unsigned answers = 0;
+        Answers answers = {0};
         ++w->bent;
         if (p->to_receiver) {
             pure_link_receiver_counts(r, &before);
@@ -230,8 +237,9 @@ static void tamper(World *w, PureLinkSender *s, PureLinkReceiver *r, const Packe
             pure_link_sender_take(s, bent, size, w->now);
             pure_link_sender_counts(s, &after);
         }
-        CHECK(after.received == before.received && !answers, "a packet changed on the way (%d, to the %s) %s", change,
-              p->to_receiver ? "receiver" : "sender", answers ? "made an answer" : "opened");
+        CHECK(after.received == before.received && !answers.answers && answers.lost_bytes < size,
+              "a packet changed on the way (%d, to the %s) %s", change, p->to_receiver ? "receiver" : "sender",
+              answers.answers || answers.lost_bytes >= size ? "made an answer" : "opened");
     }
 }
 
@@ -275,7 +283,10 @@ static bool static_keys(const unsigned char secret[32], const unsigned char *fro
 
 /* Each packet the sender sent, tried under the static keys: one of an epoch
  * past 0 must not open, and one of epoch 0 sent after its run's first packet
- * of a later epoch may carry no record. The number that opened. */
+ * of a later epoch may carry no record. But for this: once the receiver
+ * started again with no memo (and said it knows no epoch), the run begins
+ * again, in epoch 0, until its next packet of a later epoch. The number
+ * that opened. */
 static unsigned later_with_keys(World *w, const PureSealKey *a, const PureSealKey *b, const unsigned char *public_a,
                                 const unsigned char *public_b, const char *name) {
     unsigned char secret[32], again[32], key[PURE_AEAD_KEY], base[PURE_AEAD_NONCE], nonce[PURE_AEAD_NONCE],
@@ -285,18 +296,30 @@ static unsigned later_with_keys(World *w, const PureSealKey *a, const PureSealKe
     unsigned opened = 0;
     for (size_t k = 0; k < w->sent_log_count; ++k) {
         const Packet *p = &w->sent_log[k];
-        uint64_t run = get64le(p->bytes + 5), pn = get64le(p->bytes + 13), first_later = UINT64_MAX;
-        for (size_t j = 0; j < w->sent_log_count; ++j) /* its run's first packet of a later epoch */
-            if (get64le(w->sent_log[j].bytes + 5) == run && (w->sent_log[j].bytes[0] & 15) &&
-                get64le(w->sent_log[j].bytes + 13) < first_later)
-                first_later = get64le(w->sent_log[j].bytes + 13);
+        /* Its run's first packet of a later epoch; after the receiver forgot,
+         * its first packet of epoch 0 (begun again), and the first of a later
+         * epoch after that one. */
+        uint64_t run = get64le(p->bytes + 5), pn = get64le(p->bytes + 13), first_later = UINT64_MAX,
+                 again = UINT64_MAX, again_later = UINT64_MAX;
+        for (size_t j = 0; j < w->sent_log_count; ++j) {
+            const Packet *q = &w->sent_log[j];
+            uint64_t n = get64le(q->bytes + 13);
+            if (get64le(q->bytes + 5) != run) continue;
+            if ((q->bytes[0] & 15) && n < first_later) first_later = n;
+            if (w->forgot_at && q->at > w->forgot_at && !(q->bytes[0] & 15) && n < again) again = n;
+        }
+        for (size_t j = 0; j < w->sent_log_count; ++j) {
+            const Packet *q = &w->sent_log[j];
+            uint64_t n = get64le(q->bytes + 13);
+            if (get64le(q->bytes + 5) == run && (q->bytes[0] & 15) && n > again && n < again_later) again_later = n;
+        }
         if (!static_keys(secret, public_a, public_b, run, key, base)) exit(1);
         memcpy(nonce, base, PURE_AEAD_NONCE);
         for (int i = 0; i < 8; ++i) nonce[4 + i] ^= (unsigned char)(pn >> (56 - 8 * i));
         if (!pure_aead_open(aead, key, nonce, p->bytes, 21, p->bytes + 21, p->size - 21, plain)) continue;
         ++opened;
         CHECK(!(p->bytes[0] & 15), "%s: a packet of epoch %u opened under the static keys", name, p->bytes[0] & 15);
-        if (pn < first_later) continue;
+        if (pn < first_later || (pn >= again && pn < again_later)) continue;
         size_t size = p->size - 21 - 16;
         for (size_t at = 0; at < size;) { /* its frames: none a record */
             unsigned type = plain[at++];
@@ -391,7 +414,7 @@ static Outcome run(const Case *c, const char *dir) {
                 w.sent_log_capacity = w.sent_log_capacity ? 2 * w.sent_log_capacity : 1024;
                 if (!(w.sent_log = realloc(w.sent_log, w.sent_log_capacity * sizeof(Packet)))) exit(1);
             }
-            w.sent_log[w.sent_log_count] = (Packet){.size = size};
+            w.sent_log[w.sent_log_count] = (Packet){.at = w.now, .size = size}; /* at: when it was sent */
             memcpy(w.sent_log[w.sent_log_count++].bytes, out, size);
             put_packet(&w, true, out, size);
             if (w.black_hole && pure_link_sender_datagram(s) > PURE_LINK_DATAGRAM) w.hole = true;
@@ -454,6 +477,7 @@ static Outcome run(const Case *c, const char *dir) {
             pure_link_receiver_free(r);
             w.done_count = 0;
             r = receiver_of(&w, b, public_b, public_a, keep, c->idle_ms);
+            if (!keep) w.forgot_at = w.now;
         }
         if (!sender_restarted && pure_link_sender_stored(s) >= c->sender_restart_after) {
             sender_restarted = true;
@@ -574,7 +598,7 @@ static void flood(const char *dir) {
     for (int i = 0; i < (getenv("TEST_LINK_NO_FLOOD") ? 0 : 10000); ++i, w.now += 10000) {
         size_t size = 64 + next_random() % 1100;
         for (size_t k = 0; k < size; ++k) packet[k] = (unsigned char)next_random();
-        packet[0] = 0x70;
+        packet[0] = (unsigned char)(0x70 | (i & 1)); /* half in an epoch past 0: a LOST each, while tokens last */
         for (int j = 0; j < 4; ++j) packet[1 + j] = (unsigned char)(id >> 8 * j);
         w.attacker_in += size;
         pure_link_receiver_take(r, packet, size, "attacker", 8, w.now);
@@ -605,9 +629,11 @@ static void flood(const char *dir) {
                     (unsigned long long)pure_link_sender_due(s));
         }
     }
-    CHECK(flooded.keyed <= 300 && flooded.secrets <= 1 && !w.attacker_out, /* 256 at once, 256 a second after */
-          "flood: %llu runs keyed, %llu secrets made, %llu bytes to the attacker", (unsigned long long)flooded.keyed,
-          (unsigned long long)flooded.secrets, (unsigned long long)w.attacker_out);
+    CHECK(flooded.keyed <= 300 && flooded.secrets <= 1 && w.attacker_out <= 46 * (4096 + 410) &&
+              w.attacker_out < w.attacker_in, /* keys: 256 at once, 256 a second; LOSTs: 4,096 at once, 4,096 a second */
+          "flood: %llu runs keyed, %llu secrets made, %llu bytes to the attacker for its %llu",
+          (unsigned long long)flooded.keyed, (unsigned long long)flooded.secrets, (unsigned long long)w.attacker_out,
+          (unsigned long long)w.attacker_in);
     CHECK(w.heard == 200, "flood: the sender heard after it: %llu of 200", (unsigned long long)w.heard);
     if (getenv("TEST_LINK_DEBUG")) {
         PureLinkCounts rc, sc;
@@ -617,8 +643,9 @@ static void flood(const char *dir) {
                 (unsigned long long)rc.keyed, (unsigned long long)rc.active, (unsigned long long)sc.packets,
                 (unsigned long long)sc.received, (unsigned long long)sc.stored);
     }
-    printf("{\"case\":\"flood\",\"packets\":10000,\"keyed\":%llu,\"secrets\":%llu,\"heard_after\":%llu}\n",
-           (unsigned long long)flooded.keyed, (unsigned long long)flooded.secrets, (unsigned long long)w.heard);
+    printf("{\"case\":\"flood\",\"packets\":10000,\"keyed\":%llu,\"secrets\":%llu,\"to_attacker\":%llu,\"heard_after\":%llu}\n",
+           (unsigned long long)flooded.keyed, (unsigned long long)flooded.secrets, (unsigned long long)w.attacker_out,
+           (unsigned long long)w.heard);
     pure_link_sender_free(s);
     pure_link_receiver_free(r);
     pure_seal_key_free(a), pure_seal_key_free(b);

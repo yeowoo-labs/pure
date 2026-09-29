@@ -19,7 +19,7 @@ enum { DATAGRAM_MOST = PURE_LINK_DATAGRAM_MOST, BODY_MOST = DATAGRAM_MOST - HEAD
  * at least this much of it fits. */
 enum { PART_LEAST = 64 };
 enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, F_RECORDS = 6, F_CHALLENGE = 7,
-       F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, STORED_GAP = 1 };
+       F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, F_LOST = 11, STORED_GAP = 1 };
 /* A packet's first byte is VERSION with the sending side's epoch (mod 16)
  * in its low four bits; OFFER and ACCEPT are an epoch's number (u32) and a
  * public key made for it, and ACCEPT the first bytes of the key it answers
@@ -42,7 +42,7 @@ enum { REACH_TRIES = 3, HOLE_LOST = 3, HOLE_PROBES = 2 };
 enum { RESPONSES = 4 };
 /* Keys made for runs that do not open, and new epochs accepted: a second,
  * and at once. */
-enum { KEYINGS = 256, ACCEPTS = 256, ACCEPTS_AT_ONCE = 8 };
+enum { KEYINGS = 256, ACCEPTS = 256, ACCEPTS_AT_ONCE = 8, LOSTS = 4096 };
 /* A receiver accepts a new epoch for a sender at most a second. */
 static const uint64_t ACCEPT_EVERY_NS = 1000000000u, OURS_LIFE = 1000000000u;
 /* CUBIC's constants (RFC 9438): the cubic's scale, and the window kept at a
@@ -300,6 +300,7 @@ struct PureLinkSender {
 
 static bool seal_in(PureLinkSender *l, uint32_t n, const unsigned char secret[32]);
 static bool offer(PureLinkSender *l, uint32_t n);
+static void epoch_lost(PureLinkSender *l);
 static void begin_epoch(PureLinkSender *l, const unsigned char their[PURE_SEAL_KEY], uint64_t now);
 
 /* The rings of records and flights are powers of two long (grown by
@@ -691,14 +692,15 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
         get32(packet + 1) != l->peer_id)
         return; /* not ours, or an error from an earlier send (nobody listening) */
     uint64_t run = get64(packet + 5), pn = get64(packet + 13);
-    /* Answers come in its epoch or the one before. */
+    /* Answers come in its epoch, the one before, or 0 (LOST: a receiver that
+     * knows no epoch of this run says so under the nodes' keys). */
     unsigned e = packet[0] & EPOCH_MASK;
-    uint32_t epoch = e == (l->epoch & EPOCH_MASK) ? l->epoch : l->before_epoch;
+    uint32_t epoch = e == (l->epoch & EPOCH_MASK) ? l->epoch : e == (l->before_epoch & EPOCH_MASK) ? l->before_epoch : 0;
     if (e != (epoch & EPOCH_MASK)) return;
     if (!l->in || l->in_run != run || l->in_epoch != epoch) {
         pure_aead_free(l->in);
-        l->in = aead_of(epoch == l->epoch ? l->epoch_secret : l->before_secret, l->peer, l->own_public, run, l->run,
-                        l->in_base);
+        l->in = aead_of(epoch == l->epoch ? l->epoch_secret : epoch == l->before_epoch ? l->before_secret : l->secret,
+                        l->peer, l->own_public, run, l->run, l->in_base);
         ++l->counts.keyed;
         l->in_run = run;
         l->in_epoch = epoch;
@@ -737,6 +739,11 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
                 !memcmp(plain + at + EPOCH_FRAME - 1, l->offer_public, ANSWERS))
                 begin_epoch(l, plain + at + 4, now);
             at += ACCEPT_FRAME - 1;
+        } else if (type == F_LOST) { /* of a packet still out: the receiver lost this run's epoch */
+            if (at + 8 > size) break;
+            Flight *f = flight_of(l, get64(plain + at));
+            if (f && !f->done && (l->epoch || l->renegotiating)) epoch_lost(l);
+            at += 8;
         } else if (type != F_PING)
             break; /* padding, or what this side does not know: the rest */
     }
@@ -1045,6 +1052,32 @@ static bool offer(PureLinkSender *l, uint32_t n) {
     return true;
 }
 
+/* The receiver knows no epoch of this run (it started again without its
+ * memo), and said so under the nodes' keys of a packet still out: begun
+ * again as a run begins, in epoch 0 with records until the next epoch is
+ * accepted (only a receiver can say it; a word of the past names a packet
+ * no longer out). What it did not store goes again, what flies went
+ * nowhere: no congestion counted for it. Silence alone is not this: that
+ * could be an attacker's doing, and then only offers go (tick). */
+static void epoch_lost(PureLinkSender *l) {
+    if (l->epoch) {
+        seal_in(l, 0, l->secret);
+        offer(l, 1);
+        ++l->counts.fallbacks;
+    }
+    l->renegotiating = false;
+    l->pto_count = 0;
+    for (size_t k = 0; k < l->flight_count; ++k) {
+        Flight *f = &l->flights[(l->flight_head + k) & (l->flight_capacity - 1)];
+        if (!f->done) settle(l, f), f->count = 0;
+    }
+    for (size_t k = 0; k < l->count; ++k) {
+        Record *r = record_at(l, k);
+        for (uint32_t i = 0; i < r->parts; ++i)
+            if (part_of(r, i)->state != UNSENT) set_part(l, r, part_of(r, i), UNSENT), ++l->counts.resent;
+    }
+}
+
 /* The receiver accepted the offer with its public key: the epoch begins,
  * the private half gone. */
 static void begin_epoch(PureLinkSender *l, const unsigned char their[PURE_SEAL_KEY], uint64_t now) {
@@ -1233,6 +1266,9 @@ struct PureLinkReceiver {
      * whose packets open (a thousand waking at once) cost none. */
     double key_tokens;
     uint64_t key_at;
+    /* LOSTs (lost) come out of a bucket of their own: LOSTS a second. */
+    double lost_tokens;
+    uint64_t lost_at;
     /* The pair its epochs are accepted with: one for a second (the X25519
      * of making it shared by the offers of that second), then the private
      * half is gone. An accept costs an X25519 on each side (220 µs on a
@@ -1250,6 +1286,10 @@ struct PureLinkReceiver {
     /* Runs whose offers wait for the turn (a slot may hold another run by then). */
     struct { Run *run; uint64_t id; } *offers;
     size_t offer_count, offer_capacity;
+    /* Answers sealed where there was no run to answer from, sent in the turn:
+     * LOST, to a sender whose packet came in an epoch it does not know. */
+    struct { unsigned char packet[HEADER + 9 + PURE_AEAD_TAG], to[PURE_LINK_ADDRESS]; size_t to_size; } *notices;
+    size_t notice_count, notice_capacity;
     PureAead *aead; /* keyed by each packet's run */
     unsigned char open_key[PURE_AEAD_KEY], seal_key[PURE_AEAD_KEY]; /* the keys it has now */
     bool open_keyed, seal_keyed;
@@ -2002,6 +2042,34 @@ static void accept_waiting(PureLinkReceiver *s, uint64_t now) {
     s->offer_count = 0;
 }
 
+/* A packet of a run it does not know, in an epoch past 0 it knows nothing
+ * of (it started again without its memo, or the memo kept another run of
+ * the sender's): LOST, sealed in epoch 0, naming the packet's number, to
+ * where it came from, in the turn. The sender, if that packet is one of
+ * those it has out, begins again from epoch 0 as a run begins. As QUIC's
+ * stateless reset (RFC 9000 §10.3) it answers a packet it cannot open, so
+ * it is smaller than what asked for it, and LOSTS a second at most. */
+enum { LOST_SIZE = HEADER + 9 + PURE_AEAD_TAG };
+static void lost(PureLinkReceiver *s, const Peer *peer, const Active *a, uint64_t run, uint64_t pn, const void *from,
+                 size_t from_size) {
+    void *notices = room(s->notices, &s->notice_capacity, s->notice_count, sizeof(*s->notices), 16);
+    unsigned char key[PURE_AEAD_KEY], base[PURE_AEAD_NONCE], body[9] = {F_LOST};
+    uint64_t answer_run = random64();
+    if (!notices || s->notice_count >= LOSTS ||
+        !derive(a->secret, s->own_public, peer->key, answer_run, run, key, base))
+        return;
+    s->notices = notices;
+    put64(body + 1, pn);
+    size_t at = s->notice_count, to_size = from_size < PURE_LINK_ADDRESS ? from_size : PURE_LINK_ADDRESS;
+    memcpy(s->seal_key, key, PURE_AEAD_KEY), s->seal_keyed = true;
+    if (seal_packet(s->aead, key, base, s->own_id, 0, answer_run, 0, body, sizeof(body), s->notices[at].packet)) {
+        memcpy(s->notices[at].to, from, to_size);
+        s->notices[at].to_size = to_size;
+        ++s->notice_count;
+    }
+    explicit_bzero(key, sizeof(key));
+}
+
 /* Whether keys may be made for a run not seen (a token is there). */
 static bool may_key(PureLinkReceiver *s, uint64_t now) {
     return has_token(&s->key_tokens, &s->key_at, KEYINGS, KEYINGS, now);
@@ -2021,8 +2089,8 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
     Run made = {.active = a, .run = run, .seen = now, .used = true}, *k = r ? r : &made;
     if (!r) {
         made.answer_run = random64();
-        ++s->counts.keyed;
-        if (!run_begun(s, peer, a, &made, e)) k = NULL;
+        if (run_begun(s, peer, a, &made, e)) ++s->counts.keyed;
+        else k = NULL;
     }
     /* The keys of the packet's epoch: the next, now's, the one before, or
      * epoch 0's for a sender that begins its epochs again. Two may share
@@ -2046,8 +2114,18 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
     bool uses_next = k && opened == &k->next;
     explicit_bzero(&zero, sizeof(zero));
     if (!opened) {
+        /* A run whose epoch it does not know (no keys made for it): LOST. A
+         * token (KEYINGS) goes for keys made for nothing, and for a secret
+         * made and not kept (no memo): not for this, as the secret made for
+         * it is remembered, once a sender. */
+        bool unknown = !k && e;
+        if (unknown && n > LOST_SIZE && has_token(&s->lost_tokens, &s->lost_at, LOSTS, LOSTS, now)) {
+            --s->lost_tokens;
+            lost(s, peer, a, run, pn, from, from_size);
+        }
         explicit_bzero(&made, sizeof(made));
-        if (!r) s->key_tokens = s->key_tokens > 1 ? s->key_tokens - 1 : 0; /* keys for nothing */
+        if (!r && (!unknown || (woke && !a->remembered && !s->memo)))
+            s->key_tokens = s->key_tokens > 1 ? s->key_tokens - 1 : 0; /* keys for nothing */
         if (woke) let_go(s, a);
         return false;
     }
@@ -2273,6 +2351,10 @@ void pure_link_receiver_turn(PureLinkReceiver *s, const PureLinkDone *done, size
     }
     apply_done(s, done, count);
     hand_over_ready(s);
+    for (size_t k = 0; k < s->notice_count; ++k)
+        if (send(context, s->notices[k].packet, sizeof(s->notices[k].packet), s->notices[k].to, s->notices[k].to_size))
+            ++s->counts.packets;
+    s->notice_count = 0;
     answer(s, now, send, context);
     if (s->offer_count) { /* the offers' X25519 after the answers, then their ACCEPTs */
         accept_waiting(s, now);
@@ -2296,6 +2378,7 @@ void pure_link_receiver_free(PureLinkReceiver *s) {
     pure_aead_free(s->aead);
     explicit_bzero(s->ours_private, sizeof(s->ours_private));
     free(s->offers);
+    free(s->notices);
     if (s->memo) munmap(s->memo, s->memo_size);
     free(s->actives);
     free(s->peers);
