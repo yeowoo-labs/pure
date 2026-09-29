@@ -13,7 +13,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-enum { VERSION = 0x70, HEADER = 21, DATAGRAM = PURE_LINK_DATAGRAM, BODY = DATAGRAM - HEADER - PURE_AEAD_TAG, PIECE = 1000 };
+enum { VERSION = 0x70, HEADER = 21, DATAGRAM = PURE_LINK_DATAGRAM, BODY = DATAGRAM - HEADER - PURE_AEAD_TAG };
+/* A record that does not fit what is left of a packet goes in part, when
+ * at least this much of it fits. */
+enum { PART_LEAST = 64 };
 enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, F_RECORDS = 6, STORED_GAP = 1 };
 enum { RECORDS_HEAD = 10 }; /* type, the first number, the count */
 enum { RANGES = 32, RUNS = 2, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
@@ -149,12 +152,15 @@ static size_t get_names(const unsigned char *p, size_t size, char source[PURE_LI
 /* ---- The sending side */
 
 enum { UNSENT, FLYING, RECEIVED };
-typedef struct { uint64_t pn; uint8_t state; } Piece;
-/* A record queued: its bytes at `at` in the link's byte ring, its pieces'
- * states (one kept here, more beside). */
-typedef struct { uint64_t seq; size_t at; uint32_t size, pieces; Piece *more, one; } Record;
-static Piece *piece_of(Record *r, uint32_t i) { return r->pieces == 1 ? &r->one : &r->more[i]; }
-typedef struct { uint64_t seq; uint32_t piece; } Unit;
+/* Part of a record's bytes, gone whole in one packet (numbered pn): a
+ * record is one part until a packet has room for only some of it. */
+typedef struct { uint64_t pn; uint32_t offset, length; uint8_t state; } Part;
+/* A record queued: its bytes at `at` in the link's byte ring, its parts in
+ * order (the one here, or all of them beside, room for room). */
+typedef struct { uint64_t seq; size_t at; uint32_t size, parts, room; Part *more, one; } Record;
+static Part *part_of(Record *r, uint32_t i) { return r->more ? &r->more[i] : &r->one; }
+/* What a packet carried of a record: its bytes from offset, whole parts. */
+typedef struct { uint64_t seq; uint32_t offset, length; } Unit;
 typedef struct {
     uint64_t pn, sent; /* its number; when it went (ns) */
     uint64_t largest_then; /* lost: the largest number acknowledged when it was called lost */
@@ -209,8 +215,8 @@ struct PureLinkSender {
     /* The window went unused (nothing to send, or no credit) when the
      * sender last looked: it does not grow then (RFC 9002 §7.8). */
     bool unused;
-    uint64_t received;    /* pieces received and not yet stored */
-    uint64_t unsent_from; /* no record before this number has a piece unsent */
+    uint64_t received;    /* parts received and not yet stored */
+    uint64_t unsent_from; /* no record before this number has a part unsent */
     unsigned pto_count, probes;
     PureLinkCounts counts;
 };
@@ -223,15 +229,69 @@ static Record *record_of(PureLinkSender *l, uint64_t seq) {
     return record_at(l, (size_t)(seq - record_at(l, 0)->seq));
 }
 
-/* Every change of a piece's state goes through here: the link knows at once
- * how many pieces wait to be stored, and where the unsent ones begin. */
-static void set_piece(PureLinkSender *l, Record *r, uint32_t i, uint8_t state) {
-    uint8_t was = (*piece_of(r, i)).state;
-    if (was == state) return;
-    if (was == RECEIVED) --l->received;
+/* Every change of a part's state goes through here: the link knows at once
+ * how many parts wait to be stored, and where the unsent ones begin. */
+static void set_part(PureLinkSender *l, Record *r, Part *p, uint8_t state) {
+    if (p->state == state) return;
+    if (p->state == RECEIVED) --l->received;
     if (state == RECEIVED) ++l->received;
     if (state == UNSENT && r->seq < l->unsent_from) l->unsent_from = r->seq;
-    (*piece_of(r, i)).state = state;
+    p->state = state;
+}
+
+/* Part i of r cut after length bytes: the rest is part i + 1, as it
+ * stood. Cut only before it goes, so what a packet carried is whole parts,
+ * and cuts stay. False when memory runs out. */
+static bool cut(Record *r, uint32_t i, uint32_t length) {
+    if (!r->more) {
+        if (!(r->more = malloc(4 * sizeof(Part)))) return false;
+        r->more[0] = r->one;
+        r->room = 4;
+    } else if (r->parts == r->room) {
+        Part *grown = realloc(r->more, 2 * (size_t)r->room * sizeof(Part));
+        if (!grown) return false;
+        r->more = grown;
+        r->room *= 2;
+    }
+    memmove(&r->more[i + 2], &r->more[i + 1], (r->parts - i - 1) * sizeof(Part));
+    r->more[i + 1] = r->more[i];
+    r->more[i + 1].offset += length;
+    r->more[i + 1].length -= length;
+    r->more[i].length = length;
+    ++r->parts;
+    return true;
+}
+
+/* The first part of r at or after offset. */
+static uint32_t part_at(Record *r, uint32_t offset) {
+    uint32_t low = 0, high = r->parts;
+    while (low < high) {
+        uint32_t middle = low + (high - low) / 2;
+        if (part_of(r, middle)->offset < offset) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
+/* What became of the parts unit u carried in packet pn: acknowledged
+ * (received, whatever went since), or not (the ones still flying in pn are
+ * unsent again). How many went unsent. */
+static unsigned carried(PureLinkSender *l, const Unit *u, uint64_t pn, bool acknowledged, uint64_t now) {
+    Record *r = record_of(l, u->seq);
+    unsigned unsent = 0;
+    for (uint32_t i = r ? part_at(r, u->offset) : 0; r && i < r->parts; ++i) {
+        Part *p = part_of(r, i);
+        if (p->offset >= u->offset + u->length && u->length) break;
+        if (acknowledged && p->state != RECEIVED) {
+            set_part(l, r, p, RECEIVED);
+            l->stored_changed = now; /* waits for its save from now */
+        } else if (!acknowledged && p->state == FLYING && p->pn == pn) {
+            set_part(l, r, p, UNSENT);
+            ++unsent;
+        }
+        if (!u->length) break; /* an empty record's one part */
+    }
+    return unsent;
 }
 
 /* Where size bytes go at the end of the byte ring (after the newest record,
@@ -267,9 +327,8 @@ static bool ring_grow(PureLinkSender *l, size_t size) {
 }
 
 bool pure_link_sender_queue(PureLinkSender *l, uint64_t seq, const unsigned char *bytes, size_t size) {
-    Record r = {.seq = seq, .size = (uint32_t)size};
-    r.pieces = size ? (uint32_t)((size + PIECE - 1) / PIECE) : 1;
-    if (size > RECORD_MOST || (r.pieces > 1 && !(r.more = calloc(r.pieces, sizeof(Piece))))) return false;
+    Record r = {.seq = seq, .size = (uint32_t)size, .parts = 1, .one = {.length = (uint32_t)size}};
+    if (size > RECORD_MOST) return false;
     bool ok = seq > l->queued && (!l->count || seq == l->queued + 1);
     size_t at = ok ? ring_place(l, size) : SIZE_MAX;
     if (ok && at == SIZE_MAX) ok = ring_grow(l, size) && (at = ring_place(l, size)) != SIZE_MAX;
@@ -289,10 +348,7 @@ bool pure_link_sender_queue(PureLinkSender *l, uint64_t seq, const unsigned char
         } else
             ok = false;
     }
-    if (!ok) {
-        free(r.more);
-        return false;
-    }
+    if (!ok) return false;
     *record_at(l, l->count++) = r;
     l->queued = seq;
     return true;
@@ -339,14 +395,7 @@ static void lose(PureLinkSender *l, Flight *f, uint64_t now, bool by_time) {
     f->by_time = by_time;
     f->largest_then = l->largest_acked;
     ++l->counts.lost;
-    for (uint16_t u = 0; u < f->count; ++u) {
-        Record *r = record_of(l, f->units[u].seq);
-        Piece *p = r ? &(*piece_of(r, f->units[u].piece)) : NULL;
-        if (p && p->state == FLYING && p->pn == f->pn) {
-            set_piece(l, r, f->units[u].piece, UNSENT);
-            ++l->counts.resent;
-        }
-    }
+    for (uint16_t u = 0; u < f->count; ++u) l->counts.resent += carried(l, &f->units[u], f->pn, false, now);
     if (f->sent > l->recovery_start) { /* one congestion event per round trip */
         if (!l->undo_losses) { /* an episode begins */
             ++l->episode;
@@ -396,13 +445,7 @@ static void settle_loss(PureLinkSender *l, const Flight *f, bool real) {
 static void came_late(PureLinkSender *l, Flight *f, uint64_t now) {
     f->lost = false;
     ++l->counts.late;
-    for (uint16_t u = 0; u < f->count; ++u) {
-        Record *r = record_of(l, f->units[u].seq);
-        if (r && (*piece_of(r, f->units[u].piece)).state != RECEIVED) {
-            set_piece(l, r, f->units[u].piece, RECEIVED);
-            l->stored_changed = now;
-        }
-    }
+    for (uint16_t u = 0; u < f->count; ++u) carried(l, &f->units[u], f->pn, true, now);
     if (f->by_time) l->reorder_quarters = least(l->reorder_quarters + 1, REORDER_QUARTERS_MOST);
     else l->reorder_packets = least(most(l->reorder_packets, l->largest_acked - f->pn + 1), REORDER_PACKETS_MOST);
     l->calm_events = 0;
@@ -486,13 +529,7 @@ static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint6
             if (!f || f->done) continue;
             settle(l, f);
             ++l->counts.acknowledged;
-            for (uint16_t u = 0; u < f->count; ++u) {
-                Record *r = record_of(l, f->units[u].seq);
-                if (r && (*piece_of(r, f->units[u].piece)).state != RECEIVED) {
-                    set_piece(l, r, f->units[u].piece, RECEIVED);
-                    l->stored_changed = now; /* waits for its save from now */
-                }
-            }
+            for (uint16_t u = 0; u < f->count; ++u) carried(l, &f->units[u], f->pn, true, now);
             if (f->eliciting && f->sent > l->recovery_start && !l->unused) grow(l, f->bytes, now);
             if (pn == largest) top = f;
         }
@@ -523,7 +560,7 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
     if (heard > l->stored) {
         while (l->count && record_at(l, 0)->seq <= heard) {
             Record *r = record_at(l, 0);
-            for (uint32_t i = 0; i < r->pieces; ++i) l->received -= (*piece_of(r, i)).state == RECEIVED;
+            for (uint32_t i = 0; i < r->parts; ++i) l->received -= part_of(r, i)->state == RECEIVED;
             free(r->more); /* its bytes go back with the ring's head */
             l->head = (l->head + 1) % l->capacity;
             --l->count;
@@ -534,8 +571,8 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
     if (flags & STORED_GAP) /* it did not keep what came after a gap: send it again */
         for (size_t k = 0; k < l->count && l->received; ++k) {
             Record *r = record_at(l, k);
-            for (uint32_t i = 0; i < r->pieces; ++i)
-                if ((*piece_of(r, i)).state == RECEIVED) set_piece(l, r, i, UNSENT);
+            for (uint32_t i = 0; i < r->parts; ++i)
+                if (part_of(r, i)->state == RECEIVED) set_part(l, r, part_of(r, i), UNSENT);
         }
     l->credit = credit ? least(credit, 65536) : 1;
 }
@@ -571,7 +608,7 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
     }
 }
 
-/* A packet of pieces not sent yet, in order, within the receiver's credit:
+/* A packet of what is not sent yet, in order, within the receiver's credit:
  * its body's size, or 0 when there is none. */
 static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) {
     size_t at = 0;
@@ -582,23 +619,22 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
     /* The credit counts from the oldest record not stored: after a restart
      * the sender does not know yet how far the receiver stored. */
     uint64_t base = l->count ? record_at(l, 0)->seq - 1 : l->stored;
-    /* From the first record that may have an unsent piece: the ones before
+    /* From the first record that may have a part unsent: the ones before
      * it are sent, and every one found sent moves that mark on. */
     size_t k = l->count && l->unsent_from > base + 1 ? (size_t)(l->unsent_from - base - 1) : 0;
     bool before = true;
-    /* A record none of whose pieces went yet goes whole when it fits what is
-     * left of the packet: whole records whose numbers follow on share a
-     * RECORDS frame (its count at run). Else its unsent pieces go, each in a
-     * RECORD frame. */
+    /* A record none of which went yet goes whole when it fits what is left
+     * of the packet: whole records whose numbers follow on share a RECORDS
+     * frame (its count at run). Else its unsent parts go, each in a RECORD
+     * frame, the last cut to what is left (when at least PART_LEAST is). */
     size_t run = 0;
     uint64_t next = 0;
     for (; k < l->count && f->count < UNITS; ++k) {
         Record *r = record_at(l, k);
         if (r->seq > base + l->credit) break;
-        bool unsent = false, fresh = true, joins = run && r->seq == next;
-        for (uint32_t i = 0; i < r->pieces && fresh; ++i) fresh = piece_of(r, i)->state == UNSENT;
+        bool full = false, fresh = !r->more && r->one.state == UNSENT, joins = run && r->seq == next;
         size_t whole = (joins ? 0 : RECORDS_HEAD) + varint_size(r->size) + r->size;
-        if (fresh && f->count + r->pieces <= UNITS && at + whole <= BODY) {
+        if (fresh && at + whole <= BODY) {
             if (!joins) {
                 body[at] = F_RECORDS;
                 put64(body + at + 1, r->seq);
@@ -611,38 +647,36 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
             at += r->size;
             ++body[run];
             next = r->seq + 1;
-            for (uint32_t i = 0; i < r->pieces; ++i) {
-                set_piece(l, r, i, FLYING);
-                piece_of(r, i)->pn = f->pn;
-                f->units[f->count++] = (Unit){r->seq, i};
-            }
+            set_part(l, r, &r->one, FLYING);
+            r->one.pn = f->pn;
+            f->units[f->count++] = (Unit){r->seq, 0, r->size};
             ++l->counts.records;
-        } else if (fresh && r->pieces == 1)
-            unsent = true; /* too large for what is left: the next packet */
-        else
-            for (uint32_t i = 0; i < r->pieces; ++i) {
-                if (piece_of(r, i)->state != UNSENT) continue;
-                uint32_t offset = i * PIECE, length = (uint32_t)least(PIECE, r->size - offset);
-                if (f->count == UNITS || at + RECORD_HEAD + length > BODY) {
-                    unsent = true;
+        } else
+            for (uint32_t i = 0; i < r->parts; ++i) {
+                Part *p = part_of(r, i);
+                if (p->state != UNSENT) continue;
+                size_t room = at + RECORD_HEAD < BODY ? BODY - at - RECORD_HEAD : 0;
+                if (f->count == UNITS || (p->length > room && (room < PART_LEAST || !cut(r, i, (uint32_t)room)))) {
+                    full = true;
                     break;
                 }
+                p = part_of(r, i); /* where it is after a cut */
                 body[at] = F_RECORD;
                 put64(body + at + 1, r->seq);
                 put32(body + at + 9, r->size);
-                put32(body + at + 13, offset);
-                put16(body + at + 17, length);
-                if (length) memcpy(body + at + RECORD_HEAD, l->ring + r->at + offset, length);
-                at += RECORD_HEAD + length;
+                put32(body + at + 13, p->offset);
+                put16(body + at + 17, p->length);
+                if (p->length) memcpy(body + at + RECORD_HEAD, l->ring + r->at + p->offset, p->length);
+                at += RECORD_HEAD + p->length;
                 run = 0;
-                set_piece(l, r, i, FLYING);
-                piece_of(r, i)->pn = f->pn;
-                f->units[f->count++] = (Unit){r->seq, i};
+                set_part(l, r, p, FLYING);
+                p->pn = f->pn;
+                f->units[f->count++] = (Unit){r->seq, p->offset, p->length};
                 ++l->counts.records;
             }
-        if (before && !unsent) l->unsent_from = r->seq + 1;
-        before = before && !unsent;
-        if (unsent) { /* the packet is full: whole, so it can go in a burst */
+        if (before && !full) l->unsent_from = r->seq + 1;
+        before = before && !full;
+        if (full) { /* the packet is full: whole, so it can go in a burst */
             if (pad && f->count) {
                 memset(body + at, F_PADDING, BODY - at);
                 at = BODY;
@@ -657,10 +691,7 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
 void pure_link_sender_refused(PureLinkSender *l, uint64_t pn) {
     Flight *f = flight_of(l, pn);
     if (!f || f->done) return;
-    for (uint16_t u = 0; u < f->count; ++u) {
-        Record *r = record_of(l, f->units[u].seq);
-        if (r && (*piece_of(r, f->units[u].piece)).pn == pn) set_piece(l, r, f->units[u].piece, UNSENT);
-    }
+    for (uint16_t u = 0; u < f->count; ++u) carried(l, &f->units[u], pn, false, 0);
     settle(l, f);
     f->eliciting = false;
     f->count = 0;
@@ -676,10 +707,7 @@ static size_t transmit(PureLinkSender *l, Flight *f, const unsigned char *body, 
     f->sent = now;
     f->bytes = (uint32_t)total;
     if (!total) { /* not sealed: what it carried is unsent again */
-        for (uint16_t u = 0; u < f->count; ++u) {
-            Record *r = record_of(l, f->units[u].seq);
-            if (r && (*piece_of(r, f->units[u].piece)).pn == f->pn) set_piece(l, r, f->units[u].piece, UNSENT);
-        }
+        for (uint16_t u = 0; u < f->count; ++u) carried(l, &f->units[u], f->pn, false, now);
         f->done = true;
         f->eliciting = false;
         f->count = 0;
@@ -748,9 +776,9 @@ void pure_link_sender_tick(PureLinkSender *l, uint64_t now) {
         for (size_t k = 0; k < l->count; ++k) {
             Record *r = record_at(l, k);
             uint32_t i = 0;
-            while (i < r->pieces && (*piece_of(r, i)).state != FLYING) ++i;
-            if (i < r->pieces) {
-                set_piece(l, r, i, UNSENT);
+            while (i < r->parts && part_of(r, i)->state != FLYING) ++i;
+            if (i < r->parts) {
+                set_part(l, r, part_of(r, i), UNSENT);
                 ++l->counts.resent;
                 break;
             }
@@ -761,8 +789,8 @@ void pure_link_sender_tick(PureLinkSender *l, uint64_t now) {
          * restarted) or its word got lost. Sent again: it takes a number once. */
         for (size_t k = 0; k < l->count && l->received; ++k) {
             Record *r = record_at(l, k);
-            for (uint32_t i = 0; i < r->pieces; ++i)
-                if ((*piece_of(r, i)).state == RECEIVED) set_piece(l, r, i, UNSENT), ++l->counts.resent;
+            for (uint32_t i = 0; i < r->parts; ++i)
+                if (part_of(r, i)->state == RECEIVED) set_part(l, r, part_of(r, i), UNSENT), ++l->counts.resent;
         }
         l->stored_changed = now;
     }
@@ -850,10 +878,13 @@ typedef struct {
     Range got[RANGES]; /* the numbers received, newest first */
     unsigned got_count;
 } Run;
+typedef struct { uint32_t from, to; } Span; /* bytes [from, to) */
 typedef struct {
     uint64_t seq;
-    unsigned char *bytes; /* its size, then a byte a piece: had */
-    uint32_t size, pieces, got;
+    unsigned char *bytes;
+    uint32_t size, spans, room; /* the spans of its bytes had, in order, none touching (room for room) */
+    Span *span;
+    bool whole;
 } Held;
 typedef struct Stream {
     Active *active;
@@ -864,12 +895,16 @@ typedef struct Stream {
     /* The line: once the last heard is known, whole records from the one
      * after it on, in order, as a delivery carries them (u32 size, bytes),
      * from line_head: handed over as they are, let go by moving the head.
-     * Records that come early or in pieces, or before the last heard is
-     * known, wait in held until the line reaches them. */
+     * The record at its end may come in parts, in order from its start:
+     * the tail, its room kept after the line's records, tail_got bytes of
+     * its tail_size had. Records that come early or out of order, or before
+     * the last heard is known, wait in held until the line reaches them. */
     unsigned char *line;
     size_t line_head, line_size, line_capacity;
     uint64_t line_first;
     unsigned line_count;
+    bool tail;
+    uint32_t tail_size, tail_got;
     Held *held;                  /* records not yet stored, by number: held_count from held_first */
     size_t held_first, held_count, held_capacity, held_bytes;
     Run *run;                    /* the run that sent to it last: where STORED goes */
@@ -1075,6 +1110,7 @@ static void line_drop(Stream *st, uint64_t heard) {
         st->line_head = st->line_size = 0;
         st->line_count = 0;
         st->line_first = heard + 1;
+        st->tail = false;
         return;
     }
     for (uint64_t n = heard - st->line_first + 1; n; --n, --st->line_count, ++st->line_first)
@@ -1087,7 +1123,7 @@ static void line_pull(Stream *st) {
     while (st->held_count) {
         Held *h = held_at(st, 0);
         if (h->seq < line_end(st)) drop_first(st);
-        else if (h->seq == line_end(st) && h->got == h->pieces && line_append(st, h->bytes, h->size)) drop_first(st);
+        else if (h->seq == line_end(st) && h->whole && line_append(st, h->bytes, h->size)) drop_first(st);
         else break;
     }
 }
@@ -1096,6 +1132,7 @@ static void line_pull(Stream *st) {
 static void drop_first(Stream *st) {
     st->held_bytes -= held_at(st, 0)->size;
     free(held_at(st, 0)->bytes);
+    free(held_at(st, 0)->span);
     ++st->held_first;
     if (!--st->held_count) st->held_first = 0;
 }
@@ -1194,7 +1231,9 @@ static void let_go(PureLinkReceiver *s, Active *a) {
 /* Whether any of a peer's records or answers waits here. */
 static bool busy(const Active *a) {
     for (unsigned k = 0; k < a->stream_count; ++k)
-        if (a->streams[k]->out || a->streams[k]->held_count || a->streams[k]->line_count || a->streams[k]->ready) return true;
+        if (a->streams[k]->out || a->streams[k]->held_count || a->streams[k]->line_count || a->streams[k]->tail ||
+            a->streams[k]->ready)
+            return true;
     for (unsigned i = 0; i < RUNS; ++i)
         if (a->runs[i].due) return true;
     return false;
@@ -1314,19 +1353,37 @@ static Stream *stream_of(PureLinkReceiver *s, Active *a, const char *source, con
     return st;
 }
 
-/* A record's piece, kept until the record is whole and handed over. */
-static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const unsigned char *bytes, uint32_t length) {
-    if (st->known && seq <= st->heard) {
-        st->stored_due = true; /* sent again: say again how far it is stored */
-        return;
+/* Bytes [from, to) of h had: the spans that touch them become one. False
+ * when memory runs out. */
+static bool had_bytes(Held *h, uint32_t from, uint32_t to) {
+    uint32_t i = 0, j;
+    while (i < h->spans && h->span[i].to < from) ++i;
+    for (j = i; j < h->spans && h->span[j].from <= to; ++j) {
+        if (h->span[j].from < from) from = h->span[j].from;
+        if (h->span[j].to > to) to = h->span[j].to;
     }
-    if ((st->known && seq > st->heard + CREDIT) || size > RECORD_MOST) return;
-    if (st->known && seq < line_end(st)) return; /* on the line already */
-    if (st->known && seq == line_end(st) && !offset && length == size) { /* the next, whole */
-        if (st->held_bytes + (st->line_size - st->line_head) + size <= HELD_MOST && line_append(st, bytes, size))
-            line_pull(st);
-        return;
+    if (j == i) { /* touches none: one more */
+        if (h->spans == h->room) {
+            uint32_t more = h->room ? 2 * h->room : 4;
+            Span *grown = realloc(h->span, more * sizeof(Span));
+            if (!grown) return false;
+            h->span = grown;
+            h->room = more;
+        }
+        memmove(&h->span[i + 1], &h->span[i], (h->spans - i) * sizeof(Span));
+        ++h->spans;
+    } else { /* spans i to j - 1 become one */
+        memmove(&h->span[i + 1], &h->span[j], (h->spans - j) * sizeof(Span));
+        h->spans -= j - i - 1;
     }
+    h->span[i] = (Span){from, to};
+    h->whole = h->spans == 1 && !h->span[0].from && h->span[0].to == h->size;
+    return true;
+}
+
+/* The record held numbered seq, made when there is none (NULL when there
+ * is no room, or it was said to be of another size). */
+static Held *held_for(Stream *st, uint64_t seq, uint32_t size) {
     /* In order it goes last; out of order, its place is found by halving. */
     size_t k = st->held_count;
     if (k && held_at(st, k - 1)->seq >= seq) {
@@ -1338,35 +1395,94 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
         }
     }
     if (k == st->held_count || held_at(st, k)->seq != seq) {
-        if (st->held_bytes + size > HELD_MOST) return;
+        if (st->held_bytes + size > HELD_MOST) return NULL;
         if (st->held_first && st->held_first + st->held_count == st->held_capacity) { /* the front is free: used again */
             memmove(st->held, held_at(st, 0), st->held_count * sizeof(Held));
             st->held_first = 0;
         }
         Held *kept = room(st->held, &st->held_capacity, st->held_first + st->held_count, sizeof(Held), 16);
-        if (!kept) return;
+        if (!kept) return NULL;
         st->held = kept;
-        Held h = {.seq = seq, .size = size, .pieces = size ? (size + PIECE - 1) / PIECE : 1};
-        if (!(h.bytes = malloc(size + h.pieces))) return;
-        memset(h.bytes + size, 0, h.pieces);
+        Held h = {.seq = seq, .size = size};
+        if (!(h.bytes = malloc(size ? size : 1))) return NULL;
         memmove(held_at(st, k + 1), held_at(st, k), (st->held_count - k) * sizeof(Held));
         *held_at(st, k) = h;
         ++st->held_count;
         st->held_bytes += size;
     }
     Held *h = held_at(st, k);
-    if (h->size != size) return;
-    if (!offset && length == size) { /* whole: every piece had */
-        if (size) memcpy(h->bytes, bytes, size);
-        memset(h->bytes + size, 1, h->pieces);
-        h->got = h->pieces;
+    return h->size == size ? h : NULL;
+}
+
+static bool is_held(Stream *st, uint64_t seq) {
+    size_t k = 0;
+    while (k < st->held_count && held_at(st, k)->seq < seq) ++k;
+    return k < st->held_count && held_at(st, k)->seq == seq;
+}
+
+/* A part of the record at the line's end, onto the line when it comes in
+ * order: whole, or as the tail, part after part from its start. True when
+ * it is taken (or let be: no room, had already); false when it waits in
+ * held instead (it came out of order: then so does the tail so far). */
+static bool on_line(Stream *st, uint32_t size, uint32_t offset, const unsigned char *bytes, uint32_t length) {
+    bool whole = !offset && length == size;
+    if (st->tail) {
+        unsigned char *at = st->line + st->line_size + 4;
+        if (size != st->tail_size || (!whole && offset + length <= st->tail_got)) return true;
+        if (!whole && offset != st->tail_got) { /* out of order: held, with what the tail had */
+            uint64_t seq = line_end(st);
+            st->tail = false;
+            Held *h = held_for(st, seq, size);
+            if (h && st->tail_got) {
+                memcpy(h->bytes, at, st->tail_got);
+                had_bytes(h, 0, st->tail_got);
+            }
+            return false;
+        }
+        memcpy(at + offset, bytes, length);
+        st->tail_got = whole ? size : st->tail_got + length;
+        if (st->tail_got == size) { /* whole now: a record of the line */
+            st->line_size += 4 + (size_t)size;
+            ++st->line_count;
+            st->tail = false;
+            line_pull(st);
+        }
+        return true;
+    }
+    if (st->held_bytes + (st->line_size - st->line_head) + size > HELD_MOST) return true;
+    if (whole) { /* a part of it held goes as the line passes it */
+        if (line_append(st, bytes, size)) line_pull(st);
+        return true;
+    }
+    if (offset || is_held(st, line_end(st)) || !line_room(st, 4 + (size_t)size)) return false;
+    put32(st->line + st->line_size, size);
+    memcpy(st->line + st->line_size + 4, bytes, length);
+    st->tail = true;
+    st->tail_size = size;
+    st->tail_got = length;
+    return true;
+}
+
+/* A record's part, kept until the record is whole and handed over. */
+static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const unsigned char *bytes, uint32_t length) {
+    if (st->known && seq <= st->heard) {
+        st->stored_due = true; /* sent again: say again how far it is stored */
         return;
     }
-    uint32_t piece = offset / PIECE;
-    if (offset % PIECE || piece >= h->pieces || length != least(PIECE, size - offset) || h->bytes[size + piece]) return;
-    if (length) memcpy(h->bytes + offset, bytes, length);
-    h->bytes[size + piece] = 1;
-    ++h->got;
+    if ((st->known && seq > st->heard + CREDIT) || size > RECORD_MOST) return;
+    if (st->known && seq < line_end(st)) return; /* on the line already */
+    if ((!length && offset) || offset > size || length > size - offset) return;
+    if (st->known && seq == line_end(st) && on_line(st, size, offset, bytes, length)) return;
+    Held *h = held_for(st, seq, size);
+    if (!h || h->whole) return;
+    if (!offset && length == size) { /* whole at once */
+        if (size) memcpy(h->bytes, bytes, size);
+        h->whole = true;
+        return;
+    }
+    if (!length) return;
+    memcpy(h->bytes + offset, bytes, length);
+    had_bytes(h, offset, offset + length);
 }
 
 /* Whole records from the one after the last heard, in order, to the host:
@@ -1389,7 +1505,7 @@ static bool hand_over(PureLinkReceiver *s, Stream *st) {
     }
     if (!st->held_count || (st->known && held_at(st, 0)->seq != st->heard + 1)) return true;
     size_t n = 0, bytes = 0;
-    while (n < st->held_count && n < BATCH && held_at(st, n)->got == held_at(st, n)->pieces &&
+    while (n < st->held_count && n < BATCH && held_at(st, n)->whole &&
            held_at(st, n)->seq == held_at(st, 0)->seq + n)
         bytes += 4 + held_at(st, n++)->size;
     if (!n) return true;

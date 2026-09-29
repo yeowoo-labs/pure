@@ -32,8 +32,9 @@
  *                shape of the messages (the sender's output and the
  *                receiver's input must have the same): the stream the
  *                records after it are of
- *   0x02 RECORD  u64 number, u32 size, u32 offset, u16 length, bytes: a piece
- *                of a saved send (pieces are 1000 bytes, the last shorter)
+ *   0x02 RECORD  u64 number, u32 size, u32 offset, u16 length, bytes: part
+ *                of a saved send (a send too large for what is left of a
+ *                packet goes in parts, cut where the packet is full)
  *   0x03 ACK     u64 largest number, u32 delay (µs), u8 ranges, each as u64
  *                first and u64 last, newest first
  *   0x04 STORED  source, input (as STREAM), u64 the last number heard
