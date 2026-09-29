@@ -22,8 +22,9 @@ enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PIN
        F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, STORED_GAP = 1 };
 /* A packet's first byte is VERSION with the sending side's epoch (mod 16)
  * in its low four bits; OFFER and ACCEPT are an epoch's number (u32) and a
- * public key made for it. */
-enum { EPOCH_MASK = 15, EPOCH_FRAME = 1 + 4 + PURE_SEAL_KEY };
+ * public key made for it, and ACCEPT the first bytes of the key it answers
+ * (a sender may offer an epoch again with another key). */
+enum { EPOCH_MASK = 15, EPOCH_FRAME = 1 + 4 + PURE_SEAL_KEY, ANSWERS = 4, ACCEPT_FRAME = EPOCH_FRAME + ANSWERS };
 enum { RECORDS_HEAD = 10 }; /* type, the first number, the count */
 enum { RANGES = 32, RUNS = 2, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
 enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
@@ -712,10 +713,12 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
                 if (l->responding < RESPONSES) ++l->responding;
             }
             at += 8;
-        } else if (type == F_ACCEPT) { /* the epoch offered begins */
-            if (at + EPOCH_FRAME - 1 > size) break;
-            if (l->offering && get32(plain + at) == l->offer_epoch) begin_epoch(l, plain + at + 4, now);
-            at += EPOCH_FRAME - 1;
+        } else if (type == F_ACCEPT) { /* the epoch offered begins: an answer to this offer, not one before */
+            if (at + ACCEPT_FRAME - 1 > size) break;
+            if (l->offering && get32(plain + at) == l->offer_epoch &&
+                !memcmp(plain + at + EPOCH_FRAME - 1, l->offer_public, ANSWERS))
+                begin_epoch(l, plain + at + 4, now);
+            at += ACCEPT_FRAME - 1;
         } else if (type != F_PING)
             break; /* padding, or what this side does not know: the rest */
     }
@@ -954,6 +957,7 @@ void pure_link_sender_tick(PureLinkSender *l, uint64_t now) {
         offer(l, 1);
         l->renegotiating = true;
         l->offer_again = 0;
+        ++l->counts.fallbacks;
     }
     if (l->loss_time && l->loss_time <= now) detect_lost(l, now);
     else if (l->eliciting && l->last_eliciting + pto_period(l) <= now) {
@@ -2165,7 +2169,8 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
             body[at] = F_ACCEPT;
             put32(body + at + 1, r->accept_epoch);
             memcpy(body + at + 5, r->accept_public, PURE_SEAL_KEY);
-            at += EPOCH_FRAME;
+            memcpy(body + at + EPOCH_FRAME, r->offered, ANSWERS);
+            at += ACCEPT_FRAME;
         }
         if (r->ack_due && r->got_count) {
             body[at++] = F_ACK;

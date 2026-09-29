@@ -95,7 +95,9 @@
  *                epoch's secret, until it is accepted
  *   0x0a ACCEPT  u32 epoch, a public key: the receiver's half, until a
  *                packet of that epoch opens (the same offer again gets the
- *                same; one a second for a run)
+ *                same; one a second for a sender), then the first four
+ *                bytes of the key offered it answers (a sender that took
+ *                its epoch for lost offers epoch 1 again with another)
  *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
  *                a whole datagram
  * Losses are detected as RFC 9002 says, with RACK's patience for packets
@@ -114,12 +116,13 @@ enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME
  * packets lost and acknowledged, packets received, deliveries handed over,
  * the last number stored; packets called lost that came late, and
  * congestion events undone for it; runs keyed (keys made from a secret),
- * secrets made (X25519 of the nodes' keys), epochs begun; a receiver's senders woken (their active
- * state made), of them with a secret remembered (no X25519), let go when
- * idle, and active now. */
+ * secrets made (X25519), epochs begun, and a sender's epochs taken for lost
+ * (begun again from the nodes' keys); a receiver's senders woken (their
+ * active state made), of them with a secret remembered (no X25519), let go
+ * when idle, and active now. */
 typedef struct {
     uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, late, undone, keyed, secrets,
-        epochs, woken, remembered, swept, active;
+        epochs, fallbacks, woken, remembered, swept, active;
 } PureLinkCounts;
 
 /* ---- The sending side: one output's saved sends to a receiver's input, as

@@ -83,6 +83,10 @@ typedef struct {
     uint64_t attacker_in, attacker_out, bent, replayed;
     unsigned loss, doubled, spread_ms; /* percent, percent, the most a packet is held back */
     uint64_t now, sent;
+    /* The path cut (nothing passes) until then: cuts times, 3 s each, the
+     * moment the sender begins an epoch (before the receiver has seen it). */
+    uint64_t cut_until;
+    unsigned cuts;
     /* The receiving app: its last heard (kept across the receiver's
      * restarts), what it said of deliveries (given at the next turn). */
     uint64_t heard, applied, deliveries;
@@ -188,6 +192,7 @@ typedef struct {
     bool tamper;     /* every packet comes changed three ways first */
     uint64_t epoch_ms; /* epochs this long (0: an hour) */
     bool forgetful;    /* the receiver keeps no memo: it starts again knowing no epoch */
+    unsigned cuts;     /* the path cut for 3 s so many times, as an epoch begins */
 } Case;
 
 static bool nothing_sent(void *context, const unsigned char *packet, size_t size, const unsigned char *to, size_t to_size) {
@@ -353,7 +358,7 @@ static Outcome run(const Case *c, const char *dir) {
     unlink(memo);
     World w = {.packets = malloc(PACKETS * sizeof(Packet)), .loss = c->loss, .doubled = c->doubled,
                .spread_ms = c->spread_ms, .fail_every = c->fail_every, .replay = c->replay, .tamper = c->tamper,
-               .history = malloc(HISTORY * sizeof(Packet))};
+               .cuts = c->cuts, .history = malloc(HISTORY * sizeof(Packet))};
     if (!w.packets || !w.history) exit(1);
     char from[8] = "sender0";
     epoch_ms = c->epoch_ms;
@@ -410,9 +415,19 @@ static Outcome run(const Case *c, const char *dir) {
                 ++k;
                 continue;
             }
+            if (w.now < w.cut_until) { /* the path is cut */
+                *p = w.packets[--w.count];
+                continue;
+            }
             if (w.tamper) tamper(&w, s, r, p, from);
             if (p->to_receiver) pure_link_receiver_take(r, p->bytes, p->size, from, 7, w.now);
-            else pure_link_sender_take(s, p->bytes, p->size, w.now);
+            else {
+                PureLinkCounts before, after;
+                pure_link_sender_counts(s, &before);
+                pure_link_sender_take(s, p->bytes, p->size, w.now);
+                pure_link_sender_counts(s, &after);
+                if (w.cuts && after.epochs > before.epochs) --w.cuts, w.cut_until = w.now + 3000 * MS;
+            }
             w.history[w.history_count++ % HISTORY] = *p;
             *p = w.packets[--w.count];
         }
@@ -442,6 +457,7 @@ static Outcome run(const Case *c, const char *dir) {
     pure_link_sender_counts(s, &o.sent);
     pure_link_receiver_counts(r, &o.heard);
     o.sent.packets += sent_before.packets, o.sent.resent += sent_before.resent, o.sent.epochs += sent_before.epochs;
+    o.sent.fallbacks += sent_before.fallbacks;
     o.heard.woken += heard_before.woken, o.heard.swept += heard_before.swept;
     CHECK(w.heard == c->records && w.applied == c->records, "%s: applied %llu, heard %llu of %llu", c->name,
           (unsigned long long)w.applied, (unsigned long long)w.heard, (unsigned long long)c->records);
@@ -605,7 +621,7 @@ int main(void) {
         return 1;
     }
     /* A clean network: nothing is sent twice. */
-    Case clean = {"clean", 3000, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false};
+    Case clean = {"clean", 3000, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false, 0};
     Outcome o = run(&clean, dir);
     CHECK(o.sent.resent == 0 && o.sent.lost == 0, "clean: %llu sent again, %llu lost", (unsigned long long)o.sent.resent,
           (unsigned long long)o.sent.lost);
@@ -614,7 +630,7 @@ int main(void) {
      * starting again: the receiver remembers its secret, so it wakes the
      * sender without an X25519. */
     for (uint64_t s = 1; s <= 4; ++s) {
-        Case rough = {"rough", 3000, s * 7919, 10, 3, 20, 37, 1500, 800, 2200, 300, 0, false, 0, false};
+        Case rough = {"rough", 3000, s * 7919, 10, 3, 20, 37, 1500, 800, 2200, 300, 0, false, 0, false, 0};
         o = run(&rough, dir);
         CHECK(o.sent.resent > 0 && o.heard.swept >= 1 && o.heard.woken >= 1 && o.heard.remembered >= 1,
               "rough: sent again %llu, swept %llu, woken %llu, remembered %llu", (unsigned long long)o.sent.resent,
@@ -624,21 +640,29 @@ int main(void) {
     /* An attacker on the path: packets changed on the way, and packets of
      * the past sent again, from the sender's address and its own, across the
      * same restarts and pause. */
-    Case changed = {"changed", 1500, 31, 3, 0, 5, 0, 0, 0, 0, 0, 0, true, 0, false};
+    Case changed = {"changed", 1500, 31, 3, 0, 5, 0, 0, 0, 0, 0, 0, true, 0, false, 0};
     run(&changed, dir);
     for (uint64_t s = 1; s <= 2; ++s) {
-        Case again = {"replayed", 3000, s * 104729, 5, 3, 20, 37, 1500, 800, 2200, 300, 25, false, 0, false};
+        Case again = {"replayed", 3000, s * 104729, 5, 3, 20, 37, 1500, 800, 2200, 300, 25, false, 0, false, 0};
         run(&again, dir);
     }
     /* Epochs a fifth of a second long (a new one a second, as the receiver
      * accepts), and a receiver that starts again with no memo: it knows no
      * epoch, and the sender begins them again. */
-    Case epochs = {"epochs", 3000, 271, 5, 3, 20, 37, 1500, 800, 2200, 300, 10, false, 200, false};
+    Case epochs = {"epochs", 3000, 271, 5, 3, 20, 37, 1500, 800, 2200, 300, 10, false, 200, false, 0};
     o = run(&epochs, dir);
     CHECK(o.sent.epochs >= 10, "epochs: %llu begun", (unsigned long long)o.sent.epochs);
-    Case forgetful = {"forgetful", 3000, 409, 5, 3, 20, 37, 0, 800, 0, 0, 0, false, 0, true};
+    Case forgetful = {"forgetful", 3000, 409, 5, 3, 20, 37, 0, 800, 0, 0, 0, false, 0, true, 0};
     o = run(&forgetful, dir);
     CHECK(o.sent.epochs >= 2, "forgetful: %llu epochs begun (none again)", (unsigned long long)o.sent.epochs);
+    /* The path cut for 3 s the moment the sender begins an epoch, three
+     * times: the receiver never saw the epoch used, and the sender, hearing
+     * nothing, offers another epoch 1 with a new key. The accept of the old
+     * offer must not begin it. */
+    Case cut = {"cut", 3000, 919, 0, 0, 20, 37, 0, 0, 0, 0, 0, false, 200, false, 3};
+    o = run(&cut, dir);
+    CHECK(o.sent.epochs >= 4 && o.sent.fallbacks == 3, "cut: %llu epochs begun, %llu taken for lost (3 cuts)",
+          (unsigned long long)o.sent.epochs, (unsigned long long)o.sent.fallbacks);
     impostors(dir);
     flood(dir);
     char command[600];
