@@ -108,9 +108,9 @@
  * probe of that size acknowledged: DPLPMTUD, RFC 8899; a link probes once
  * a packet of its was full, else a larger one would carry nothing more); a
  * source's or an input's name is 1 to PURE_LINK_NAME bytes; a receiver
- * keeps where a packet came from (the socket's address) in
- * PURE_LINK_ADDRESS bytes. */
-enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 28 };
+ * keeps a packet's path (where it came from, and the address of its own it
+ * came to: link/link.c answers from there) in PURE_LINK_ADDRESS bytes. */
+enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 48 };
 
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,

@@ -54,8 +54,18 @@ typedef struct {
     struct sockaddr_storage from[GATHER];
     struct iovec parts[GATHER];
     struct mmsghdr messages[GATHER];
-    _Alignas(8) unsigned char control[GATHER][64]; /* a cmsghdr's alignment */
+    _Alignas(8) unsigned char control[GATHER][128]; /* a cmsghdr's alignment */
 } Gathering;
+
+/* A packet's path as a receiver keeps it (PURE_LINK_ADDRESS bytes): where
+ * it came from, and the address of the node's it came to. Answers go back
+ * from that address: a node may have many, and a sender's socket takes
+ * answers only from the one it sent to. */
+typedef struct {
+    union { struct sockaddr_in6 six; struct sockaddr_in four; } from;
+    union { struct in6_pktinfo six; struct in_pktinfo four; } to;
+} Path;
+_Static_assert(sizeof(Path) <= PURE_LINK_ADDRESS, "a path fits what a receiver keeps");
 
 static int gather(int fd, Gathering *g) {
     for (unsigned k = 0; k < GATHER; ++k) {
@@ -69,15 +79,22 @@ static int gather(int fd, Gathering *g) {
     return n > 0 ? n : 0;
 }
 
-/* The size of each datagram in a buffer gathered (all of it when one). */
-static size_t segment_of(struct msghdr *m, size_t length) {
-    for (struct cmsghdr *c = CMSG_FIRSTHDR(m); c; c = CMSG_NXTHDR(m, c))
-        if (c->cmsg_level == SOL_UDP && c->cmsg_type == UDP_GRO) {
-            int size;
-            memcpy(&size, CMSG_DATA(c), sizeof(size));
-            if (size > 0) return (size_t)size;
-        }
-    return length ? length : 1;
+/* The size of each datagram in a buffer gathered (all of it when one), and
+ * the path they came by. */
+static size_t segment_of(struct msghdr *m, size_t length, Path *path) {
+    size_t step = length ? length : 1;
+    memset(path, 0, sizeof(*path));
+    memcpy(&path->from, m->msg_name, m->msg_namelen < sizeof(path->from) ? m->msg_namelen : sizeof(path->from));
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(m); c; c = CMSG_NXTHDR(m, c)) {
+        int size;
+        if (c->cmsg_level == SOL_UDP && c->cmsg_type == UDP_GRO && (memcpy(&size, CMSG_DATA(c), sizeof(size)), size > 0))
+            step = (size_t)size;
+        else if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_PKTINFO)
+            memcpy(&path->to.six, CMSG_DATA(c), sizeof(path->to.six));
+        else if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_PKTINFO)
+            memcpy(&path->to.four, CMSG_DATA(c), sizeof(path->to.four));
+    }
+    return step;
 }
 
 /* Up to TAKE datagrams from fd: how many (0 when none waits). */
@@ -361,7 +378,7 @@ void pure_link_close(PureLink *l) {
 struct PureLinkListener {
     PureLinkReceiver *receiver; /* the thread's */
     unsigned port;
-    int fd, wake;
+    int fd, wake, family;
     pthread_t thread;
     bool started;
     pthread_mutex_t lock; /* the done list and stopping */
@@ -383,10 +400,31 @@ PureLinkListener *pure_link_listen(PureLinkReceiver *r, unsigned port, char *err
     return s;
 }
 
+/* An answer by the path its sender's packet came: to where it came from,
+ * from the address it came to. */
 static bool send_answer(void *context, const unsigned char *packet, size_t size, const unsigned char *to,
                         size_t to_size) {
     const PureLinkListener *s = context;
-    return sendto(s->fd, packet, size, 0, (const struct sockaddr *)(const void *)to, (socklen_t)to_size) >= 0;
+    Path path;
+    if (to_size != sizeof(path)) return false;
+    memcpy(&path, to, sizeof(path));
+    _Alignas(8) unsigned char control[CMSG_SPACE(sizeof(struct in6_pktinfo))] = {0};
+    struct iovec part = {(void *)packet, size};
+    struct msghdr m = {.msg_name = &path.from, .msg_iov = &part, .msg_iovlen = 1, .msg_control = control};
+    m.msg_namelen = path.from.six.sin6_family == AF_INET6 ? sizeof(path.from.six) : sizeof(path.from.four);
+    struct cmsghdr *c = (struct cmsghdr *)(void *)control; /* the first */
+    if (s->family == AF_INET6 && !IN6_IS_ADDR_UNSPECIFIED(&path.to.six.ipi6_addr)) {
+        *c = (struct cmsghdr){.cmsg_level = IPPROTO_IPV6, .cmsg_type = IPV6_PKTINFO, .cmsg_len = CMSG_LEN(sizeof(path.to.six))};
+        memcpy(CMSG_DATA(c), &path.to.six, sizeof(path.to.six));
+        m.msg_controllen = CMSG_SPACE(sizeof(path.to.six));
+    } else if (s->family == AF_INET && path.to.four.ipi_addr.s_addr) {
+        struct in_pktinfo from = {.ipi_ifindex = path.to.four.ipi_ifindex, .ipi_spec_dst = path.to.four.ipi_addr};
+        *c = (struct cmsghdr){.cmsg_level = IPPROTO_IP, .cmsg_type = IP_PKTINFO, .cmsg_len = CMSG_LEN(sizeof(from))};
+        memcpy(CMSG_DATA(c), &from, sizeof(from));
+        m.msg_controllen = CMSG_SPACE(sizeof(from));
+    }
+    if (!m.msg_controllen) m.msg_control = NULL;
+    return sendmsg(s->fd, &m, 0) >= 0;
 }
 
 static void *run_listener(void *context) {
@@ -411,10 +449,11 @@ static void *run_listener(void *context) {
             n = (unsigned)gather(s->fd, gathering);
             for (unsigned k = 0; k < n; ++k) {
                 struct mmsghdr *m = &gathering->messages[k];
-                size_t length = m->msg_len, step = segment_of(&m->msg_hdr, length);
+                Path path;
+                size_t length = m->msg_len, step = segment_of(&m->msg_hdr, length, &path);
                 for (size_t at = 0; at < length; at += step)
                     pure_link_receiver_take(s->receiver, gathering->bytes[k] + at, step < length - at ? step : length - at,
-                                            &gathering->from[k], m->msg_hdr.msg_namelen, now);
+                                            &path, sizeof(path), now);
             }
         }
         pthread_mutex_lock(&s->lock);
@@ -450,6 +489,12 @@ bool pure_link_serve(PureLinkListener *s, char *error, size_t size) {
     setsockopt(s->fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer));
     int one = 1; /* without GRO, a buffer is a datagram */
     setsockopt(s->fd, SOL_UDP, UDP_GRO, &one, sizeof(one));
+    /* The address each packet came to, answered from (IPv4 too, as ::ffff:a.b.c.d, on a socket of both). */
+    struct sockaddr_storage own;
+    socklen_t own_size = sizeof(own);
+    s->family = getsockname(s->fd, (struct sockaddr *)&own, &own_size) ? AF_INET : own.ss_family;
+    if (s->family == AF_INET6) setsockopt(s->fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &one, sizeof(one));
+    else setsockopt(s->fd, IPPROTO_IP, IP_PKTINFO, &one, sizeof(one));
     s->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (s->wake < 0 || pthread_create(&s->thread, NULL, run_listener, s)) {
         snprintf(error, size, "--link-port %u: cannot start", s->port);
