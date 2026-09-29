@@ -12,7 +12,13 @@
  * attacker's own (none applied twice; nothing sent to the attacker beyond
  * three times what it sent), keys not allowed and sources not allowed
  * (nothing delivered), and a flood of made-up packets for a known key (few
- * keys made). Under all of it no key and nonce seals twice. */
+ * keys made). Under all of it no key and nonce seals twice.
+ *
+ * And later: one who then has both nodes' private keys, and every packet
+ * the sender sent. Once an epoch has begun, nothing it sent opens under
+ * the keys of the nodes' static secret, and no record went under them
+ * after that (forward secrecy), however often the epochs change and
+ * whether the receiver starts again with its memo or without. */
 #include "link-protocol.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +78,8 @@ typedef struct {
     size_t nonce_count, nonce_capacity;
     Packet *history;
     size_t history_count;
+    Packet *sent_log; /* every packet the sender sent, for one who later has the keys */
+    size_t sent_log_count, sent_log_capacity;
     uint64_t attacker_in, attacker_out, bent, replayed;
     unsigned loss, doubled, spread_ms; /* percent, percent, the most a packet is held back */
     uint64_t now, sent;
@@ -178,6 +186,8 @@ typedef struct {
     uint64_t pause_after, receiver_restart_after, sender_restart_after, idle_ms;
     unsigned replay; /* percent of steps that send a packet of the past again */
     bool tamper;     /* every packet comes changed three ways first */
+    uint64_t epoch_ms; /* epochs this long (0: an hour) */
+    bool forgetful;    /* the receiver keeps no memo: it starts again knowing no epoch */
 } Case;
 
 static bool nothing_sent(void *context, const unsigned char *packet, size_t size, const unsigned char *to, size_t to_size) {
@@ -232,6 +242,64 @@ static void replay(World *w, PureLinkSender *s, PureLinkReceiver *r, const char 
 
 typedef struct { PureLinkCounts sent, heard; uint64_t packets, seconds_ms; } Outcome;
 
+/* One who later has both nodes' private keys: the keys of the sender's
+ * packets under the nodes' static secret (link-protocol.c's derive). */
+static bool static_keys(const unsigned char secret[32], const unsigned char *from, const unsigned char *to, uint64_t run,
+                        unsigned char key[PURE_AEAD_KEY], unsigned char base[PURE_AEAD_NONCE]) {
+    unsigned char info[16 + 2 * PURE_SEAL_KEY + 16], out[PURE_AEAD_KEY + PURE_AEAD_NONCE];
+    memcpy(info, "pure link 0 keys", 16);
+    memcpy(info + 16, from, PURE_SEAL_KEY);
+    memcpy(info + 16 + PURE_SEAL_KEY, to, PURE_SEAL_KEY);
+    for (int i = 0; i < 8; ++i) info[16 + 2 * PURE_SEAL_KEY + i] = (unsigned char)(run >> 8 * i);
+    memset(info + 24 + 2 * PURE_SEAL_KEY, 0, 8);
+    if (!pure_link_derive(secret, info, sizeof(info), out, sizeof(out))) return false;
+    memcpy(key, out, PURE_AEAD_KEY);
+    memcpy(base, out + PURE_AEAD_KEY, PURE_AEAD_NONCE);
+    return true;
+}
+
+/* Each packet the sender sent, tried under the static keys: one of an epoch
+ * past 0 must not open, and one of epoch 0 sent after its run's first packet
+ * of a later epoch may carry no record. The number that opened. */
+static unsigned later_with_keys(World *w, const PureSealKey *a, const PureSealKey *b, const unsigned char *public_a,
+                                const unsigned char *public_b, const char *name) {
+    unsigned char secret[32], again[32], key[PURE_AEAD_KEY], base[PURE_AEAD_NONCE], nonce[PURE_AEAD_NONCE],
+        plain[PURE_LINK_DATAGRAM_MOST];
+    if (!pure_link_secret(a, public_b, secret) || !pure_link_secret(b, public_a, again) || memcmp(secret, again, 32)) exit(1);
+    PureAead *aead = pure_aead(secret);
+    unsigned opened = 0;
+    for (size_t k = 0; k < w->sent_log_count; ++k) {
+        const Packet *p = &w->sent_log[k];
+        uint64_t run = get64le(p->bytes + 5), pn = get64le(p->bytes + 13), first_later = UINT64_MAX;
+        for (size_t j = 0; j < w->sent_log_count; ++j) /* its run's first packet of a later epoch */
+            if (get64le(w->sent_log[j].bytes + 5) == run && (w->sent_log[j].bytes[0] & 15) &&
+                get64le(w->sent_log[j].bytes + 13) < first_later)
+                first_later = get64le(w->sent_log[j].bytes + 13);
+        if (!static_keys(secret, public_a, public_b, run, key, base)) exit(1);
+        memcpy(nonce, base, PURE_AEAD_NONCE);
+        for (int i = 0; i < 8; ++i) nonce[4 + i] ^= (unsigned char)(pn >> (56 - 8 * i));
+        if (!pure_aead_open(aead, key, nonce, p->bytes, 21, p->bytes + 21, p->size - 21, plain)) continue;
+        ++opened;
+        CHECK(!(p->bytes[0] & 15), "%s: a packet of epoch %u opened under the static keys", name, p->bytes[0] & 15);
+        if (pn < first_later) continue;
+        size_t size = p->size - 21 - 16;
+        for (size_t at = 0; at < size;) { /* its frames: none a record */
+            unsigned type = plain[at++];
+            if (type == 1) at += 2 + plain[at] + plain[at + 1 + plain[at]] + 4; /* STREAM */
+            else if (type == 8) at += 8;                                      /* RESPONSE */
+            else if (type == 9) at += 36;                                     /* OFFER */
+            else {
+                CHECK(type != 2 && type != 6, "%s: a record under the static keys after the epoch began (packet %llu)", name,
+                      (unsigned long long)pn);
+                break;
+            }
+        }
+    }
+    pure_aead_free(aead);
+    explicit_bzero(secret, sizeof(secret)), explicit_bzero(again, sizeof(again));
+    return opened;
+}
+
 static int by_nonce(const void *x, const void *y) {
     const Nonce *a = x, *b = y;
     return a->whose != b->whose ? (a->whose < b->whose ? -1 : 1)
@@ -245,7 +313,7 @@ static PureLinkReceiver *receiver_of(World *w, const PureSealKey *b, const unsig
     char error[256];
     PureLinkReceiver *r = pure_link_receiver(b, public_b, &(PureLinkHost){input_of, deliver, w}, error, sizeof(error));
     if (!r || !pure_link_allow(r, "test.ordered", public_a, error, sizeof(error)) ||
-        !pure_link_remember(r, memo, error, sizeof(error))) {
+        (memo && !pure_link_remember(r, memo, error, sizeof(error)))) {
         fprintf(stderr, "test-link: %s\n", error);
         exit(1);
     }
@@ -255,6 +323,8 @@ static PureLinkReceiver *receiver_of(World *w, const PureSealKey *b, const unsig
 
 /* The sender as its app makes it: the sends its outbox keeps, from the one
  * after the last stored, up to limit. */
+static uint64_t epoch_ms; /* the senders' epochs, as the case says */
+
 static PureLinkSender *sender_of(const PureSealKey *a, const unsigned char *public_a, const unsigned char *public_b,
                                  uint64_t from, uint64_t limit) {
     PureLinkSender *s = pure_link_sender("test.ordered", "order", 0x5eed, a, public_a);
@@ -262,6 +332,7 @@ static PureLinkSender *sender_of(const PureSealKey *a, const unsigned char *publ
         fprintf(stderr, "test-link: cannot make a sender\n");
         exit(1);
     }
+    if (epoch_ms) pure_link_sender_epochs(s, epoch_ms * MS, UINT64_C(1) << 30);
     static unsigned char bytes[20200];
     for (uint64_t seq = from; seq <= limit; ++seq) {
         size_t size = record_size(seq);
@@ -285,10 +356,12 @@ static Outcome run(const Case *c, const char *dir) {
                .history = malloc(HISTORY * sizeof(Packet))};
     if (!w.packets || !w.history) exit(1);
     char from[8] = "sender0";
+    epoch_ms = c->epoch_ms;
+    const char *keep = c->forgetful ? NULL : memo;
     seed = c->seed;
     uint64_t queued = c->pause_after ? c->pause_after : c->records, resumed = 0;
     PureLinkSender *s = sender_of(a, public_a, public_b, 1, queued);
-    PureLinkReceiver *r = receiver_of(&w, b, public_b, public_a, memo, c->idle_ms);
+    PureLinkReceiver *r = receiver_of(&w, b, public_b, public_a, keep, c->idle_ms);
     PureLinkCounts sent_before = {0}, heard_before = {0};
     bool receiver_restarted = !c->receiver_restart_after, sender_restarted = !c->sender_restart_after;
     unsigned char out[PURE_LINK_DATAGRAM_MOST];
@@ -299,6 +372,12 @@ static Outcome run(const Case *c, const char *dir) {
         uint64_t number;
         for (size_t size; (size = pure_link_sender_packet(s, out, false, w.now, &number));) {
             used(&w, 0, out);
+            if (w.sent_log_count == w.sent_log_capacity) {
+                w.sent_log_capacity = w.sent_log_capacity ? 2 * w.sent_log_capacity : 1024;
+                if (!(w.sent_log = realloc(w.sent_log, w.sent_log_capacity * sizeof(Packet)))) exit(1);
+            }
+            w.sent_log[w.sent_log_count] = (Packet){.size = size};
+            memcpy(w.sent_log[w.sent_log_count++].bytes, out, size);
             put_packet(&w, true, out, size);
         }
         /* Then the next thing to happen. */
@@ -348,7 +427,7 @@ static Outcome run(const Case *c, const char *dir) {
             pure_link_receiver_counts(r, &heard_before);
             pure_link_receiver_free(r);
             w.done_count = 0;
-            r = receiver_of(&w, b, public_b, public_a, memo, c->idle_ms);
+            r = receiver_of(&w, b, public_b, public_a, keep, c->idle_ms);
         }
         if (!sender_restarted && pure_link_sender_stored(s) >= c->sender_restart_after) {
             sender_restarted = true;
@@ -362,7 +441,7 @@ static Outcome run(const Case *c, const char *dir) {
     Outcome o = {.packets = w.sent, .seconds_ms = w.now / MS};
     pure_link_sender_counts(s, &o.sent);
     pure_link_receiver_counts(r, &o.heard);
-    o.sent.packets += sent_before.packets, o.sent.resent += sent_before.resent;
+    o.sent.packets += sent_before.packets, o.sent.resent += sent_before.resent, o.sent.epochs += sent_before.epochs;
     o.heard.woken += heard_before.woken, o.heard.swept += heard_before.swept;
     CHECK(w.heard == c->records && w.applied == c->records, "%s: applied %llu, heard %llu of %llu", c->name,
           (unsigned long long)w.applied, (unsigned long long)w.heard, (unsigned long long)c->records);
@@ -379,14 +458,15 @@ static Outcome run(const Case *c, const char *dir) {
         }
     CHECK(w.attacker_out <= 3 * w.attacker_in, "%s: %llu bytes to the attacker for its %llu", c->name,
           (unsigned long long)w.attacker_out, (unsigned long long)w.attacker_in);
+    unsigned opened_later = later_with_keys(&w, a, b, public_a, public_b, c->name);
     printf("{\"case\":\"%s\",\"records\":%llu,\"virtual_ms\":%llu,\"packets\":%llu,\"resent\":%llu,\"lost\":%llu,"
            "\"deliveries\":%llu,\"woken\":%llu,\"remembered\":%llu,\"swept\":%llu,\"changed\":%llu,\"replayed\":%llu,"
-           "\"attacker_in\":%llu,\"attacker_out\":%llu}\n",
+           "\"attacker_in\":%llu,\"attacker_out\":%llu,\"epochs\":%llu,\"opened_later\":%u}\n",
            c->name, (unsigned long long)c->records, (unsigned long long)o.seconds_ms, (unsigned long long)o.sent.packets,
            (unsigned long long)o.sent.resent, (unsigned long long)o.sent.lost, (unsigned long long)w.deliveries,
            (unsigned long long)o.heard.woken, (unsigned long long)o.heard.remembered, (unsigned long long)o.heard.swept,
            (unsigned long long)w.bent, (unsigned long long)w.replayed, (unsigned long long)w.attacker_in,
-           (unsigned long long)w.attacker_out);
+           (unsigned long long)w.attacker_out, (unsigned long long)o.sent.epochs, opened_later);
     pure_link_sender_free(s);
     pure_link_receiver_free(r);
     pure_seal_key_free(a);
@@ -394,6 +474,7 @@ static Outcome run(const Case *c, const char *dir) {
     free(w.packets);
     free(w.history);
     free(w.nonces);
+    free(w.sent_log);
     return o;
 }
 
@@ -524,7 +605,7 @@ int main(void) {
         return 1;
     }
     /* A clean network: nothing is sent twice. */
-    Case clean = {"clean", 3000, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, false};
+    Case clean = {"clean", 3000, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false};
     Outcome o = run(&clean, dir);
     CHECK(o.sent.resent == 0 && o.sent.lost == 0, "clean: %llu sent again, %llu lost", (unsigned long long)o.sent.resent,
           (unsigned long long)o.sent.lost);
@@ -533,7 +614,7 @@ int main(void) {
      * starting again: the receiver remembers its secret, so it wakes the
      * sender without an X25519. */
     for (uint64_t s = 1; s <= 4; ++s) {
-        Case rough = {"rough", 3000, s * 7919, 10, 3, 20, 37, 1500, 800, 2200, 300, 0, false};
+        Case rough = {"rough", 3000, s * 7919, 10, 3, 20, 37, 1500, 800, 2200, 300, 0, false, 0, false};
         o = run(&rough, dir);
         CHECK(o.sent.resent > 0 && o.heard.swept >= 1 && o.heard.woken >= 1 && o.heard.remembered >= 1,
               "rough: sent again %llu, swept %llu, woken %llu, remembered %llu", (unsigned long long)o.sent.resent,
@@ -543,12 +624,21 @@ int main(void) {
     /* An attacker on the path: packets changed on the way, and packets of
      * the past sent again, from the sender's address and its own, across the
      * same restarts and pause. */
-    Case changed = {"changed", 1500, 31, 3, 0, 5, 0, 0, 0, 0, 0, 0, true};
+    Case changed = {"changed", 1500, 31, 3, 0, 5, 0, 0, 0, 0, 0, 0, true, 0, false};
     run(&changed, dir);
     for (uint64_t s = 1; s <= 2; ++s) {
-        Case again = {"replayed", 3000, s * 104729, 5, 3, 20, 37, 1500, 800, 2200, 300, 25, false};
+        Case again = {"replayed", 3000, s * 104729, 5, 3, 20, 37, 1500, 800, 2200, 300, 25, false, 0, false};
         run(&again, dir);
     }
+    /* Epochs a fifth of a second long (a new one a second, as the receiver
+     * accepts), and a receiver that starts again with no memo: it knows no
+     * epoch, and the sender begins them again. */
+    Case epochs = {"epochs", 3000, 271, 5, 3, 20, 37, 1500, 800, 2200, 300, 10, false, 200, false};
+    o = run(&epochs, dir);
+    CHECK(o.sent.epochs >= 10, "epochs: %llu begun", (unsigned long long)o.sent.epochs);
+    Case forgetful = {"forgetful", 3000, 409, 5, 3, 20, 37, 0, 800, 0, 0, 0, false, 0, true};
+    o = run(&forgetful, dir);
+    CHECK(o.sent.epochs >= 2, "forgetful: %llu epochs begun (none again)", (unsigned long long)o.sent.epochs);
     impostors(dir);
     flood(dir);
     char command[600];

@@ -370,11 +370,11 @@ static int run_all(char **argv) {
             fprintf(stderr, "{\"t\":%.1f,\"made\":%" PRIu64 ",\"stored\":%" PRIu64 "}\n", (double)(now - began) / 1e9, made, stored);
         }
     }
-    uint64_t again = 0, keyed = 0, secrets = 0;
+    uint64_t again = 0, keyed = 0, secrets = 0, epochs = 0;
     for (size_t k = 0; k < count; ++k) {
         PureLinkCounts c;
         pure_link_sender_counts(devices[k].sender, &c);
-        again += c.resent, keyed += c.keyed, secrets += c.secrets;
+        again += c.resent, keyed += c.keyed, secrets += c.secrets, epochs += c.epochs;
     }
     /* The p50 and p99 of the records made in each second: where the slow ones are. */
     size_t seconds_made = (size_t)seconds + 1;
@@ -404,7 +404,8 @@ static int run_all(char **argv) {
            latency_count ? latency[latency_count * 99 / 100] : 0, latency_count ? latency[latency_count - 1] : 0,
            longest * 100, gap * 100);
     for (size_t b = 0; b <= last; ++b) printf("%s%u", b ? "," : "", timeline[b]);
-    printf("],\"keyed\":%" PRIu64 ",\"secrets\":%" PRIu64 ",\"p50_ms_by_second_made\":[", keyed, secrets);
+    printf("],\"keyed\":%" PRIu64 ",\"secrets\":%" PRIu64 ",\"epochs\":%" PRIu64 ",\"p50_ms_by_second_made\":[", keyed,
+           secrets, epochs);
     for (size_t second = 0; second < seconds_made; ++second) printf("%s%.2f", second ? "," : "", p50_by_second[second]);
     printf("],\"p99_ms_by_second_made\":[");
     for (size_t second = 0; second < seconds_made; ++second) printf("%s%.2f", second ? "," : "", p99_by_second[second]);

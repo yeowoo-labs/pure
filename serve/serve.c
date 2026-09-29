@@ -2760,11 +2760,13 @@ int main(int argc, char **argv) {
             ",\"link_lost\":%" PRIu64 ",\"link_acknowledged\":%" PRIu64 ",\"link_stored\":%" PRIu64
             ",\"listener_packets\":%" PRIu64 ",\"listener_received\":%" PRIu64 ",\"listener_deliveries\":%" PRIu64
             ",\"listener_woken\":%" PRIu64 ",\"listener_remembered\":%" PRIu64 ",\"listener_swept\":%" PRIu64
-            ",\"listener_active\":%" PRIu64 "}\n",
+            ",\"listener_active\":%" PRIu64 ",\"listener_keyed\":%" PRIu64 ",\"listener_secrets\":%" PRIu64
+            ",\"listener_epochs\":%" PRIu64 "}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
             owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
-            heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept, heard.active);
+            heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept, heard.active,
+            heard.keyed, heard.secrets, heard.epochs);
     free(hosts);
     free(thread);
     return 0;

@@ -19,7 +19,11 @@ enum { DATAGRAM_MOST = PURE_LINK_DATAGRAM_MOST, BODY_MOST = DATAGRAM_MOST - HEAD
  * at least this much of it fits. */
 enum { PART_LEAST = 64 };
 enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, F_RECORDS = 6, F_CHALLENGE = 7,
-       F_RESPONSE = 8, STORED_GAP = 1 };
+       F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, STORED_GAP = 1 };
+/* A packet's first byte is VERSION with the sending side's epoch (mod 16)
+ * in its low four bits; OFFER and ACCEPT are an epoch's number (u32) and a
+ * public key made for it. */
+enum { EPOCH_MASK = 15, EPOCH_FRAME = 1 + 4 + PURE_SEAL_KEY };
 enum { RECORDS_HEAD = 10 }; /* type, the first number, the count */
 enum { RANGES = 32, RUNS = 2, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
 enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
@@ -31,7 +35,11 @@ enum { REORDER_FIRST = 3, REORDER_PACKETS_MOST = 256, REORDER_QUARTERS_MOST = 8,
 enum { REACH_TRIES = 3 };
 /* Challenges a sender keeps to say back, the newest first. */
 enum { RESPONSES = 4 };
-enum { KEYINGS = 256 };
+/* Keys made for runs that do not open, and new epochs accepted: a second,
+ * and at once. */
+enum { KEYINGS = 256, ACCEPTS = 256, ACCEPTS_AT_ONCE = 8 };
+/* A receiver accepts a new epoch for a sender at most a second. */
+static const uint64_t ACCEPT_EVERY_NS = 1000000000u, OURS_LIFE = 1000000000u;
 /* CUBIC's constants (RFC 9438): the cubic's scale, and the window kept at a
  * congestion event. */
 static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7, RENO_PACE = 3 * (1 - 0.7) / (1 + 0.7);
@@ -42,6 +50,10 @@ static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7, RENO_PACE = 3 * (1 - 0.7) /
 static const uint64_t FIRST_RTT = 100 * MS, ACK_DELAY_MOST = 25 * MS, GRANULARITY = 1 * MS, PTO_MOST = 1000 * MS,
                       STORED_WAIT = 1000 * MS, RECORD_MOST = UINT64_C(64) << 20, HELD_MOST = UINT64_C(16) << 20,
                       REACH_AGAIN = 1000 * MS, REACH_RARELY = 600000 * MS;
+/* An epoch lasts an hour or a GiB sent; a sender that hears nothing for 2 s
+ * with packets out, and four probes, takes its epoch for lost. */
+static const uint64_t EPOCH_EVERY = UINT64_C(3600000) * MS, EPOCH_MOST = UINT64_C(1) << 30, FALLBACK_WAIT = 2000 * MS;
+enum { FALLBACK_PROBES = 4 }; /* and after as many probes unanswered in a row */
 
 static void put16(unsigned char *p, uint32_t v) { p[0] = (unsigned char)v, p[1] = (unsigned char)(v >> 8); }
 static void put32(unsigned char *p, uint32_t v) { for (int i = 0; i < 4; ++i) p[i] = (unsigned char)(v >> 8 * i); }
@@ -108,6 +120,18 @@ static bool derive(const unsigned char secret[32], const unsigned char from[PURE
     return true;
 }
 
+/* The secret of epoch n: the X25519 of the two keys made for it (fresh),
+ * with the secret before it (epoch 0's is the nodes' static secret). */
+static bool epoch_secret_of(const unsigned char before[32], const unsigned char fresh[32], uint32_t n, unsigned char out[32]) {
+    unsigned char info[17 + 4 + 32];
+    memcpy(info, "pure link 0 epoch", 17);
+    put32(info + 17, n);
+    memcpy(info + 21, before, 32);
+    bool ok = pure_link_derive(fresh, info, sizeof(info), out, 32);
+    explicit_bzero(info, sizeof(info));
+    return ok;
+}
+
 /* The same as a context of its own, for a sender's one link. */
 static PureAead *aead_of(const unsigned char secret[32], const unsigned char from[PURE_SEAL_KEY],
                          const unsigned char to[PURE_SEAL_KEY], uint64_t from_run, uint64_t to_run,
@@ -126,9 +150,10 @@ static void nonce_of(unsigned char out[PURE_AEAD_NONCE], const unsigned char bas
 /* A packet: the header, then body sealed (with key, or the context's own
  * when NULL); its size, or 0. */
 static size_t seal_packet(PureAead *aead, const unsigned char *key, const unsigned char base[PURE_AEAD_NONCE], uint32_t id,
-                          uint64_t run, uint64_t pn, const unsigned char *body, size_t size, unsigned char *out) {
+                          uint32_t epoch, uint64_t run, uint64_t pn, const unsigned char *body, size_t size,
+                          unsigned char *out) {
     unsigned char nonce[PURE_AEAD_NONCE];
-    out[0] = VERSION;
+    out[0] = (unsigned char)(VERSION | (epoch & EPOCH_MASK));
     put32(out + 1, id);
     put64(out + 5, run);
     put64(out + 13, pn);
@@ -248,7 +273,25 @@ struct PureLinkSender {
     uint64_t unsent_from; /* no record before this number has a part unsent */
     unsigned pto_count, probes;
     PureLinkCounts counts;
+    /* Epochs (forward secrecy). Keys come from the secret of the epoch it
+     * sends in (epoch 0's is the two nodes' static secret), each made from
+     * two keys made for it, whose private halves go once agreed; the one
+     * before stays for answers still in it. The pair it offers for the
+     * next; when its epoch began, and its bytes; how often and after how
+     * many bytes it moves on; when an answer last opened; renegotiating:
+     * the receiver lost the epoch, so only offers go (in epoch 0, no record
+     * under the static keys again) until a new one begins, the next at
+     * offer_again. Last: what a sender at rest is looked at for (its
+     * timers) stays in fewer cache lines. */
+    uint32_t epoch, before_epoch, offer_epoch, in_epoch;
+    unsigned char epoch_secret[32], before_secret[32], offer_private[32], offer_public[PURE_SEAL_KEY];
+    bool offering, renegotiating;
+    uint64_t epoch_at, epoch_bytes, epoch_every, epoch_most, heard_at, offer_again;
 };
+
+static bool out_keys(PureLinkSender *l);
+static bool offer(PureLinkSender *l, uint32_t n);
+static void begin_epoch(PureLinkSender *l, const unsigned char their[PURE_SEAL_KEY], uint64_t now);
 
 static Record *record_at(PureLinkSender *l, size_t k) { return &l->records[(l->head + k) % l->capacity]; }
 
@@ -625,20 +668,28 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
 
 void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_t n, uint64_t now) {
     unsigned char plain[DATAGRAM_MOST], nonce[PURE_AEAD_NONCE];
-    if (!l->out || n < HEADER + PURE_AEAD_TAG || n > DATAGRAM_MOST || packet[0] != VERSION || get32(packet + 1) != l->peer_id)
+    if (!l->out || n < HEADER + PURE_AEAD_TAG || n > DATAGRAM_MOST || (packet[0] & ~EPOCH_MASK) != VERSION ||
+        get32(packet + 1) != l->peer_id)
         return; /* not ours, or an error from an earlier send (nobody listening) */
     uint64_t run = get64(packet + 5), pn = get64(packet + 13);
-    if (!l->in || l->in_run != run) {
+    /* Answers come in its epoch or the one before. */
+    unsigned e = packet[0] & EPOCH_MASK;
+    uint32_t epoch = e == (l->epoch & EPOCH_MASK) ? l->epoch : l->before_epoch;
+    if (e != (epoch & EPOCH_MASK)) return;
+    if (!l->in || l->in_run != run || l->in_epoch != epoch) {
         pure_aead_free(l->in);
-        l->in = aead_of(l->secret, l->peer, l->own_public, run, l->run, l->in_base);
+        l->in = aead_of(epoch == l->epoch ? l->epoch_secret : l->before_secret, l->peer, l->own_public, run, l->run,
+                        l->in_base);
         ++l->counts.keyed;
         l->in_run = run;
+        l->in_epoch = epoch;
         if (!l->in) return;
     }
     nonce_of(nonce, l->in_base, pn);
     size_t size = n - HEADER - PURE_AEAD_TAG;
     if (!pure_aead_open(l->in, NULL, nonce, packet, HEADER, packet + HEADER, n - HEADER, plain)) return;
     ++l->counts.received;
+    l->heard_at = now;
     for (size_t at = 0; at < size;) {
         unsigned type = plain[at++];
         if (type == F_ACK && at + 13 <= size && at + 13 + 16u * plain[at + 12] <= size) {
@@ -661,6 +712,10 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
                 if (l->responding < RESPONSES) ++l->responding;
             }
             at += 8;
+        } else if (type == F_ACCEPT) { /* the epoch offered begins */
+            if (at + EPOCH_FRAME - 1 > size) break;
+            if (l->offering && get32(plain + at) == l->offer_epoch) begin_epoch(l, plain + at + 4, now);
+            at += EPOCH_FRAME - 1;
         } else if (type != F_PING)
             break; /* padding, or what this side does not know: the rest */
     }
@@ -683,6 +738,16 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad, 
     for (unsigned k = 0; k < l->responding; ++k, at += 9) { /* let go once the packet goes */
         body[at] = F_RESPONSE;
         put64(body + at + 1, l->respond[k]);
+    }
+    if (l->offering) { /* the next epoch's key, until it is accepted */
+        body[at] = F_OFFER;
+        put32(body + at + 1, l->offer_epoch);
+        memcpy(body + at + 5, l->offer_public, PURE_SEAL_KEY);
+        at += EPOCH_FRAME;
+    }
+    if (l->renegotiating) { /* no record under the static keys */
+        l->responding = 0;
+        return at;
     }
     /* The credit counts from the oldest record not stored: after a restart
      * the sender does not know yet how far the receiver stored. */
@@ -753,7 +818,7 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad, 
             break;
         }
     }
-    if (!f->count && !(probe && l->responding)) return 0;
+    if (!f->count && !(probe && (l->responding || l->offering))) return 0;
     l->responding = 0;
     return at;
 }
@@ -773,8 +838,9 @@ void pure_link_sender_refused(PureLinkSender *l, uint64_t pn) {
  * carried is then unsent again). Its number is spent either way. */
 static size_t transmit(PureLinkSender *l, Flight *f, const unsigned char *body, size_t size, unsigned char *out,
                        uint64_t now) {
-    size_t total = seal_packet(l->out, NULL, l->out_base, l->own_id, l->run, f->pn, body, size, out);
+    size_t total = seal_packet(l->out, NULL, l->out_base, l->own_id, l->epoch, l->run, f->pn, body, size, out);
     ++l->next_pn;
+    l->epoch_bytes += total;
     f->sent = now;
     f->bytes = (uint32_t)total;
     if (!total) { /* not sealed: what it carried is unsent again */
@@ -818,6 +884,12 @@ size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DA
     if (!probe && l->in_flight + l->datagram > l->window) l->unused = false;
     if (!l->out || (!probe && l->in_flight + l->datagram > l->window) || !flight_room(l)) return 0;
     if (!probe && !paced(l, now)) return 0;
+    if (!l->offering && !l->renegotiating && (now - l->epoch_at >= l->epoch_every || l->epoch_bytes >= l->epoch_most))
+        offer(l, l->epoch + 1); /* on to the next epoch: a key made for it goes in the packets until accepted */
+    if (l->renegotiating) { /* an offer an RTT, no records */
+        if (!probe && now < l->offer_again) return 0;
+        l->offer_again = now + most(rtt_now(l), 100 * MS);
+    }
     unsigned char body[BODY_MOST];
     Flight f = {.pn = l->next_pn, .eliciting = true};
     if (l->datagram < DATAGRAM_MOST && l->filled && !l->reaching && l->sampled && now >= l->reach_at &&
@@ -869,6 +941,20 @@ uint64_t pure_link_sender_due(const PureLinkSender *l) {
 }
 
 void pure_link_sender_tick(PureLinkSender *l, uint64_t now) {
+    if (l->epoch && !l->renegotiating && l->eliciting && l->heard_at && now - l->heard_at > FALLBACK_WAIT &&
+        l->pto_count >= FALLBACK_PROBES) {
+        /* Nothing heard for long with packets out: the receiver lost the
+         * epoch (it started again without its memo), or its answers are
+         * kept from us. Offers only now, in epoch 0, until one begins. */
+        memcpy(l->before_secret, l->epoch_secret, 32);
+        l->before_epoch = l->epoch;
+        memcpy(l->epoch_secret, l->secret, 32);
+        l->epoch = 0;
+        out_keys(l);
+        offer(l, 1);
+        l->renegotiating = true;
+        l->offer_again = 0;
+    }
     if (l->loss_time && l->loss_time <= now) detect_lost(l, now);
     else if (l->eliciting && l->last_eliciting + pto_period(l) <= now) {
         /* Nothing heard for a while: a probe, what flies longest sent again. */
@@ -913,7 +999,47 @@ PureLinkSender *pure_link_sender(const char *source, const char *input, uint32_t
     l->threshold = UINT64_MAX;
     l->reorder_packets = REORDER_FIRST;
     l->datagram = DATAGRAM;
+    l->epoch_every = EPOCH_EVERY;
+    l->epoch_most = EPOCH_MOST;
     return l;
+}
+
+/* Keys of its packets in the epoch it is in. */
+static bool out_keys(PureLinkSender *l) {
+    pure_aead_free(l->out);
+    l->out = aead_of(l->epoch_secret, l->own_public, l->peer, l->run, 0, l->out_base);
+    ++l->counts.keyed;
+    return l->out != NULL;
+}
+
+/* A pair for epoch n, offered in each packet until it is accepted. */
+static bool offer(PureLinkSender *l, uint32_t n) {
+    if (!pure_link_ephemeral(l->offer_private, l->offer_public)) return false;
+    l->offer_epoch = n;
+    l->offering = true;
+    return true;
+}
+
+/* The receiver accepted the offer with its public key: the epoch begins,
+ * the private half gone. */
+static void begin_epoch(PureLinkSender *l, const unsigned char their[PURE_SEAL_KEY], uint64_t now) {
+    unsigned char fresh[32], next[32];
+    bool ok = pure_link_agree(l->offer_private, their, fresh) &&
+              epoch_secret_of(l->epoch_secret, fresh, l->offer_epoch, next);
+    explicit_bzero(l->offer_private, sizeof(l->offer_private));
+    explicit_bzero(fresh, sizeof(fresh));
+    l->offering = false;
+    l->epoch_at = now; /* failed: offered again a whole epoch on */
+    if (!ok) return;
+    memcpy(l->before_secret, l->epoch_secret, 32);
+    l->before_epoch = l->epoch;
+    memcpy(l->epoch_secret, next, 32);
+    explicit_bzero(next, sizeof(next));
+    l->epoch = l->offer_epoch;
+    l->epoch_bytes = 0;
+    l->renegotiating = false;
+    ++l->counts.epochs;
+    out_keys(l);
 }
 
 /* The receiver's key, with the secret made (or given) into l->secret: the
@@ -926,8 +1052,10 @@ static bool keyed(PureLinkSender *l, const unsigned char peer[PURE_SEAL_KEY], co
     l->out = l->in = NULL;
     if (secret) memcpy(l->secret, secret, 32);
     if (!secret) ++l->counts.secrets;
-    return (secret || (l->own && pure_link_secret(l->own, l->peer, l->secret))) &&
-           (l->out = aead_of(l->secret, l->own_public, l->peer, l->run, 0, l->out_base)) && ++l->counts.keyed;
+    if (!secret && !(l->own && pure_link_secret(l->own, l->peer, l->secret))) return false;
+    memcpy(l->epoch_secret, l->secret, 32);
+    l->epoch = l->before_epoch = 0;
+    return out_keys(l) && offer(l, 1);
 }
 
 bool pure_link_sender_peer(PureLinkSender *l, const unsigned char peer[PURE_SEAL_KEY]) { return keyed(l, peer, NULL); }
@@ -937,6 +1065,11 @@ bool pure_link_sender_shared(PureLinkSender *l, const unsigned char peer[PURE_SE
 }
 
 uint64_t pure_link_sender_queued(const PureLinkSender *l) { return l->queued; }
+
+void pure_link_sender_epochs(PureLinkSender *l, uint64_t every_ns, uint64_t bytes) {
+    l->epoch_every = every_ns;
+    l->epoch_most = bytes;
+}
 
 size_t pure_link_sender_datagram(const PureLinkSender *l) { return l->datagram; }
 
@@ -956,6 +1089,9 @@ void pure_link_sender_free(PureLinkSender *l) {
     pure_aead_free(l->out);
     pure_aead_free(l->in);
     explicit_bzero(l->secret, sizeof(l->secret));
+    explicit_bzero(l->epoch_secret, sizeof(l->epoch_secret));
+    explicit_bzero(l->before_secret, sizeof(l->before_secret));
+    explicit_bzero(l->offer_private, sizeof(l->offer_private));
     free(l);
 }
 
@@ -984,12 +1120,26 @@ typedef struct {
      * bytes that came from it (RFC 9000 §8). */
     bool checked;
     uint64_t challenge, bytes_in, bytes_out;
+    /* Epochs: the sender's, as its packets opened last (the keys in and out
+     * below are of it); the one before, whose packets may still come; an
+     * offer accepted and not yet used; an offer taken, accepted in the
+     * turn. Their secrets and keys are last. */
+    uint32_t epoch, before_epoch, accept_epoch, waiting_epoch;
+    bool has_before, accepted, waits;
     unsigned char in_key[PURE_AEAD_KEY], out_key[PURE_AEAD_KEY], in_base[PURE_AEAD_NONCE], out_base[PURE_AEAD_NONCE];
     uint64_t next_pn, largest_at;
     _Alignas(8) unsigned char address[PURE_LINK_ADDRESS]; /* where it sends from: a socket's address */
     size_t address_size;
     Range got[RANGES]; /* the numbers received, newest first */
     unsigned got_count;
+    /* The epoch's secret; the accepted one's, its keys in, the key offered
+     * and ours (the same offer again gets the same answer); the keys in of
+     * the epoch before; the offer taken: the epoch of the packet it came in,
+     * and its key. */
+    unsigned char epoch_secret[32], accept_secret[32], offered[PURE_SEAL_KEY], accept_public[PURE_SEAL_KEY];
+    unsigned char accept_in_key[PURE_AEAD_KEY], accept_in_base[PURE_AEAD_NONCE];
+    unsigned char before_in_key[PURE_AEAD_KEY], before_in_base[PURE_AEAD_NONCE];
+    unsigned char waiting_in, waiting[PURE_SEAL_KEY];
 } Run;
 typedef struct { uint32_t from, to; } Span; /* bytes [from, to) */
 typedef struct {
@@ -1026,7 +1176,9 @@ typedef struct Stream {
 struct Active {
     uint32_t peer;               /* its place among the peers */
     unsigned char secret[32];
+    bool remembered;             /* its secret came from the memo */
     uint64_t seen;
+    uint64_t accepted_at;        /* its last new epoch: one a second, whatever its runs */
     size_t place;                /* among the active */
     Run runs[RUNS];
     Stream **streams;
@@ -1057,6 +1209,22 @@ struct PureLinkReceiver {
      * whose packets open (a thousand waking at once) cost none. */
     double key_tokens;
     uint64_t key_at;
+    /* The pair its epochs are accepted with: one for a second (the X25519
+     * of making it shared by the offers of that second), then the private
+     * half is gone. An accept costs an X25519 on each side (220 µs on a
+     * Raspberry Pi 5), made in the turn after the answers, so it holds back
+     * no packet's answer. One of a sender with records to send costs a
+     * token (ACCEPTS a second, ACCEPTS_AT_ONCE at once) and waits for one
+     * (its next packet offers again), so ten thousand senders waking at
+     * once do not hold the others back; a sender with nothing else to send
+     * (its epoch lost) waits for none, one accept a second for it. */
+    unsigned char ours_private[32], ours_public[PURE_SEAL_KEY];
+    bool ours_ready;
+    uint64_t ours_at;
+    double accept_tokens;
+    uint64_t accept_at;
+    struct { Run *run; uint64_t id; } *offers; /* runs whose offers wait for the turn (a slot may hold another run by then) */
+    size_t offer_count, offer_capacity;
     PureAead *aead; /* keyed by each packet's run */
     unsigned char open_key[PURE_AEAD_KEY], seal_key[PURE_AEAD_KEY]; /* the keys it has now */
     bool open_keyed, seal_keyed;
@@ -1258,12 +1426,45 @@ static void drop_first(Stream *st) {
 /* The memo of secrets (pure_link_remember): a header, then a place a peer
  * in the order allowed, each the first 28 bytes of its key, a check (FNV-1a
  * of its whole key and the secret) and the secret. A place whose check
- * fails (never made, another key, cut short by a crash) is made again. */
-enum { MEMO_HEAD = 64, MEMO_PLACE = 64 };
-static const unsigned char memo_magic[8] = {'P', 'L', 'M', '1', 0, 0, 0, 0};
+ * fails (never made, another key, cut short by a crash) is made again.
+ * From MEMO_EPOCH on, the epoch last accepted for the peer's run: the run,
+ * the epoch, a check (FNV-1a of the rest), its secret, the one before, the
+ * key the sender offered and ours; written secrets first, the run last. A
+ * node that starts again goes on in the sender's epoch, no key made. */
+enum { MEMO_HEAD = 64, MEMO_PLACE = 256, MEMO_EPOCH = 64, MEMO_EPOCH_SIZE = 144 };
+static const unsigned char memo_magic[8] = {'P', 'L', 'M', '2', 0, 0, 0, 0};
 
 static uint32_t memo_check(const unsigned char key[PURE_SEAL_KEY], const unsigned char secret[32]) {
     return fnv(fnv(2166136261u, key, PURE_SEAL_KEY), secret, 32);
+}
+
+static unsigned char *memo_place(const PureLinkReceiver *s, uint32_t peer) {
+    return s->memo && MEMO_HEAD + ((size_t)peer + 1) * MEMO_PLACE <= s->memo_size ? s->memo + MEMO_HEAD + (size_t)peer * MEMO_PLACE
+                                                                                : NULL;
+}
+
+static uint32_t epoch_check(const unsigned char *e) { return fnv(fnv(2166136261u, e, 12), e + 16, MEMO_EPOCH_SIZE - 16); }
+
+/* The epoch the memo has for the peer's run (its place's epoch part), or NULL. */
+static const unsigned char *memo_epoch(const PureLinkReceiver *s, uint32_t peer, uint64_t run) {
+    const unsigned char *place = memo_place(s, peer), *e = place ? place + MEMO_EPOCH : NULL;
+    return e && get64(e) == run && get32(e + 12) == epoch_check(e) ? e : NULL;
+}
+
+static void remember_epoch(PureLinkReceiver *s, uint32_t peer, const Run *r) {
+    unsigned char *place = memo_place(s, peer);
+    if (!place) return;
+    unsigned char *e = place + MEMO_EPOCH;
+    memset(e, 0, 16);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    memcpy(e + 16, r->accept_secret, 32);
+    memcpy(e + 48, r->epoch_secret, 32);
+    memcpy(e + 80, r->offered, PURE_SEAL_KEY);
+    memcpy(e + 112, r->accept_public, PURE_SEAL_KEY);
+    put64(e, r->run);
+    put32(e + 8, r->accept_epoch);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    put32(e + 12, epoch_check(e));
 }
 
 bool pure_link_remember(PureLinkReceiver *s, const char *path, char *error, size_t size) {
@@ -1303,12 +1504,10 @@ static Active *activate(PureLinkReceiver *s, Peer *peer, uint64_t now) {
         free(a);
         return NULL;
     }
-    size_t index = (size_t)(peer - s->peers);
-    unsigned char *place = s->memo && MEMO_HEAD + (index + 1) * MEMO_PLACE <= s->memo_size ?
-                           s->memo + MEMO_HEAD + index * MEMO_PLACE : NULL;
+    unsigned char *place = memo_place(s, (uint32_t)(peer - s->peers));
     if (place && !memcmp(place, peer->key, 28) && get32(place + 28) == memo_check(peer->key, place + 32)) {
         memcpy(a->secret, place + 32, 32);
-        ++s->counts.remembered;
+        a->remembered = true;
     } else if (++s->counts.secrets && pure_link_secret(s->own, peer->key, a->secret)) {
         if (place) {
             memset(place, 0, 28);
@@ -1650,44 +1849,196 @@ static bool hand_over(PureLinkReceiver *s, Stream *st) {
     return true;
 }
 
-/* A packet from peer, if it opens with the keys of peer's run (made for a
- * run not seen yet, and for a peer at rest its active state): its frames. */
-/* Whether keys may be made for a run not seen (a token is there). */
-static bool may_key(PureLinkReceiver *s, uint64_t now) {
-    if (!s->key_at) s->key_tokens = KEYINGS;
-    s->key_tokens += (double)(now - s->key_at) * KEYINGS / 1e9;
-    if (s->key_tokens > KEYINGS) s->key_tokens = KEYINGS;
-    s->key_at = now;
-    return s->key_tokens >= 1;
+/* Keys in (from the sender) and out (answers) of an epoch's secret. */
+static bool epoch_keys(const PureLinkReceiver *s, const Peer *peer, Run *r, const unsigned char secret[32]) {
+    return derive(secret, peer->key, s->own_public, r->run, 0, r->in_key, r->in_base) &&
+           derive(secret, s->own_public, peer->key, r->answer_run, r->run, r->out_key, r->out_base);
 }
 
+/* A run not seen: in the epoch the memo has for it (its accepted one, or the
+ * one before with that one accepted), or epoch 0. False when the packet's
+ * epoch is none of these. */
+static bool run_begun(PureLinkReceiver *s, const Peer *peer, const Active *a, Run *r, unsigned e) {
+    const unsigned char *memo = memo_epoch(s, (uint32_t)(peer - s->peers), r->run);
+    uint32_t n = memo ? get32(memo + 8) : 0;
+    const unsigned char *secret = a->secret;
+    if (memo && e == (n & EPOCH_MASK)) r->epoch = n, secret = memo + 16;
+    else if (memo && n && e == ((n - 1) & EPOCH_MASK)) { /* it had not used the one accepted yet */
+        r->epoch = n - 1, secret = memo + 48;
+        r->accepted = true;
+        r->accept_epoch = n;
+        memcpy(r->accept_secret, memo + 16, 32);
+        memcpy(r->offered, memo + 80, PURE_SEAL_KEY);
+        memcpy(r->accept_public, memo + 112, PURE_SEAL_KEY);
+        if (!derive(r->accept_secret, peer->key, s->own_public, r->run, 0, r->accept_in_key, r->accept_in_base)) return false;
+    } else if (e) return false;
+    memcpy(r->epoch_secret, secret, 32);
+    if (memo && r->epoch == n && n && /* its packets of the epoch before may still come */
+        derive(memo + 48, peer->key, s->own_public, r->run, 0, r->before_in_key, r->before_in_base))
+        r->has_before = true, r->before_epoch = n - 1;
+    return epoch_keys(s, peer, r, secret);
+}
+
+/* The sender uses the epoch accepted: it is its epoch now. */
+static void confirm(PureLinkReceiver *s, const Peer *peer, Run *r) {
+    memcpy(r->before_in_key, r->in_key, PURE_AEAD_KEY);
+    memcpy(r->before_in_base, r->in_base, PURE_AEAD_NONCE);
+    r->before_epoch = r->epoch;
+    r->has_before = true;
+    r->epoch = r->accept_epoch;
+    memcpy(r->epoch_secret, r->accept_secret, 32);
+    explicit_bzero(r->accept_secret, sizeof(r->accept_secret));
+    r->accepted = false;
+    epoch_keys(s, peer, r, r->epoch_secret);
+    ++s->counts.epochs;
+}
+
+/* A token of a bucket that fills rate a second, up to most: whether one is
+ * there. */
+static bool has_token(double *tokens, uint64_t *at, double rate, double most, uint64_t now) {
+    if (!*at) *tokens = most;
+    *tokens += (double)(now - *at) * rate / 1e9;
+    if (*tokens > most) *tokens = most;
+    *at = now;
+    return *tokens >= 1;
+}
+
+/* An offer of epoch n (in a packet of epoch e): the next, or a chain begun
+ * again from epoch 0. The same offer again gets the same ACCEPT; a new one
+ * waits for the turn (accept_waiting). blocked: the packet had no records
+ * (the sender waits for the epoch). */
+static void offer_taken(PureLinkReceiver *s, Active *a, Run *r, uint32_t n, const unsigned char offered[PURE_SEAL_KEY],
+                        unsigned e, bool blocked, uint64_t now) {
+    if (r->accepted && r->accept_epoch == n && !memcmp(r->offered, offered, PURE_SEAL_KEY)) {
+        mark_due(s, r); /* said again */
+        return;
+    }
+    if (!(n == 1 && !e) && !(n == r->epoch + 1 && e == (r->epoch & EPOCH_MASK))) return;
+    if (r->waits || (a->accepted_at && now - a->accepted_at < ACCEPT_EVERY_NS)) return;
+    if (!blocked && !has_token(&s->accept_tokens, &s->accept_at, ACCEPTS, ACCEPTS_AT_ONCE, now)) return; /* it offers again */
+    void *offers = room(s->offers, &s->offer_capacity, s->offer_count, sizeof(*s->offers), 16);
+    if (!offers) return;
+    s->offers = offers;
+    s->offers[s->offer_count].run = r;
+    s->offers[s->offer_count++].id = r->run;
+    if (!blocked) --s->accept_tokens;
+    a->accepted_at = now;
+    r->waits = true;
+    r->waiting_epoch = n;
+    r->waiting_in = (unsigned char)e;
+    memcpy(r->waiting, offered, PURE_SEAL_KEY);
+}
+
+/* The offers taken, accepted (after the answers of the packets they came
+ * in): each one X25519. */
+static void accept_waiting(PureLinkReceiver *s, uint64_t now) {
+    for (size_t k = 0; k < s->offer_count; ++k) {
+        Run *r = s->offers[k].run;
+        if (r->run != s->offers[k].id || !r->waits) continue; /* its slot holds another run now */
+        r->waits = false;
+        Active *a = r->active;
+        const Peer *peer = &s->peers[a->peer];
+        uint32_t n = r->waiting_epoch;
+        const unsigned char *base = n == 1 && !r->waiting_in ? a->secret
+                                    : n == r->epoch + 1 && r->waiting_in == (r->epoch & EPOCH_MASK) ? r->epoch_secret
+                                                                                                     : NULL;
+        if (!base) continue; /* its epoch moved on since */
+        if (!s->ours_ready || now - s->ours_at >= OURS_LIFE) { /* a new pair for this second's offers */
+            explicit_bzero(s->ours_private, sizeof(s->ours_private));
+            if (!(s->ours_ready = pure_link_ephemeral(s->ours_private, s->ours_public))) continue;
+            s->ours_at = now;
+            ++s->counts.secrets;
+        }
+        unsigned char fresh[32];
+        ++s->counts.secrets;
+        bool ok = pure_link_agree(s->ours_private, r->waiting, fresh) && epoch_secret_of(base, fresh, n, r->accept_secret) &&
+                  derive(r->accept_secret, peer->key, s->own_public, r->run, 0, r->accept_in_key, r->accept_in_base);
+        explicit_bzero(fresh, sizeof(fresh));
+        if (!ok) continue;
+        memcpy(r->accept_public, s->ours_public, PURE_SEAL_KEY);
+        memcpy(r->offered, r->waiting, PURE_SEAL_KEY);
+        r->accept_epoch = n;
+        r->accepted = true;
+        if (base == a->secret && r->epoch) { /* begun again from epoch 0: so are its answers, the old epoch before */
+            memcpy(r->before_in_key, r->in_key, PURE_AEAD_KEY);
+            memcpy(r->before_in_base, r->in_base, PURE_AEAD_NONCE);
+            r->before_epoch = r->epoch;
+            r->has_before = true;
+            r->epoch = 0;
+            memcpy(r->epoch_secret, a->secret, 32);
+            epoch_keys(s, peer, r, r->epoch_secret);
+        }
+        remember_epoch(s, a->peer, r);
+        mark_due(s, r);
+    }
+    s->offer_count = 0;
+}
+
+/* Whether keys may be made for a run not seen (a token is there). */
+static bool may_key(PureLinkReceiver *s, uint64_t now) {
+    return has_token(&s->key_tokens, &s->key_at, KEYINGS, KEYINGS, now);
+}
+
+enum { AS_NOW, AS_ACCEPTED, AS_BEFORE, AS_ZERO };
+
+/* A packet from peer, if it opens with the keys of peer's run (made for a
+ * run not seen yet, and for a peer at rest its active state): its frames. */
 static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *packet, size_t n, const void *from,
                       size_t from_size, uint64_t now) {
     uint64_t pn = get64(packet + 13), run = get64(packet + 5);
+    unsigned e = packet[0] & EPOCH_MASK;
     Active *a = peer->active;
     Run *r = a ? run_found(a, run) : NULL;
     if (!r && !may_key(s, now)) return false;
     bool woke = !a;
     if (woke && !(a = activate(s, peer, now))) return false;
     Run made = {.active = a, .run = run, .seen = now, .used = true};
-    if (!r) made.answer_run = random64();
-    bool keyed = r || (++s->counts.keyed && derive(a->secret, peer->key, s->own_public, run, 0, made.in_key, made.in_base) &&
-                       derive(a->secret, s->own_public, peer->key, made.answer_run, run, made.out_key, made.out_base));
+    /* The keys of the packet's epoch: the one accepted, its run's now, the
+     * one before, or epoch 0's for a sender that begins its epochs again;
+     * for a run not seen, as the memo has it. Two may share the four bits
+     * (a chain begun again): each is tried. */
+    unsigned char zero_key[PURE_AEAD_KEY], zero_base[PURE_AEAD_NONCE];
+    const unsigned char *keys[4], *bases[4];
+    int as[4], tries = 0;
+    if (!r) {
+        made.answer_run = random64();
+        ++s->counts.keyed;
+        if (run_begun(s, peer, a, &made, e)) {
+            if (made.accepted && e == (made.accept_epoch & EPOCH_MASK))
+                keys[tries] = made.accept_in_key, bases[tries] = made.accept_in_base, as[tries++] = AS_ACCEPTED;
+            keys[tries] = made.in_key, bases[tries] = made.in_base, as[tries++] = AS_NOW;
+        }
+    } else {
+        if (r->accepted && e == (r->accept_epoch & EPOCH_MASK))
+            keys[tries] = r->accept_in_key, bases[tries] = r->accept_in_base, as[tries++] = AS_ACCEPTED;
+        if (e == (r->epoch & EPOCH_MASK)) keys[tries] = r->in_key, bases[tries] = r->in_base, as[tries++] = AS_NOW;
+        if (r->has_before && e == (r->before_epoch & EPOCH_MASK))
+            keys[tries] = r->before_in_key, bases[tries] = r->before_in_base, as[tries++] = AS_BEFORE;
+        if (!e && r->epoch && derive(a->secret, peer->key, s->own_public, run, 0, zero_key, zero_base))
+            keys[tries] = zero_key, bases[tries] = zero_base, as[tries++] = AS_ZERO;
+    }
     unsigned char plain[DATAGRAM_MOST], nonce[PURE_AEAD_NONCE];
-    nonce_of(nonce, r ? r->in_base : made.in_base, pn);
     size_t size = n - HEADER - PURE_AEAD_TAG;
-    const unsigned char *key = r ? r->in_key : made.in_key, *give = key;
-    if (s->open_keyed && !memcmp(s->open_key, key, PURE_AEAD_KEY)) give = NULL; /* the key it has */
-    else if (keyed) memcpy(s->open_key, key, PURE_AEAD_KEY), s->open_keyed = true;
-    if (!keyed || !pure_aead_open(s->aead, give, nonce, packet, HEADER, packet + HEADER, n - HEADER, plain)) {
+    int opened = -1;
+    for (int t = 0; t < tries && opened < 0; ++t) {
+        const unsigned char *give = keys[t];
+        nonce_of(nonce, bases[t], pn);
+        if (s->open_keyed && !memcmp(s->open_key, keys[t], PURE_AEAD_KEY)) give = NULL; /* the key it has */
+        else memcpy(s->open_key, keys[t], PURE_AEAD_KEY), s->open_keyed = true;
+        if (pure_aead_open(s->aead, give, nonce, packet, HEADER, packet + HEADER, n - HEADER, plain)) opened = as[t];
+    }
+    explicit_bzero(zero_key, sizeof(zero_key));
+    if (opened < 0) {
         explicit_bzero(&made, sizeof(made));
         if (!r) s->key_tokens = s->key_tokens > 1 ? s->key_tokens - 1 : 0; /* keys for nothing */
         if (woke) let_go(s, a);
         return false;
     }
-    if (woke) ++s->counts.woken;
+    if (woke) ++s->counts.woken, s->counts.remembered += a->remembered; /* counted once it opens */
     bool fresh = !r;
     if (!r) r = install_run(a, &made);
+    explicit_bzero(&made, sizeof(made));
+    if (opened == AS_ACCEPTED) confirm(s, peer, r);
     if (!fresh && had(r, pn)) { /* again (opened first: nothing unsealed answers): its acknowledgment was lost, perhaps */
         r->ack_due = true;
         mark_due(s, r);
@@ -1710,7 +2061,8 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
     if (!elsewhere || newest) r->bytes_in += n;
     ++s->counts.received;
     Stream *st = NULL;
-    bool eliciting = false;
+    bool eliciting = false, records = false;
+    const unsigned char *offer = NULL; /* taken after the frames: whether records came with it */
     for (size_t at = 0; at < size;) {
         unsigned type = plain[at++];
         if (type == F_STREAM) {
@@ -1733,7 +2085,7 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
                 mark_ready(s, st);
             }
             at += RECORD_HEAD - 1 + length;
-            eliciting = true;
+            eliciting = records = true;
         } else if (type == F_RECORDS) {
             if (at + RECORDS_HEAD - 1 > size) break;
             uint64_t first = get64(plain + at), length = 0;
@@ -1746,9 +2098,14 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
                 at += used + length;
             }
             if (st) mark_ready(s, st);
-            eliciting = true;
+            eliciting = records = true;
             if (i < count) break; /* cut short: the rest is not read */
         } else if (type == F_PING) {
+            eliciting = true;
+        } else if (type == F_OFFER) { /* the sender's key for its next epoch */
+            if (at + EPOCH_FRAME - 1 > size) break;
+            offer = plain + at;
+            at += EPOCH_FRAME - 1;
             eliciting = true;
         } else if (type == F_RESPONSE) { /* the challenge said back: the address is the sender's */
             if (at + 8 > size) break;
@@ -1758,6 +2115,7 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
         } else
             break; /* padding, or what this side does not know: the rest */
     }
+    if (offer) offer_taken(s, a, r, get32(offer), offer + 4, e, !records, now);
     if (eliciting) {
         r->ack_due = true;
         mark_due(s, r);
@@ -1767,7 +2125,7 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
 
 void pure_link_receiver_take(PureLinkReceiver *s, const unsigned char *packet, size_t n, const void *from,
                              size_t from_size, uint64_t now) {
-    if (n < HEADER + PURE_AEAD_TAG || n > DATAGRAM_MOST || packet[0] != VERSION || !s->index_size) return;
+    if (n < HEADER + PURE_AEAD_TAG || n > DATAGRAM_MOST || (packet[0] & ~EPOCH_MASK) != VERSION || !s->index_size) return;
     uint32_t id = get32(packet + 1);
     size_t mask = s->index_size - 1;
     uint64_t run = get64(packet + 5);
@@ -1803,6 +2161,12 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
             put64(body + at, r->challenge);
             at += 8;
         }
+        if (r->accepted) { /* the sender's next epoch, until it uses it */
+            body[at] = F_ACCEPT;
+            put32(body + at + 1, r->accept_epoch);
+            memcpy(body + at + 5, r->accept_public, PURE_SEAL_KEY);
+            at += EPOCH_FRAME;
+        }
         if (r->ack_due && r->got_count) {
             body[at++] = F_ACK;
             put64(body + at, r->got[0].last);
@@ -1833,7 +2197,8 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
         const unsigned char *give = r->out_key;
         if (s->seal_keyed && !memcmp(s->seal_key, r->out_key, PURE_AEAD_KEY)) give = NULL; /* the key it has */
         else memcpy(s->seal_key, r->out_key, PURE_AEAD_KEY), s->seal_keyed = true;
-        size_t total = seal_packet(s->aead, give, r->out_base, s->own_id, r->answer_run, r->next_pn++, body, at, packet);
+        size_t total =
+            seal_packet(s->aead, give, r->out_base, s->own_id, r->epoch, r->answer_run, r->next_pn++, body, at, packet);
         if (total && send(context, packet, total, r->address, r->address_size)) {
             ++s->counts.packets;
             if (!r->checked) r->bytes_out += total;
@@ -1878,9 +2243,17 @@ static void hand_over_ready(PureLinkReceiver *s) {
 void pure_link_receiver_turn(PureLinkReceiver *s, const PureLinkDone *done, size_t count, uint64_t now,
                              PureLinkSend *send, void *context) {
     if (!s->swept) s->swept = s->trimmed = now;
+    if (s->ours_ready && now - s->ours_at >= OURS_LIFE) { /* its second is over: the private half goes */
+        explicit_bzero(s->ours_private, sizeof(s->ours_private));
+        s->ours_ready = false;
+    }
     apply_done(s, done, count);
     hand_over_ready(s);
     answer(s, now, send, context);
+    if (s->offer_count) { /* the offers' X25519 after the answers, then their ACCEPTs */
+        accept_waiting(s, now);
+        answer(s, now, send, context);
+    }
     sweep(s, now);
 }
 
@@ -1897,6 +2270,8 @@ void pure_link_receiver_free(PureLinkReceiver *s) {
     if (!s) return;
     while (s->active_count) let_go(s, s->actives[0]);
     pure_aead_free(s->aead);
+    explicit_bzero(s->ours_private, sizeof(s->ours_private));
+    free(s->offers);
     if (s->memo) munmap(s->memo, s->memo_size);
     free(s->actives);
     free(s->peers);

@@ -16,18 +16,35 @@
  *
  * A packet is a header in the clear, then frames sealed with AES-128-GCM
  * (the header as associated data):
- *   u8 0x70 (version 0), u32le the key id of the node that sent it (FNV-1a
- *   of its public key; two keys may share an id, and a receiver tries the
- *   keys it allows with it), u64le that node's run (random, new each time it
- *   starts, so no nonce repeats under a key across restarts), u64le the
- *   packet's number in its run.
- * Keys come from the secret the two nodes' keys share (X25519) by
- * HKDF-SHA256, with both public keys and the sending node's run: a sender's
- * packets use its own run. A receiver's answers use a run drawn for each
- * sender's run it keeps (made again when a sender at rest comes back, so no
- * nonce repeats), and add the run they answer, so an answer opens only in
- * that run. The nonce is the key's base with the packet's number in its
- * last eight bytes (XOR, big-endian, as QUIC does).
+ *   u8 0x70 (version 0) with the low four bits of the epoch it is sealed
+ *   in, u32le the key id of the node that sent it (FNV-1a of its public
+ *   key; two keys may share an id, and a receiver tries the keys it allows
+ *   with it), u64le that node's run (random, new each time it starts, so no
+ *   nonce repeats under a key across restarts), u64le the packet's number in
+ *   its run.
+ * Keys come from an epoch's secret by HKDF-SHA256, with both public keys and
+ * the sending node's run: a sender's packets use its own run. A receiver's
+ * answers use a run drawn for each sender's run it keeps (made again when a
+ * sender at rest comes back, so no nonce repeats), and add the run they
+ * answer, so an answer opens only in that run. The nonce is the key's base
+ * with the packet's number in its last eight bytes (XOR, big-endian, as QUIC
+ * does).
+ *
+ * Epoch 0's secret is the one the two nodes' keys share (X25519). A sender
+ * offers the public half of a pair made for the next epoch (OFFER) in its
+ * packets until the receiver accepts it with a half of its own (ACCEPT); the
+ * X25519 of the two halves and the epoch's secret make the next one's
+ * (HKDF, "pure link 0 epoch" and its number), and the private halves are let
+ * go. The sender seals in it from the ACCEPT on; the receiver takes it once
+ * a packet of it opens, and opens the late ones of the epoch before. So what
+ * went in epoch 1 and on cannot be opened by one who later has both nodes'
+ * keys: only a run's first packets, before its first answer, are sealed
+ * under the static keys. A new epoch every hour or GiB
+ * (pure_link_sender_epochs). A receiver that remembers (pure_link_remember)
+ * writes the epoch it accepted for each sender's run, and goes on in it after
+ * it starts again; a sender that hears nothing for 2 s over 4 probes (the
+ * receiver forgot) offers again in epoch 0, with no records, and the chain
+ * begins again from the nodes' keys.
  *
  * What an attacker on the path may do, and what it gets (link/test-link.c
  * does each):
@@ -41,7 +58,11 @@
  *     three times the bytes that came from it (RFC 9000 §8).
  *   - send as a key or a source not allowed: nothing opens or is delivered.
  *     (Anyone who has the receiver's private key can seal as any sender to
- *     it: static-static keys, as Noise KK's first message.)
+ *     it, in a run of its own: static-static keys, as Noise KK's first
+ *     message. Epochs do not change this; they keep it out of others'
+ *     runs.)
+ *   - keep what went, and later get both nodes' keys: it opens only the
+ *     packets of epoch 0.
  *   - flood made-up packets under a known key's id, runs never seen: keys
  *     made for a run that did not open cost a token, 256 a second, so at
  *     most that many HKDFs a second; X25519 once a sender (remembered).
@@ -70,6 +91,11 @@
  *                the address the answers go to
  *   0x08 RESPONSE u64: a challenge said back (the last few had), in the next
  *                packet that goes (records, or a probe)
+ *   0x09 OFFER   u32 epoch, a public key (X25519): the sender's half of that
+ *                epoch's secret, until it is accepted
+ *   0x0a ACCEPT  u32 epoch, a public key: the receiver's half, until a
+ *                packet of that epoch opens (the same offer again gets the
+ *                same; one a second for a run)
  *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
  *                a whole datagram
  * Losses are detected as RFC 9002 says, with RACK's patience for packets
@@ -87,13 +113,13 @@ enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,
  * the last number stored; packets called lost that came late, and
- * congestion events undone for it; runs keyed (keys made from a secret)
- * and secrets made (X25519); a receiver's senders woken (their active
+ * congestion events undone for it; runs keyed (keys made from a secret),
+ * secrets made (X25519 of the nodes' keys), epochs begun; a receiver's senders woken (their active
  * state made), of them with a secret remembered (no X25519), let go when
  * idle, and active now. */
 typedef struct {
     uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, late, undone, keyed, secrets,
-        woken, remembered, swept, active;
+        epochs, woken, remembered, swept, active;
 } PureLinkCounts;
 
 /* ---- The sending side: one output's saved sends to a receiver's input, as
@@ -132,6 +158,9 @@ size_t pure_link_sender_datagram(const PureLinkSender *);
 void pure_link_sender_refused(PureLinkSender *, uint64_t number);
 /* When the next timer is due (ns), or 0 for none. */
 uint64_t pure_link_sender_due(const PureLinkSender *);
+/* How often it moves on to a new epoch (ns), and after how many bytes sent
+ * (an hour and a GiB at first). */
+void pure_link_sender_epochs(PureLinkSender *, uint64_t every_ns, uint64_t bytes);
 /* The last number queued; the last the receiver stored. */
 uint64_t pure_link_sender_queued(const PureLinkSender *);
 uint64_t pure_link_sender_stored(const PureLinkSender *);
