@@ -41,24 +41,33 @@ static uint32_t timeline[BUCKETS];
 
 static uint64_t now_ns(void);
 
-/* Records as sent, each once, in order: the one after the last taken on
- * (one taken before would be a delivery again), of the payload's bytes. */
+/* Records applied as a host does: from the one after the last taken on,
+ * each as sent (else wrong); ones taken before are let be (the listener
+ * does not know yet how far this side heard: its first delivery after the
+ * link starts may begin anywhere); a gap stops it, and says so. */
 static bool deliver(void *context, const PureLinkDelivery *d) {
     (void)context;
     const unsigned char *at = d->records;
+    uint64_t now = now_ns(), took = 0;
+    bool gap = false;
     for (unsigned k = 0; k < d->count; ++k) {
         uint32_t size = (uint32_t)at[0] | (uint32_t)at[1] << 8 | (uint32_t)at[2] << 16 | (uint32_t)at[3] << 24;
-        if (d->first + k != heard + 1 + k || size != payload_size || memcmp(at + 4, payload, size)) ++wrong;
+        uint64_t seq = d->first + k;
+        if (seq > heard + 1) {
+            gap = true;
+            break;
+        }
+        if (seq == heard + 1) {
+            if (size != payload_size || memcmp(at + 4, payload, size)) ++wrong;
+            if (queued_at) waited[seq] = now - queued_at[seq];
+            heard = seq;
+            ++took;
+        }
         at += 4 + size;
     }
-    uint64_t now = now_ns();
-    if (queued_at)
-        for (unsigned k = 0; k < d->count; ++k) waited[d->first + k] = now - queued_at[d->first + k];
-    if ((now - began) / 100000000u < BUCKETS) timeline[(now - began) / 100000000u] += d->count;
-    if ((size_t)(at - d->records) != d->size || d->first > heard + 1) ++wrong;
-    if (d->first + d->count - 1 > heard) heard = d->first + d->count - 1;
-    atomic_fetch_add(&delivered, d->count);
-    pure_link_done(listener, d->token, heard, true, false);
+    if ((now - began) / 100000000u < BUCKETS) timeline[(now - began) / 100000000u] += (uint32_t)took;
+    atomic_fetch_add(&delivered, took);
+    pure_link_done(listener, d->token, heard, true, gap);
     return true;
 }
 
