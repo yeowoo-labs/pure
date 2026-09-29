@@ -513,6 +513,10 @@ static void sample_rtt(PureLinkSender *l, uint64_t latest, uint64_t ack_delay) {
     l->smoothed_rtt = (7 * l->smoothed_rtt + adjusted) / 8;
 }
 
+/* The RTT as the window's pace takes it: never under a microsecond (a
+ * sample of 0, as on a path within one clock tick, would make it infinite). */
+static uint64_t rtt_now(const PureLinkSender *l) { return most(l->sampled ? l->smoothed_rtt : FIRST_RTT, 1000); }
+
 /* The window after bytes acknowledged: slow start below the threshold,
  * then CUBIC. The cubic's target is where it will be an RTT on, and the
  * window closes on it by the share of the window acknowledged. */
@@ -527,7 +531,7 @@ static void grow(PureLinkSender *l, uint64_t bytes, uint64_t now) {
         l->cubic_max = l->cubic_reno = w;
         l->cubic_k = 0;
     }
-    double t = (double)(now - l->cubic_epoch) / 1e9, rtt = (double)(l->sampled ? l->smoothed_rtt : FIRST_RTT) / 1e9;
+    double t = (double)(now - l->cubic_epoch) / 1e9, rtt = (double)rtt_now(l) / 1e9;
     /* Reno's pace, 0.53 datagrams an RTT as the CUBIC deployed (Linux's,
      * quinn's) keeps it, not RFC 9438's whole datagram once past the window
      * before the event: as the acknowledgments come, or as time goes (RFC
@@ -758,7 +762,7 @@ static size_t transmit(PureLinkSender *l, Flight *f, const unsigned char *body, 
 
 /* Whether pacing lets a packet go now (else when it will, in pace_due). */
 static bool paced(PureLinkSender *l, uint64_t now) {
-    double rtt = (double)(l->sampled ? l->smoothed_rtt : FIRST_RTT);
+    double rtt = (double)rtt_now(l);
     double rate = (double)l->window * (l->window < l->threshold ? 2.0 : 1.25) / rtt; /* bytes a ns */
     double most = rate * 2e6, least = 10.0 * l->datagram, top = 256.0 * l->datagram;
     most = most < least ? least : most > top ? top : most;
