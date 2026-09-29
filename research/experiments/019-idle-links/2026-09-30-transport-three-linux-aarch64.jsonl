@@ -1,0 +1,15 @@
+{"item": 48, "records": 300000, "round": 0, "pure": {"us": 0.321, "per_second": 4802771, "packets": 13889}, "quinn": {"us": 0.32, "per_second": 5644023}, "ngtcp2": {"us": 0.27, "per_second": 6164660}}
+{"item": 48, "records": 300000, "round": 1, "pure": {"us": 0.28200000000000003, "per_second": 5876868, "packets": 13902}, "quinn": {"us": 0.31000000000000005, "per_second": 5991396}, "ngtcp2": {"us": 0.27, "per_second": 6081678}}
+{"item": 48, "records": 300000, "round": 2, "pure": {"us": 0.278, "per_second": 5810147, "packets": 13835}, "quinn": {"us": 0.31000000000000005, "per_second": 6066156}, "ngtcp2": {"us": 0.27, "per_second": 6174980}}
+{"item": 48, "records": 300000, "round": 3, "pure": {"us": 0.28, "per_second": 5781982, "packets": 13835}, "quinn": {"us": 0.31000000000000005, "per_second": 6091074}, "ngtcp2": {"us": 0.27, "per_second": 6209375}}
+{"item": 48, "records": 300000, "round": 4, "pure": {"us": 0.274, "per_second": 5879728, "packets": 13847}, "quinn": {"us": 0.31000000000000005, "per_second": 6069152}, "ngtcp2": {"us": 0.27, "per_second": 6189593}}
+{"item": 1000, "records": 100000, "round": 0, "pure": {"us": 2.612, "per_second": 756596, "packets": 75008}, "quinn": {"us": 3.84, "per_second": 520495}, "ngtcp2": {"us": 3.5, "per_second": 542464}}
+{"item": 1000, "records": 100000, "round": 1, "pure": {"us": 3.2969999999999997, "per_second": 490797, "packets": 75008}, "quinn": {"us": 3.94, "per_second": 508117}, "ngtcp2": {"us": 3.5700000000000003, "per_second": 532466}}
+{"item": 1000, "records": 100000, "round": 2, "pure": {"us": 2.521, "per_second": 786189, "packets": 75008}, "quinn": {"us": 3.94, "per_second": 507144}, "ngtcp2": {"us": 3.52, "per_second": 542998}}
+{"item": 1000, "records": 100000, "round": 3, "pure": {"us": 2.6390000000000002, "per_second": 751117, "packets": 75008}, "quinn": {"us": 3.82, "per_second": 522353}, "ngtcp2": {"us": 3.54, "per_second": 536007}}
+{"item": 1000, "records": 100000, "round": 4, "pure": {"us": 2.6239999999999997, "per_second": 752571, "packets": 75008}, "quinn": {"us": 4.43, "per_second": 442694}, "ngtcp2": {"us": 3.54, "per_second": 538312}}
+{"item": 16000, "records": 20000, "round": 0, "pure": {"us": 44.4, "per_second": 44166, "packets": 233920}, "quinn": {"us": 60.16, "per_second": 32745}, "ngtcp2": {"us": 54.129999999999995, "per_second": 35859}}
+{"item": 16000, "records": 20000, "round": 1, "pure": {"us": 40.21, "per_second": 49579, "packets": 233920}, "quinn": {"us": 61.55, "per_second": 32043}, "ngtcp2": {"us": 54.989999999999995, "per_second": 35156}}
+{"item": 16000, "records": 20000, "round": 2, "pure": {"us": 40.06, "per_second": 49735, "packets": 233920}, "quinn": {"us": 59.16, "per_second": 33280}, "ngtcp2": {"us": 54.81, "per_second": 35190}}
+{"item": 16000, "records": 20000, "round": 3, "pure": {"us": 39.324, "per_second": 50714, "packets": 233920}, "quinn": {"us": 60.26, "per_second": 32420}, "ngtcp2": {"us": 53.99, "per_second": 35958}}
+{"item": 16000, "records": 20000, "round": 4, "pure": {"us": 40.421, "per_second": 49209, "packets": 233920}, "quinn": {"us": 60.14, "per_second": 32044}, "ngtcp2": {"us": 54.43, "per_second": 35632}}

@@ -543,6 +543,26 @@ def drain_quic(work, n, size):
     return row
 
 
+def drain_ngtcp2(work, n, size):
+    """The same over ngtcp2 (ngtcp2/drain.c, OpenSSL 3.5's QUIC TLS): one
+    connection, one stream, n messages; CPU of both sides."""
+    import resource
+    binary = ROOT / 'build/third/ngtcp2-drain'
+    server, info = start([binary, 'serve', work / 'cert.der', work / 'key.der'])
+    before, children = thread_cpu(server.pid, None), resource.getrusage(resource.RUSAGE_CHILDREN)
+    client = subprocess.run([str(binary), 'drain', str(info['port']), str(n), str(size + 8 + 5)], capture_output=True,
+                            timeout=600)
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    row = json.loads(client.stdout)
+    server_cpu = thread_cpu(server.pid, None) - before
+    client_cpu = (after.ru_utime + after.ru_stime - children.ru_utime - children.ru_stime) * 1000
+    row['client_cpu_us_per_message'] = round(client_cpu * 1000 / n, 2)
+    server.kill()
+    server.wait()
+    row['service_cpu_us_per_message'] = round(server_cpu * 1000 / n, 2)
+    return row
+
+
 def transport(work, size, n):
     """The transport alone (transport.c): a backlog of n records of an order
     with a size-byte item drained through a link and a listener in one
