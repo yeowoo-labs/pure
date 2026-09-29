@@ -26,7 +26,13 @@ enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PIN
  * (a sender may offer an epoch again with another key). */
 enum { EPOCH_MASK = 15, EPOCH_FRAME = 1 + 4 + PURE_SEAL_KEY, ANSWERS = 4, ACCEPT_FRAME = EPOCH_FRAME + ANSWERS };
 enum { RECORDS_HEAD = 10 }; /* type, the first number, the count */
-enum { RANGES = 32, UNITS = 64, CREDIT = 1024, BATCH = 256, RECORD_HEAD = 19 };
+enum { RANGES = 32, UNITS = 64, BATCH = 256, RECORD_HEAD = 19 };
+/* Credit: records past the last stored a sender may send, CREDIT before a
+ * receiver says (its STORED), and what it says after, CREDIT_MOST at most
+ * (a sender takes no more): what fits in what it holds (HELD_MOST) at the
+ * size its records have had. A receiver takes records that far past the
+ * last it stored, as its memory lets it. */
+enum { CREDIT = 1024, CREDIT_MOST = 65536 };
 /* A receiver keeps a peer's runs in RUNS places (its sender's, and the one
  * before a restart), and more beside when more of them send at once (a
  * node's outputs to this one, each a sender of its own), RUNS_MOST in all. */
@@ -702,7 +708,7 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
             for (uint32_t i = 0; i < r->parts; ++i)
                 if (part_of(r, i)->state == RECEIVED) set_part(l, r, part_of(r, i), UNSENT);
         }
-    l->limit = most(l->limit, heard + (credit ? least(credit, 65536) : 1));
+    l->limit = most(l->limit, heard + (credit ? least(credit, CREDIT_MOST) : 1));
 }
 
 /* The receiver refuses the stream: no records go for a while, then a
@@ -1274,6 +1280,7 @@ typedef struct Stream {
     unsigned line_count;
     unsigned out_count; /* the delivery out from the line: its records and bytes (let go at once when all applied) */
     size_t out_bytes;
+    uint32_t mean; /* the bytes a record took on the line in the last delivery from it (0: none yet) */
     bool tail;
     uint32_t tail_size, tail_got;
     Held *held;                  /* records not yet stored, by number: held_count from held_first */
@@ -1972,7 +1979,7 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
         st->stored_due = true; /* sent again: say again how far it is stored */
         return;
     }
-    if ((st->known && seq > st->heard + CREDIT) || size > RECORD_MOST) return;
+    if ((st->known && seq > st->heard + CREDIT_MOST) || size > RECORD_MOST) return;
     if (st->known && seq < line_end(st)) return; /* on the line already */
     if ((!length && offset) || offset > size || length > size - offset) return;
     if (st->known && seq == line_end(st) && on_line(st, size, offset, bytes, length)) return;
@@ -2329,7 +2336,7 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
             unsigned i = 0;
             /* In order, nothing held and no tail waiting: straight onto the
              * line, the frame at once (what hold does a record, for all). */
-            bool straight = st && st->known && first == line_end(st) && first + count - 1 <= st->heard + CREDIT &&
+            bool straight = st && st->known && first == line_end(st) && first + count - 1 <= st->heard + CREDIT_MOST &&
                             !st->tail && !st->held_count &&
                             st->line_size - st->line_head + (size - at) <= HELD_MOST &&
                             line_room(st, size - at + 4 * (size_t)count);
@@ -2434,8 +2441,9 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
             at += put_names(body + at, st->source, st->input_name);
             put64(body + at, st->heard);
             body[at + 8] = st->gap ? STORED_GAP : 0;
-            size_t room = st->held_bytes + (st->line_size - st->line_head) < HELD_MOST ? CREDIT : 1;
-            put32(body + at + 9, (uint32_t)room);
+            size_t used = st->held_bytes + (st->line_size - st->line_head);
+            size_t credit = used >= HELD_MOST ? 1 : st->mean ? (HELD_MOST - used) / st->mean : CREDIT;
+            put32(body + at + 9, (uint32_t)(credit < 1 ? 1 : credit > CREDIT_MOST ? CREDIT_MOST : credit));
             at += 13;
             st->stored_due = st->gap = false;
         }
@@ -2470,6 +2478,7 @@ static void apply_done(PureLinkReceiver *s, const PureLinkDone *done, size_t cou
         if (!done[k].stored) continue; /* not saved: handed over again */
         if (!st->known || done[k].heard > st->heard) st->heard = done[k].heard;
         if (!st->known) st->line_first = st->heard + 1; /* the line begins */
+        if (st->out_count) st->mean = (uint32_t)(st->out_bytes / st->out_count);
         if (st->out_count && st->heard == st->line_first + st->out_count - 1) { /* the delivery applied whole */
             st->line_head += st->out_bytes;
             st->line_first += st->out_count;
