@@ -19,7 +19,7 @@ enum { DATAGRAM_MOST = PURE_LINK_DATAGRAM_MOST, BODY_MOST = DATAGRAM_MOST - HEAD
  * at least this much of it fits. */
 enum { PART_LEAST = 64 };
 enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, F_RECORDS = 6, F_CHALLENGE = 7,
-       F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, F_LOST = 11, STORED_GAP = 1 };
+       F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, F_LOST = 11, F_REFUSED = 12, STORED_GAP = 1 };
 /* A packet's first byte is VERSION with the sending side's epoch (mod 16)
  * in its low four bits; OFFER and ACCEPT are an epoch's number (u32) and a
  * public key made for it, and ACCEPT the first bytes of the key it answers
@@ -60,6 +60,9 @@ static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7, RENO_PACE = 3 * (1 - 0.7) /
 static const uint64_t FIRST_RTT = 100 * MS, ACK_DELAY_MOST = 25 * MS, GRANULARITY = 1 * MS, PTO_MOST = 1000 * MS,
                       STORED_WAIT = 1000 * MS, RECORD_MOST = PURE_LINK_RECORD_MOST, HELD_MOST = RECORD_MOST,
                       REACH_AGAIN = 1000 * MS, REACH_RARELY = 600000 * MS;
+/* A stream refused is tried a packet at a time, a second on at first and
+ * twice as long each time it is refused again. */
+static const uint64_t REFUSED_FIRST = 1000 * MS, REFUSED_MOST = 64000 * MS;
 /* An epoch lasts an hour or a GiB sent; a sender that hears nothing for 2 s
  * with packets out, and four probes, takes its epoch for lost. */
 static const uint64_t EPOCH_EVERY = UINT64_C(3600000) * MS, EPOCH_MOST = UINT64_C(1) << 30, FALLBACK_WAIT = 2000 * MS;
@@ -197,6 +200,7 @@ static size_t get_names(const unsigned char *p, size_t size, char source[PURE_LI
 /* ---- The sending side */
 
 enum { UNSENT, FLYING, RECEIVED };
+enum { TRYING = 1, TRIED = 2 }; /* a packet sent to learn whether a stream refused is taken now */
 /* Part of a record's bytes, gone whole in one packet (numbered pn): a
  * record is one part until a packet has room for only some of it. */
 typedef struct { uint64_t pn; uint32_t offset, length; uint8_t state; } Part;
@@ -286,6 +290,14 @@ struct PureLinkSender {
     uint64_t received;    /* parts received and not yet stored */
     uint64_t unsent_from; /* no record before this number has a part unsent */
     unsigned pto_count, probes;
+    /* The receiver refuses the stream (why; 0: it does not): records go
+     * again from refused_until (0: now), a packet of them (numbered
+     * tried_pn: TRYING, then TRIED once acknowledged), the wait twice as
+     * long each time it is refused (and back to the first once a record is
+     * stored); the refusal is over when that packet is acknowledged in an
+     * answer with no REFUSED. */
+    unsigned refusal, tried;
+    uint64_t refused_until, refused_wait, tried_pn;
     PureLinkCounts counts;
     /* Epochs (forward secrecy). Keys come from the secret of the epoch it
      * sends in (epoch 0's is the two nodes' static secret), each made from
@@ -635,6 +647,7 @@ static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint6
         uint64_t oldest = l->flights[l->flight_head].pn, newest = oldest + l->flight_count - 1;
         for (uint64_t pn = most(first, oldest); pn <= least(last, newest); ++pn) {
             Flight *f = flight_of(l, pn);
+            if (f && l->tried == TRYING && pn == l->tried_pn) l->tried = TRIED;
             if (f && f->lost) came_late(l, f, now);
             if (!f || f->done) continue;
             settle(l, f);
@@ -671,6 +684,7 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
     uint64_t heard = get64(p + names);
     unsigned flags = p[names + 8];
     uint32_t credit = get32(p + names + 9);
+    l->refusal = l->tried = 0, l->refused_until = l->refused_wait = 0; /* the stream is taken, and stored */
     if (heard > l->stored) {
         while (l->count && record_at(l, 0)->seq <= heard) {
             Record *r = record_at(l, 0);
@@ -689,6 +703,24 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
                 if (part_of(r, i)->state == RECEIVED) set_part(l, r, part_of(r, i), UNSENT);
         }
     l->limit = most(l->limit, heard + (credit ? least(credit, 65536) : 1));
+}
+
+/* The receiver refuses the stream: no records go for a while, then a
+ * packet of them, to learn whether it takes them now. Said of packets that
+ * went before that one (it is not acknowledged yet: the ACK comes first),
+ * it changes nothing. What went goes again: none of it was taken. */
+static void refused(PureLinkSender *l, unsigned why, uint64_t now) {
+    if (l->refusal && l->tried != TRIED) return;
+    l->refusal = why ? why : PURE_LINK_NO_INPUT;
+    l->refused_wait = l->refused_wait ? least(2 * l->refused_wait, REFUSED_MOST) : REFUSED_FIRST;
+    l->refused_until = now + l->refused_wait;
+    l->tried = 0;
+    ++l->counts.refused;
+    for (size_t k = 0; k < l->count; ++k) {
+        Record *r = record_at(l, k);
+        for (uint32_t i = 0; i < r->parts; ++i)
+            if (part_of(r, i)->state != UNSENT) set_part(l, r, part_of(r, i), UNSENT);
+    }
 }
 
 void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_t n, uint64_t now) {
@@ -716,6 +748,7 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
     if (!pure_aead_open(l->in, NULL, nonce, packet, HEADER, packet + HEADER, n - HEADER, plain)) return;
     ++l->counts.received;
     l->heard_at = now;
+    bool refusing = false;
     for (size_t at = 0; at < size;) {
         unsigned type = plain[at++];
         if (type == F_ACK && at + 13 <= size && at + 13 + 16u * plain[at + 12] <= size) {
@@ -749,9 +782,16 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
             Flight *f = flight_of(l, get64(plain + at));
             if (f && !f->done && (l->epoch || l->renegotiating)) epoch_lost(l);
             at += 8;
+        } else if (type == F_REFUSED) {
+            char source[PURE_LINK_NAME + 1], input[PURE_LINK_NAME + 1];
+            size_t names = get_names(plain + at, size - at, source, input);
+            if (!names || at + names + 1 > size) break;
+            if (!strcmp(source, l->source) && !strcmp(input, l->input)) refused(l, plain[at + names], now), refusing = true;
+            at += names + 1;
         } else if (type != F_PING)
             break; /* padding, or what this side does not know: the rest */
     }
+    if (l->refusal && l->tried == TRIED && !refusing) l->refusal = l->tried = 0, l->refused_until = 0; /* taken now */
 }
 
 /* A packet of what is not sent yet, in order, within the receiver's credit
@@ -916,6 +956,7 @@ size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DA
     l->pace_due = 0; /* set again only when pacing holds a packet back */
     if (!probe && l->in_flight + l->datagram > l->cc.window) l->unused = false;
     if (!l->out || (!probe && l->in_flight + l->datagram > l->cc.window) || !flight_room(l)) return 0;
+    if (l->refusal && !probe && (l->refused_until || l->tried)) return 0; /* refused: a packet a wait */
     if (!probe && !paced(l, now)) return 0;
     if (!l->offering && !l->renegotiating && (now - l->epoch_at >= l->epoch_every || l->epoch_bytes >= l->epoch_most))
         offer(l, l->epoch + 1); /* on to the next epoch: a key made for it goes in the packets until accepted */
@@ -946,6 +987,7 @@ size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DA
     size_t total = transmit(l, &f, body, size, out, now);
     if (!total) return 0;
     if (probe) --l->probes;
+    if (l->refusal && f.count) l->tried = TRYING, l->tried_pn = f.pn;
     *number = f.pn;
     return total;
 }
@@ -970,10 +1012,12 @@ uint64_t pure_link_sender_due(const PureLinkSender *l) {
         uint64_t stored = l->stored_changed + STORED_WAIT;
         if (!due || stored < due) due = stored;
     }
+    if (l->refusal && l->refused_until && l->count && (!due || l->refused_until < due)) due = l->refused_until;
     return due;
 }
 
 void pure_link_sender_tick(PureLinkSender *l, uint64_t now) {
+    if (l->refusal && l->refused_until && l->refused_until <= now) l->refused_until = 0; /* a packet may try */
     if (l->epoch && !l->renegotiating && l->eliciting && l->heard_at && now - l->heard_at > FALLBACK_WAIT &&
         l->pto_count >= FALLBACK_PROBES) {
         /* Nothing heard for long with packets out: the receiver lost the
@@ -1124,6 +1168,8 @@ bool pure_link_sender_shared(PureLinkSender *l, const unsigned char peer[PURE_SE
 uint64_t pure_link_sender_queued(const PureLinkSender *l) { return l->queued; }
 
 unsigned pure_link_sender_probes(const PureLinkSender *l) { return l->pto_count; }
+
+unsigned pure_link_sender_refusal(const PureLinkSender *l) { return l->refusal; }
 
 void pure_link_sender_epochs(PureLinkSender *l, uint64_t every_ns, uint64_t bytes) {
     l->epoch_every = every_ns;
@@ -1296,6 +1342,10 @@ struct PureLinkReceiver {
      * LOST, to a sender whose packet came in an epoch it does not know. */
     struct { unsigned char packet[HEADER + 9 + PURE_AEAD_TAG], to[PURE_LINK_ADDRESS]; size_t to_size; } *notices;
     size_t notice_count, notice_capacity;
+    /* Streams refused since the last answers: REFUSED frames, each in the
+     * answer to the run that named it (a slot may hold another run by then). */
+    struct { Run *run; uint64_t id; size_t size; unsigned char frame[3 + 2 * PURE_LINK_NAME]; } *refusals;
+    size_t refusal_count, refusal_capacity;
     PureAead *aead; /* keyed by each packet's run */
     unsigned char open_key[PURE_AEAD_KEY], seal_key[PURE_AEAD_KEY]; /* the keys it has now */
     bool open_keyed, seal_keyed;
@@ -1733,16 +1783,24 @@ static bool allowed(const PureLinkReceiver *s, const Peer *peer, const char *sou
     return false;
 }
 
-/* The stream of a peer's source to input, made the first time: NULL when the
- * source is not allowed from the peer, or the host has no input that takes
- * such messages. */
-static Stream *stream_of(PureLinkReceiver *s, Active *a, const char *source, const char *input, uint32_t shape) {
+/* The stream of a peer's source to input, made the first time: NULL when it
+ * is refused (why: the source is not allowed from the peer, or the host has
+ * no input that takes such messages), or memory runs out (why 0). */
+static Stream *stream_of(PureLinkReceiver *s, Active *a, const char *source, const char *input, uint32_t shape,
+                         unsigned *why) {
+    *why = 0;
     for (unsigned k = 0; k < a->stream_count; ++k) {
         Stream *st = a->streams[k];
-        if (!strcmp(st->input_name, input) && !strcmp(st->source, source)) return st->shape == shape ? st : NULL;
+        if (strcmp(st->input_name, input) || strcmp(st->source, source)) continue;
+        if (st->shape != shape) *why = PURE_LINK_OTHER_SHAPE;
+        return *why ? NULL : st;
     }
-    int index = allowed(s, &s->peers[a->peer], source) ? s->host.input(s->host.context, input, shape) : -1;
-    if (index < 0) return NULL;
+    int index = allowed(s, &s->peers[a->peer], source) ? s->host.input(s->host.context, input, shape)
+                                                       : -PURE_LINK_NOT_ALLOWED;
+    if (index < 0) {
+        *why = index == -PURE_LINK_OTHER_SHAPE || index == -PURE_LINK_NOT_ALLOWED ? (unsigned)-index : PURE_LINK_NO_INPUT;
+        return NULL;
+    }
     size_t capacity = a->stream_capacity;
     Stream **streams = room(a->streams, &capacity, a->stream_count, sizeof(*streams), 2), *st;
     if (!streams) return NULL;
@@ -2091,6 +2149,25 @@ static void lost(PureLinkReceiver *s, const Peer *peer, const Active *a, uint64_
     explicit_bzero(key, sizeof(key));
 }
 
+/* A stream refused (its names as the packet had them), said in the answer
+ * to its run: once a turn. */
+static void refuse(PureLinkReceiver *s, Run *r, const unsigned char *names, size_t size, unsigned why) {
+    for (size_t k = 0; k < s->refusal_count; ++k)
+        if (s->refusals[k].run == r && s->refusals[k].size == size + 2 && !memcmp(s->refusals[k].frame + 1, names, size))
+            return;
+    void *more = room(s->refusals, &s->refusal_capacity, s->refusal_count, sizeof(*s->refusals), 4);
+    if (!more) return;
+    s->refusals = more;
+    unsigned char *frame = s->refusals[s->refusal_count].frame;
+    frame[0] = F_REFUSED;
+    memcpy(frame + 1, names, size);
+    frame[1 + size] = (unsigned char)why;
+    s->refusals[s->refusal_count].run = r;
+    s->refusals[s->refusal_count].id = r->run;
+    s->refusals[s->refusal_count++].size = size + 2;
+    ++s->counts.refused;
+}
+
 /* Whether keys may be made for a run not seen (a token is there). */
 static bool may_key(PureLinkReceiver *s, uint64_t now) {
     return has_token(&s->key_tokens, &s->key_at, KEYINGS, KEYINGS, now);
@@ -2185,11 +2262,13 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
             char source[PURE_LINK_NAME + 1], input[PURE_LINK_NAME + 1];
             size_t names = get_names(plain + at, size - at, source, input);
             if (!names || at + names + 4 > size) break;
-            st = stream_of(s, a, source, input, get32(plain + at + names));
+            unsigned why;
+            st = stream_of(s, a, source, input, get32(plain + at + names), &why);
             if (st) {
                 st->run = r;
                 st->run_id = r->run;
-            }
+            } else if (why)
+                refuse(s, r, plain + at, names, why);
             at += names + 4;
             eliciting = true;
         } else if (type == F_RECORD) {
@@ -2320,6 +2399,11 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
             at += 13;
             st->stored_due = st->gap = false;
         }
+        for (size_t i = 0; i < s->refusal_count; ++i)
+            if (s->refusals[i].run == r && s->refusals[i].id == r->run && at + s->refusals[i].size <= BODY) {
+                memcpy(body + at, s->refusals[i].frame, s->refusals[i].size);
+                at += s->refusals[i].size;
+            }
         r->ack_due = false;
         if (!at) continue;
         if (!r->checked && r->bytes_out + HEADER + at + PURE_AEAD_TAG > 3 * r->bytes_in) continue; /* no amplifier */
@@ -2333,7 +2417,7 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
             if (!r->checked) r->bytes_out += total;
         }
     }
-    s->due_count = 0;
+    s->due_count = s->refusal_count = 0;
 }
 
 /* What the host said of its deliveries: the saved records let go, and how
@@ -2412,6 +2496,7 @@ void pure_link_receiver_free(PureLinkReceiver *s) {
     explicit_bzero(s->ours_private, sizeof(s->ours_private));
     free(s->offers);
     free(s->notices);
+    free(s->refusals);
     if (s->memo) munmap(s->memo, s->memo_size);
     free(s->actives);
     free(s->peers);

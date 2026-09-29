@@ -106,6 +106,11 @@
  *                its epoch for lost offers epoch 1 again with another)
  *   0x0b LOST    u64 a packet's number: a receiver knows no epoch of its run
  *                (sealed in epoch 0, in a run of answers of its own)
+ *   0x0c REFUSED source, input (as STREAM), u8 why (PURE_LINK_NO_INPUT and
+ *                on): the receiver takes no records of that stream; its
+ *                sender sends one packet of them a wait from then (a
+ *                second, twice as long each time, 64 s at most) until one
+ *                is stored
  *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
  *                a whole datagram
  * Losses are detected as RFC 9002 says, with RACK's patience for packets
@@ -123,18 +128,23 @@
  * stream not yet stored). */
 enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 48,
        PURE_LINK_RECORD_MOST = 16 << 20 };
+/* Why a receiver refuses a stream (REFUSED): no input of that name takes
+ * messages, the input takes messages of another shape, or the sender's key
+ * may not send as that source. */
+enum { PURE_LINK_NO_INPUT = 1, PURE_LINK_OTHER_SHAPE = 2, PURE_LINK_NOT_ALLOWED = 3 };
 
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,
  * the last number stored; packets called lost that came late, and
  * congestion events undone for it; runs keyed (keys made from a secret),
  * secrets made (X25519), epochs begun, and a sender's epochs taken for lost
- * (begun again from the nodes' keys); a receiver's senders woken (their
- * active state made), of them with a secret remembered (no X25519), let go
- * when idle, and active now. */
+ * (begun again from the nodes' keys); streams refused (a receiver's said, a
+ * sender's heard); a receiver's senders woken (their active state made), of
+ * them with a secret remembered (no X25519), let go when idle, and active
+ * now. */
 typedef struct {
     uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, late, undone, keyed, secrets,
-        epochs, fallbacks, woken, remembered, swept, active;
+        epochs, fallbacks, refused, woken, remembered, swept, active;
 } PureLinkCounts;
 
 /* ---- The sending side: one output's saved sends to a receiver's input, as
@@ -177,6 +187,9 @@ uint64_t pure_link_sender_due(const PureLinkSender *);
 /* Probes in a row that nothing answered (0 once anything is): the path, or
  * the receiver where it was, may be gone. */
 unsigned pure_link_sender_probes(const PureLinkSender *);
+/* Why the receiver refuses the stream (PURE_LINK_NO_INPUT and on), or 0:
+ * cleared once it stores one of its records. */
+unsigned pure_link_sender_refusal(const PureLinkSender *);
 /* How often it moves on to a new epoch (ns), and after how many bytes sent
  * (an hour and a GiB at first). */
 void pure_link_sender_epochs(PureLinkSender *, uint64_t every_ns, uint64_t bytes);
@@ -189,7 +202,9 @@ void pure_link_sender_free(PureLinkSender *);
 /* ---- The receiving side: packets from the senders allowed (a source name
  * and the key it seals with, a few bytes each however many there are: see
  * pure_link_idle). A stream (a source to an input) goes to the host's input
- * its name and shape find (its number, or -1: the stream is refused). Whole
+ * its name and shape find: its number, or -PURE_LINK_OTHER_SHAPE when it
+ * takes another shape, or -1 (PURE_LINK_NO_INPUT) when none takes messages
+ * by that name; a stream refused is said to be (REFUSED). Whole
  * records of a stream, in order, go to deliver as one delivery; the host
  * applies them from the one after the source's last heard number, stops at
  * a gap, saves, and then says so with a done (pure_link_receiver_turn).

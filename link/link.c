@@ -112,7 +112,7 @@ static int take_datagrams(int fd, Taking *t) {
 
 struct PureLink {
     PureLinkSender *sender; /* under the lock */
-    char host[256], port[8], input[PURE_LINK_NAME + 1];
+    char host[256], port[8], input[PURE_LINK_NAME + 1], source[PURE_LINK_NAME + 1];
     bool peered, keyed; /* given the receiver's key; the keys made from it */
     pthread_mutex_t lock;
     bool stopping, started;
@@ -132,8 +132,9 @@ struct PureLink {
     uint64_t burst_pn[BURST];
     size_t segment; /* the datagram's size the bursts are cut at */
     bool gso, no_gso;
-    unsigned looked; /* the probes unanswered when it last looked for the receiver */
-    bool nowhere;    /* a send failed as the system saw no way there (no route, nobody at the port) */
+    unsigned looked;  /* the probes unanswered when it last looked for the receiver */
+    bool nowhere;     /* a send failed as the system saw no way there (no route, nobody at the port) */
+    unsigned refusal; /* why the receiver refused the stream when it was last said (0: it takes it) */
 };
 
 PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, const PureSealKey *own,
@@ -159,6 +160,7 @@ PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, co
     memcpy(l->host, host, (size_t)(colon - host));
     memcpy(l->port, colon + 1, (size_t)(slash - colon - 1));
     strcpy(l->input, slash + 1);
+    memcpy(l->source, source, length);
     l->fd = l->wake = -1;
     if (!(l->sender = pure_link_sender(source, l->input, shape, own, own_public))) {
         pthread_mutex_destroy(&l->lock);
@@ -362,8 +364,16 @@ static void *run_link(void *context) {
         uint64_t stored = pure_link_sender_stored(l->sender);
         bool told = stored != l->told;
         l->told = stored;
+        unsigned refusal = pure_link_sender_refusal(l->sender), before = l->refusal;
+        l->refusal = refusal;
         pthread_mutex_unlock(&l->lock);
         if (told && l->notify) l->notify(l->context);
+        if (refusal && refusal != before) /* as a wire says the receiver does not take its sends */
+            fprintf(stderr, "{\"link\":\"pure://%s:%s/%s\",\"source\":\"%s\",\"error\":\"the receiver refuses the stream: %s; "
+                    "trying again\"}\n", l->host, l->port, l->input, l->source,
+                    refusal == PURE_LINK_NOT_ALLOWED ? "this node's key may not send as that source"
+                    : refusal == PURE_LINK_OTHER_SHAPE ? "its input takes messages of another shape"
+                                                       : "it has no input of that name taking messages");
     }
     return NULL;
 }

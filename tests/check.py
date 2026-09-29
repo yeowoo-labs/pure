@@ -946,6 +946,79 @@ print(json.dumps(check.server_links_udp(Path({str(aup)!r}), Path({str(pure)!r}),
     return json.loads(done.stdout.strip().splitlines()[-1])
 
 
+def server_links_refused(aup, pure, work):
+    """A link to an input the receiver's app does not have: the receiver
+    says so (REFUSED), and the sender says it once on stderr, as a wire says
+    a receiver does not take its sends, and tries a packet a wait instead of
+    sending its records again every second."""
+    import select
+    import socket
+    import time
+    sender_module, receiver_module = work / 'refused-sender.pmod', work / 'refused-receiver.pmod'
+    for module, text in ((sender_module, LINK_SENDER), (receiver_module, LINK_RECEIVER)):
+        source = module.with_suffix('.aup')
+        source.write_text(text)
+        compile_module(aup, source, module)
+
+    def free_port(kind=socket.SOCK_STREAM):
+        with socket.socket(socket.AF_INET, kind) as probe:
+            probe.bind(('127.0.0.1', 0))
+            return probe.getsockname()[1]
+
+    def start(args, port):
+        process = subprocess.Popen([str(a) for a in args] + ['--port', str(port)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        line = process.stdout.readline() if ready else b''
+        assert line, f'host did not start: {process.stderr.read(2000) if process.poll() is not None else ""}'
+        return process, json.loads(line)
+
+    keys = {}
+    for name in ('sender', 'receiver'):
+        process, info = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'refused-key',
+                               '--key', work / f'refused-{name}.key'], 0)
+        keys[name] = info['public_key']
+        process.terminate()
+        process.communicate(timeout=30)
+    port_a, port_b, link_port = free_port(), free_port(), free_port(socket.SOCK_DGRAM)
+    receiver = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'refused-b',
+                      '--key', work / 'refused-receiver.key', '--link-port', link_port,
+                      '--sender', f'refused-sender.ordered={keys["sender"]}'], port_b)[0]
+    sender = start([pure / 'build/pure-serve', '--module', sender_module, '--store', work / 'refused-a',
+                    '--key', work / 'refused-sender.key', '--send', f'ordered=pure://127.0.0.1:{link_port}/nosuch',
+                    '--seal', f'ordered={keys["receiver"]}'], port_a)[0]
+    said = []
+    try:
+        import http.client
+        connection = http.client.HTTPConnection('127.0.0.1', port_a, timeout=10)
+        body = json.dumps({'item': 'x', 'count': 1}).encode()
+        connection.request('POST', '/inputs/buy', body, {'Content-Length': str(len(body)), 'Content-Type': 'application/json'})
+        assert connection.getresponse().status == 200
+        connection.close()
+        deadline = time.time() + 10
+        while not said and time.time() < deadline:
+            ready, _, _ = select.select([sender.stderr], [], [], 0.1)
+            if ready:
+                line = sender.stderr.readline().decode()
+                if line.startswith('{"link"'):
+                    said.append(json.loads(line))
+        assert said and said[0]['error'].startswith('the receiver refuses the stream: it has no input of that name'), said
+        time.sleep(2.5)  # tried at 1 s and at 3 s: not every second, and said once
+    finally:
+        stats = {}
+        for name, process in (('a', sender), ('b', receiver)):
+            process.terminate()
+            _, error = process.communicate(timeout=30)
+            assert process.returncode == 0, error[-1000:]
+            lines = error.decode().splitlines()
+            stats[name] = [json.loads(line) for line in lines if line.startswith('{"active"')][-1]
+            if name == 'a':
+                said += [json.loads(line) for line in lines if line.startswith('{"link"')]
+    assert len(said) == 1, said
+    assert stats['a']['link_packets'] <= 8 and stats['a']['link_records'] <= 4, stats['a']
+    return {'said': said[0]['error'], 'packets': stats['a']['link_packets']}
+
+
 def server_links_moved(aup, pure, work):
     """A receiver's store moved to another address (H3 of
     docs/design/011-pure-transport.md), in namespaces of its own (unshare
@@ -2192,6 +2265,7 @@ def main():
         report['server_links'] = server_links(aup, pure, work)
         report['server_links_udp'] = server_links_udp(aup, pure, work)
         report['server_links_udp_lossy'] = server_links_udp_lossy(aup, pure, work)
+        report['server_links_refused'] = server_links_refused(aup, pure, work)
         report['server_links_moved'] = server_links_moved(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)
         report['server_sealed'] = server_sealed(aup, pure, work)

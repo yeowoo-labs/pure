@@ -97,6 +97,7 @@ typedef struct {
     PureLinkDone done[64], told[64];
     size_t done_count;
     unsigned fail_every; /* a delivery's save fails every so many (0: never) */
+    bool later_open;     /* the app has an input "later" (as "order") */
 } World;
 
 static void put_packet(World *w, bool to_receiver, const unsigned char *bytes, size_t size) {
@@ -142,8 +143,9 @@ static bool answer(void *context, const unsigned char *packet, size_t size, cons
 }
 
 static int input_of(void *context, const char *name, uint32_t shape) {
-    (void)context;
-    return !strcmp(name, "order") && shape == 0x5eed ? 3 : -1;
+    const World *w = context;
+    if (strcmp(name, "order") && !(w && w->later_open && !strcmp(name, "later"))) return -PURE_LINK_NO_INPUT;
+    return shape == 0x5eed ? 3 : -PURE_LINK_OTHER_SHAPE;
 }
 
 /* Applied from the one after the last heard, in order; a gap stops it. */
@@ -741,6 +743,85 @@ static void outputs(const char *dir) {
     pure_seal_key_free(a), pure_seal_key_free(b);
 }
 
+/* Streams a receiver refuses: a source its key may not send as, an input it
+ * does not have, one of another shape. Each sender hears why, and then
+ * tries a packet a wait (1, 2, 4 s ...) instead of sending its records
+ * again every second; and one refused until the receiver's app has the
+ * input goes on then, all its records delivered. */
+static void refusals(const char *dir) {
+    unsigned char public_a[PURE_SEAL_KEY], public_b[PURE_SEAL_KEY], out[PURE_LINK_DATAGRAM_MOST];
+    PureSealKey *a = key(dir, "a.key", public_a), *b = key(dir, "b.key", public_b);
+    char memo[512];
+    snprintf(memo, sizeof(memo), "%s/b.key.links", dir);
+    unlink(memo);
+    World w = {.packets = malloc(PACKETS * sizeof(Packet))};
+    if (!w.packets) exit(1);
+    /* Its senders let go only after two minutes quiet: else one of the runs
+     * the memo does not keep is answered LOST at a try (a minute apart). */
+    PureLinkReceiver *r = receiver_of(&w, b, public_b, public_a, memo, 120000);
+    struct { const char *source, *input; uint32_t shape; unsigned why; PureLinkSender *s; uint64_t packets; } links[] = {
+        {"other.source", "order", 0x5eed, PURE_LINK_NOT_ALLOWED, NULL, 0},
+        {"test.ordered", "nothing", 0x5eed, PURE_LINK_NO_INPUT, NULL, 0},
+        {"test.ordered", "order", 0x5eee, PURE_LINK_OTHER_SHAPE, NULL, 0},
+        {"test.ordered", "later", 0x5eed, 0, NULL, 0}, /* no such input until 10 s on */
+    };
+    enum { LINKS = sizeof(links) / sizeof(links[0]) };
+    static unsigned char bytes[20200];
+    for (unsigned i = 0; i < LINKS; ++i) {
+        PureLinkSender *s = links[i].s = pure_link_sender(links[i].source, links[i].input, links[i].shape, a, public_a);
+        if (!s || !pure_link_sender_peer(s, public_b)) exit(1);
+        for (uint64_t seq = 1; seq <= 200; ++seq) {
+            size_t size = record_size(seq);
+            for (size_t k = 0; k < size; ++k) bytes[k] = record_byte(seq, k);
+            if (!pure_link_sender_queue(s, seq, bytes, size)) exit(1);
+        }
+    }
+    uint64_t number;
+    for (; w.now < 90000 * MS; w.now += MS) {
+        if (w.now == 10000 * MS) w.later_open = true;
+        for (unsigned i = 0; i < LINKS; ++i)
+            for (size_t size; (size = pure_link_sender_packet(links[i].s, out, false, w.now, &number)); ++links[i].packets)
+                pure_link_receiver_take(r, out, size, "sender0", 7, w.now);
+        size_t told = w.done_count;
+        memcpy(w.told, w.done, told * sizeof(*w.done));
+        w.done_count = 0;
+        pure_link_receiver_turn(r, w.told, told, w.now, answer, &w);
+        for (size_t k = 0; k < w.count;) { /* each answer to all: only its sender's run opens it */
+            if (w.packets[k].at > w.now) {
+                ++k;
+                continue;
+            }
+            for (unsigned i = 0; i < LINKS; ++i) pure_link_sender_take(links[i].s, w.packets[k].bytes, w.packets[k].size, w.now);
+            w.packets[k] = w.packets[--w.count];
+        }
+        for (unsigned i = 0; i < LINKS; ++i) pure_link_sender_tick(links[i].s, w.now);
+    }
+    PureLinkCounts heard;
+    pure_link_receiver_counts(r, &heard);
+    for (unsigned i = 0; i < LINKS; ++i) {
+        PureLinkCounts c;
+        pure_link_sender_counts(links[i].s, &c);
+        unsigned why = pure_link_sender_refusal(links[i].s);
+        printf("{\"case\":\"refused\",\"source\":\"%s\",\"input\":\"%s\",\"why\":%u,\"refused\":%llu,\"packets\":%llu,"
+               "\"stored\":%llu}\n", links[i].source, links[i].input, why, (unsigned long long)c.refused,
+               (unsigned long long)links[i].packets, (unsigned long long)pure_link_sender_stored(links[i].s));
+        if (links[i].why) /* refused at once, then at 1, 3, 7, 15, 31 and 63 s: a packet each */
+            CHECK(why == links[i].why && c.refused == 7 && links[i].packets <= 30,
+                  "refused %s to %s: why %u (not %u), refused %llu times, %llu packets", links[i].source,
+                  links[i].input, why, links[i].why, (unsigned long long)c.refused, (unsigned long long)links[i].packets);
+        else /* taken at the try after 10 s (15 s on) */
+            CHECK(!why && c.refused == 4 && pure_link_sender_stored(links[i].s) == 200 && w.heard == 200,
+                  "refused until taken: why %u, refused %llu times, %llu stored, %llu heard", why,
+                  (unsigned long long)c.refused, (unsigned long long)pure_link_sender_stored(links[i].s),
+                  (unsigned long long)w.heard);
+        pure_link_sender_free(links[i].s);
+    }
+    CHECK(heard.refused >= 3 * 7 + 4, "refused: the receiver said so %llu times", (unsigned long long)heard.refused);
+    pure_link_receiver_free(r);
+    pure_seal_key_free(a), pure_seal_key_free(b);
+    free(w.packets);
+}
+
 /* The largest send (PURE_LINK_RECORD_MOST) goes whole, over a receiver that
  * never heard of the stream before; one byte more is not taken to send. */
 typedef struct { World *w; PureLinkSender *s; } Largest;
@@ -858,6 +939,7 @@ int main(void) {
     impostors(dir);
     flood(dir);
     outputs(dir);
+    refusals(dir);
     largest(dir);
     char command[600];
     snprintf(command, sizeof(command), "rm -rf %s", dir);

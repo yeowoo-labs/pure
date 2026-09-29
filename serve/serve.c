@@ -2339,10 +2339,8 @@ static void stop_shard(Host *host) {
 static int link_input(void *context, const char *name, uint32_t shape) {
     const PureModule *m = ((Owner *)context)->executor.app.module;
     int index = pure_module_input(m, name);
-    if (index < 0 || m->input[index].kind != PURE_KIND_MESSAGE || m->input[index].keyed ||
-        pure_module_shape(m, (uint32_t)index) != shape)
-        return -1;
-    return index;
+    if (index < 0 || m->input[index].kind != PURE_KIND_MESSAGE || m->input[index].keyed) return -PURE_LINK_NO_INPUT;
+    return pure_module_shape(m, (uint32_t)index) == shape ? index : -PURE_LINK_OTHER_SHAPE;
 }
 
 /* Records a link delivered, queued at the owner as a request is: applied
