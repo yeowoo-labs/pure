@@ -24,7 +24,7 @@ void pure_wire_trust(const char *ca_file);
 PureWire *pure_wire_open(const PureModule *m, const char *output, const char *url, const char *source,
                          char *error, size_t size);
 uint32_t pure_wire_output(const PureWire *);
-/* Seal the wire's sends to the receiver's public key (serve/seal.h),
+/* Seal the wire's sends to the receiver's public key (link/seal.h),
  * authenticated by own (whose public half is from) when given: each
  * request's body, bound to its source, first number and count, goes with
  * X-Pure-Seal naming the suite, the session, the seal's number and the

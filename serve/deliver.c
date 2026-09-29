@@ -59,7 +59,7 @@ struct PureWire {
 };
 
 /* TLS verifies a receiver's certificate against the system's CAs or the
- * file pure_wire_trust named (serve/tls.h). */
+ * file pure_wire_trust named (link/tls.h). */
 static const char *tls_ca;
 
 void pure_wire_trust(const char *ca_file) { tls_ca = ca_file; }

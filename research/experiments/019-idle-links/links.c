@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 /* Many senders to one Pure node over links without connections
  * (docs/design/011-pure-transport.md, M1). Written from the packet format in
- * serve/link.h alone, with OpenSSL: a second implementation of it.
+ * link/link.h alone, with OpenSSL: a second implementation of it.
  *
  *   links keys N FILE
  *       N X25519 keys into FILE (each a private then a public half, 32 bytes
@@ -111,7 +111,7 @@ static int keys(size_t n, const char *path) {
     return 0;
 }
 
-/* ---- Keys of a link (serve/link.h): X25519, HKDF-SHA256, AES-128-GCM */
+/* ---- Keys of a link (link/link.h): X25519, HKDF-SHA256, AES-128-GCM */
 
 static bool secret_of(const unsigned char own[2 * KEY], const unsigned char peer[KEY], unsigned char out[32]) {
     EVP_PKEY *mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, own, KEY);

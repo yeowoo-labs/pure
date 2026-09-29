@@ -552,11 +552,12 @@ def main():
     args = parser.parse_args()
     counts = [int(c) for c in args.counts.split(',')]
     if args.transport:
-        subprocess.run(['make', '-s', '-C', str(ROOT), 'build/libpure.a', 'build/pure-crypto.so'], check=True)
-        subprocess.run(['cc', '-O2', '-g', '-std=c17', '-Wall', '-Wextra', '-Werror', f'-I{ROOT}/core', f'-I{ROOT}/serve',
-                        '-DPURE_ASYNC_EFFECTS', str(Path(__file__).parent / 'transport.c'), str(ROOT / 'serve/link.c'),
-                        str(ROOT / 'serve/crypto.c'), str(ROOT / 'build/libpure.a'), '-lm', '-pthread', '-ldl', '-o',
-                        str(ROOT / 'build/link-transport')], check=True)
+        subprocess.run(['make', '-s', '-C', str(ROOT), 'build/libpure.a', 'build/libpure-link.a', 'build/pure-crypto.so'],
+                       check=True)
+        subprocess.run(['cc', '-O2', '-g', '-std=c17', '-Wall', '-Wextra', '-Werror', f'-I{ROOT}/core', f'-I{ROOT}/link',
+                        str(Path(__file__).parent / 'transport.c'), str(ROOT / 'build/libpure-link.a'),
+                        str(ROOT / 'build/libpure.a'), '-lm', '-pthread', '-ldl', '-o', str(ROOT / 'build/link-transport')],
+                       check=True)
         subprocess.run(['cargo', 'build', '--release', '--offline', '--quiet'], cwd=Path(__file__).parent / 'quic', check=True)
         with tempfile.TemporaryDirectory(prefix='pure-m5-', dir=args.store) as directory:
             work = Path(directory)

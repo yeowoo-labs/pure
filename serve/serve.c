@@ -162,7 +162,7 @@ typedef struct {
     RouteKind route;
     PureFault fault;  /* a failed event's */
     const char *type; /* a view's content type */
-    struct LinkJob *link; /* records a link delivered (serve/link.h) */
+    struct LinkJob *link; /* records a link delivered (link/link.h) */
     uint64_t heard;       /* then the source's last number heard after them */
     bool gap;             /* and whether they stopped at a gap */
 } Applied;

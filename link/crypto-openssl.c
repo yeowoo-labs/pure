@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-/* pure-crypto.so: what pure-serve asks of OpenSSL (serve/crypto.h), mapped
+/* pure-crypto.so: what pure-serve asks of OpenSSL (link/crypto.h), mapped
  * only when a server seals, opens a seal or reaches an https receiver. It
  * exports one table, pure_crypto. */
 #include "crypto.h"

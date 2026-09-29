@@ -13,7 +13,7 @@
  * (one encapsulation) and numbers its seals in it; a receiver opens a
  * session once and then each seal by its number. A private key lives in
  * OpenSSL's secure heap: locked in memory, out of core dumps, cleared when
- * freed. OpenSSL comes with pure-crypto.so (serve/crypto.c), mapped the
+ * freed. OpenSSL comes with pure-crypto.so (link/crypto.c), mapped the
  * first time a key is read or a session made. */
 enum { PURE_SEAL_KEY = 32, PURE_SEAL_OVERHEAD = 16 }; /* a public key; a seal's tag */
 
@@ -54,7 +54,7 @@ bool pure_unseal(PureOpener *, uint64_t n, const char *aad, const unsigned char 
                  unsigned char *plain);
 void pure_opener_free(PureOpener *);
 
-/* Links (serve/link.h): the secret two nodes share (X25519 of this node's
+/* Links (link/link.h): the secret two nodes share (X25519 of this node's
  * private key and the other's public key: the same on both sides, and
  * never all zeros), keys from it (HKDF-SHA256 with the info given), and
  * AES-128-GCM under such a key with the nonce the caller gives (sealing may

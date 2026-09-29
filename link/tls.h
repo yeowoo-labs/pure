@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* TLS to https receivers (serve/crypto.c): one client context, verifying a
+/* TLS to https receivers (link/crypto.c): one client context, verifying a
  * receiver's certificate against the system's CAs or ca_file, and its name. */
 typedef struct PureTls PureTls;
 /* The context, made once; false with why in error when it cannot be. */

@@ -10,24 +10,29 @@ BUILD ?= build
 #           states as drafts; state.h and store.h are what it asks of storage.
 #   store/  the tree store (one file; commits are one contiguous write and one
 #           sync; formats PURETRE3 and PUREREC1).
-#   serve/  pure-serve: the HTTP host, outbound delivery, JSON in place; with
-#           pure-crypto.so beside it, OpenSSL's part (TLS to https receivers,
-#           sealed sends), mapped only by a server that uses one.
+#   link/   links without connections (UDP, sealed, no handshake) and the
+#           crypto they and sealed sends use; with pure-crypto.so beside it,
+#           OpenSSL's part (TLS to https receivers, sealing), mapped only by a
+#           process that uses one.
+#   serve/  pure-serve: the HTTP host, outbound delivery, JSON in place.
 #   cli/    command-line hosts.
 # libpure.a is the app model with the tree store: what a host embeds (Vega's
-# surfaces link it). prototypes/ keeps the earlier document runtime (000-077).
+# surfaces link it); libpure-link.a is the links with the crypto loader.
+# prototypes/ keeps the earlier document runtime (000-077).
 # Unit tests sit by their part (core/test-module.c, store/test-tree-store.c,
 # store/test-log.c, serve/test-message-json.c);
 # tests/check.py checks the hosts end to end.
 INCLUDES = -Icore
 MODEL = core/module.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c
 STORE = store/store-tree.c store/store-log.c
-SERVE = serve/serve.c serve/deliver.c serve/link.c serve/message-json.c serve/crypto.c
-HEADERS = $(wildcard core/*.h) $(wildcard serve/*.h) $(wildcard store/*.h)
+LINK = link/link.c link/crypto.c
+SERVE = serve/serve.c serve/deliver.c serve/message-json.c
+HEADERS = $(wildcard core/*.h) $(wildcard link/*.h) $(wildcard serve/*.h) $(wildcard store/*.h)
 OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(MODEL) $(STORE))
+LINK_OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(LINK))
 
 .PHONY: all check
-all: $(BUILD)/libpure.a $(BUILD)/pure-serve $(BUILD)/pure-crypto.so $(BUILD)/pure-run $(BUILD)/pure-edit-module
+all: $(BUILD)/libpure.a $(BUILD)/libpure-link.a $(BUILD)/pure-serve $(BUILD)/pure-crypto.so $(BUILD)/pure-run $(BUILD)/pure-edit-module
 
 $(BUILD)/obj/%.o: %.c $(HEADERS)
 	@mkdir -p $(dir $@)
@@ -37,15 +42,20 @@ $(BUILD)/libpure.a: $(OBJECTS)
 	rm -f $@
 	$(AR) rcs $@ $^
 
+$(BUILD)/libpure-link.a: $(LINK_OBJECTS)
+	rm -f $@
+	$(AR) rcs $@ $^
+
 # The runtime's tickets and budgets, with effects completed off the owner thread.
 # It links after the library, last as it always was, so code keeps its place.
 # The app model's functions are exported for a surface it maps (serve/surface.h).
-$(BUILD)/pure-serve: $(SERVE) core/runtime.c $(BUILD)/libpure.a $(HEADERS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve -DPURE_ASYNC_EFFECTS $(SERVE) $(BUILD)/libpure.a core/runtime.c \
+$(BUILD)/pure-serve: $(SERVE) core/runtime.c $(BUILD)/libpure.a $(BUILD)/libpure-link.a $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Ilink -Iserve -DPURE_ASYNC_EFFECTS $(SERVE) $(BUILD)/libpure-link.a \
+		$(BUILD)/libpure.a core/runtime.c \
 		$(LDFLAGS) -Wl,--export-dynamic-symbol='pure_*' -lm -pthread $(LDLIBS) -o $@
 
-$(BUILD)/pure-crypto.so: serve/crypto-openssl.c $(HEADERS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve -fPIC -shared serve/crypto-openssl.c $(LDFLAGS) -lssl -lcrypto \
+$(BUILD)/pure-crypto.so: link/crypto-openssl.c $(HEADERS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared link/crypto-openssl.c $(LDFLAGS) -lssl -lcrypto \
 		$(LDLIBS) -o $@
 
 $(BUILD)/pure-run: cli/pure-run.c $(BUILD)/libpure.a $(HEADERS)

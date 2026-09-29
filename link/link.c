@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-/* Links without connections (serve/link.h, docs/design/011-pure-transport.md). */
+/* Links without connections (link/link.h, docs/design/011-pure-transport.md). */
 #include "link.h"
 #include <arpa/inet.h>
 #include <errno.h>

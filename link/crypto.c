@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
-/* Sealing and TLS for pure-serve (serve/seal.h, serve/tls.h), by way of
- * pure-crypto.so (serve/crypto.h): mapped, and OpenSSL with it, the first
+/* Sealing and TLS for pure-serve (link/seal.h, link/tls.h), by way of
+ * pure-crypto.so (link/crypto.h): mapped, and OpenSSL with it, the first
  * time a server needs it. What needs no OpenSSL (a key's hex, the suite
  * this machine seals with) is here. */
 #include "crypto.h"
