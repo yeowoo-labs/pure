@@ -2187,9 +2187,21 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
             unsigned count = plain[at + 8];
             at += RECORDS_HEAD - 1;
             unsigned i = 0;
+            /* In order, nothing held and no tail waiting: straight onto the
+             * line, the frame at once (what hold does a record, for all). */
+            bool straight = st && st->known && first == line_end(st) && first + count - 1 <= st->heard + CREDIT &&
+                            !st->tail && !st->held_count &&
+                            st->line_size - st->line_head + (size - at) <= HELD_MOST &&
+                            line_room(st, size - at + 4 * (size_t)count);
             for (size_t used; i < count && (used = get_varint(plain + at, size - at, &length)) &&
                               length <= size - at - used; ++i) {
-                if (st) hold(st, first + i, (uint32_t)length, 0, plain + at + used, (uint32_t)length);
+                if (straight) {
+                    put32(st->line + st->line_size, (uint32_t)length);
+                    memcpy(st->line + st->line_size + 4, plain + at + used, length);
+                    st->line_size += 4 + length;
+                    ++st->line_count;
+                } else if (st)
+                    hold(st, first + i, (uint32_t)length, 0, plain + at + used, (uint32_t)length);
                 at += used + length;
             }
             if (st) mark_ready(s, st);
