@@ -20,10 +20,15 @@
 //!       connects again and sends it again. Then a line of JSON: orders made
 //!       and stored, connections made again, the orders stored in each
 //!       100 ms, the time from an order made to it stored
-//!   idle-quic drain PORT COUNT SIZE
+//!   idle-quic drain PORT COUNT SIZE [RATE [SECONDS]]
 //!       one client sends COUNT messages of SIZE bytes over one stream
 //!       (each after its u32 length) and waits until the service says it
-//!       read them all; a line of JSON: how long
+//!       read them all; a line of JSON: how long. RATE: messages a second
+//!       (0: as fast as it may), each with the time it was written, so the
+//!       service knows how long each took; SECONDS: stop writing after that
+//!       long. The service writes a line of JSON for each such stream: the
+//!       messages read in each 100 ms, and how long they took.
+//!   QUIC_GSO=0: no UDP GSO (a path of netem takes a burst as one packet)
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -40,6 +45,9 @@ fn transport() -> Arc<TransportConfig> {
     let mut t = TransportConfig::default();
     t.max_idle_timeout(Some(IdleTimeout::from(VarInt::from_u32(3_600_000)))); // an hour: connections at rest stay
     t.keep_alive_interval(None);
+    if std::env::var("QUIC_GSO").as_deref() == Ok("0") {
+        t.enable_segmentation_offload(false);
+    }
     Arc::new(t)
 }
 
@@ -80,8 +88,8 @@ fn serve(cert: Vec<u8>, key: Vec<u8>, port: u16) {
                     if recv.read_exact(&mut first).await.is_err() {
                         return;
                     }
-                    if first == *DRAIN {
-                        drain(&mut send, &mut recv).await;
+                    if first == *DRAIN || first == *PACED {
+                        drain(&mut send, &mut recv, first == *PACED).await;
                         continue;
                     }
                     let Ok(rest) = recv.read_to_end(1024).await else { return };
@@ -114,12 +122,21 @@ fn serve(cert: Vec<u8>, key: Vec<u8>, port: u16) {
 }
 
 /// A drain's stream begins with these bytes; an order's never does (a client number that large).
+/// A paced drain's messages each begin with the time they were written (ns since the epoch).
 const DRAIN: &[u8; 4] = b"pure";
+const PACED: &[u8; 4] = b"pace";
+
+fn epoch_ns() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64
+}
 
 /// Messages each after its u32 length until a length of 0, read a chunk at
-/// a time as they come; then how many, as the answer.
-async fn drain(send: &mut quinn::SendStream, recv: &mut quinn::RecvStream) {
+/// a time as they come; then how many, as the answer, and a line of JSON:
+/// the messages read in each 100 ms, and (paced) how long each took.
+async fn drain(send: &mut quinn::SendStream, recv: &mut quinn::RecvStream, paced: bool) {
     let (mut count, mut pending, mut done) = (0u64, Vec::<u8>::new(), false);
+    let began = Instant::now();
+    let (mut timeline, mut waited) = (Vec::<u32>::new(), Vec::<u64>::new());
     while !done {
         let Ok(Some(chunk)) = recv.read_chunk(1 << 20, true).await else { return };
         pending.extend_from_slice(&chunk.bytes);
@@ -133,11 +150,25 @@ async fn drain(send: &mut quinn::SendStream, recv: &mut quinn::RecvStream) {
             if pending.len() - at - 4 < length {
                 break;
             }
+            let bucket = (began.elapsed().as_millis() / 100) as usize;
+            if timeline.len() <= bucket {
+                timeline.resize(bucket + 1, 0);
+            }
+            timeline[bucket] += 1;
+            if paced && length >= 8 {
+                let stamp = u64::from_le_bytes(pending[at + 4..at + 12].try_into().unwrap());
+                waited.push(epoch_ns().saturating_sub(stamp));
+            }
             at += 4 + length;
             count += 1;
         }
         pending.drain(..at);
     }
+    waited.sort_unstable();
+    let pick = |q: usize| waited.get((waited.len() * q / 100).min(waited.len().saturating_sub(1))).copied().unwrap_or(0) as f64 / 1e6;
+    println!("{{\"drained\":{count},\"waited_ms_p50\":{:.3},\"waited_ms_p99\":{:.3},\"waited_ms_max\":{:.3},\"timeline_100ms\":[{}]}}",
+             pick(50), pick(99), waited.last().copied().unwrap_or(0) as f64 / 1e6,
+             timeline.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(","));
     let _ = send.write_all(&count.to_le_bytes()).await;
     let _ = send.finish();
 }
@@ -351,8 +382,9 @@ fn steady(port: u16, first: u64, count: u64, period: Duration, seconds: u64, win
     });
 }
 
-/// One client, COUNT messages of SIZE bytes over one stream, and the answer.
-fn drain_client(port: u16, count: u64, size: usize) {
+/// One client, COUNT messages of SIZE bytes over one stream (at rate a
+/// second, 0: as fast as it may; for at most seconds), and the answer.
+fn drain_client(port: u16, count: u64, size: usize, rate: f64, seconds: f64) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async move {
         let mut endpoint = Endpoint::client(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
@@ -365,9 +397,27 @@ fn drain_client(port: u16, count: u64, size: usize) {
         let per_chunk = ((64 << 10) / frame.len()).max(1);
         let chunk: Vec<u8> = frame.iter().copied().cycle().take(frame.len() * per_chunk).collect();
         let began = Instant::now();
-        send.write_all(DRAIN).await.unwrap();
+        let limit = if seconds > 0.0 { Duration::from_secs_f64(seconds) } else { Duration::MAX };
         let mut left = count as usize;
-        while left > 0 {
+        if rate > 0.0 {
+            send.write_all(PACED).await.unwrap();
+            let mut message = frame.clone();
+            for i in 0..count {
+                let due = Duration::from_secs_f64(i as f64 / rate);
+                if due >= limit {
+                    break;
+                }
+                if let Some(wait) = due.checked_sub(began.elapsed()) {
+                    tokio::time::sleep(wait).await;
+                }
+                message[4..12].copy_from_slice(&epoch_ns().to_le_bytes());
+                send.write_all(&message).await.unwrap();
+            }
+            left = 0;
+        } else {
+            send.write_all(DRAIN).await.unwrap();
+        }
+        while left > 0 && began.elapsed() < limit {
             let n = left.min(per_chunk);
             send.write_all(&chunk[..n * frame.len()]).await.unwrap();
             left -= n;
@@ -388,8 +438,10 @@ fn main() {
         Some("serve") if args.len() == 4 || args.len() == 5 => serve(std::fs::read(&args[2]).unwrap(),
                                                                     std::fs::read(&args[3]).unwrap(),
                                                                     args.get(4).map_or(0, |p| p.parse().unwrap())),
-        Some("drain") if args.len() == 5 => drain_client(args[2].parse().unwrap(), args[3].parse().unwrap(),
-                                                         args[4].parse().unwrap()),
+        Some("drain") if (5..=7).contains(&args.len()) => drain_client(args[2].parse().unwrap(), args[3].parse().unwrap(),
+                                                                       args[4].parse().unwrap(),
+                                                                       args.get(5).map_or(0.0, |r| r.parse().unwrap()),
+                                                                       args.get(6).map_or(0.0, |s| s.parse().unwrap())),
         Some("steady") if args.len() == 8 => steady(args[2].parse().unwrap(), args[3].parse().unwrap(),
                                                     args[4].parse().unwrap(),
                                                     Duration::from_millis(args[5].parse().unwrap()),
@@ -398,7 +450,7 @@ fn main() {
                                                       args[4].parse().unwrap(), args[5].parse().unwrap()),
         _ => {
             eprintln!("idle-quic serve CERT.der KEY.der [PORT] | idle-quic connect PORT FIRST COUNT WINDOW | \
-                       idle-quic steady PORT FIRST COUNT PERIOD_MS SECONDS WINDOW | idle-quic drain PORT COUNT SIZE");
+                       idle-quic steady PORT FIRST COUNT PERIOD_MS SECONDS WINDOW | idle-quic drain PORT COUNT SIZE [RATE [SECONDS]]");
             std::process::exit(2);
         }
     }

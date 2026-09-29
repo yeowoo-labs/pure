@@ -1,15 +1,20 @@
 #define _GNU_SOURCE
 /* A link and a listener in one process, with no app and no store: what the
- * transport alone costs a record (M5 of docs/design/011-pure-transport.md).
+ * transport alone costs a record (M5 of docs/design/011-pure-transport.md),
+ * and how it fares on a path of loss and queues (M6).
  * The listener says each delivery stored as it hands it over.
  *
- *   transport SENDER.pmod RECEIVER.pmod COUNT SIZE [WINDOW]
+ *   transport SENDER.pmod RECEIVER.pmod COUNT SIZE [WINDOW [RATE [SECONDS]]]
  *       COUNT records of SIZE item bytes (an order of the sender's output
  *       "ordered", to the receiver's input "order"), at most WINDOW waiting
  *       at once (100,000); a line of JSON: how long, records a second, and
  *       CPU a record by thread (the link's, the listener's, the queuing
- *       one's). WINDOW 0: all are queued before the link starts (a backlog
- *       drained). Built beside pure-crypto.so (build/). */
+ *       one's), the records handed over in each 100 ms. WINDOW 0: all are
+ *       queued before the link starts (a backlog drained). RATE: records
+ *       queued a second (0: as fast as the window allows), and the time
+ *       from each queued to handed over. SECONDS: stop after that long
+ *       (0: once all are handed over). TRANSPORT_GSO=0: no UDP GSO bursts.
+ *       Built beside pure-crypto.so (build/). */
 #include "link.h"
 #include "module.h"
 #include "seal.h"
@@ -30,6 +35,11 @@ static atomic_uint_fast64_t delivered;
 static unsigned char *payload;
 static size_t payload_size;
 static uint64_t heard, wrong; /* the last record taken; deliveries not as sent */
+static uint64_t began, *queued_at, *waited; /* by number: when queued, how long until handed over (ns) */
+enum { BUCKETS = 36000 };                   /* an hour of 100 ms */
+static uint32_t timeline[BUCKETS];
+
+static uint64_t now_ns(void);
 
 /* Records as sent, each once, in order: the one after the last taken on
  * (one taken before would be a delivery again), of the payload's bytes. */
@@ -41,6 +51,10 @@ static bool deliver(void *context, const PureLinkDelivery *d) {
         if (d->first + k != heard + 1 + k || size != payload_size || memcmp(at + 4, payload, size)) ++wrong;
         at += 4 + size;
     }
+    uint64_t now = now_ns();
+    if (queued_at)
+        for (unsigned k = 0; k < d->count; ++k) waited[d->first + k] = now - queued_at[d->first + k];
+    if ((now - began) / 100000000u < BUCKETS) timeline[(now - began) / 100000000u] += d->count;
     if ((size_t)(at - d->records) != d->size || d->first > heard + 1) ++wrong;
     if (d->first + d->count - 1 > heard) heard = d->first + d->count - 1;
     atomic_fetch_add(&delivered, d->count);
@@ -61,6 +75,11 @@ static uint64_t now_ns(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+
+static int by_value(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
 }
 
 /* CPU ns of this process's threads named name (NULL: all). */
@@ -117,6 +136,8 @@ int main(int argc, char **argv) {
     }
     char error[256], dir[] = "/tmp/pure-transport-XXXXXX", path[512], hex[2 * PURE_SEAL_KEY + 1];
     uint64_t count = strtoull(argv[3], NULL, 10), window = argc > 5 ? strtoull(argv[5], NULL, 10) : 100000;
+    double rate = argc > 6 ? strtod(argv[6], NULL) : 0, limit = argc > 7 ? strtod(argv[7], NULL) : 0;
+    const char *gso = getenv("TRANSPORT_GSO");
     size_t size = strtoull(argv[4], NULL, 10);
     if (pure_module_read(argv[1], &sender, error, sizeof(error)) != PURE_OK ||
         pure_module_read(argv[2], &receiver, error, sizeof(error)) != PURE_OK || !mkdtemp(dir)) {
@@ -150,6 +171,9 @@ int main(int argc, char **argv) {
                                                  public_a, error, sizeof(error));
     if (!link) return fprintf(stderr, "transport: %s\n", output < 0 ? "no output 'ordered'" : error), 1;
     pure_link_peer(link, public_b);
+    if (gso && !strcmp(gso, "0")) pure_link_gso(link, false);
+    if (rate > 0 && (!(queued_at = calloc(count + 1, sizeof(*queued_at))) || !(waited = calloc(count + 1, sizeof(*waited)))))
+        return fputs("transport: out of memory\n", stderr), 1;
     payload = malloc(size + 256);
     payload_size = order(&sender, (uint32_t)output, size, payload);
     for (size_t i = 0; i < payload_size; ++i) payload[i] ^= (unsigned char)(i * 7); /* bytes that differ by place */
@@ -157,32 +181,52 @@ int main(int argc, char **argv) {
     if (!window) /* a backlog: all queued before the link starts */
         for (; first <= count; ++first)
             if (!pure_link_queue(link, first, payload, payload_size)) return fputs("transport: cannot queue\n", stderr), 1;
-    uint64_t began = now_ns(), cpu_link = 0, cpu_listen = thread_cpu("pure-listen"), cpu_all = thread_cpu(NULL);
+    began = now_ns();
+    uint64_t cpu_link = 0, cpu_listen = thread_cpu("pure-listen"), cpu_all = thread_cpu(NULL);
+    uint64_t end = limit > 0 ? began + (uint64_t)(limit * 1e9) : UINT64_MAX;
     if (!pure_link_start(link, notify, NULL, error, sizeof(error))) return fprintf(stderr, "transport: %s\n", error), 1;
-    for (uint64_t seq = first; seq <= count; ++seq) {
-        while (seq - pure_link_delivered(link) > window) {
+    for (uint64_t seq = first; seq <= count && now_ns() < end; ++seq) {
+        uint64_t due = rate > 0 ? began + (uint64_t)((double)(seq - first) * 1e9 / rate) : 0;
+        while ((seq - pure_link_delivered(link) > window || now_ns() < due) && now_ns() < end) {
             struct timespec pause = {0, 50000};
             nanosleep(&pause, NULL);
         }
+        if (now_ns() >= end) break;
+        if (queued_at) queued_at[seq] = now_ns();
         if (!pure_link_queue(link, seq, payload, payload_size)) return fputs("transport: cannot queue\n", stderr), 1;
     }
-    while (pure_link_delivered(link) < count) {
+    while (pure_link_delivered(link) < count && now_ns() < end) {
         struct timespec pause = {0, 50000};
         nanosleep(&pause, NULL);
     }
-    double seconds = (double)(now_ns() - began) / 1e9;
+    double seconds = (double)((end < now_ns() ? end : now_ns()) - began) / 1e9;
     uint64_t link_ns = thread_cpu("pure-link") - cpu_link, listen_ns = thread_cpu("pure-listen") - cpu_listen,
              all_ns = thread_cpu(NULL) - cpu_all;
-    PureLinkCounts sent;
+    PureLinkCounts sent, got;
     pure_link_counts(link, &sent);
-    printf("{\"records\":%llu,\"record_bytes\":%zu,\"seconds\":%.3f,\"per_second\":%.0f,\"packets\":%llu,"
-           "\"wrong\":%llu,\"resent\":%llu,\"link_us_per_record\":%.3f,\"listener_us_per_record\":%.3f,\"other_us_per_record\":%.3f}\n",
-           (unsigned long long)count, payload_size, seconds, (double)count / seconds, (unsigned long long)sent.packets,
-           (unsigned long long)wrong, (unsigned long long)sent.resent, (double)link_ns / 1e3 / (double)count, (double)listen_ns / 1e3 / (double)count,
-           (double)(all_ns - link_ns - listen_ns) / 1e3 / (double)count);
     pure_link_close(link);
-    PureLinkCounts heard;
-    pure_link_listener_close(listener, &heard);
+    pure_link_listener_close(listener, &got);
+    uint64_t done = heard; /* in order, as the listener handed them over */
+    if (!done) done = 1;
+    printf("{\"records\":%llu,\"delivered\":%llu,\"record_bytes\":%zu,\"seconds\":%.3f,\"per_second\":%.0f,\"mbit\":%.2f,"
+           "\"packets\":%llu,\"wrong\":%llu,\"resent\":%llu,\"lost\":%llu,\"late\":%llu,\"undone\":%llu,"
+           "\"link_us_per_record\":%.3f,\"listener_us_per_record\":%.3f,\"other_us_per_record\":%.3f",
+           (unsigned long long)count, (unsigned long long)heard, payload_size, seconds, (double)heard / seconds,
+           (double)heard * (double)payload_size * 8 / seconds / 1e6, (unsigned long long)sent.packets,
+           (unsigned long long)wrong, (unsigned long long)sent.resent, (unsigned long long)sent.lost,
+           (unsigned long long)sent.late, (unsigned long long)sent.undone, (double)link_ns / 1e3 / (double)done,
+           (double)listen_ns / 1e3 / (double)done, (double)(all_ns - link_ns - listen_ns) / 1e3 / (double)done);
+    if (queued_at && heard) { /* the waits of those handed over */
+        qsort(waited + 1, heard, sizeof(*waited), by_value);
+        printf(",\"waited_ms_p50\":%.3f,\"waited_ms_p99\":%.3f,\"waited_ms_max\":%.3f", (double)waited[1 + heard / 2] / 1e6,
+               (double)waited[1 + heard * 99 / 100] / 1e6, (double)waited[heard] / 1e6);
+    }
+    size_t last = 0;
+    for (size_t b = 0; b < BUCKETS; ++b)
+        if (timeline[b]) last = b;
+    printf(",\"timeline_100ms\":[");
+    for (size_t b = 0; b <= last; ++b) printf("%s%u", b ? "," : "", timeline[b]);
+    printf("]}\n");
     snprintf(path, sizeof(path), "rm -rf %s", dir);
-    return system(path) || wrong ? 1 : 0;
+    return system(path) || wrong || (!limit && heard < count) ? 1 : 0;
 }

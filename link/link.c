@@ -112,7 +112,7 @@ struct PureLink {
     size_t burst_size;
     unsigned burst_count;
     uint64_t burst_pn[BURST];
-    bool gso;
+    bool gso, no_gso;
 };
 
 PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, const PureSealKey *own,
@@ -147,6 +147,8 @@ PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, co
     }
     return l;
 }
+
+void pure_link_gso(PureLink *l, bool on) { l->no_gso = !on; }
 
 void pure_link_peer(PureLink *l, const unsigned char peer[PURE_SEAL_KEY]) {
     l->peered = true;
@@ -279,7 +281,7 @@ bool pure_link_start(PureLink *l, void (*notify)(void *), void *context, char *e
         setsockopt(l->fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
     }
     int segment = DATAGRAM;
-    l->gso = ok && !setsockopt(l->fd, SOL_UDP, UDP_SEGMENT, &segment, sizeof(segment));
+    l->gso = ok && !l->no_gso && !setsockopt(l->fd, SOL_UDP, UDP_SEGMENT, &segment, sizeof(segment));
     ok = ok && l->keyed && (l->burst = malloc((size_t)BURST * DATAGRAM)) && (l->taking = malloc(sizeof(*l->taking))) &&
          (l->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) >= 0;
     l->notify = notify;
