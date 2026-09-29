@@ -123,7 +123,8 @@ static bool derive(const unsigned char secret[32], const unsigned char from[PURE
 
 /* The secret of epoch n: the X25519 of the two keys made for it (fresh),
  * with the secret before it (epoch 0's is the nodes' static secret). */
-static bool epoch_secret_of(const unsigned char before[32], const unsigned char fresh[32], uint32_t n, unsigned char out[32]) {
+static bool epoch_secret_of(const unsigned char before[32], const unsigned char fresh[32], uint32_t n,
+                            unsigned char out[32]) {
     unsigned char info[17 + 4 + 32];
     memcpy(info, "pure link 0 epoch", 17);
     put32(info + 17, n);
@@ -297,12 +298,14 @@ static bool seal_in(PureLinkSender *l, uint32_t n, const unsigned char secret[32
 static bool offer(PureLinkSender *l, uint32_t n);
 static void begin_epoch(PureLinkSender *l, const unsigned char their[PURE_SEAL_KEY], uint64_t now);
 
-static Record *record_at(PureLinkSender *l, size_t k) { return &l->records[(l->head + k) % l->capacity]; }
+/* The rings of records and flights are powers of two long (grown by
+ * doubling): a place is masked, not divided. */
+static Record *record_at(PureLinkSender *l, size_t k) { return &l->records[(l->head + k) & (l->capacity - 1)]; }
 
 /* The queued record numbered seq, or NULL (stored already, or not queued). */
 static Record *record_of(PureLinkSender *l, uint64_t seq) {
-    if (!l->count || seq < record_at(l, 0)->seq || seq - record_at(l, 0)->seq >= l->count) return NULL;
-    return record_at(l, (size_t)(seq - record_at(l, 0)->seq));
+    uint64_t first = l->count ? l->records[l->head].seq : 0;
+    return l->count && seq >= first && seq - first < l->count ? record_at(l, (size_t)(seq - first)) : NULL;
 }
 
 /* Every change of a part's state goes through here: the link knows at once
@@ -355,7 +358,7 @@ static uint32_t part_at(Record *r, uint32_t offset) {
 static unsigned carried(PureLinkSender *l, const Unit *u, uint64_t pn, bool acknowledged, uint64_t now) {
     Record *r = record_of(l, u->seq);
     unsigned unsent = 0;
-    for (uint32_t i = r ? part_at(r, u->offset) : 0; r && i < r->parts; ++i) {
+    for (uint32_t i = r && r->more ? part_at(r, u->offset) : 0; r && i < r->parts; ++i) {
         Part *p = part_of(r, i);
         if (p->offset >= u->offset + u->length && u->length) break;
         if (acknowledged && p->state != RECEIVED) {
@@ -434,7 +437,7 @@ static Flight *flight_of(PureLinkSender *l, uint64_t pn) {
     if (!l->flight_count) return NULL;
     uint64_t first = l->flights[l->flight_head].pn;
     if (pn < first || pn - first >= l->flight_count) return NULL;
-    return &l->flights[(l->flight_head + (size_t)(pn - first)) % l->flight_capacity];
+    return &l->flights[(l->flight_head + (size_t)(pn - first)) & (l->flight_capacity - 1)];
 }
 
 /* Room for one more flight: made before a packet is, so every number sent
@@ -444,7 +447,7 @@ static bool flight_room(PureLinkSender *l) {
     size_t capacity = l->flight_capacity ? 2 * l->flight_capacity : 8;
     Flight *grown = malloc(capacity * sizeof(*grown));
     if (!grown) return false;
-    for (size_t k = 0; k < l->flight_count; ++k) grown[k] = l->flights[(l->flight_head + k) % l->flight_capacity];
+    for (size_t k = 0; k < l->flight_count; ++k) grown[k] = l->flights[(l->flight_head + k) & (l->flight_capacity - 1)];
     free(l->flights);
     l->flights = grown;
     l->flight_capacity = capacity;
@@ -453,7 +456,7 @@ static bool flight_room(PureLinkSender *l) {
 }
 
 static void push_flight(PureLinkSender *l, const Flight *f) {
-    l->flights[(l->flight_head + l->flight_count++) % l->flight_capacity] = *f;
+    l->flights[(l->flight_head + l->flight_count++) & (l->flight_capacity - 1)] = *f;
 }
 
 static void settle(PureLinkSender *l, Flight *f) {
@@ -540,7 +543,7 @@ static void detect_lost(PureLinkSender *l, uint64_t now) {
     uint64_t rtt = most(l->latest_rtt, l->sampled ? l->smoothed_rtt : FIRST_RTT);
     uint64_t delay = most(rtt + reorder_time(l, rtt), GRANULARITY);
     for (size_t k = 0; k < l->flight_count; ++k) {
-        Flight *f = &l->flights[(l->flight_head + k) % l->flight_capacity];
+        Flight *f = &l->flights[(l->flight_head + k) & (l->flight_capacity - 1)];
         if (f->pn >= l->largest_acked) break;
         if (f->done) continue;
         bool late = f->sent + delay <= now;
@@ -632,7 +635,7 @@ static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint6
         Flight *f = &l->flights[l->flight_head];
         if (!f->done || (f->lost && f->sent + keep > now)) break;
         if (f->lost) settle_loss(l, f, true); /* not late: lost */
-        l->flight_head = (l->flight_head + 1) % l->flight_capacity;
+        l->flight_head = (l->flight_head + 1) & (l->flight_capacity - 1);
         --l->flight_count;
     }
 }
@@ -649,7 +652,7 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
             Record *r = record_at(l, 0);
             for (uint32_t i = 0; i < r->parts; ++i) l->received -= part_of(r, i)->state == RECEIVED;
             free(r->more); /* its bytes go back with the ring's head */
-            l->head = (l->head + 1) % l->capacity;
+            l->head = (l->head + 1) & (l->capacity - 1);
             --l->count;
         }
         l->stored = heard;
@@ -1166,6 +1169,8 @@ typedef struct Stream {
     size_t line_head, line_size, line_capacity;
     uint64_t line_first;
     unsigned line_count;
+    unsigned out_count; /* the delivery out from the line: its records and bytes (let go at once when all applied) */
+    size_t out_bytes;
     bool tail;
     uint32_t tail_size, tail_got;
     Held *held;                  /* records not yet stored, by number: held_count from held_first */
@@ -1223,7 +1228,8 @@ struct PureLinkReceiver {
     uint64_t ours_at;
     double accept_tokens;
     uint64_t accept_at;
-    struct { Run *run; uint64_t id; } *offers; /* runs whose offers wait for the turn (a slot may hold another run by then) */
+    /* Runs whose offers wait for the turn (a slot may hold another run by then). */
+    struct { Run *run; uint64_t id; } *offers;
     size_t offer_count, offer_capacity;
     PureAead *aead; /* keyed by each packet's run */
     unsigned char open_key[PURE_AEAD_KEY], seal_key[PURE_AEAD_KEY]; /* the keys it has now */
@@ -1439,11 +1445,13 @@ static uint32_t memo_check(const unsigned char key[PURE_SEAL_KEY], const unsigne
 }
 
 static unsigned char *memo_place(const PureLinkReceiver *s, uint32_t peer) {
-    return s->memo && MEMO_HEAD + ((size_t)peer + 1) * MEMO_PLACE <= s->memo_size ? s->memo + MEMO_HEAD + (size_t)peer * MEMO_PLACE
-                                                                                : NULL;
+    size_t at = MEMO_HEAD + (size_t)peer * MEMO_PLACE;
+    return s->memo && at + MEMO_PLACE <= s->memo_size ? s->memo + at : NULL;
 }
 
-static uint32_t epoch_check(const unsigned char *e) { return fnv(fnv(2166136261u, e, 12), e + 16, MEMO_EPOCH_SIZE - 16); }
+static uint32_t epoch_check(const unsigned char *e) {
+    return fnv(fnv(2166136261u, e, 12), e + 16, MEMO_EPOCH_SIZE - 16);
+}
 
 /* The epoch the memo has for the peer's run (its place's epoch part), or NULL. */
 static const unsigned char *memo_epoch(const PureLinkReceiver *s, uint32_t peer, uint64_t run) {
@@ -1811,12 +1819,14 @@ static bool hand_over(PureLinkReceiver *s, Stream *st) {
     if (st->known) { /* the line as it is, up to BATCH records */
         line_pull(st);
         if (!st->line_count) return true;
-        unsigned n = 0;
-        size_t bytes = 0;
-        for (; n < st->line_count && n < BATCH; ++n) bytes += 4 + (size_t)get32(st->line + st->line_head + bytes);
+        unsigned n = st->line_count;
+        size_t bytes = st->line_size - st->line_head; /* the whole line, when it is a batch or less */
+        if (n > BATCH)
+            for (n = 0, bytes = 0; n < BATCH; ++n) bytes += 4 + (size_t)get32(st->line + st->line_head + bytes);
         PureLinkDelivery d = {st->input, st->source, st->line_first, n, st->line + st->line_head, bytes, st};
         if (!s->host.deliver(s->host.context, &d)) return false;
         st->out = true;
+        st->out_count = n, st->out_bytes = bytes;
         ++s->counts.deliveries;
         return true;
     }
@@ -2206,7 +2216,13 @@ static void apply_done(PureLinkReceiver *s, const PureLinkDone *done, size_t cou
         if (!done[k].stored) continue; /* not saved: handed over again */
         if (!st->known || done[k].heard > st->heard) st->heard = done[k].heard;
         if (!st->known) st->line_first = st->heard + 1; /* the line begins */
-        line_drop(st, st->heard);
+        if (st->out_count && st->heard == st->line_first + st->out_count - 1) { /* the delivery applied whole */
+            st->line_head += st->out_bytes;
+            st->line_first += st->out_count;
+            st->line_count -= st->out_count;
+        } else
+            line_drop(st, st->heard);
+        st->out_count = 0;
         while (st->held_count && held_at(st, 0)->seq <= st->heard) drop_first(st);
         st->known = true;
         st->gap = done[k].gap;

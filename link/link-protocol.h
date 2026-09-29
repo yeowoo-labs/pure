@@ -187,7 +187,7 @@ typedef struct {
     const char *source;
     uint64_t first;
     unsigned count;
-    const unsigned char *records; /* count of: u32le size, bytes */
+    const unsigned char *records; /* count of: u32le size, bytes (the receiver's: the host's during the call) */
     size_t size;
     void *token; /* for its done */
 } PureLinkDelivery;
