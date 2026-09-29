@@ -197,9 +197,11 @@ typedef struct {
     unsigned wire_count;
     uint64_t trimmed[PURE_MODULE_INPUTS], answers;
     bool held[PURE_MODULE_INPUTS]; /* an answer failed to apply: the wire's sends stay until a restart */
-    /* The owner's: outputs linked to Pure receivers (pure://), and how far each was trimmed. */
+    /* The owner's: outputs linked to Pure receivers (pure://), which output
+     * each is, and how far each was trimmed. */
     PureLink *links[PURE_MODULE_INPUTS];
     unsigned link_count;
+    uint32_t link_output[PURE_MODULE_INPUTS];
     uint64_t link_trimmed[PURE_MODULE_INPUTS];
     struct Writer *writer; /* the thread writing the app's checkpoints, once one was due */
     uint64_t checkpoints;  /* images it wrote */
@@ -1501,7 +1503,7 @@ typedef struct { Executor *executor; Fresh *fresh; size_t count, capacity; uint6
 
 /* An output's outlet: its wires first, then its links. */
 static uint32_t outlet_output(Executor *ex, unsigned i) {
-    return i < ex->wire_count ? pure_wire_output(ex->wires[i]) : pure_link_output(ex->links[i - ex->wire_count]);
+    return i < ex->wire_count ? pure_wire_output(ex->wires[i]) : ex->link_output[i - ex->wire_count];
 }
 static uint64_t outlet_queued(Executor *ex, unsigned i) {
     return i < ex->wire_count ? pure_wire_queued(ex->wires[i]) : pure_link_queued(ex->links[i - ex->wire_count]);
@@ -1541,7 +1543,8 @@ static void after_save(Executor *ex) {
         const Fresh *f = &q.fresh[k];
         if (blocked[f->wire]) continue;
         blocked[f->wire] = f->wire < ex->wire_count ? !pure_wire_queue(ex->wires[f->wire], f->seq, f->payload)
-                                                    : !pure_link_queue(ex->links[f->wire - ex->wire_count], f->seq, f->payload);
+                                                    : !pure_link_queue(ex->links[f->wire - ex->wire_count], f->seq,
+                                                                       f->payload.data, f->payload.size);
     }
     free(q.fresh);
 }
@@ -1574,7 +1577,7 @@ static bool take_deliveries(Executor *ex) {
     for (unsigned i = 0; i < ex->link_count; ++i) {
         uint64_t stored = pure_link_delivered(ex->links[i]);
         if (stored <= ex->link_trimmed[i]) continue;
-        pure_app_trim(&ex->app, pure_link_output(ex->links[i]), stored);
+        pure_app_trim(&ex->app, ex->link_output[i], stored);
         ex->link_trimmed[i] = stored;
     }
     return answered;
@@ -2331,6 +2334,17 @@ static void stop_shard(Host *host) {
     free(host->views);
 }
 
+/* The input a link's stream goes to: one taking messages (not keyed) of the
+ * sender's shape. */
+static int link_input(void *context, const char *name, uint32_t shape) {
+    const PureModule *m = ((Owner *)context)->executor.app.module;
+    int index = pure_module_input(m, name);
+    if (index < 0 || m->input[index].kind != PURE_KIND_MESSAGE || m->input[index].keyed ||
+        pure_module_shape(m, (uint32_t)index) != shape)
+        return -1;
+    return index;
+}
+
 /* Records a link delivered, queued at the owner as a request is: applied
  * with the next burst and done (pure_link_done) once its save is over. */
 static PureLinkListener *link_listener;
@@ -2393,13 +2407,17 @@ static bool open_wires(Executor *ex, const PureModule *m, const char *const *sen
         output[length] = 0;
         int written = snprintf(source, sizeof(source), "%s.%s", name, output);
         if (!strncmp(equals + 1, "pure://", 7)) { /* a link: no connection, sealed with the node's key */
-            PureLink *link = written > 0 && written <= PURE_SOURCE
-                                 ? pure_link_open(m, output, equals + 1, source, seal_key, own_public, error, sizeof(error))
+            int index = pure_module_input(m, output);
+            if (index < 0 || m->input[index].kind != PURE_KIND_OUTPUT) snprintf(error, sizeof(error), "no output '%s'", output);
+            PureLink *link = index >= 0 && m->input[index].kind == PURE_KIND_OUTPUT && written > 0 && written <= PURE_SOURCE
+                                 ? pure_link_open(equals + 1, source, pure_module_shape(m, (uint32_t)index), seal_key,
+                                                  own_public, error, sizeof(error))
                                  : NULL;
             if (!link) {
                 fprintf(stderr, "--send %s: %s\n", sends[i], written > PURE_SOURCE ? "the name and output are longer than 64 bytes" : error);
                 return false;
             }
+            ex->link_output[ex->link_count] = (uint32_t)index;
             ex->links[ex->link_count++] = link;
             continue;
         }
@@ -2440,7 +2458,7 @@ static bool wire_seals(Executor *ex, const PureModule *m, const char *const *sea
             for (unsigned k = 0; k < ex->wire_count; ++k)
                 if (!strcmp(m->input_names[pure_wire_output(ex->wires[k])], output)) wire = ex->wires[k];
             for (unsigned k = 0; k < ex->link_count; ++k)
-                if (!strcmp(m->input_names[pure_link_output(ex->links[k])], output)) link = ex->links[k];
+                if (!strcmp(m->input_names[ex->link_output[k]], output)) link = ex->links[k];
         }
         if (link && pure_seal_peer(equals + 1, peer)) { /* the link's receiver */
             pure_link_peer(link, peer);
@@ -2657,7 +2675,8 @@ int main(int argc, char **argv) {
             fputs("--link-port needs an app with states and the node's --key\n", stderr);
             return 2;
         }
-        link_listener = pure_link_listen(&module, link_port, seal_key, own_public, link_deliver, &owner, error, sizeof(error));
+        link_listener = pure_link_listen(link_port, seal_key, own_public, &(PureLinkHost){link_input, link_deliver, &owner},
+                                         error, sizeof(error));
         bool allowed = link_listener != NULL && allow_senders(link_listener, senders_path, error, sizeof(error));
         for (unsigned i = 0; allowed && i < sender_count; ++i)
             allowed = pure_link_allow(link_listener, senders[i].name, senders[i].key, error, sizeof(error));

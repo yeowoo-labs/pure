@@ -1,6 +1,5 @@
 #ifndef PURE_LINK_H
 #define PURE_LINK_H
-#include "module.h"
 #include "seal.h"
 
 /* Links without connections (docs/design/011-pure-transport.md): one node's
@@ -47,19 +46,21 @@
  * Losses are detected as RFC 9002 says; congestion control is its NewReno
  * (RFC 9002 §7). */
 
+/* A source's or an input's name is 1 to PURE_LINK_NAME bytes. */
+enum { PURE_LINK_NAME = 64 };
+
 /* The sending side: one output's saved sends to url, pure://host:port/INPUT,
- * as source (a Pure receiver's name for it), from own (this node's key,
- * whose public half is own_public) to the receiver's public key, given by
- * pure_link_peer before pure_link_start. The owner queues and trims as it
- * does a wire's (serve/deliver.h): a send counts as delivered once the
- * receiver says it saved it. */
+ * as source (a Pure receiver's name for it), their messages of shape (the
+ * receiver's input must have the same: core/module.h's pure_module_shape),
+ * from own (this node's key, whose public half is own_public) to the
+ * receiver's public key, given by pure_link_peer before pure_link_start.
+ * The owner queues and trims as it does a wire's (serve/deliver.h): a send
+ * counts as delivered once the receiver says it saved it. */
 typedef struct PureLink PureLink;
-PureLink *pure_link_open(const PureModule *m, const char *output, const char *url, const char *source,
-                         const PureSealKey *own, const unsigned char own_public[PURE_SEAL_KEY], char *error,
-                         size_t size);
+PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, const PureSealKey *own,
+                         const unsigned char own_public[PURE_SEAL_KEY], char *error, size_t size);
 void pure_link_peer(PureLink *, const unsigned char peer[PURE_SEAL_KEY]);
-uint32_t pure_link_output(const PureLink *);
-bool pure_link_queue(PureLink *, uint64_t seq, PureSpan payload);
+bool pure_link_queue(PureLink *, uint64_t seq, const unsigned char *bytes, size_t size);
 uint64_t pure_link_queued(PureLink *);
 /* The last number the receiver saved; any thread. */
 uint64_t pure_link_delivered(PureLink *);
@@ -69,12 +70,14 @@ void pure_link_close(PureLink *);
 
 /* The receiving side: packets on a UDP port, from the senders allowed (a
  * source name and the key it seals with, a few bytes each however many
- * there are: see pure_link_idle). Whole records of a stream, in
- * order, go to deliver (on the listener's thread) as one delivery; the host
- * applies them from the one after the source's last heard number, stops at
- * a gap, saves, and then calls pure_link_done (any thread) with the last
- * number heard. Records wait here until then, and only the saved ones are
- * acknowledged as stored. */
+ * there are: see pure_link_idle). A stream (a source to an input) goes to
+ * the host's input its name and shape find (its number, or -1: the stream
+ * is refused). Whole records of a stream, in order, go to deliver (both on
+ * the listener's thread) as one delivery; the host applies them from the
+ * one after the source's last heard number, stops at a gap, saves, and then
+ * calls pure_link_done (any thread) with the last number heard. Records
+ * wait here until then, and only the saved ones are acknowledged as
+ * stored. */
 typedef struct {
     uint32_t input;
     const char *source;
@@ -84,11 +87,14 @@ typedef struct {
     size_t size;
     void *token; /* for pure_link_done */
 } PureLinkDelivery;
+typedef struct {
+    int (*input)(void *context, const char *name, uint32_t shape);
+    bool (*deliver)(void *context, const PureLinkDelivery *);
+    void *context;
+} PureLinkHost;
 typedef struct PureLinkListener PureLinkListener;
-PureLinkListener *pure_link_listen(const PureModule *m, unsigned port, const PureSealKey *own,
-                                   const unsigned char own_public[PURE_SEAL_KEY],
-                                   bool (*deliver)(void *, const PureLinkDelivery *), void *context, char *error,
-                                   size_t size);
+PureLinkListener *pure_link_listen(unsigned port, const PureSealKey *own, const unsigned char own_public[PURE_SEAL_KEY],
+                                   const PureLinkHost *host, char *error, size_t size);
 bool pure_link_allow(PureLinkListener *, const char *source, const unsigned char key[PURE_SEAL_KEY], char *error,
                      size_t size);
 /* A sender quiet for ms (30 s at first) with nothing of it waiting lets its

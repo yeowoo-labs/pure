@@ -50,6 +50,13 @@ static bool deliver(void *context, const PureLinkDelivery *d) {
 
 static void notify(void *context) { (void)context; }
 
+/* The receiver's input a stream goes to: "order", of the sender's shape. */
+static int input_of(void *context, const char *name, uint32_t shape) {
+    (void)context;
+    int index = pure_module_input(&receiver, name);
+    return index >= 0 && pure_module_shape(&receiver, (uint32_t)index) == shape ? index : -1;
+}
+
 static uint64_t now_ns(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -131,23 +138,25 @@ int main(int argc, char **argv) {
         return 1;
     unsigned port = ntohs(any.sin_port);
     close(probe);
-    if (!(listener = pure_link_listen(&receiver, port, b, public_b, deliver, NULL, error, sizeof(error))) ||
+    if (!(listener = pure_link_listen(port, b, public_b, &(PureLinkHost){input_of, deliver, NULL}, error, sizeof(error))) ||
         !pure_link_allow(listener, "bench.ordered", public_a, error, sizeof(error)) ||
         !pure_link_serve(listener, error, sizeof(error)))
         return fprintf(stderr, "transport: %s\n", error), 1;
     char url[128];
     snprintf(url, sizeof(url), "pure://127.0.0.1:%u/order", port);
-    PureLink *link = pure_link_open(&sender, "ordered", url, "bench.ordered", a, public_a, error, sizeof(error));
-    if (!link) return fprintf(stderr, "transport: %s\n", error), 1;
-    pure_link_peer(link, public_b);
     int output = pure_module_input(&sender, "ordered");
+    PureLink *link = output < 0 ? NULL
+                                : pure_link_open(url, "bench.ordered", pure_module_shape(&sender, (uint32_t)output), a,
+                                                 public_a, error, sizeof(error));
+    if (!link) return fprintf(stderr, "transport: %s\n", output < 0 ? "no output 'ordered'" : error), 1;
+    pure_link_peer(link, public_b);
     payload = malloc(size + 256);
     payload_size = order(&sender, (uint32_t)output, size, payload);
     for (size_t i = 0; i < payload_size; ++i) payload[i] ^= (unsigned char)(i * 7); /* bytes that differ by place */
     uint64_t first = 1;
     if (!window) /* a backlog: all queued before the link starts */
         for (; first <= count; ++first)
-            if (!pure_link_queue(link, first, (PureSpan){payload, payload_size})) return fputs("transport: cannot queue\n", stderr), 1;
+            if (!pure_link_queue(link, first, payload, payload_size)) return fputs("transport: cannot queue\n", stderr), 1;
     uint64_t began = now_ns(), cpu_link = 0, cpu_listen = thread_cpu("pure-listen"), cpu_all = thread_cpu(NULL);
     if (!pure_link_start(link, notify, NULL, error, sizeof(error))) return fprintf(stderr, "transport: %s\n", error), 1;
     for (uint64_t seq = first; seq <= count; ++seq) {
@@ -155,7 +164,7 @@ int main(int argc, char **argv) {
             struct timespec pause = {0, 50000};
             nanosleep(&pause, NULL);
         }
-        if (!pure_link_queue(link, seq, (PureSpan){payload, payload_size})) return fputs("transport: cannot queue\n", stderr), 1;
+        if (!pure_link_queue(link, seq, payload, payload_size)) return fputs("transport: cannot queue\n", stderr), 1;
     }
     while (pure_link_delivered(link) < count) {
         struct timespec pause = {0, 50000};

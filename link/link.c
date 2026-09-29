@@ -89,19 +89,6 @@ static uint32_t fnv(uint32_t h, const void *bytes, size_t size) {
 
 static uint32_t key_id(const unsigned char key[PURE_SEAL_KEY]) { return fnv(2166136261u, key, PURE_SEAL_KEY); }
 
-/* What a message of input looks like: its fields' names, types and places. */
-static uint32_t shape_of(const PureModule *m, uint32_t input) {
-    const PureInputShape *s = &m->input[input];
-    uint32_t h = fnv(2166136261u, &s->prefix, sizeof(s->prefix));
-    for (uint32_t f = 0; f < s->field_count; ++f) {
-        const PureField *field = &m->field[s->field_start + f];
-        unsigned char fixed[7] = {field->type, (unsigned char)field->rows, (unsigned char)(field->rows >> 8)};
-        put32(fixed + 3, field->offset);
-        h = fnv(fnv(h, field->name, strlen(field->name) + 1), fixed, sizeof(fixed));
-    }
-    return h;
-}
-
 static uint64_t random64(void) {
     uint64_t value = 0;
     while (getrandom(&value, sizeof(value), 0) != sizeof(value) || !value) {}
@@ -164,10 +151,11 @@ static size_t put_names(unsigned char *p, const char *source, const char *input)
 }
 
 /* A source and an input's names from p (size bytes); how many it takes, or 0. */
-static size_t get_names(const unsigned char *p, size_t size, char source[PURE_SOURCE + 1], char input[PURE_MODULE_NAME]) {
-    if (size < 1 || !p[0] || p[0] > PURE_SOURCE || size < 2u + p[0]) return 0;
+static size_t get_names(const unsigned char *p, size_t size, char source[PURE_LINK_NAME + 1],
+                        char input[PURE_LINK_NAME + 1]) {
+    if (size < 1 || !p[0] || p[0] > PURE_LINK_NAME || size < 2u + p[0]) return 0;
     size_t a = p[0], b = p[1 + a];
-    if (!b || b >= PURE_MODULE_NAME || size < 2 + a + b) return 0;
+    if (!b || b > PURE_LINK_NAME || size < 2 + a + b) return 0;
     memcpy(source, p + 1, a);
     source[a] = 0;
     memcpy(input, p + 2 + a, b);
@@ -249,9 +237,8 @@ typedef struct {
 } Flight;
 
 struct PureLink {
-    const PureModule *module;
-    uint32_t output, shape, own_id, peer_id;
-    char host[256], port[8], input[PURE_MODULE_NAME], source[PURE_SOURCE + 1];
+    uint32_t shape, own_id, peer_id;
+    char host[256], port[8], input[PURE_LINK_NAME + 1], source[PURE_LINK_NAME + 1];
     const PureSealKey *own;
     unsigned char own_public[PURE_SEAL_KEY], peer[PURE_SEAL_KEY], secret[32];
     bool peered;
@@ -293,23 +280,17 @@ struct PureLink {
     PureLinkCounts counts;
 };
 
-PureLink *pure_link_open(const PureModule *m, const char *output, const char *url, const char *source,
-                         const PureSealKey *own, const unsigned char own_public[PURE_SEAL_KEY], char *error,
-                         size_t size) {
-    int index = pure_module_input(m, output);
-    if (index < 0 || m->input[index].kind != PURE_KIND_OUTPUT) {
-        snprintf(error, size, "no output '%s'", output);
-        return NULL;
-    }
+PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, const PureSealKey *own,
+                         const unsigned char own_public[PURE_SEAL_KEY], char *error, size_t size) {
     if (!own) {
         snprintf(error, size, "a pure:// link needs the node's --key");
         return NULL;
     }
     size_t length = strlen(source);
     const char *host = url + 7, *slash = strchr(host, '/'), *colon = slash ? memchr(host, ':', (size_t)(slash - host)) : NULL;
-    if (!length || length > PURE_SOURCE || strncmp(url, "pure://", 7) || !slash || !colon || colon == host ||
+    if (!length || length > PURE_LINK_NAME || strncmp(url, "pure://", 7) || !slash || !colon || colon == host ||
         (size_t)(colon - host) >= 256 || slash - colon - 1 < 1 || slash - colon - 1 > 5 || !slash[1] ||
-        strlen(slash + 1) >= PURE_MODULE_NAME) {
+        strlen(slash + 1) > PURE_LINK_NAME) {
         snprintf(error, size, "a link is pure://host:port/INPUT");
         return NULL;
     }
@@ -319,9 +300,7 @@ PureLink *pure_link_open(const PureModule *m, const char *output, const char *ur
         snprintf(error, size, "out of memory");
         return NULL;
     }
-    l->module = m;
-    l->output = (uint32_t)index;
-    l->shape = shape_of(m, (uint32_t)index);
+    l->shape = shape;
     memcpy(l->host, host, (size_t)(colon - host));
     memcpy(l->port, colon + 1, (size_t)(slash - colon - 1));
     strcpy(l->input, slash + 1);
@@ -338,8 +317,6 @@ void pure_link_peer(PureLink *l, const unsigned char peer[PURE_SEAL_KEY]) {
     l->peer_id = key_id(peer);
     l->peered = true;
 }
-
-uint32_t pure_link_output(const PureLink *l) { return l->output; }
 
 static Record *record_at(PureLink *l, size_t k) { return &l->records[(l->head + k) % l->capacity]; }
 
@@ -397,17 +374,17 @@ static bool ring_grow(PureLink *l, size_t size) {
     return true;
 }
 
-bool pure_link_queue(PureLink *l, uint64_t seq, PureSpan payload) {
-    Record r = {.seq = seq, .size = (uint32_t)payload.size};
-    r.pieces = payload.size ? (uint32_t)((payload.size + PIECE - 1) / PIECE) : 1;
-    if (payload.size > RECORD_MOST || (r.pieces > 1 && !(r.more = calloc(r.pieces, sizeof(Piece))))) return false;
+bool pure_link_queue(PureLink *l, uint64_t seq, const unsigned char *bytes, size_t size) {
+    Record r = {.seq = seq, .size = (uint32_t)size};
+    r.pieces = size ? (uint32_t)((size + PIECE - 1) / PIECE) : 1;
+    if (size > RECORD_MOST || (r.pieces > 1 && !(r.more = calloc(r.pieces, sizeof(Piece))))) return false;
     pthread_mutex_lock(&l->lock);
     bool ok = seq > l->queued && (!l->count || seq == l->queued + 1);
-    size_t at = ok ? ring_place(l, payload.size) : SIZE_MAX;
-    if (ok && at == SIZE_MAX) ok = ring_grow(l, payload.size) && (at = ring_place(l, payload.size)) != SIZE_MAX;
+    size_t at = ok ? ring_place(l, size) : SIZE_MAX;
+    if (ok && at == SIZE_MAX) ok = ring_grow(l, size) && (at = ring_place(l, size)) != SIZE_MAX;
     if (ok) {
         r.at = at;
-        if (payload.size) memcpy(l->ring + at, payload.data, payload.size);
+        if (size) memcpy(l->ring + at, bytes, size);
     }
     if (ok && l->count == l->capacity) {
         size_t capacity = l->capacity ? 2 * l->capacity : 64;
@@ -568,7 +545,7 @@ static void on_ack(PureLink *l, const unsigned char *p, size_t size, uint64_t no
 }
 
 static void on_stored(PureLink *l, const unsigned char *p, size_t size, uint64_t now) {
-    char source[PURE_SOURCE + 1], input[PURE_MODULE_NAME];
+    char source[PURE_LINK_NAME + 1], input[PURE_LINK_NAME + 1];
     size_t names = get_names(p, size, source, input);
     if (!names || size < names + 13 || strcmp(source, l->source) || strcmp(input, l->input)) return;
     uint64_t heard = get64(p + names);
@@ -624,7 +601,7 @@ static void take_answer(PureLink *l, unsigned char *packet, ssize_t n, uint64_t 
             on_ack(l, plain + at, size - at, now);
             at += 13 + 16u * plain[at + 12];
         } else if (type == F_STORED) {
-            char source[PURE_SOURCE + 1], input[PURE_MODULE_NAME];
+            char source[PURE_LINK_NAME + 1], input[PURE_LINK_NAME + 1];
             size_t names = get_names(plain + at, size - at, source, input);
             if (!names || at + names + 13 > size) break;
             on_stored(l, plain + at, size - at, now);
@@ -988,8 +965,8 @@ typedef struct {
 } Held;
 typedef struct Stream {
     Active *active;
-    char source[PURE_SOURCE + 1];
-    uint32_t input;
+    char source[PURE_LINK_NAME + 1], input_name[PURE_LINK_NAME + 1];
+    uint32_t input, shape; /* the host's number for the input; the messages' shape */
     uint64_t heard;              /* the last number heard (stored), once known */
     bool known, out, stored_due, gap, ready;
     /* The line: once the last heard is known, whole records from the one
@@ -1030,7 +1007,7 @@ static const uint64_t IDLE_FIRST = 30000 * MS, SWEEP_EVERY = 250 * MS, TRIM_WAIT
 enum { TRIM_AFTER = 1024 };
 
 struct PureLinkListener {
-    const PureModule *module;
+    PureLinkHost host;
     const PureSealKey *own;
     unsigned char own_public[PURE_SEAL_KEY];
     uint32_t own_id;
@@ -1062,31 +1039,25 @@ struct PureLinkListener {
     size_t ready_count, ready_capacity;
     Run **due; /* runs to answer */
     size_t due_count, due_capacity;
-    bool (*deliver)(void *, const PureLinkDelivery *);
-    void *context;
     unsigned char *batch;
     size_t batch_capacity;
     PureLinkCounts counts;
 };
 
-PureLinkListener *pure_link_listen(const PureModule *m, unsigned port, const PureSealKey *own,
-                                   const unsigned char own_public[PURE_SEAL_KEY],
-                                   bool (*deliver)(void *, const PureLinkDelivery *), void *context, char *error,
-                                   size_t size) {
+PureLinkListener *pure_link_listen(unsigned port, const PureSealKey *own, const unsigned char own_public[PURE_SEAL_KEY],
+                                   const PureLinkHost *host, char *error, size_t size) {
     PureLinkListener *s = own ? calloc(1, sizeof(*s)) : NULL;
     if (!s || pthread_mutex_init(&s->lock, NULL)) {
         free(s);
         snprintf(error, size, own ? "out of memory" : "--link-port needs the node's --key");
         return NULL;
     }
-    s->module = m;
+    s->host = *host;
     s->own = own;
     memcpy(s->own_public, own_public, PURE_SEAL_KEY);
     s->own_id = key_id(own_public);
     s->port = port;
     s->idle = IDLE_FIRST;
-    s->deliver = deliver;
-    s->context = context;
     s->fd = s->wake = -1;
     return s;
 }
@@ -1128,8 +1099,8 @@ bool pure_link_allow(PureLinkListener *s, const char *source, const unsigned cha
                      size_t size) {
     size_t length = strlen(source), p = SIZE_MAX;
     uint32_t id = key_id(key);
-    if (!length || length > PURE_SOURCE) {
-        snprintf(error, size, "a source's name is 1 to %d bytes", PURE_SOURCE);
+    if (!length || length > PURE_LINK_NAME) {
+        snprintf(error, size, "a source's name is 1 to %d bytes", PURE_LINK_NAME);
         return false;
     }
     for (size_t slot = s->index_size ? id & (s->index_size - 1) : 0; s->index_size && s->index[slot];
@@ -1431,18 +1402,15 @@ static bool allowed(const PureLinkListener *s, const Peer *peer, const char *sou
 }
 
 /* The stream of a peer's source to input, made the first time: NULL when the
- * source is not allowed from the peer, or input takes no such messages. */
+ * source is not allowed from the peer, or the host has no input that takes
+ * such messages. */
 static Stream *stream_of(PureLinkListener *s, Active *a, const char *source, const char *input, uint32_t shape) {
-    int index = pure_module_input(s->module, input);
-    if (index < 0) return NULL;
     for (unsigned k = 0; k < a->stream_count; ++k) {
         Stream *st = a->streams[k];
-        if (st->input == (uint32_t)index && !strcmp(st->source, source)) return st;
+        if (!strcmp(st->input_name, input) && !strcmp(st->source, source)) return st->shape == shape ? st : NULL;
     }
-    const PureInputShape *in = &s->module->input[index];
-    if (!allowed(s, &s->peers[a->peer], source) || in->kind != PURE_KIND_MESSAGE || in->keyed ||
-        shape_of(s->module, (uint32_t)index) != shape)
-        return NULL;
+    int index = allowed(s, &s->peers[a->peer], source) ? s->host.input(s->host.context, input, shape) : -1;
+    if (index < 0) return NULL;
     size_t capacity = a->stream_capacity;
     Stream **streams = room(a->streams, &capacity, a->stream_count, sizeof(*streams), 2), *st;
     if (!streams) return NULL;
@@ -1451,7 +1419,9 @@ static Stream *stream_of(PureLinkListener *s, Active *a, const char *source, con
     if (!(st = calloc(1, sizeof(*st)))) return NULL;
     st->active = a;
     st->input = (uint32_t)index;
+    st->shape = shape;
     snprintf(st->source, sizeof(st->source), "%s", source);
+    snprintf(st->input_name, sizeof(st->input_name), "%s", input);
     a->streams[a->stream_count++] = st;
     return st;
 }
@@ -1524,7 +1494,7 @@ static bool hand_over(PureLinkListener *s, Stream *st) {
         size_t bytes = 0;
         for (; n < st->line_count && n < BATCH; ++n) bytes += 4 + (size_t)get32(st->line + st->line_head + bytes);
         PureLinkDelivery d = {st->input, st->source, st->line_first, n, st->line + st->line_head, bytes, st};
-        if (!s->deliver(s->context, &d)) return false;
+        if (!s->host.deliver(s->host.context, &d)) return false;
         st->out = true;
         ++s->counts.deliveries;
         return true;
@@ -1548,7 +1518,7 @@ static bool hand_over(PureLinkListener *s, Stream *st) {
         at += 4 + held_at(st, k)->size;
     }
     PureLinkDelivery d = {st->input, st->source, held_at(st, 0)->seq, (unsigned)n, s->batch, bytes, st};
-    if (!s->deliver(s->context, &d)) return false;
+    if (!s->host.deliver(s->host.context, &d)) return false;
     st->out = true;
     ++s->counts.deliveries;
     return true;
@@ -1594,7 +1564,7 @@ static bool take_from(PureLinkListener *s, Peer *peer, unsigned char *packet, si
     for (size_t at = 0; at < size;) {
         unsigned type = plain[at++];
         if (type == F_STREAM) {
-            char source[PURE_SOURCE + 1], input[PURE_MODULE_NAME];
+            char source[PURE_LINK_NAME + 1], input[PURE_LINK_NAME + 1];
             size_t names = get_names(plain + at, size - at, source, input);
             if (!names || at + names + 4 > size) break;
             st = stream_of(s, a, source, input, get32(plain + at + names));
@@ -1687,9 +1657,9 @@ static void answer(PureLinkListener *s, uint64_t now) {
         for (unsigned j = 0; j < a->stream_count; ++j) {
             Stream *st = a->streams[j];
             if (!(st->stored_due || r->ack_due) || st->run != r || st->run_id != r->run || !st->known) continue;
-            if (at + 2 + PURE_SOURCE + PURE_MODULE_NAME + 14 > BODY) break;
+            if (at + strlen(st->source) + strlen(st->input_name) + 16 > BODY) break; /* type, names, 13 */
             body[at++] = F_STORED;
-            at += put_names(body + at, st->source, s->module->input_names[st->input]);
+            at += put_names(body + at, st->source, st->input_name);
             put64(body + at, st->heard);
             body[at + 8] = st->gap ? STORED_GAP : 0;
             size_t room = st->held_bytes + (st->line_size - st->line_head) < HELD_MOST ? CREDIT : 1;

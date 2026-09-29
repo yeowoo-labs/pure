@@ -1094,6 +1094,25 @@ static int find(const char (*names)[PURE_MODULE_NAME], unsigned count, const cha
 
 int pure_module_state(const PureModule *m, const char *name) { return find(m->state_names, m->states, name); }
 int pure_module_input(const PureModule *m, const char *name) { return find(m->input_names, m->inputs, name); }
+static uint32_t fnv(uint32_t h, const void *bytes, size_t size) {
+    const unsigned char *p = bytes;
+    for (size_t i = 0; i < size; ++i) h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+uint32_t pure_module_shape(const PureModule *m, uint32_t input) {
+    const PureInputShape *s = &m->input[input];
+    uint32_t h = fnv(2166136261u, &s->prefix, sizeof(s->prefix));
+    for (uint32_t f = 0; f < s->field_count; ++f) {
+        const PureField *field = &m->field[s->field_start + f];
+        unsigned char fixed[7] = {field->type, (unsigned char)field->rows, (unsigned char)(field->rows >> 8),
+                                  (unsigned char)field->offset, (unsigned char)(field->offset >> 8),
+                                  (unsigned char)(field->offset >> 16), (unsigned char)(field->offset >> 24)};
+        h = fnv(fnv(h, field->name, strlen(field->name) + 1), fixed, sizeof(fixed));
+    }
+    return h;
+}
+
 int pure_module_view(const PureModule *m, const char *name) {
     for (uint32_t i = 0; i < m->views; ++i)
         if (!m->view_table[i] && !strcmp(m->view_names[i], name)) return (int)i;

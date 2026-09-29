@@ -38,6 +38,11 @@ $(BUILD)/obj/%.o: %.c $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+# The links know nothing of the core: they build without its headers.
+$(BUILD)/obj/link/%.o: link/%.c $(wildcard link/*.h)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
 $(BUILD)/libpure.a: $(OBJECTS)
 	rm -f $@
 	$(AR) rcs $@ $^

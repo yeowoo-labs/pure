@@ -211,6 +211,10 @@ int pure_module_state(const PureModule *, const char *name);
 int pure_module_input(const PureModule *, const char *name);
 int pure_module_view(const PureModule *, const char *name);
 int pure_module_column(const PureModule *, uint32_t table, const char *name);
+/* What a message of an input looks like, as 32 bits: its fields' names,
+ * types and places (FNV-1a). A sender's output and the input it sends to
+ * across nodes must agree on it (link/link.h). */
+uint32_t pure_module_shape(const PureModule *, uint32_t input);
 /* The index state a number view shows as its position (a view that is just
  * `at.position`), or -1: what a host moves with pure_app_point. */
 int pure_module_position(const PureModule *, uint32_t view);
