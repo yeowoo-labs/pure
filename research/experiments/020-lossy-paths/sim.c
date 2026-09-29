@@ -5,10 +5,12 @@
  * (a backlog), stored by the host at once. It takes in link-protocol.c
  * whole, to read the sender's window and RTT.
  *
- *   sim SIZE COUNT DELAY_MS LOSS_PERMIL JITTER_MS RATE_MBIT QUEUE_PACKETS SEED
+ *   sim SIZE COUNT DELAY_MS LOSS_PERMIL JITTER_MS RATE_MBIT QUEUE_PACKETS SEED [PACE]
  * prints a line of JSON: virtual seconds, records a second, packets sent,
  * dropped (by loss, by the queue), called lost, of them late, congestion
  * episodes undone, sent again, and the window and RTT seen each 100 ms.
+ * PACE: records queued a second (else all at once), and the time each took
+ * from queued to handed over (p50, p99, max), and probes sent (PTO).
  *
  *   cc -O2 -std=c17 -I link research/experiments/020-lossy-paths/sim.c link/crypto.c -lm -ldl -o build/sim
  *   PURE_CRYPTO=build/pure-crypto.so build/sim 1000 30000 10 10 5 50 100 1 */
@@ -36,6 +38,7 @@ static uint64_t dropped_loss, dropped_queue, sent_count;
 static uint64_t heard, records, size;
 static PureLinkDone dones[64];
 static size_t done_count;
+static uint64_t *queued_at, *waited;
 
 static void put(bool to_receiver, const unsigned char *bytes, size_t n) {
     ++sent_count;
@@ -63,6 +66,11 @@ static void put(bool to_receiver, const unsigned char *bytes, size_t n) {
     memcpy(p->bytes, bytes, n);
 }
 
+static int by_value(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
 static bool sim_answer(void *context, const unsigned char *packet, size_t n, const unsigned char *to, size_t to_size) {
     (void)context, (void)to, (void)to_size;
     put(false, packet, n);
@@ -79,7 +87,10 @@ static bool sim_deliver(void *context, const PureLinkDelivery *d) {
     if (done_count == 64) return false;
     uint64_t h = heard;
     for (unsigned k = 0; k < d->count; ++k)
-        if (d->first + k == h + 1) h = d->first + k;
+        if (d->first + k == h + 1) {
+            h = d->first + k;
+            if (queued_at) waited[h] = now - queued_at[h];
+        }
     heard = h;
     dones[done_count++] = (PureLinkDone){d->token, heard, true, d->first > heard + 1};
     return true;
@@ -95,6 +106,8 @@ int main(int argc, char **argv) {
     rate_bps = strtoull(argv[6], NULL, 10) * 1000000u;
     queue_limit = strtoull(argv[7], NULL, 10);
     sim_seed = strtoull(argv[8], NULL, 10) * 0x9e3779b97f4a7c15u | 1;
+    double pace = argc > 9 ? strtod(argv[9], NULL) : 0;
+    if (pace > 0) queued_at = calloc(records + 1, sizeof(*queued_at)), waited = calloc(records + 1, sizeof(*waited));
     char dir[] = "/tmp/pure-sim-XXXXXX", path[512], hex[65], error[256];
     if (!mkdtemp(dir)) return 1;
     unsigned char pa[32], pb[32];
@@ -109,12 +122,18 @@ int main(int argc, char **argv) {
     PureLinkReceiver *r = pure_link_receiver(b, pb, &(PureLinkHost){input_of, sim_deliver, NULL}, error, sizeof(error));
     pure_link_allow(r, "sim.out", pa, error, sizeof(error));
     unsigned char *bytes = calloc(1, size + 1);
-    for (uint64_t seq = 1; seq <= records; ++seq)
+    uint64_t queued = 0, ptos = 0;
+    for (uint64_t seq = 1; !queued_at && seq <= records; ++seq)
         if (!pure_link_sender_queue(s, seq, bytes, size)) return 1;
+    if (!queued_at) queued = records;
     unsigned char out[PURE_LINK_DATAGRAM_MOST];
     uint64_t sample_at = 0, window_sum = 0, rtt_sum = 0, samples = 0, window_least = UINT64_MAX;
     PureLinkDone told[64];
     while (heard < records || s->stored < records) {
+        for (; queued < records && (uint64_t)((double)queued * 1e9 / pace) <= now; ++queued) {
+            queued_at[queued + 1] = now;
+            if (!pure_link_sender_queue(s, queued + 1, bytes, size)) return 1;
+        }
         uint64_t number;
         for (size_t n; (n = pure_link_sender_packet(s, out, false, now, &number));) put(true, out, n);
         uint64_t next = UINT64_MAX, due = pure_link_sender_due(s), turn = pure_link_receiver_due(r);
@@ -123,6 +142,7 @@ int main(int argc, char **argv) {
         if (due && due < next) next = due;
         if (turn && turn < next) next = turn;
         if (done_count && now + 1000 < next) next = now + 1000;
+        if (queued < records && (uint64_t)((double)queued * 1e9 / pace) < next) next = (uint64_t)((double)queued * 1e9 / pace);
         if (next == UINT64_MAX || next > 3600000 * MS) {
             fprintf(stderr, "sim: stuck at %llu of %llu\n", (unsigned long long)heard, (unsigned long long)records);
             return 1;
@@ -143,7 +163,9 @@ int main(int argc, char **argv) {
             else pure_link_sender_take(s, p->bytes, p->size, now);
             *p = packets[--packet_count];
         }
+        unsigned before = s->pto_count;
         pure_link_sender_tick(s, now);
+        ptos += s->pto_count > before;
         size_t count = done_count;
         memcpy(told, dones, count * sizeof(*dones));
         done_count = 0;
@@ -153,13 +175,19 @@ int main(int argc, char **argv) {
     printf("{\"size\":%llu,\"records\":%llu,\"delay_ms\":%llu,\"loss_permil\":%llu,\"jitter_ms\":%llu,\"rate_mbit\":%llu,"
            "\"queue\":%llu,\"seconds\":%.3f,\"per_second\":%.0f,\"mbit\":%.2f,\"sent\":%llu,\"dropped_loss\":%llu,"
            "\"dropped_queue\":%llu,\"declared_lost\":%llu,\"late\":%llu,\"undone\":%llu,\"resent\":%llu,\"window_mean\":%.0f,\"window_least\":%llu,"
-           "\"srtt_mean_ms\":%.2f}\n",
+           "\"srtt_mean_ms\":%.2f,\"probes\":%llu",
            (unsigned long long)size, (unsigned long long)records, (unsigned long long)(delay_ns / MS),
            (unsigned long long)loss_permil, (unsigned long long)(jitter / MS), (unsigned long long)(rate_bps / 1000000),
            (unsigned long long)queue_limit, seconds, records / seconds, records * (double)size * 8 / seconds / 1e6,
            (unsigned long long)s->counts.packets, (unsigned long long)dropped_loss, (unsigned long long)dropped_queue,
            (unsigned long long)s->counts.lost, (unsigned long long)s->counts.late, (unsigned long long)s->counts.undone, (unsigned long long)s->counts.resent, (double)window_sum / samples,
-           (unsigned long long)window_least, (double)rtt_sum / samples / 1e6);
+           (unsigned long long)window_least, (double)rtt_sum / samples / 1e6, (unsigned long long)ptos);
+    if (queued_at) {
+        qsort(waited + 1, records, sizeof(*waited), by_value);
+        printf(",\"waited_ms_p50\":%.3f,\"waited_ms_p99\":%.3f,\"waited_ms_max\":%.3f", waited[1 + records / 2] / 1e6,
+               waited[1 + records * 99 / 100] / 1e6, waited[records] / 1e6);
+    }
+    printf("}\n");
     snprintf(path, sizeof(path), "rm -rf %s", dir);
     return system(path) ? 1 : 0;
 }
