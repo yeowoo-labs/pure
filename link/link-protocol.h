@@ -161,6 +161,9 @@ size_t pure_link_sender_datagram(const PureLinkSender *);
 void pure_link_sender_refused(PureLinkSender *, uint64_t number);
 /* When the next timer is due (ns), or 0 for none. */
 uint64_t pure_link_sender_due(const PureLinkSender *);
+/* Probes in a row that nothing answered (0 once anything is): the path, or
+ * the receiver where it was, may be gone. */
+unsigned pure_link_sender_probes(const PureLinkSender *);
 /* How often it moves on to a new epoch (ns), and after how many bytes sent
  * (an hour and a GiB at first). */
 void pure_link_sender_epochs(PureLinkSender *, uint64_t every_ns, uint64_t bytes);

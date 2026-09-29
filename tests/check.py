@@ -946,6 +946,153 @@ print(json.dumps(check.server_links_udp(Path({str(aup)!r}), Path({str(pure)!r}),
     return json.loads(done.stdout.strip().splitlines()[-1])
 
 
+def server_links_moved(aup, pure, work):
+    """A receiver's store moved to another address (H3 of
+    docs/design/011-pure-transport.md), in namespaces of its own (unshare
+    -rmn: its network, and an /etc/hosts of its own): the sender links to
+    pure://receiver.test, which names 127.0.0.2. While clients buy, the
+    receiver is killed (-9), its store, key and memo (KEY.links) copied
+    elsewhere, 127.0.0.2 made unreachable, the name pointed at 127.0.0.3,
+    and the copy started there. The sender, its probes unanswered, looks
+    the name up again and goes on: every order it saved is applied once,
+    and the moved receiver makes no X25519 (its memo came with it). None
+    where there is no unshare or ip."""
+    import shutil
+    unshare = shutil.which('unshare')
+    ip = shutil.which('ip') or next((path for path in ('/usr/sbin/ip', '/sbin/ip', '/bin/ip') if Path(path).exists()), None)
+    if not unshare or not ip or subprocess.run([unshare, '-rmn', 'true'], capture_output=True).returncode:
+        return None
+    hosts = work / 'moved-hosts'
+    hosts.write_text('127.0.0.1 localhost\n127.0.0.2 receiver.test\n')
+    script = f"""
+import json, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, {str(HERE)!r})
+import check
+subprocess.run([{ip!r}, 'link', 'set', 'lo', 'up'], check=True)
+subprocess.run(['mount', '--bind', {str(hosts)!r}, '/etc/hosts'], check=True)
+print(json.dumps(check.server_links_moved_inside(Path({str(aup)!r}), Path({str(pure)!r}), Path({str(work)!r}),
+                                                 Path({str(hosts)!r}), {ip!r})))
+"""
+    done = subprocess.run([unshare, '-rmn', sys.executable, '-c', script], capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stderr[-3000:]
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def server_links_moved_inside(aup, pure, work, hosts, ip):
+    import select
+    import shutil
+    import signal
+    import socket
+    import threading
+    import time
+    sender_module, receiver_module = work / 'moved-sender.pmod', work / 'moved-receiver.pmod'
+    for module, text in ((sender_module, LINK_SENDER), (receiver_module, LINK_RECEIVER)):
+        source = module.with_suffix('.aup')
+        source.write_text(text)
+        compile_module(aup, source, module)
+
+    def free_port(kind=socket.SOCK_STREAM):
+        with socket.socket(socket.AF_INET, kind) as probe:
+            probe.bind(('127.0.0.1', 0))
+            return probe.getsockname()[1]
+
+    def start(args, port):
+        process = subprocess.Popen([str(a) for a in args] + ['--port', str(port)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        line = process.stdout.readline() if ready else b''
+        assert line, f'host did not start: {process.stderr.read(2000) if process.poll() is not None else ""}'
+        return process, json.loads(line)
+
+    def post(port, body):
+        import http.client
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+        try:
+            data = json.dumps(body).encode()
+            connection.request('POST', '/inputs/buy', data, {'Content-Length': str(len(data)),
+                                                             'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            response.read()
+            return response.status
+        finally:
+            connection.close()
+
+    def number(port, view):
+        return int(http(port, 'GET', f'/views/{view}')[3])
+
+    keys = {}
+    for name in ('sender', 'receiver'):
+        process, info = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'moved-key',
+                               '--key', work / f'moved-{name}.key'], 0)
+        keys[name] = info['public_key']
+        process.terminate()
+        process.communicate(timeout=30)
+    port_a, port_b, link_port = free_port(), free_port(), free_port(socket.SOCK_DGRAM)
+    (work / 'moved-senders').write_text(f'moved-sender.ordered {keys["sender"]}\n')
+
+    def receiver(where):
+        return [pure / 'build/pure-serve', '--module', receiver_module, '--store', work / f'moved-{where}',
+                '--key', work / f'moved-{where}.key', '--link-port', link_port, '--senders', work / 'moved-senders']
+
+    shutil.copy(work / 'moved-receiver.key', work / 'moved-first.key')
+    b, _ = start(receiver('first'), port_b)
+    a, _ = start([pure / 'build/pure-serve', '--module', sender_module, '--store', work / 'moved-a',
+                  '--key', work / 'moved-sender.key', '--send', f'ordered=pure://receiver.test:{link_port}/order',
+                  '--seal', f'ordered={keys["receiver"]}'], port_a)
+    acknowledged = [0]
+    stop = threading.Event()
+
+    def client():
+        rng = random.Random(7331)
+        while not stop.is_set():
+            count = rng.randint(1, 20)
+            try:
+                if post(port_a, {'item': 'm', 'count': count}) == 200:
+                    acknowledged[0] += count
+            except OSError:
+                time.sleep(0.02)
+
+    thread = threading.Thread(target=client)
+    thread.start()
+    try:
+        time.sleep(0.6)
+        b.send_signal(signal.SIGKILL)
+        b.wait()
+        # The store, key and memo carried to another machine; the old one gone, the name moved.
+        shutil.copytree(work / 'moved-first', work / 'moved-second')
+        for suffix in ('.key', '.key.links'):
+            shutil.copy(work / f'moved-first{suffix}', work / f'moved-second{suffix}')
+        subprocess.run([ip, 'route', 'add', 'unreachable', '127.0.0.2/32', 'table', 'local'], check=True)
+        hosts.write_text('127.0.0.1 localhost\n127.0.0.3 receiver.test\n')
+        b, _ = start(receiver('second'), port_b)
+        time.sleep(1.5)
+    finally:
+        stop.set()
+        thread.join()
+    try:
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            sent, sent_total = number(port_a, 'sent'), number(port_a, 'sent_total')
+            if (number(port_b, 'count'), number(port_b, 'total')) == (sent, sent_total):
+                break
+            time.sleep(0.1)
+        count, total = number(port_b, 'count'), number(port_b, 'total')
+        assert (count, total) == (sent, sent_total), (count, total, sent, sent_total)
+        assert sent_total >= acknowledged[0] > 0, (sent_total, acknowledged)
+    finally:
+        stats = {}
+        for name, process in (('a', a), ('b', b)):
+            process.terminate()
+            _, error = process.communicate(timeout=30)
+            assert process.returncode == 0, error[-1000:]
+            stats[name] = [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
+    assert stats['b']['listener_woken'] >= 1 and stats['b']['listener_secrets'] == 0, stats['b']
+    return {'orders': sent, 'acknowledged_total': acknowledged[0], 'packets': stats['a']['link_packets'],
+            'resent': stats['a']['link_resent'], 'received_after_move': stats['b']['listener_received'],
+            'secrets_after_move': stats['b']['listener_secrets']}
+
+
 def server_sealed(aup, pure, work):
     """Sends sealed end to end (--seal to the receiver's --key), in one session
     a wire and authenticated by the sender's own --key: through a relay that
@@ -2045,6 +2192,7 @@ def main():
         report['server_links'] = server_links(aup, pure, work)
         report['server_links_udp'] = server_links_udp(aup, pure, work)
         report['server_links_udp_lossy'] = server_links_udp_lossy(aup, pure, work)
+        report['server_links_moved'] = server_links_moved(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)
         report['server_sealed'] = server_sealed(aup, pure, work)
         report['server_surface'] = server_surface(aup, pure, work)

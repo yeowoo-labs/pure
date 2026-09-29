@@ -132,6 +132,7 @@ struct PureLink {
     uint64_t burst_pn[BURST];
     size_t segment; /* the datagram's size the bursts are cut at */
     bool gso, no_gso;
+    unsigned looked; /* the probes unanswered when it last looked for the receiver */
 };
 
 PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, const PureSealKey *own,
@@ -276,6 +277,46 @@ static void send_packets(PureLink *l, uint64_t now) {
     flush(l);
 }
 
+/* Where the receiver's name is now, a socket connected there in place of
+ * the one before: so a link follows a receiver moved to another address,
+ * and goes out a new socket when its own network changed. False (the
+ * socket as it was) when the name or a socket fails. */
+static bool look(PureLink *l, char *error, size_t size) {
+    struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM}, *found = NULL;
+    int resolved = getaddrinfo(l->host, l->port, &hints, &found);
+    if (resolved) {
+        snprintf(error, size, "%s: %s", l->host, gai_strerror(resolved));
+        return false;
+    }
+    int fd = socket(found->ai_family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0), family = found->ai_family;
+    bool ok = fd >= 0 && !connect(fd, found->ai_addr, found->ai_addrlen);
+    int failed = errno, buffer = 4 << 20;
+    freeaddrinfo(found);
+    if (!ok) {
+        if (fd >= 0) close(fd);
+        snprintf(error, size, "pure://%s:%s/%s: %s", l->host, l->port, l->input, strerror(failed));
+        return false;
+    }
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
+    /* Never cut up on the way (the don't-fragment bit): a packet the path
+     * does not carry is lost, as a probe of a larger size must be. */
+    int probe = IP_PMTUDISC_PROBE, probe6 = IPV6_PMTUDISC_PROBE;
+    if (family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &probe6, sizeof(probe6));
+    else setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &probe, sizeof(probe));
+    /* GSO where the system has it: asked for each burst, never for the socket. */
+    int segment = DATAGRAM, none = 0;
+    l->gso = !l->no_gso && !setsockopt(fd, SOL_UDP, UDP_SEGMENT, &segment, sizeof(segment)) &&
+             !setsockopt(fd, SOL_UDP, UDP_SEGMENT, &none, sizeof(none));
+    if (l->fd >= 0) close(l->fd);
+    l->fd = fd;
+    return true;
+}
+
+/* A link whose probes go unanswered three times in a row looks for its
+ * receiver again, and at each probe after (a second apart at most). */
+enum { LOOK_PROBES = 3 };
+
 static void *run_link(void *context) {
     PureLink *l = context;
     for (;;) {
@@ -297,6 +338,13 @@ static void *run_link(void *context) {
         now = now_ns();
         if (waits[0].revents) take_answers(l, now);
         pure_link_sender_tick(l->sender, now);
+        unsigned probes = pure_link_sender_probes(l->sender);
+        if (probes >= LOOK_PROBES && probes != l->looked) { /* before the probe goes, so its answer comes to the new socket */
+            pthread_mutex_unlock(&l->lock); /* a name looked up may take its time: the owner queues meanwhile */
+            look(l, NULL, 0);
+            pthread_mutex_lock(&l->lock);
+        }
+        l->looked = probes;
         send_packets(l, now);
         uint64_t stored = pure_link_sender_stored(l->sender);
         bool told = stored != l->told;
@@ -312,36 +360,14 @@ bool pure_link_start(PureLink *l, void (*notify)(void *), void *context, char *e
         snprintf(error, size, "pure://%s:%s/%s: no receiver's key (--seal)", l->host, l->port, l->input);
         return false;
     }
-    struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM}, *found = NULL;
-    int resolved = getaddrinfo(l->host, l->port, &hints, &found);
-    if (resolved) {
-        snprintf(error, size, "%s: %s", l->host, gai_strerror(resolved));
-        return false;
-    }
-    l->fd = socket(found->ai_family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    bool ok = l->fd >= 0 && !connect(l->fd, found->ai_addr, found->ai_addrlen);
-    int buffer = 4 << 20, family = found->ai_family;
-    freeaddrinfo(found);
-    if (ok) {
-        setsockopt(l->fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer));
-        setsockopt(l->fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
-        /* Never cut up on the way (the don't-fragment bit): a packet the
-         * path does not carry is lost, as a probe of a larger size must be. */
-        int probe = IP_PMTUDISC_PROBE, probe6 = IPV6_PMTUDISC_PROBE;
-        if (family == AF_INET6) setsockopt(l->fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &probe6, sizeof(probe6));
-        else setsockopt(l->fd, IPPROTO_IP, IP_MTU_DISCOVER, &probe, sizeof(probe));
-    }
-    /* GSO where the system has it: asked for each burst, never for the socket. */
-    int segment = DATAGRAM, none = 0;
+    if (!look(l, error, size)) return false;
     l->segment = DATAGRAM;
-    l->gso = ok && !l->no_gso && !setsockopt(l->fd, SOL_UDP, UDP_SEGMENT, &segment, sizeof(segment)) &&
-             !setsockopt(l->fd, SOL_UDP, UDP_SEGMENT, &none, sizeof(none));
-    ok = ok && l->keyed && (l->burst = malloc(BURST_BYTES + DATAGRAM_MOST)) && (l->taking = malloc(sizeof(*l->taking))) &&
-         (l->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) >= 0;
+    bool ok = l->keyed && (l->burst = malloc(BURST_BYTES + DATAGRAM_MOST)) && (l->taking = malloc(sizeof(*l->taking))) &&
+              (l->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) >= 0;
     l->notify = notify;
     l->context = context;
     if (!ok || pthread_create(&l->thread, NULL, run_link, l)) {
-        snprintf(error, size, "pure://%s:%s/%s: cannot start (a socket, the keys)", l->host, l->port, l->input);
+        snprintf(error, size, "pure://%s:%s/%s: cannot start (the keys, memory)", l->host, l->port, l->input);
         return false;
     }
     pthread_setname_np(l->thread, "pure-link"); /* a link's CPU, seen apart */

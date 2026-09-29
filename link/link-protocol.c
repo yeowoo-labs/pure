@@ -1063,6 +1063,8 @@ bool pure_link_sender_shared(PureLinkSender *l, const unsigned char peer[PURE_SE
 
 uint64_t pure_link_sender_queued(const PureLinkSender *l) { return l->queued; }
 
+unsigned pure_link_sender_probes(const PureLinkSender *l) { return l->pto_count; }
+
 void pure_link_sender_epochs(PureLinkSender *l, uint64_t every_ns, uint64_t bytes) {
     l->epoch_every = every_ns;
     l->epoch_most = bytes;
