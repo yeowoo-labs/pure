@@ -55,10 +55,10 @@ def compile_module(aup, source_path, out):
 class HttpHost:
     """A Pure HTTP host on a fresh port; stops with its statistics."""
 
-    def __init__(self, args):
+    def __init__(self, args, env=None):
         import select
         self.process = subprocess.Popen([str(a) for a in args] + ['--port', '0'], stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE)
+                                        stderr=subprocess.PIPE, env=env)
         ready, _, _ = select.select([self.process.stdout], [], [], 10)
         assert ready, 'HTTP host did not start'
         line = self.process.stdout.readline()
@@ -2329,10 +2329,18 @@ view stamped_view = stamped
 """
 
 
+HEARTBEAT_SOURCE = """input beat = every 20 ms
+output pulse = message { value: number }
+on beat { send pulse { value: 1 } }
+view label = "heartbeat"
+"""
+
+
 def server_timers(aup, pure, work):
     """A served app's timers tick on the server's clock and its events see
     the time they were applied, on one thread and with an owner; the ticks
-    are saved, so a restarted server goes on from them."""
+    are saved, so a restarted server goes on from them. An app with no state
+    but an output ticks too: its sends are its state (review 004, F4)."""
     import time
     module, source = work / 'beat.pmod', work / 'beat.aup'
     source.write_text(BEAT_SOURCE)
@@ -2358,6 +2366,27 @@ def server_timers(aup, pure, work):
                 stats = host.stop()
             assert stats[0]['ticks'] >= 5, stats
         seen[threads] = beats
+    module, source = work / 'heartbeat.pmod', work / 'heartbeat.aup'
+    source.write_text(HEARTBEAT_SOURCE)
+    compile_module(aup, source, module)
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'heartbeat'])
+    try:
+        time.sleep(0.45)
+    finally:
+        stats = host.stop()
+    assert stats[0]['ticks'] >= 10, stats
+    seen['stateless'] = stats[0]['ticks']
+    # The wall clock set back an hour 0.2 s in (build/clock-back.so): the
+    # timers wait on the monotonic clock, so they go on ticking.
+    import os
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'heartbeat-back'],
+                    env={**os.environ, 'LD_PRELOAD': str(pure / 'build/clock-back.so')})
+    try:
+        time.sleep(0.6)
+    finally:
+        stats = host.stop()
+    assert stats[0]['ticks'] >= 20, stats
+    seen['clock_set_back'] = stats[0]['ticks']
     return seen
 
 

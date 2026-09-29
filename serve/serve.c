@@ -183,7 +183,7 @@ typedef struct {
     bool wrote;       /* the last round saved an event or an edit */
     uint64_t save_waited; /* ns the last save waited for the device (a sync), not working */
     bool reads_first; /* the owner's: a round's reads before its writes */
-    double next[PURE_MODULE_INPUTS]; /* when each timer ticks next (wall clock, ms) */
+    uint64_t next[PURE_MODULE_INPUTS]; /* when each timer ticks next (monotonic clock, ms; 0: not yet begun) */
     uint64_t ticks;
     /* The owner's: the last save's snapshot (NULL: the owner shows views),
      * taken under the lock, and the app's changes it shows. */
@@ -1648,27 +1648,32 @@ static void execute(Executor *ex, const Job *jobs, size_t count, void (*finish)(
     if (pinned) pure_store_pin(ex->store, false);
 }
 
-/* Tick every timer that is due, with one save for them (an app with states
- * only: a timer can change nothing else). The milliseconds until the next
- * is due, or -1 without timers. Missed ticks are not made up. */
+/* Tick every timer that is due, with one save for them. A tick can change
+ * states and send (the outbox is the app's state too): an app with neither
+ * has nothing a tick could do, and runs on every thread, so it ticks none.
+ * The milliseconds until the next is due, or -1 without timers. Missed
+ * ticks are not made up. When a timer is due is the monotonic clock's
+ * business (the wall clock may be set back); events see the wall clock. */
 static long run_timers(Executor *ex) {
     const PureModule *m = ex->module;
-    if (!m->states) return -1;
-    double now = wall_ms(), soonest = -1;
+    bool changes = m->states > 0;
+    for (uint32_t i = 0; i < m->inputs && !changes; ++i) changes = m->input[i].kind == PURE_KIND_OUTPUT;
+    if (!changes) return -1;
+    uint64_t now = now_ms(), soonest = UINT64_MAX;
     bool ticked = false;
     for (uint32_t i = 0; i < m->inputs; ++i) {
         if (m->input[i].kind != PURE_KIND_TIMER) continue;
         if (!ex->next[i]) ex->next[i] = now + m->input[i].period; /* the first period starts now */
         if (ex->next[i] <= now) {
-            ex->app.now = now;
+            ex->app.now = wall_ms();
             if (pure_app_tick(&ex->app, i) == PURE_OK) ++ex->ticks;
             ticked = true;
             ex->next[i] = now + m->input[i].period;
         }
-        if (soonest < 0 || ex->next[i] - now < soonest) soonest = ex->next[i] - now;
+        if (ex->next[i] - now < soonest) soonest = ex->next[i] - now;
     }
     if (ticked && pure_app_save(&ex->app) == PURE_OK) after_save(ex); /* a failed save undoes the ticks */
-    return soonest < 0 ? -1 : (long)ceil(soonest);
+    return soonest == UINT64_MAX ? -1 : (long)soonest;
 }
 
 /* On the request's connection thread: complete its ticket and answer it if

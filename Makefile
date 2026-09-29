@@ -85,6 +85,10 @@ $(BUILD)/test-message-json: serve/test-message-json.c serve/message-json.c $(BUI
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve serve/test-message-json.c serve/message-json.c $(BUILD)/libpure.a \
 		$(LDFLAGS) -lm $(LDLIBS) -o $@
 
+# LD_PRELOAD: the wall clock set back an hour, to see timers go on (tests/check.py).
+$(BUILD)/clock-back.so: tests/clock-back.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared tests/clock-back.c $(LDFLAGS) -ldl $(LDLIBS) -o $@
+
 # A module run ranged and not from the same inputs, compared (tests/check.py).
 $(BUILD)/module-probe: tests/module-probe.c $(BUILD)/libpure.a $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) tests/module-probe.c $(BUILD)/libpure.a $(LDFLAGS) -lm $(LDLIBS) -o $@
@@ -101,7 +105,7 @@ $(BUILD)/test-tree-store: store/test-tree-store.c $(STORE) $(HEADERS)
 # compare documents with the earlier document server.
 AUP ?= ../aup
 check: all $(BUILD)/test-module $(BUILD)/test-tree-store $(BUILD)/test-log $(BUILD)/test-link $(BUILD)/test-message-json \
-		$(BUILD)/module-probe
+		$(BUILD)/module-probe $(BUILD)/clock-back.so
 	$(BUILD)/test-tree-store
 	$(BUILD)/test-log
 	$(BUILD)/test-module
