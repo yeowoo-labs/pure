@@ -32,8 +32,12 @@ enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
  * events with no late packet before the patience halves. */
 enum { REORDER_FIRST = 3, REORDER_PACKETS_MOST = 256, REORDER_QUARTERS_MOST = 8, CALM = 16 };
 /* A probe of a larger datagram lost is tried again a second on, three
- * times, then ten minutes on. */
-enum { REACH_TRIES = 3 };
+ * times, then ten minutes on. A path that stops carrying the larger ones
+ * (a black hole, RFC 8899 §4.3) is seen when this many of them in a row
+ * are lost while only smaller ones are acknowledged, or when two probes in
+ * a row go unanswered: the datagram goes back to the first, and the larger
+ * is tried again a second on. */
+enum { REACH_TRIES = 3, HOLE_LOST = 3, HOLE_PROBES = 2 };
 /* Challenges a sender keeps to say back, the newest first. */
 enum { RESPONSES = 4 };
 /* Keys made for runs that do not open, and new epochs accepted: a second,
@@ -273,7 +277,7 @@ struct PureLinkSender {
     uint32_t datagram;
     bool reaching, filled; /* filled: a packet was full with more to go (a larger one would carry more) */
     uint64_t reach_at;
-    unsigned reach_lost;
+    unsigned reach_lost, larger_lost; /* larger_lost: packets larger than the first datagram lost since one came */
     uint64_t received;    /* parts received and not yet stored */
     uint64_t unsent_from; /* no record before this number has a part unsent */
     unsigned pto_count, probes;
@@ -467,9 +471,19 @@ static void settle(PureLinkSender *l, Flight *f) {
     }
 }
 
+/* The path carries no datagram larger than the first now (a black hole):
+ * back to it, and the larger tried again a second on. */
+static void shrink(PureLinkSender *l, uint64_t now) {
+    l->datagram = DATAGRAM;
+    l->reaching = false;
+    l->larger_lost = 0;
+    l->reach_at = now + REACH_AGAIN;
+}
+
 /* A packet lost: what it carried and was not received otherwise goes again. */
 static void lose(PureLinkSender *l, Flight *f, uint64_t now, bool by_time) {
     settle(l, f);
+    if (f->bytes > DATAGRAM) ++l->larger_lost;
     if (f->reach) { /* the path does not carry it (yet): tried again a while on, three times, then rarely */
         l->reaching = false;
         l->reach_at = now + (++l->reach_lost < REACH_TRIES ? REACH_AGAIN : REACH_RARELY);
@@ -607,6 +621,7 @@ static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint6
     if (size < 13 || size < 13 + 16u * p[12]) return;
     uint64_t largest = get64(p), delay = (uint64_t)get32(p + 8) * 1000;
     Flight *top = NULL;
+    bool smaller = false, larger = false; /* acknowledged now, of the first datagram's size or less, and larger */
     if (!l->acked_any || largest > l->largest_acked) l->largest_acked = largest;
     for (unsigned k = 0; k < p[12]; ++k) {
         uint64_t first = get64(p + 13 + 16 * k), last = get64(p + 21 + 16 * k);
@@ -619,6 +634,8 @@ static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint6
             settle(l, f);
             ++l->counts.acknowledged;
             if (f->reach) l->datagram = DATAGRAM_MOST, l->reaching = false; /* the path carries it */
+            if (f->bytes > DATAGRAM) larger = true, l->larger_lost = 0;
+            else smaller = true;
             for (uint16_t u = 0; u < f->count; ++u) carried(l, &f->units[u], f->pn, true, now);
             if (f->eliciting && f->sent > l->cc.recovery_start && !l->unused) grow(l, f->bytes, now);
             if (pn == largest) top = f;
@@ -628,6 +645,7 @@ static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint6
     if (top && top->eliciting) sample_rtt(l, now - top->sent, delay);
     l->pto_count = 0;
     detect_lost(l, now);
+    if (smaller && !larger && l->datagram > DATAGRAM && l->larger_lost >= HOLE_LOST) shrink(l, now);
     /* Done ones go; one called lost stays a while, so it is known if it
      * comes late. */
     uint64_t keep = 2 * most(l->latest_rtt, l->sampled ? l->smoothed_rtt : FIRST_RTT);
@@ -957,8 +975,9 @@ void pure_link_sender_tick(PureLinkSender *l, uint64_t now) {
     }
     if (l->loss_time && l->loss_time <= now) detect_lost(l, now);
     else if (l->eliciting && l->last_eliciting + pto_period(l) <= now) {
-        /* Nothing heard for a while: a probe, what flies longest sent again. */
-        ++l->pto_count;
+        /* Nothing heard for a while: a probe, what flies longest sent again
+         * (in a datagram of the first size, the second time). */
+        if (++l->pto_count >= HOLE_PROBES && l->datagram > DATAGRAM) shrink(l, now);
         l->probes = 1;
         for (size_t k = 0; k < l->count; ++k) {
             Record *r = record_at(l, k);

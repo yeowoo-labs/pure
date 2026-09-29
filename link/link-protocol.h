@@ -106,7 +106,8 @@
 /* A packet is PURE_LINK_DATAGRAM bytes at most at first, and up to
  * PURE_LINK_DATAGRAM_MOST once the path is found to carry that many (a
  * probe of that size acknowledged: DPLPMTUD, RFC 8899; a link probes once
- * a packet of its was full, else a larger one would carry nothing more); a
+ * a packet of its was full, else a larger one would carry nothing more, and
+ * goes back to the first size when the larger stop coming, §4.3); a
  * source's or an input's name is 1 to PURE_LINK_NAME bytes; a receiver
  * keeps a packet's path (where it came from, and the address of its own it
  * came to: link/link.c answers from there) in PURE_LINK_ADDRESS bytes. */

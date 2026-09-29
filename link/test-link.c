@@ -87,6 +87,9 @@ typedef struct {
      * moment the sender begins an epoch (before the receiver has seen it). */
     uint64_t cut_until;
     unsigned cuts;
+    /* A black hole: from when the sender's datagram grew, the path carries
+     * nothing larger than PURE_LINK_DATAGRAM (and says nothing of it). */
+    bool black_hole, hole;
     /* The receiving app: its last heard (kept across the receiver's
      * restarts), what it said of deliveries (given at the next turn). */
     uint64_t heard, applied, deliveries;
@@ -97,6 +100,7 @@ typedef struct {
 
 static void put_packet(World *w, bool to_receiver, const unsigned char *bytes, size_t size) {
     ++w->sent;
+    if (w->hole && size > PURE_LINK_DATAGRAM) return;
     for (int copies = chance(w->doubled) ? 2 : 1; copies--;) {
         if (chance(w->loss) || w->count == PACKETS) continue;
         Packet *p = &w->packets[w->count++];
@@ -193,6 +197,7 @@ typedef struct {
     uint64_t epoch_ms; /* epochs this long (0: an hour) */
     bool forgetful;    /* the receiver keeps no memo: it starts again knowing no epoch */
     unsigned cuts;     /* the path cut for 3 s so many times, as an epoch begins */
+    bool black_hole;   /* larger packets lost from when the path was found to carry them */
 } Case;
 
 static bool nothing_sent(void *context, const unsigned char *packet, size_t size, const unsigned char *to, size_t to_size) {
@@ -245,7 +250,12 @@ static void replay(World *w, PureLinkSender *s, PureLinkReceiver *r, const char 
     }
 }
 
-typedef struct { PureLinkCounts sent, heard; uint64_t packets, seconds_ms; } Outcome;
+typedef struct {
+    PureLinkCounts sent, heard;
+    uint64_t packets, seconds_ms;
+    size_t datagram; /* the sender's at the end */
+    bool hole;       /* a black hole opened */
+} Outcome;
 
 /* One who later has both nodes' private keys: the keys of the sender's
  * packets under the nodes' static secret (link-protocol.c's derive). */
@@ -358,7 +368,7 @@ static Outcome run(const Case *c, const char *dir) {
     unlink(memo);
     World w = {.packets = malloc(PACKETS * sizeof(Packet)), .loss = c->loss, .doubled = c->doubled,
                .spread_ms = c->spread_ms, .fail_every = c->fail_every, .replay = c->replay, .tamper = c->tamper,
-               .cuts = c->cuts, .history = malloc(HISTORY * sizeof(Packet))};
+               .cuts = c->cuts, .black_hole = c->black_hole, .history = malloc(HISTORY * sizeof(Packet))};
     if (!w.packets || !w.history) exit(1);
     char from[8] = "sender0";
     epoch_ms = c->epoch_ms;
@@ -384,6 +394,7 @@ static Outcome run(const Case *c, const char *dir) {
             w.sent_log[w.sent_log_count] = (Packet){.size = size};
             memcpy(w.sent_log[w.sent_log_count++].bytes, out, size);
             put_packet(&w, true, out, size);
+            if (w.black_hole && pure_link_sender_datagram(s) > PURE_LINK_DATAGRAM) w.hole = true;
         }
         /* Then the next thing to happen. */
         uint64_t next = UINT64_MAX, due = pure_link_sender_due(s), turn = pure_link_receiver_due(r);
@@ -453,7 +464,7 @@ static Outcome run(const Case *c, const char *dir) {
             snprintf(from, sizeof(from), "sender%u", ++w.gen); /* a new process: another address */
         }
     }
-    Outcome o = {.packets = w.sent, .seconds_ms = w.now / MS};
+    Outcome o = {.packets = w.sent, .seconds_ms = w.now / MS, .datagram = pure_link_sender_datagram(s), .hole = w.hole};
     pure_link_sender_counts(s, &o.sent);
     pure_link_receiver_counts(r, &o.heard);
     o.sent.packets += sent_before.packets, o.sent.resent += sent_before.resent, o.sent.epochs += sent_before.epochs;
@@ -621,7 +632,7 @@ int main(void) {
         return 1;
     }
     /* A clean network: nothing is sent twice. */
-    Case clean = {"clean", 3000, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false, 0};
+    Case clean = {"clean", 3000, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false, 0, false};
     Outcome o = run(&clean, dir);
     CHECK(o.sent.resent == 0 && o.sent.lost == 0, "clean: %llu sent again, %llu lost", (unsigned long long)o.sent.resent,
           (unsigned long long)o.sent.lost);
@@ -630,7 +641,7 @@ int main(void) {
      * starting again: the receiver remembers its secret, so it wakes the
      * sender without an X25519. */
     for (uint64_t s = 1; s <= 4; ++s) {
-        Case rough = {"rough", 3000, s * 7919, 10, 3, 20, 37, 1500, 800, 2200, 300, 0, false, 0, false, 0};
+        Case rough = {"rough", 3000, s * 7919, 10, 3, 20, 37, 1500, 800, 2200, 300, 0, false, 0, false, 0, false};
         o = run(&rough, dir);
         CHECK(o.sent.resent > 0 && o.heard.swept >= 1 && o.heard.woken >= 1 && o.heard.remembered >= 1,
               "rough: sent again %llu, swept %llu, woken %llu, remembered %llu", (unsigned long long)o.sent.resent,
@@ -640,29 +651,36 @@ int main(void) {
     /* An attacker on the path: packets changed on the way, and packets of
      * the past sent again, from the sender's address and its own, across the
      * same restarts and pause. */
-    Case changed = {"changed", 1500, 31, 3, 0, 5, 0, 0, 0, 0, 0, 0, true, 0, false, 0};
+    Case changed = {"changed", 1500, 31, 3, 0, 5, 0, 0, 0, 0, 0, 0, true, 0, false, 0, false};
     run(&changed, dir);
     for (uint64_t s = 1; s <= 2; ++s) {
-        Case again = {"replayed", 3000, s * 104729, 5, 3, 20, 37, 1500, 800, 2200, 300, 25, false, 0, false, 0};
+        Case again = {"replayed", 3000, s * 104729, 5, 3, 20, 37, 1500, 800, 2200, 300, 25, false, 0, false, 0, false};
         run(&again, dir);
     }
     /* Epochs a fifth of a second long (a new one a second, as the receiver
      * accepts), and a receiver that starts again with no memo: it knows no
      * epoch, and the sender begins them again. */
-    Case epochs = {"epochs", 3000, 271, 5, 3, 20, 37, 1500, 800, 2200, 300, 10, false, 200, false, 0};
+    Case epochs = {"epochs", 3000, 271, 5, 3, 20, 37, 1500, 800, 2200, 300, 10, false, 200, false, 0, false};
     o = run(&epochs, dir);
     CHECK(o.sent.epochs >= 10, "epochs: %llu begun", (unsigned long long)o.sent.epochs);
-    Case forgetful = {"forgetful", 3000, 409, 5, 3, 20, 37, 0, 800, 0, 0, 0, false, 0, true, 0};
+    Case forgetful = {"forgetful", 3000, 409, 5, 3, 20, 37, 0, 800, 0, 0, 0, false, 0, true, 0, false};
     o = run(&forgetful, dir);
     CHECK(o.sent.epochs >= 2, "forgetful: %llu epochs begun (none again)", (unsigned long long)o.sent.epochs);
     /* The path cut for 3 s the moment the sender begins an epoch, three
      * times: the receiver never saw the epoch used, and the sender, hearing
      * nothing, offers another epoch 1 with a new key. The accept of the old
      * offer must not begin it. */
-    Case cut = {"cut", 3000, 919, 0, 0, 20, 37, 0, 0, 0, 0, 0, false, 200, false, 3};
+    Case cut = {"cut", 3000, 919, 0, 0, 20, 37, 0, 0, 0, 0, 0, false, 200, false, 3, false};
     o = run(&cut, dir);
     CHECK(o.sent.epochs >= 4 && o.sent.fallbacks == 3, "cut: %llu epochs begun, %llu taken for lost (3 cuts)",
           (unsigned long long)o.sent.epochs, (unsigned long long)o.sent.fallbacks);
+    /* A path that carried 1,452-byte packets and then, from the moment the
+     * link found it did, carries none larger than 1,200 (a route changed,
+     * and no ICMP says so): the link must see it and go back. */
+    Case hole = {"black hole", 3000, 1601, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false, 0, true};
+    o = run(&hole, dir);
+    CHECK(o.hole && o.datagram == PURE_LINK_DATAGRAM, "black hole: %s, a datagram of %zu at the end",
+          o.hole ? "opened" : "never opened", o.datagram);
     impostors(dir);
     flood(dir);
     char command[600];
