@@ -2131,9 +2131,11 @@ static bool load_module(PureModule *m, const char *path, bool *documents, uint32
         fprintf(stderr, "Module: %s\n", error);
         return false;
     }
-    /* Documents are served when the module has show and edit, as keyed messages. */
+    /* Documents are served when the module keeps a keyed collection: its keyed
+     * messages show and edit read and write one by key. Without one, inputs
+     * named show and edit are messages as any other. */
     int show = pure_module_input(m, "show"), edit = pure_module_input(m, "edit");
-    *documents = show >= 0 || edit >= 0;
+    *documents = m->collections > 0;
     if (*documents && (show < 0 || edit < 0 || m->input[show].kind != PURE_KIND_MESSAGE || !m->input[show].keyed ||
                        m->input[edit].kind != PURE_KIND_MESSAGE || !m->input[edit].keyed)) {
         fputs("Module: documents need keyed messages named show and edit\n", stderr);

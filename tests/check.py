@@ -2329,6 +2329,36 @@ view stamped_view = stamped
 """
 
 
+PLAIN_EDIT_SOURCE = """state n = 0
+input edit = message { value: number }
+on edit { n = edit.value }
+view result = n
+"""
+
+
+def server_plain_edit(aup, pure, work):
+    """An input named edit that is a plain message (the module keeps no
+    document collection) is served as any other input: the app starts, and a
+    POST to it changes its state (review 004, an earlier P2)."""
+    from http.client import HTTPConnection
+    module, source = work / 'plain-edit.pmod', work / 'plain-edit.aup'
+    source.write_text(PLAIN_EDIT_SOURCE)
+    compile_module(aup, source, module)
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'plain-edit'])
+    try:
+        connection = HTTPConnection('127.0.0.1', host.port, timeout=10)
+        body = json.dumps({'value': 5}).encode()
+        connection.request('POST', '/inputs/edit', body, {'Content-Length': str(len(body)), 'Content-Type': 'application/json'})
+        status = connection.getresponse().status
+        connection.close()
+        assert status == 200, status
+        result = http(host.port, 'GET', '/views/result')
+        assert result[0] == 200 and float(result[3]) == 5, result
+    finally:
+        host.stop()
+    return 5
+
+
 HEARTBEAT_SOURCE = """input beat = every 20 ms
 output pulse = message { value: number }
 on beat { send pulse { value: 1 } }
@@ -2569,6 +2599,7 @@ def main():
             server_app(aup, pure, work, range(args.seeds), threads=3)
         report['server_json_requests'] = server_json(aup, pure, work)
         report['server_timer_beats'] = server_timers(aup, pure, work)
+        report['server_plain_edit'] = server_plain_edit(aup, pure, work)
         report['server_links'] = server_links(aup, pure, work)
         report['server_links_udp'] = server_links_udp(aup, pure, work)
         report['server_links_udp_lossy'] = server_links_udp_lossy(aup, pure, work)
