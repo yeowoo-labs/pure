@@ -133,6 +133,7 @@ struct PureLink {
     size_t segment; /* the datagram's size the bursts are cut at */
     bool gso, no_gso;
     unsigned looked; /* the probes unanswered when it last looked for the receiver */
+    bool nowhere;    /* a send failed as the system saw no way there (no route, nobody at the port) */
 };
 
 PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, const PureSealKey *own,
@@ -217,6 +218,12 @@ static void take_answers(PureLink *l, uint64_t now) {
 
 static bool transient(void) { return errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS || errno == EINTR; }
 
+/* The system says there is no way to the receiver where it was. */
+static bool nowhere(void) {
+    return errno == ECONNREFUSED || errno == EHOSTUNREACH || errno == ENETUNREACH || errno == EADDRNOTAVAIL ||
+           errno == ENETDOWN;
+}
+
 /* The burst in one call, cut into datagrams of the segment's size by the
  * system (UDP GSO, asked for this call alone: a packet sent by itself is
  * never cut, however large). */
@@ -239,10 +246,14 @@ static void flush(PureLink *l) {
     unsigned n = l->burst_count, sent = 0;
     bool whole = n > 1 && l->gso;
     if (whole && send_burst(l) >= 0) sent = n;
+    else if (whole && nowhere()) l->nowhere = true, sent = n; /* lost: gone as sent */
     else if (whole && !transient()) l->gso = false, whole = false; /* no GSO here: one by one from now on */
     for (size_t at = 0; !whole && sent < n; ++sent) {
         size_t size = sent + 1 < n ? l->segment : l->burst_size - at;
-        if (send(l->fd, l->burst + at, size, 0) < 0 && transient()) break;
+        if (send(l->fd, l->burst + at, size, 0) < 0) {
+            if (transient()) break; /* refused: sent again */
+            l->nowhere = l->nowhere || nowhere(); /* lost, as sent */
+        }
         at += size;
     }
     for (unsigned k = sent; k < n; ++k) pure_link_sender_refused(l->sender, l->burst_pn[k]);
@@ -314,7 +325,8 @@ static bool look(PureLink *l, char *error, size_t size) {
 }
 
 /* A link whose probes go unanswered three times in a row looks for its
- * receiver again, and at each probe after (a second apart at most). */
+ * receiver again, and at each probe after (a second apart at most); at
+ * once when the system says there is no way there. */
 enum { LOOK_PROBES = 3 };
 
 static void *run_link(void *context) {
@@ -339,7 +351,8 @@ static void *run_link(void *context) {
         if (waits[0].revents) take_answers(l, now);
         pure_link_sender_tick(l->sender, now);
         unsigned probes = pure_link_sender_probes(l->sender);
-        if (probes >= LOOK_PROBES && probes != l->looked) { /* before the probe goes, so its answer comes to the new socket */
+        if ((probes >= LOOK_PROBES && probes != l->looked) || l->nowhere) { /* before the next goes, so its answer comes to the new socket */
+            l->nowhere = false;
             pthread_mutex_unlock(&l->lock); /* a name looked up may take its time: the owner queues meanwhile */
             look(l, NULL, 0);
             pthread_mutex_lock(&l->lock);
