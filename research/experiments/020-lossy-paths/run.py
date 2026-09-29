@@ -3,11 +3,13 @@
 reordering and a bottleneck, against quinn, and beside TCP CUBIC.
 
 Each case runs in `unshare -rn` (an unprivileged network namespace) whose
-loopback is the path, both ways: MTU 1500, and TCP's segments no larger
-(gso_max_size), so each is a packet; a 50 Mbit/s bottleneck (tbf) whose
-queue holds about a round trip of it; under it netem's delay (half the
-RTT), jitter (packets reorder) and random loss. Pure and quinn send without
-UDP GSO: a qdisc takes a GSO burst as one packet.
+loopback is the path: MTU 1500, and TCP's segments no larger
+(gso_max_size), so each is a packet. Each way netem gives delay (half the
+RTT), jitter (packets reorder) and random loss; the way to the receivers
+(ports 40000-40007) then goes through a 50 Mbit/s bottleneck (tbf) whose
+queue holds a round trip of it, and the way back (answers, TCP's
+acknowledgments) does not queue behind it. Pure and quinn send without UDP
+GSO: a qdisc takes a GSO burst as one packet.
 
   bulk   a backlog of 1 KiB records for --seconds (Pure: a link and a
          listener, transport.c; quinn: one stream); the goodput from the
@@ -38,6 +40,7 @@ QUINN = ROOT / 'research/experiments/019-idle-links/quic/target/release/idle-qui
 TC = shutil.which('tc') or '/usr/sbin/tc'
 IP = shutil.which('ip') or '/usr/sbin/ip'
 RATE_MBIT, SIZE = 50, 1000
+PURE_PORT, QUINN_PORT, TCP_PORT, OTHER_TCP_PORT = 40001, 40002, 40003, 40004  # the receivers, beyond the bottleneck
 sys.path.insert(0, str(ROOT / 'tests'))
 
 
@@ -66,15 +69,21 @@ def build(work):
 
 
 def path(rtt_ms, loss, jitter_ms):
-    """The loopback as the path."""
+    """The loopback as the path: back (band 1:1) and forth (1:2, to the
+    receivers' ports, with the bottleneck after its netem)."""
     subprocess.run([IP, 'link', 'set', 'lo', 'up', 'mtu', '1500', 'gso_max_size', '1500', 'gso_max_segs', '1'],
                    check=True)
     queue = max(30000, RATE_MBIT * 1000000 // 8 * rtt_ms // 1000)  # a round trip of the bottleneck, in bytes
-    subprocess.run([TC, 'qdisc', 'add', 'dev', 'lo', 'root', 'handle', '1:', 'tbf', 'rate', f'{RATE_MBIT}mbit',
-                    'burst', '15000', 'limit', str(queue)], check=True)
     netem = ['delay', f'{rtt_ms / 2}ms'] + ([f'{jitter_ms}ms'] if jitter_ms else []) + \
             (['loss', f'{loss}%'] if loss else []) + ['limit', '100000']
-    subprocess.run([TC, 'qdisc', 'add', 'dev', 'lo', 'parent', '1:1', 'handle', '10:', 'netem'] + netem, check=True)
+    for rule in (['qdisc', 'add', 'dev', 'lo', 'root', 'handle', '1:', 'prio', 'bands', '2', 'priomap'] + ['0'] * 16,
+                 ['qdisc', 'add', 'dev', 'lo', 'parent', '1:1', 'handle', '10:', 'netem'] + netem,
+                 ['qdisc', 'add', 'dev', 'lo', 'parent', '1:2', 'handle', '20:', 'netem'] + netem,
+                 ['qdisc', 'add', 'dev', 'lo', 'parent', '20:1', 'handle', '21:', 'tbf', 'rate', f'{RATE_MBIT}mbit',
+                  'burst', '15000', 'limit', str(queue)],
+                 ['filter', 'add', 'dev', 'lo', 'protocol', 'ip', 'parent', '1:0', 'prio', '1', 'u32', 'match', 'ip',
+                  'dport', '40000', '0xfff8', 'flowid', '1:2']):
+        subprocess.run([TC] + rule, check=True)
 
 
 def goodput(timeline, record_bytes, skip_s=2.0, until_s=None):
@@ -88,13 +97,14 @@ def goodput(timeline, record_bytes, skip_s=2.0, until_s=None):
 def pure(work, seconds, rate=0, count=2000000):
     done = subprocess.run([str(ROOT / 'build/link-transport'), str(work / 'sender.pmod'), str(work / 'receiver.pmod'),
                            str(count), str(SIZE), '20000', str(rate), str(seconds)], capture_output=True, text=True,
-                          env={**os.environ, 'TRANSPORT_GSO': '0'}, timeout=seconds + 120)
+                          env={**os.environ, 'TRANSPORT_GSO': '0', 'TRANSPORT_PORT': str(PURE_PORT)},
+                          timeout=seconds + 120)
     assert done.returncode == 0, done.stderr[-2000:]
     return json.loads(done.stdout)
 
 
 def quinn_server(work):
-    server = subprocess.Popen([str(QUINN), 'serve', str(work / 'cert.der'), str(work / 'key.der')],
+    server = subprocess.Popen([str(QUINN), 'serve', str(work / 'cert.der'), str(work / 'key.der'), str(QUINN_PORT)],
                               stdout=subprocess.PIPE, text=True, env={**os.environ, 'QUIC_GSO': '0'})
     port = json.loads(server.stdout.readline())['port']
     return server, port
@@ -119,10 +129,11 @@ class Tcp:
     """A TCP CUBIC flow: a sender writing as fast as it may for seconds, a
     receiver counting bytes in each 100 ms from when it starts."""
 
-    def __init__(self, seconds):
+    def __init__(self, seconds, port):
         self.seconds = seconds
         self.listener = socket.socket()
-        self.listener.bind(('127.0.0.1', 0))
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(('127.0.0.1', port))
         self.listener.listen(1)
         self.timeline = []
         self.began = None
@@ -178,10 +189,10 @@ def inner(case):
             if key in result:
                 row[key] = result[key]
     else:  # share: who beside a TCP CUBIC flow
-        tcp = Tcp(seconds)
+        tcp = Tcp(seconds, TCP_PORT)
         tcp.start()
         if who == 'tcp':
-            other = Tcp(seconds)
+            other = Tcp(seconds, OTHER_TCP_PORT)
             other.start()
             theirs = [b / (SIZE + 13) for b in other.join()]
         else:

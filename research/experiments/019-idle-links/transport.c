@@ -13,7 +13,8 @@
  *       queued before the link starts (a backlog drained). RATE: records
  *       queued a second (0: as fast as the window allows), and the time
  *       from each queued to handed over. SECONDS: stop after that long
- *       (0: once all are handed over). TRANSPORT_GSO=0: no UDP GSO bursts.
+ *       (0: once all are handed over). TRANSPORT_GSO=0: no UDP GSO bursts;
+ *       TRANSPORT_PORT: the listener's port.
  *       Built beside pure-crypto.so (build/). */
 #include "link.h"
 #include "module.h"
@@ -160,13 +161,13 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof(path), "%s/b.key", dir);
     PureSealKey *b = pure_seal_key(path, hex, error, sizeof(error));
     if (!b || !pure_seal_peer(hex, public_b)) return fprintf(stderr, "transport: %s\n", error), 1;
-    /* A port nobody uses. */
+    /* The port TRANSPORT_PORT names, or one nobody uses. */
     int probe = socket(AF_INET, SOCK_DGRAM, 0);
     struct sockaddr_in any = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     socklen_t length = sizeof(any);
     if (probe < 0 || bind(probe, (struct sockaddr *)&any, sizeof(any)) || getsockname(probe, (struct sockaddr *)&any, &length))
         return 1;
-    unsigned port = ntohs(any.sin_port);
+    unsigned port = getenv("TRANSPORT_PORT") ? (unsigned)atoi(getenv("TRANSPORT_PORT")) : ntohs(any.sin_port);
     close(probe);
     PureLinkReceiver *r = pure_link_receiver(b, public_b, &(PureLinkHost){input_of, deliver, NULL}, error, sizeof(error));
     if (!r || !pure_link_allow(r, "bench.ordered", public_a, error, sizeof(error)) ||
