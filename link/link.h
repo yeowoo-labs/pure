@@ -1,53 +1,11 @@
 #ifndef PURE_LINK_H
 #define PURE_LINK_H
-#include "seal.h"
+#include "link-protocol.h"
 
-/* Links without connections (docs/design/011-pure-transport.md): one node's
- * saved sends to another node's input over UDP, sealed with a key the two
- * nodes' keys share, with no handshake: the first packet carries records.
- * A link's lasting state is the apps' own: the sender's outbox (what to send
- * and send again) and the receiver's heard numbers (what it applied, saved
- * with the events). What either side keeps in memory is a cache, so either
- * may restart and the other goes on with the next packet.
- *
- * A packet is a header in the clear, then frames sealed with AES-128-GCM
- * (the header as associated data):
- *   u8 0x70 (version 0), u32le the key id of the node that sent it (FNV-1a
- *   of its public key; two keys may share an id, and a receiver tries the
- *   keys it allows with it), u64le that node's run (random, new each time it
- *   starts, so no nonce repeats under a key across restarts), u64le the
- *   packet's number in its run.
- * Keys come from the secret the two nodes' keys share (X25519) by
- * HKDF-SHA256, with both public keys and the sending node's run: a sender's
- * packets use its own run; a receiver's answers add the run they answer,
- * so an answer opens only in that run. The nonce is the key's base with the
- * packet's number in its last eight bytes (XOR, big-endian, as QUIC does).
- *
- * Frames (numbers little-endian):
- *   0x01 STREAM  source (u8 length, bytes), input (u8 length, bytes), u32 the
- *                shape of the messages (the sender's output and the
- *                receiver's input must have the same): the stream the
- *                records after it are of
- *   0x02 RECORD  u64 number, u32 size, u32 offset, u16 length, bytes: a piece
- *                of a saved send (pieces are 1000 bytes, the last shorter)
- *   0x03 ACK     u64 largest number, u32 delay (µs), u8 ranges, each as u64
- *                first and u64 last, newest first
- *   0x04 STORED  source, input (as STREAM), u64 the last number heard
- *                (applied and saved), u8 flags (1: a record after a gap was
- *                not taken: send what follows it again), u32 credit (records
- *                it takes past that)
- *   0x05 PING    to be acknowledged
- *   0x06 RECORDS u64 the first one's number, u8 count, then whole records one
- *                after another (numbers following on), each its size (a
- *                varint: LEB128) and its bytes: a send that fits the packet
- *                whole, with 1 to 3 bytes of framing, not the 19 of RECORD
- *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
- *                a whole datagram
- * Losses are detected as RFC 9002 says; congestion control is its NewReno
- * (RFC 9002 §7). */
-
-/* A source's or an input's name is 1 to PURE_LINK_NAME bytes. */
-enum { PURE_LINK_NAME = 64 };
+/* Links over UDP: the two sides of link/link-protocol.h (what goes on the
+ * wire, and what each side keeps) with sockets and threads. A sender sends
+ * on a thread of its own, packets in bursts with UDP GSO; a listener takes
+ * a receiver's packets on a port, with UDP GRO. */
 
 /* The sending side: one output's saved sends to url, pure://host:port/INPUT,
  * as source (a Pure receiver's name for it), their messages of shape (the
@@ -66,59 +24,17 @@ uint64_t pure_link_queued(PureLink *);
 uint64_t pure_link_delivered(PureLink *);
 /* Send on a thread of the link's own, calling notify when more was saved. */
 bool pure_link_start(PureLink *, void (*notify)(void *), void *context, char *error, size_t size);
+void pure_link_counts(PureLink *, PureLinkCounts *);
 void pure_link_close(PureLink *);
 
-/* The receiving side: packets on a UDP port, from the senders allowed (a
- * source name and the key it seals with, a few bytes each however many
- * there are: see pure_link_idle). A stream (a source to an input) goes to
- * the host's input its name and shape find (its number, or -1: the stream
- * is refused). Whole records of a stream, in order, go to deliver (both on
- * the listener's thread) as one delivery; the host applies them from the
- * one after the source's last heard number, stops at a gap, saves, and then
- * calls pure_link_done (any thread) with the last number heard. Records
- * wait here until then, and only the saved ones are acknowledged as
- * stored. */
-typedef struct {
-    uint32_t input;
-    const char *source;
-    uint64_t first;
-    unsigned count;
-    const unsigned char *records; /* count of: u32le size, bytes */
-    size_t size;
-    void *token; /* for pure_link_done */
-} PureLinkDelivery;
-typedef struct {
-    int (*input)(void *context, const char *name, uint32_t shape);
-    bool (*deliver)(void *context, const PureLinkDelivery *);
-    void *context;
-} PureLinkHost;
+/* The receiving side: a receiver's packets on a UDP port, taken on a thread
+ * of the listener's own, where the host's input and deliver are called. The
+ * listener takes the receiver: closing it frees the receiver, and gives its
+ * counts. pure_link_done (any thread) says how a delivery's save went. */
 typedef struct PureLinkListener PureLinkListener;
-PureLinkListener *pure_link_listen(unsigned port, const PureSealKey *own, const unsigned char own_public[PURE_SEAL_KEY],
-                                   const PureLinkHost *host, char *error, size_t size);
-bool pure_link_allow(PureLinkListener *, const char *source, const unsigned char key[PURE_SEAL_KEY], char *error,
-                     size_t size);
-/* A sender quiet for ms (30 s at first) with nothing of it waiting lets its
- * keys, addresses and streams go: an idle link costs the listener only its
- * allowing, and the sender's next packet makes them again (one X25519). */
-void pure_link_idle(PureLinkListener *, uint64_t ms);
-/* Remember the secret each sender's key shares with the node's in a file
- * (path, 0600; begun again for another node's key): a place a sender in
- * the order allowed, mapped, so a sender at rest takes no memory for it.
- * A node that starts again then makes no X25519 for a sender it heard from
- * before. After the senders are allowed, before serving. */
-bool pure_link_remember(PureLinkListener *, const char *path, char *error, size_t size);
+PureLinkListener *pure_link_listen(PureLinkReceiver *, unsigned port, char *error, size_t size);
 bool pure_link_serve(PureLinkListener *, char *error, size_t size);
 /* stored: the delivery's save succeeded; gap: it stopped at a gap. */
 void pure_link_done(PureLinkListener *, void *token, uint64_t heard, bool stored, bool gap);
-
-/* Counts for a host's report: packets and records sent, records sent again,
- * packets lost and acknowledged, packets received, deliveries handed over,
- * the last number stored; a listener's senders woken (their active state
- * made), of them with a secret remembered (no X25519), let go when idle,
- * and active when it closed. A listener's are given when it closes. */
-typedef struct {
-    uint64_t packets, records, resent, lost, acknowledged, received, deliveries, stored, woken, remembered, swept, active;
-} PureLinkCounts;
-void pure_link_counts(PureLink *, PureLinkCounts *);
 void pure_link_listener_close(PureLinkListener *, PureLinkCounts *counts);
 #endif

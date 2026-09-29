@@ -20,12 +20,12 @@ BUILD ?= build
 # surfaces link it); libpure-link.a is the links with the crypto loader.
 # prototypes/ keeps the earlier document runtime (000-077).
 # Unit tests sit by their part (core/test-module.c, store/test-tree-store.c,
-# store/test-log.c, serve/test-message-json.c);
+# store/test-log.c, link/test-link.c, serve/test-message-json.c);
 # tests/check.py checks the hosts end to end.
 INCLUDES = -Icore
 MODEL = core/module.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c
 STORE = store/store-tree.c store/store-log.c
-LINK = link/link.c link/crypto.c
+LINK = link/link-protocol.c link/link.c link/crypto.c
 SERVE = serve/serve.c serve/deliver.c serve/message-json.c
 HEADERS = $(wildcard core/*.h) $(wildcard link/*.h) $(wildcard serve/*.h) $(wildcard store/*.h)
 OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(MODEL) $(STORE))
@@ -75,6 +75,11 @@ $(BUILD)/test-module: core/test-module.c $(MODEL) $(STORE) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -DPURE_STORE_TEST core/test-module.c $(MODEL) $(STORE) $(LDFLAGS) -pthread -lm $(LDLIBS) -o $@
 
+# A link's two sides through a network of the test's own (pure-crypto.so beside it).
+$(BUILD)/test-link: link/test-link.c $(BUILD)/libpure-link.a $(BUILD)/pure-crypto.so $(wildcard link/*.h)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) link/test-link.c $(BUILD)/libpure-link.a $(LDFLAGS) -pthread -ldl $(LDLIBS) -o $@
+
 $(BUILD)/test-message-json: serve/test-message-json.c serve/message-json.c $(BUILD)/libpure.a $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Iserve serve/test-message-json.c serve/message-json.c $(BUILD)/libpure.a \
@@ -91,10 +96,11 @@ $(BUILD)/test-tree-store: store/test-tree-store.c $(STORE) $(HEADERS)
 # The HTTP host's checks build their apps with aup (the sibling checkout) and
 # compare documents with the earlier document server.
 AUP ?= ../aup
-check: all $(BUILD)/test-module $(BUILD)/test-tree-store $(BUILD)/test-log $(BUILD)/test-message-json
+check: all $(BUILD)/test-module $(BUILD)/test-tree-store $(BUILD)/test-log $(BUILD)/test-link $(BUILD)/test-message-json
 	$(BUILD)/test-tree-store
 	$(BUILD)/test-log
 	$(BUILD)/test-module
+	$(BUILD)/test-link
 	$(BUILD)/test-message-json
 	$(MAKE) -C $(AUP) build/aup
 	$(MAKE) -C prototypes/connections BUILD=build/tree STORE=store-tree.c build/tree/pure-connections

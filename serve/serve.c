@@ -2493,7 +2493,7 @@ static bool name_senders(const char *const *named, unsigned count) {
 
 /* --senders FILE: senders a --link-port takes besides those named, a line
  * each (NAME KEY, the key as 64 hex digits), as many as memory holds. */
-static bool allow_senders(PureLinkListener *listener, const char *path, char *error, size_t size) {
+static bool allow_senders(PureLinkReceiver *receiver, const char *path, char *error, size_t size) {
     if (!path) return true;
     FILE *file = fopen(path, "r");
     if (!file) {
@@ -2516,7 +2516,7 @@ static bool allow_senders(PureLinkListener *listener, const char *path, char *er
         *space = 0;
         for (const char *c = line; *c && ok; ++c) ok = *c > ' ' && *c <= '~';
         if (!ok) snprintf(error, size, "--senders %s: line %zu names no source", path, count + 1);
-        else ok = pure_link_allow(listener, line, key, error, size);
+        else ok = pure_link_allow(receiver, line, key, error, size);
     }
     free(line);
     fclose(file);
@@ -2675,15 +2675,16 @@ int main(int argc, char **argv) {
             fputs("--link-port needs an app with states and the node's --key\n", stderr);
             return 2;
         }
-        link_listener = pure_link_listen(link_port, seal_key, own_public, &(PureLinkHost){link_input, link_deliver, &owner},
-                                         error, sizeof(error));
-        bool allowed = link_listener != NULL && allow_senders(link_listener, senders_path, error, sizeof(error));
+        PureLinkReceiver *receiver =
+            pure_link_receiver(seal_key, own_public, &(PureLinkHost){link_input, link_deliver, &owner}, error, sizeof(error));
+        bool allowed = receiver != NULL && allow_senders(receiver, senders_path, error, sizeof(error));
         for (unsigned i = 0; allowed && i < sender_count; ++i)
-            allowed = pure_link_allow(link_listener, senders[i].name, senders[i].key, error, sizeof(error));
-        if (allowed && link_idle_ms) pure_link_idle(link_listener, link_idle_ms);
+            allowed = pure_link_allow(receiver, senders[i].name, senders[i].key, error, sizeof(error));
+        if (allowed && link_idle_ms) pure_link_idle(receiver, link_idle_ms);
         char memo[4096];
         snprintf(memo, sizeof(memo), "%s.links", key_path); /* beside the key the secrets come from */
-        allowed = allowed && pure_link_remember(link_listener, memo, error, sizeof(error));
+        allowed = allowed && pure_link_remember(receiver, memo, error, sizeof(error)) &&
+                  (link_listener = pure_link_listen(receiver, link_port, error, sizeof(error)));
         if (!allowed || !pure_link_serve(link_listener, error, sizeof(error))) {
             fprintf(stderr, "--link-port: %s\n", error);
             return 2;

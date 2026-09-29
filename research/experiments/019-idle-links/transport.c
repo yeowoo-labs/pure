@@ -138,9 +138,9 @@ int main(int argc, char **argv) {
         return 1;
     unsigned port = ntohs(any.sin_port);
     close(probe);
-    if (!(listener = pure_link_listen(port, b, public_b, &(PureLinkHost){input_of, deliver, NULL}, error, sizeof(error))) ||
-        !pure_link_allow(listener, "bench.ordered", public_a, error, sizeof(error)) ||
-        !pure_link_serve(listener, error, sizeof(error)))
+    PureLinkReceiver *r = pure_link_receiver(b, public_b, &(PureLinkHost){input_of, deliver, NULL}, error, sizeof(error));
+    if (!r || !pure_link_allow(r, "bench.ordered", public_a, error, sizeof(error)) ||
+        !(listener = pure_link_listen(r, port, error, sizeof(error))) || !pure_link_serve(listener, error, sizeof(error)))
         return fprintf(stderr, "transport: %s\n", error), 1;
     char url[128];
     snprintf(url, sizeof(url), "pure://127.0.0.1:%u/order", port);
