@@ -19,7 +19,7 @@ typedef struct {
     uint64_t at;
     bool to_receiver;
     size_t size;
-    unsigned char bytes[PURE_LINK_DATAGRAM];
+    unsigned char bytes[PURE_LINK_DATAGRAM_MOST];
 } Packet;
 
 static uint64_t sim_seed;
@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
     unsigned char *bytes = calloc(1, size + 1);
     for (uint64_t seq = 1; seq <= records; ++seq)
         if (!pure_link_sender_queue(s, seq, bytes, size)) return 1;
-    unsigned char out[PURE_LINK_DATAGRAM];
+    unsigned char out[PURE_LINK_DATAGRAM_MOST];
     uint64_t sample_at = 0, window_sum = 0, rtt_sum = 0, samples = 0, window_least = UINT64_MAX;
     PureLinkDone told[64];
     while (heard < records || s->stored < records) {

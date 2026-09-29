@@ -45,7 +45,7 @@ typedef struct {
     uint64_t at;
     bool to_receiver;
     size_t size;
-    unsigned char bytes[PURE_LINK_DATAGRAM];
+    unsigned char bytes[PURE_LINK_DATAGRAM_MOST];
 } Packet;
 
 typedef struct {
@@ -185,7 +185,7 @@ static Outcome run(const Case *c, const char *dir) {
     PureLinkReceiver *r = receiver_of(&w, b, public_b, public_a, memo, c->idle_ms);
     PureLinkCounts sent_before = {0}, heard_before = {0};
     bool receiver_restarted = !c->receiver_restart_after, sender_restarted = !c->sender_restart_after;
-    unsigned char out[PURE_LINK_DATAGRAM];
+    unsigned char out[PURE_LINK_DATAGRAM_MOST];
     while (w.heard < c->records || pure_link_sender_stored(s) < c->records) {
         CHECK(w.now < 600000 * MS, "%s: not done after ten minutes (heard %llu of %llu)", c->name,
               (unsigned long long)w.heard, (unsigned long long)c->records);

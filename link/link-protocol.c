@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 enum { VERSION = 0x70, HEADER = 21, DATAGRAM = PURE_LINK_DATAGRAM, BODY = DATAGRAM - HEADER - PURE_AEAD_TAG };
+enum { DATAGRAM_MOST = PURE_LINK_DATAGRAM_MOST, BODY_MOST = DATAGRAM_MOST - HEADER - PURE_AEAD_TAG };
 /* A record that does not fit what is left of a packet goes in part, when
  * at least this much of it fits. */
 enum { PART_LEAST = 64 };
@@ -24,6 +25,9 @@ enum { WINDOW_FIRST = 10 * DATAGRAM, WINDOW_LEAST = 2 * DATAGRAM };
 /* Reordering awaited (see PureLinkSender): at first and at most; congestion
  * events with no late packet before the patience halves. */
 enum { REORDER_FIRST = 3, REORDER_PACKETS_MOST = 256, REORDER_QUARTERS_MOST = 8, CALM = 16 };
+/* A probe of a larger datagram lost is tried again a second on, three
+ * times, then ten minutes on. */
+enum { REACH_TRIES = 3 };
 /* CUBIC's constants (RFC 9438): the cubic's scale, and the window kept at a
  * congestion event. */
 static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7;
@@ -32,7 +36,8 @@ static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7;
  * the Internet at large); a probe at least every second while a receiver is
  * away; a record received but not stored after a second is sent again. */
 static const uint64_t FIRST_RTT = 100 * MS, ACK_DELAY_MOST = 25 * MS, GRANULARITY = 1 * MS, PTO_MOST = 1000 * MS,
-                      STORED_WAIT = 1000 * MS, RECORD_MOST = UINT64_C(64) << 20, HELD_MOST = UINT64_C(16) << 20;
+                      STORED_WAIT = 1000 * MS, RECORD_MOST = UINT64_C(64) << 20, HELD_MOST = UINT64_C(16) << 20,
+                      REACH_AGAIN = 1000 * MS, REACH_RARELY = 600000 * MS;
 
 static void put16(unsigned char *p, uint32_t v) { p[0] = (unsigned char)v, p[1] = (unsigned char)(v >> 8); }
 static void put32(unsigned char *p, uint32_t v) { for (int i = 0; i < 4; ++i) p[i] = (unsigned char)(v >> 8 * i); }
@@ -167,6 +172,7 @@ typedef struct {
     uint64_t episode;      /* lost: the congestion episode it counted in */
     uint32_t bytes;
     bool eliciting, done; /* acknowledged or lost */
+    bool reach;           /* a probe of a larger datagram */
     bool lost, by_time;   /* called lost (by time, or by later ones acknowledged), and not acknowledged since */
     uint16_t count;
     Unit units[UNITS];
@@ -215,6 +221,12 @@ struct PureLinkSender {
     /* The window went unused (nothing to send, or no credit) when the
      * sender last looked: it does not grow then (RFC 9002 §7.8). */
     bool unused;
+    /* The datagram's size now; a probe of the largest flies; when the next
+     * may go, and how many were lost (RFC 8899). */
+    uint32_t datagram;
+    bool reaching;
+    uint64_t reach_at;
+    unsigned reach_lost;
     uint64_t received;    /* parts received and not yet stored */
     uint64_t unsent_from; /* no record before this number has a part unsent */
     unsigned pto_count, probes;
@@ -391,6 +403,11 @@ static void settle(PureLinkSender *l, Flight *f) {
 /* A packet lost: what it carried and was not received otherwise goes again. */
 static void lose(PureLinkSender *l, Flight *f, uint64_t now, bool by_time) {
     settle(l, f);
+    if (f->reach) { /* the path does not carry it (yet): tried again a while on, three times, then rarely */
+        l->reaching = false;
+        l->reach_at = now + (++l->reach_lost < REACH_TRIES ? REACH_AGAIN : REACH_RARELY);
+        return;
+    }
     f->lost = true;
     f->by_time = by_time;
     f->largest_then = l->largest_acked;
@@ -407,13 +424,13 @@ static void lose(PureLinkSender *l, Flight *f, uint64_t now, bool by_time) {
             l->undo_ok = true;
         }
         l->recovery_start = now;
-        double w = (double)l->window / DATAGRAM;
+        double w = (double)l->window / l->datagram;
         l->cubic_max = w < l->cubic_max ? w * (1 + CUBIC_BETA) / 2 : w; /* fast convergence: another flow came */
         l->window = most((uint64_t)((double)l->window * CUBIC_BETA), WINDOW_LEAST);
         l->threshold = l->window;
         l->cubic_k = cbrt(l->cubic_max * (1 - CUBIC_BETA) / CUBIC_C);
         l->cubic_epoch = now;
-        l->cubic_reno = (double)l->window / DATAGRAM;
+        l->cubic_reno = (double)l->window / l->datagram;
         if (++l->calm_events >= CALM) { /* many events, none of them late packets: less patience */
             l->reorder_packets = most(REORDER_FIRST, l->reorder_packets / 2);
             l->reorder_quarters /= 2;
@@ -498,7 +515,7 @@ static void grow(PureLinkSender *l, uint64_t bytes, uint64_t now) {
         l->window += bytes;
         return;
     }
-    double w = (double)l->window / DATAGRAM, acked = (double)bytes / DATAGRAM;
+    double w = (double)l->window / l->datagram, acked = (double)bytes / l->datagram;
     if (!l->cubic_epoch) { /* no event yet: the cubic starts where the window is */
         l->cubic_epoch = now;
         l->cubic_max = l->cubic_reno = w;
@@ -511,7 +528,7 @@ static void grow(PureLinkSender *l, uint64_t bytes, uint64_t now) {
     double target = CUBIC_C * d * d * d + l->cubic_max;
     target = target < w ? w : target > 1.5 * w ? 1.5 * w : target;
     double next = at < l->cubic_reno ? l->cubic_reno : w + (target - w) * acked / w;
-    l->window = most(l->window, (uint64_t)(next * DATAGRAM));
+    l->window = most(l->window, (uint64_t)(next * l->datagram));
 }
 
 static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint64_t now) {
@@ -529,6 +546,7 @@ static void on_ack(PureLinkSender *l, const unsigned char *p, size_t size, uint6
             if (!f || f->done) continue;
             settle(l, f);
             ++l->counts.acknowledged;
+            if (f->reach) l->datagram = DATAGRAM_MOST, l->reaching = false; /* the path carries it */
             for (uint16_t u = 0; u < f->count; ++u) carried(l, &f->units[u], f->pn, true, now);
             if (f->eliciting && f->sent > l->recovery_start && !l->unused) grow(l, f->bytes, now);
             if (pn == largest) top = f;
@@ -578,8 +596,8 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
 }
 
 void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_t n, uint64_t now) {
-    unsigned char plain[DATAGRAM], nonce[PURE_AEAD_NONCE];
-    if (!l->out || n < HEADER + PURE_AEAD_TAG || n > DATAGRAM || packet[0] != VERSION || get32(packet + 1) != l->peer_id)
+    unsigned char plain[DATAGRAM_MOST], nonce[PURE_AEAD_NONCE];
+    if (!l->out || n < HEADER + PURE_AEAD_TAG || n > DATAGRAM_MOST || packet[0] != VERSION || get32(packet + 1) != l->peer_id)
         return; /* not ours, or an error from an earlier send (nobody listening) */
     uint64_t run = get64(packet + 5), pn = get64(packet + 13);
     if (!l->in || l->in_run != run) {
@@ -611,7 +629,7 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
 /* A packet of what is not sent yet, in order, within the receiver's credit:
  * its body's size, or 0 when there is none. */
 static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) {
-    size_t at = 0;
+    size_t at = 0, most = l->datagram - HEADER - PURE_AEAD_TAG;
     body[at++] = F_STREAM;
     at += put_names(body + at, l->source, l->input);
     put32(body + at, l->shape);
@@ -634,7 +652,7 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
         if (r->seq > base + l->credit) break;
         bool full = false, fresh = !r->more && r->one.state == UNSENT, joins = run && r->seq == next;
         size_t whole = (joins ? 0 : RECORDS_HEAD) + varint_size(r->size) + r->size;
-        if (fresh && at + whole <= BODY) {
+        if (fresh && at + whole <= most) {
             if (!joins) {
                 body[at] = F_RECORDS;
                 put64(body + at + 1, r->seq);
@@ -655,7 +673,7 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
             for (uint32_t i = 0; i < r->parts; ++i) {
                 Part *p = part_of(r, i);
                 if (p->state != UNSENT) continue;
-                size_t room = at + RECORD_HEAD < BODY ? BODY - at - RECORD_HEAD : 0;
+                size_t room = at + RECORD_HEAD < most ? most - at - RECORD_HEAD : 0;
                 if (f->count == UNITS || (p->length > room && (room < PART_LEAST || !cut(r, i, (uint32_t)room)))) {
                     full = true;
                     break;
@@ -678,8 +696,8 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad) 
         before = before && !full;
         if (full) { /* the packet is full: whole, so it can go in a burst */
             if (pad && f->count) {
-                memset(body + at, F_PADDING, BODY - at);
-                at = BODY;
+                memset(body + at, F_PADDING, most - at);
+                at = most;
             }
             break;
         }
@@ -724,13 +742,24 @@ static size_t transmit(PureLinkSender *l, Flight *f, const unsigned char *body, 
     return total;
 }
 
-size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DATAGRAM], bool whole, uint64_t now,
+size_t pure_link_sender_packet(PureLinkSender *l, unsigned char out[PURE_LINK_DATAGRAM_MOST], bool whole, uint64_t now,
                                uint64_t *number) {
     bool probe = l->probes > 0;
-    if (!probe && l->in_flight + DATAGRAM > l->window) l->unused = false;
-    if (!l->out || (!probe && l->in_flight + DATAGRAM > l->window) || !flight_room(l)) return 0;
-    unsigned char body[BODY];
+    if (!probe && l->in_flight + l->datagram > l->window) l->unused = false;
+    if (!l->out || (!probe && l->in_flight + l->datagram > l->window) || !flight_room(l)) return 0;
+    unsigned char body[BODY_MOST];
     Flight f = {.pn = l->next_pn, .eliciting = true};
+    if (l->datagram < DATAGRAM_MOST && !l->reaching && l->sampled && now >= l->reach_at &&
+        l->in_flight + DATAGRAM_MOST <= l->window) { /* the path may carry more: a PING of the most, padded */
+        body[0] = F_PING;
+        memset(body + 1, F_PADDING, BODY_MOST - 1);
+        f.reach = true;
+        size_t total = transmit(l, &f, body, BODY_MOST, out, now);
+        if (!total) return 0;
+        l->reaching = true;
+        *number = f.pn;
+        return total;
+    }
     size_t size = fill(l, body, &f, whole);
     if (!size) {
         l->unused = true;
@@ -812,6 +841,7 @@ PureLinkSender *pure_link_sender(const char *source, const char *input, uint32_t
     l->threshold = UINT64_MAX;
     l->credit = CREDIT;
     l->reorder_packets = REORDER_FIRST;
+    l->datagram = DATAGRAM;
     return l;
 }
 
@@ -835,6 +865,8 @@ bool pure_link_sender_shared(PureLinkSender *l, const unsigned char peer[PURE_SE
 }
 
 uint64_t pure_link_sender_queued(const PureLinkSender *l) { return l->queued; }
+
+size_t pure_link_sender_datagram(const PureLinkSender *l) { return l->datagram; }
 
 uint64_t pure_link_sender_stored(const PureLinkSender *l) { return l->stored; }
 
@@ -1545,7 +1577,7 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
     Run made = {.active = a, .run = run, .seen = now, .used = true};
     bool keyed = r || (derive(a->secret, peer->key, s->own_public, run, 0, made.in_key, made.in_base) &&
                        derive(a->secret, s->own_public, peer->key, s->run, run, made.out_key, made.out_base));
-    unsigned char plain[DATAGRAM], nonce[PURE_AEAD_NONCE];
+    unsigned char plain[DATAGRAM_MOST], nonce[PURE_AEAD_NONCE];
     nonce_of(nonce, r ? r->in_base : made.in_base, pn);
     size_t size = n - HEADER - PURE_AEAD_TAG;
     const unsigned char *key = r ? r->in_key : made.in_key, *give = key;
@@ -1616,7 +1648,7 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
 
 void pure_link_receiver_take(PureLinkReceiver *s, const unsigned char *packet, size_t n, const void *from,
                              size_t from_size, uint64_t now) {
-    if (n < HEADER + PURE_AEAD_TAG || n > DATAGRAM || packet[0] != VERSION || !s->index_size) return;
+    if (n < HEADER + PURE_AEAD_TAG || n > DATAGRAM_MOST || packet[0] != VERSION || !s->index_size) return;
     uint32_t id = get32(packet + 1);
     size_t mask = s->index_size - 1;
     uint64_t run = get64(packet + 5);

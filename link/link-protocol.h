@@ -51,10 +51,12 @@
  * Losses are detected as RFC 9002 says; congestion control is its NewReno
  * (RFC 9002 §7). */
 
-/* A packet is at most PURE_LINK_DATAGRAM bytes; a source's or an input's
- * name is 1 to PURE_LINK_NAME bytes; a receiver keeps where a packet came
- * from (the socket's address) in PURE_LINK_ADDRESS bytes. */
-enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 28 };
+/* A packet is PURE_LINK_DATAGRAM bytes at most at first, and up to
+ * PURE_LINK_DATAGRAM_MOST once the path is found to carry that many (a
+ * probe of that size acknowledged: DPLPMTUD, RFC 8899); a source's or an
+ * input's name is 1 to PURE_LINK_NAME bytes; a receiver keeps where a
+ * packet came from (the socket's address) in PURE_LINK_ADDRESS bytes. */
+enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 28 };
 
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,
@@ -91,10 +93,13 @@ void pure_link_sender_take(PureLinkSender *, const unsigned char *packet, size_t
 void pure_link_sender_tick(PureLinkSender *, uint64_t now);
 /* The next packet to send into out, and its number: its size, or 0 when
  * there is none (nothing to send, or the window is full). whole: a full
- * packet is padded to PURE_LINK_DATAGRAM (so packets may go in a burst of
- * whole datagrams, as UDP GSO sends them). */
-size_t pure_link_sender_packet(PureLinkSender *, unsigned char out[PURE_LINK_DATAGRAM], bool whole, uint64_t now,
+ * packet is padded to the sender's datagram (so packets may go in a burst
+ * of whole datagrams, as UDP GSO sends them). A probe of a larger size is
+ * larger than the datagram: it goes alone. */
+size_t pure_link_sender_packet(PureLinkSender *, unsigned char out[PURE_LINK_DATAGRAM_MOST], bool whole, uint64_t now,
                                uint64_t *number);
+/* The size of a full packet now. */
+size_t pure_link_sender_datagram(const PureLinkSender *);
 /* A packet made but not sent (the socket refused it): what it carried is
  * sent again, and it counts as never sent. */
 void pure_link_sender_refused(PureLinkSender *, uint64_t number);

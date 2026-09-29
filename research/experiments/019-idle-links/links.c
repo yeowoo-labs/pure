@@ -179,7 +179,7 @@ static PureLinkSender *sender_of(size_t device) {
 
 /* What a sender has to send, to its socket. */
 static void send_packets(PureLinkSender *s, int fd, uint64_t now) {
-    unsigned char packet[PURE_LINK_DATAGRAM];
+    unsigned char packet[PURE_LINK_DATAGRAM_MOST];
     uint64_t number;
     for (size_t size; (size = pure_link_sender_packet(s, packet, false, now, &number));) {
         if (send(fd, packet, size, 0) < 0 && (errno == EAGAIN || errno == ENOBUFS)) {
@@ -192,7 +192,7 @@ static void send_packets(PureLinkSender *s, int fd, uint64_t now) {
 
 /* Answers waiting on fd, to the sender. */
 static void take_answers(PureLinkSender *s, int fd, uint64_t now) {
-    unsigned char packet[PURE_LINK_DATAGRAM + 64];
+    unsigned char packet[PURE_LINK_DATAGRAM_MOST + 64];
     for (ssize_t got; (got = recv(fd, packet, sizeof(packet), 0)) > 0;) pure_link_sender_take(s, packet, (size_t)got, now);
 }
 

@@ -16,10 +16,11 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { DATAGRAM = PURE_LINK_DATAGRAM };
+enum { DATAGRAM = PURE_LINK_DATAGRAM, DATAGRAM_MOST = PURE_LINK_DATAGRAM_MOST };
 /* Packets sent at once with UDP GSO: each but the last is a whole datagram
- * (a full one padded), and 54 of them fit a UDP datagram's 65,507 bytes. */
-enum { BURST = 54 };
+ * (a full one padded), as many as fit a UDP datagram's 65,507 bytes (54 of
+ * 1,200 bytes). */
+enum { BURST = 54, BURST_BYTES = 65507 };
 #ifndef UDP_SEGMENT
 #define UDP_SEGMENT 103
 #endif
@@ -35,7 +36,7 @@ static uint64_t now_ns(void) {
 }
 
 /* Datagrams taken from a socket at once (recvmmsg). */
-enum { TAKE = 64, SLOT = DATAGRAM + 64 };
+enum { TAKE = 64, SLOT = DATAGRAM_MOST + 64 };
 typedef struct {
     unsigned char bytes[TAKE][SLOT];
     struct sockaddr_storage from[TAKE];
@@ -112,6 +113,7 @@ struct PureLink {
     size_t burst_size;
     unsigned burst_count;
     uint64_t burst_pn[BURST];
+    size_t segment; /* the datagram's size the bursts are cut at */
     bool gso, no_gso;
 };
 
@@ -197,15 +199,31 @@ static void take_answers(PureLink *l, uint64_t now) {
 
 static bool transient(void) { return errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS || errno == EINTR; }
 
+/* The burst in one call, cut into datagrams of the segment's size by the
+ * system (UDP GSO, asked for this call alone: a packet sent by itself is
+ * never cut, however large). */
+static ssize_t send_burst(PureLink *l) {
+    _Alignas(8) unsigned char control[CMSG_SPACE(sizeof(uint16_t))] = {0};
+    struct iovec part = {l->burst, l->burst_size};
+    struct msghdr m = {.msg_iov = &part, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+    struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+    c->cmsg_level = SOL_UDP;
+    c->cmsg_type = UDP_SEGMENT;
+    c->cmsg_len = CMSG_LEN(sizeof(uint16_t));
+    uint16_t segment = (uint16_t)l->segment;
+    memcpy(CMSG_DATA(c), &segment, sizeof(segment));
+    return sendmsg(l->fd, &m, 0);
+}
+
 /* The packets of the burst to the socket (each but the last a whole
  * datagram): with GSO in one call, else one by one. */
 static void flush(PureLink *l) {
     unsigned n = l->burst_count, sent = 0;
     bool whole = n > 1 && l->gso;
-    if (whole && send(l->fd, l->burst, l->burst_size, 0) >= 0) sent = n;
+    if (whole && send_burst(l) >= 0) sent = n;
     else if (whole && !transient()) l->gso = false, whole = false; /* no GSO here: one by one from now on */
     for (size_t at = 0; !whole && sent < n; ++sent) {
-        size_t size = sent + 1 < n ? DATAGRAM : l->burst_size - at;
+        size_t size = sent + 1 < n ? l->segment : l->burst_size - at;
         if (send(l->fd, l->burst + at, size, 0) < 0 && transient()) break;
         at += size;
     }
@@ -215,17 +233,28 @@ static void flush(PureLink *l) {
 }
 
 /* Packets while the sender has them (up to 128 a turn), into bursts: a
- * short packet ends one. */
+ * short packet ends one, and a probe of a larger datagram goes alone. */
 static void send_packets(PureLink *l, uint64_t now) {
     l->queued_new = false; /* all queued is looked at now */
+    l->segment = pure_link_sender_datagram(l->sender); /* larger once the path is found to carry it */
+    unsigned most = BURST_BYTES / l->segment < BURST ? (unsigned)(BURST_BYTES / l->segment) : BURST;
     for (unsigned n = 0; n < 128; ++n) {
-        if (l->burst_count && l->burst_size != (size_t)l->burst_count * DATAGRAM) flush(l); /* the last was short */
+        if (l->burst_count && l->burst_size != (size_t)l->burst_count * l->segment) flush(l); /* the last was short */
         uint64_t pn;
         size_t size = pure_link_sender_packet(l->sender, l->burst + l->burst_size, l->gso, now, &pn);
         if (!size) break;
+        if (size > l->segment) { /* a probe: the burst before it, then it alone */
+            unsigned char probe[DATAGRAM_MOST];
+            memcpy(probe, l->burst + l->burst_size, size);
+            flush(l);
+            memcpy(l->burst, probe, size);
+            l->burst_pn[0] = pn, l->burst_count = 1, l->burst_size = size;
+            flush(l);
+            continue;
+        }
         l->burst_pn[l->burst_count++] = pn;
         l->burst_size += size;
-        if (l->burst_count == BURST) flush(l);
+        if (l->burst_count == most) flush(l);
     }
     flush(l);
 }
@@ -274,15 +303,23 @@ bool pure_link_start(PureLink *l, void (*notify)(void *), void *context, char *e
     }
     l->fd = socket(found->ai_family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     bool ok = l->fd >= 0 && !connect(l->fd, found->ai_addr, found->ai_addrlen);
+    int buffer = 4 << 20, family = found->ai_family;
     freeaddrinfo(found);
-    int buffer = 4 << 20;
     if (ok) {
         setsockopt(l->fd, SOL_SOCKET, SO_SNDBUF, &buffer, sizeof(buffer));
         setsockopt(l->fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
+        /* Never cut up on the way (the don't-fragment bit): a packet the
+         * path does not carry is lost, as a probe of a larger size must be. */
+        int probe = IP_PMTUDISC_PROBE, probe6 = IPV6_PMTUDISC_PROBE;
+        if (family == AF_INET6) setsockopt(l->fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &probe6, sizeof(probe6));
+        else setsockopt(l->fd, IPPROTO_IP, IP_MTU_DISCOVER, &probe, sizeof(probe));
     }
-    int segment = DATAGRAM;
-    l->gso = ok && !l->no_gso && !setsockopt(l->fd, SOL_UDP, UDP_SEGMENT, &segment, sizeof(segment));
-    ok = ok && l->keyed && (l->burst = malloc((size_t)BURST * DATAGRAM)) && (l->taking = malloc(sizeof(*l->taking))) &&
+    /* GSO where the system has it: asked for each burst, never for the socket. */
+    int segment = DATAGRAM, none = 0;
+    l->segment = DATAGRAM;
+    l->gso = ok && !l->no_gso && !setsockopt(l->fd, SOL_UDP, UDP_SEGMENT, &segment, sizeof(segment)) &&
+             !setsockopt(l->fd, SOL_UDP, UDP_SEGMENT, &none, sizeof(none));
+    ok = ok && l->keyed && (l->burst = malloc(BURST_BYTES + DATAGRAM_MOST)) && (l->taking = malloc(sizeof(*l->taking))) &&
          (l->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) >= 0;
     l->notify = notify;
     l->context = context;
