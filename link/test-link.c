@@ -72,7 +72,7 @@ typedef struct {
     size_t nonce_count, nonce_capacity;
     Packet *history;
     size_t history_count;
-    uint64_t attacker_in, attacker_out;
+    uint64_t attacker_in, attacker_out, bent, replayed;
     unsigned loss, doubled, spread_ms; /* percent, percent, the most a packet is held back */
     uint64_t now, sent;
     /* The receiving app: its last heard (kept across the receiver's
@@ -199,6 +199,7 @@ static void tamper(World *w, PureLinkSender *s, PureLinkReceiver *r, const Packe
         else bent[size++] = (unsigned char)next_random();
         PureLinkCounts before, after;
         unsigned answers = 0;
+        ++w->bent;
         if (p->to_receiver) {
             pure_link_receiver_counts(r, &before);
             pure_link_receiver_take(r, bent, size, from, 7, w->now);
@@ -220,6 +221,7 @@ static void replay(World *w, PureLinkSender *s, PureLinkReceiver *r, const char 
     const Packet *h = &w->history[next_random() % (w->history_count < HISTORY ? w->history_count : HISTORY)];
     const char *only = getenv("TEST_LINK_REPLAY");
     if (only && strcmp(only, h->to_receiver ? (chance(50) ? "receiver-sender" : "receiver-attacker") : "sender")) return;
+    ++w->replayed;
     if (!h->to_receiver) pure_link_sender_take(s, h->bytes, h->size, w->now);
     else if (only ? !strcmp(only, "receiver-sender") : chance(50)) pure_link_receiver_take(r, h->bytes, h->size, from, 7, w->now);
     else {
@@ -378,10 +380,13 @@ static Outcome run(const Case *c, const char *dir) {
     CHECK(w.attacker_out <= 3 * w.attacker_in, "%s: %llu bytes to the attacker for its %llu", c->name,
           (unsigned long long)w.attacker_out, (unsigned long long)w.attacker_in);
     printf("{\"case\":\"%s\",\"records\":%llu,\"virtual_ms\":%llu,\"packets\":%llu,\"resent\":%llu,\"lost\":%llu,"
-           "\"deliveries\":%llu,\"woken\":%llu,\"remembered\":%llu,\"swept\":%llu}\n",
+           "\"deliveries\":%llu,\"woken\":%llu,\"remembered\":%llu,\"swept\":%llu,\"changed\":%llu,\"replayed\":%llu,"
+           "\"attacker_in\":%llu,\"attacker_out\":%llu}\n",
            c->name, (unsigned long long)c->records, (unsigned long long)o.seconds_ms, (unsigned long long)o.sent.packets,
            (unsigned long long)o.sent.resent, (unsigned long long)o.sent.lost, (unsigned long long)w.deliveries,
-           (unsigned long long)o.heard.woken, (unsigned long long)o.heard.remembered, (unsigned long long)o.heard.swept);
+           (unsigned long long)o.heard.woken, (unsigned long long)o.heard.remembered, (unsigned long long)o.heard.swept,
+           (unsigned long long)w.bent, (unsigned long long)w.replayed, (unsigned long long)w.attacker_in,
+           (unsigned long long)w.attacker_out);
     pure_link_sender_free(s);
     pure_link_receiver_free(r);
     pure_seal_key_free(a);
