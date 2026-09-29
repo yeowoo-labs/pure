@@ -22,7 +22,11 @@ send it until it is stored; at --kill-at seconds the receiver is killed
 both sides before and after, the X25519 made (none when the node
 remembers its secrets; --no-memo forgets them), and that every order made
 was applied once. With --quic too, the same for quinn clients, which
-connect again when their connection is lost.
+connect again when their connection is lost. With --move too (M3), in
+namespaces of its own (unshare -rmn), the devices send to receiver.test
+(127.0.0.2), and the node is started again elsewhere: its store, key and
+memo copied, 127.0.0.2 made unreachable, the name pointed at 127.0.0.3;
+the devices look the name up again when their probes go unanswered.
 
 With --first-contact DELAYS (M4), for each one-way delay in ms, in a
 network namespace of its own (unshare -rn) whose loopback delays UDP:
@@ -236,9 +240,10 @@ def recovery(timeline, killed_ms):
     return {'steady_per_100ms': round(steady, 1), 'silent_100ms_steps': silent, 'caught_up_ms': None}
 
 
-def restart_pure(n, work, keys, module, period_ms, seconds, kill_at, memo):
+def restart_pure(n, work, keys, module, period_ms, seconds, kill_at, memo, host='127.0.0.1', move=None):
     """M2 for Pure: n devices send a record every period_ms; the node is
-    killed (-9) at kill_at seconds and started again at once."""
+    killed (-9) at kill_at seconds and started again at once (M3, with move:
+    elsewhere, move(args) giving its arguments there)."""
     senders = work / f'senders-{n}'
     with open(f'{keys}.senders') as source, open(senders, 'w') as out:
         for _, line in zip(range(n), source):
@@ -249,7 +254,7 @@ def restart_pure(n, work, keys, module, period_ms, seconds, kill_at, memo):
     args = [ROOT / 'build/pure-serve', '--module', module, '--store', store, '--port', port, '--key', work / 'node.key',
             '--link-port', link_port, '--senders', senders]
     node, info = start(args)
-    generator = subprocess.Popen([str(a) for a in [ROOT / 'build/links', 'run', keys, module, 'order', '127.0.0.1',
+    generator = subprocess.Popen([str(a) for a in [ROOT / 'build/links', 'run', keys, module, 'order', host,
                                   link_port, info['public_key'], 0, n, period_ms, seconds]],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     for line in generator.stderr:  # progress, a line a second
@@ -267,8 +272,11 @@ def restart_pure(n, work, keys, module, period_ms, seconds, kill_at, memo):
     killed_ms = int((t + killed - seen) * 1000)  # on the generator's clock
     if not memo:
         (work / 'node.key.links').unlink()
+    if move:
+        args = move(args)
     node, _ = start(args)
-    row = {'devices': n, 'period_ms': period_ms, 'memo': memo, 'restart_ms': round((time.monotonic() - killed) * 1000, 1),
+    row = {'devices': n, 'period_ms': period_ms, 'memo': memo, 'moved': bool(move),
+           'restart_ms': round((time.monotonic() - killed) * 1000, 1),
            'steady_cpu_ms_per_s': round(steady_cpu, 1), 'senders_steady_cpu_ms_per_s': round(senders_steady, 1)}
     cpu_start, senders_start = cpu_ms(node.pid), cpu_ms(generator.pid)
     time.sleep(10)
@@ -288,6 +296,28 @@ def restart_pure(n, work, keys, module, period_ms, seconds, kill_at, memo):
     stats = [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
     row['listener'] = {k: v for k, v in stats.items() if k.startswith('listener_')}
     return row
+
+
+def mover(hosts, ip):
+    """M3: the node's store, key and memo carried to another machine (copied,
+    in the namespace of --move), its old address (127.0.0.2) made
+    unreachable, and the name the devices send to (receiver.test) pointed at
+    the new one (127.0.0.3)."""
+    import shutil
+
+    def move(args):
+        args = list(args)
+        store, key = Path(args[args.index('--store') + 1]), Path(args[args.index('--key') + 1])
+        moved_store, moved_key = store.with_name(store.name + '-moved'), key.with_name('moved-' + key.name)
+        shutil.copytree(store, moved_store)
+        shutil.copy(key, moved_key)
+        if Path(f'{key}.links').exists():
+            shutil.copy(f'{key}.links', f'{moved_key}.links')
+        subprocess.run([ip, 'route', 'add', 'unreachable', '127.0.0.2/32', 'table', 'local'], check=True)
+        hosts.write_text('127.0.0.1 localhost\n127.0.0.3 receiver.test\n')
+        args[args.index('--store') + 1], args[args.index('--key') + 1] = moved_store, moved_key
+        return args
+    return move
 
 
 def restart_quic(n, work, period_ms, seconds, kill_at):
@@ -539,6 +569,9 @@ def main():
     parser.add_argument('--quic', action='store_true', help='measure the quinn service instead (quic/)')
     parser.add_argument('--restart', action='store_true', help='M2: kill -9 the receiver under load (with --quic, quinn)')
     parser.add_argument('--no-memo', action='store_true', help='M2: the node forgets the secrets it remembered')
+    parser.add_argument('--move', action='store_true',
+                        help='M3 (with --restart): started again on another machine, the store carried there (a '
+                             'namespace of its own: unshare -rmn)')
     parser.add_argument('--period-ms', type=int, default=5000)
     parser.add_argument('--seconds', type=int, default=40)
     parser.add_argument('--kill-at', type=int, default=20)
@@ -551,6 +584,17 @@ def main():
     parser.add_argument('--rounds', type=int, default=1)
     args = parser.parse_args()
     counts = [int(c) for c in args.counts.split(',')]
+    if args.move and not os.environ.get('PURE_MOVE_HOSTS'):  # in namespaces of its own: its network, its /etc/hosts
+        with tempfile.TemporaryDirectory(prefix='pure-m3-', dir=args.store) as directory:
+            hosts = Path(directory) / 'hosts'
+            hosts.write_text('127.0.0.1 localhost\n127.0.0.2 receiver.test\n')
+            done = subprocess.run(['unshare', '-rmn', sys.executable] + sys.argv, env={**os.environ, 'PURE_MOVE_HOSTS': str(hosts)})
+        sys.exit(done.returncode)
+    if args.move:
+        import shutil
+        ip = shutil.which('ip') or '/usr/sbin/ip'
+        subprocess.run([ip, 'link', 'set', 'lo', 'up'], check=True)
+        subprocess.run(['mount', '--bind', os.environ['PURE_MOVE_HOSTS'], '/etc/hosts'], check=True)
     if args.transport:
         subprocess.run(['make', '-s', '-C', str(ROOT), 'build/libpure.a', 'build/libpure-link.a', 'build/pure-crypto.so'],
                        check=True)
@@ -614,7 +658,8 @@ def main():
                 subprocess.run([str(ROOT / 'build/links'), 'keys', str(max(counts)), str(keys)], check=True)
             for n in counts:
                 row = restart_quic(n, work, args.period_ms, args.seconds, args.kill_at) if args.quic else \
-                      restart_pure(n, work, keys, module, args.period_ms, args.seconds, args.kill_at, not args.no_memo)
+                      restart_pure(n, work, keys, module, args.period_ms, args.seconds, args.kill_at, not args.no_memo,
+                                   *(('receiver.test', mover(Path(os.environ['PURE_MOVE_HOSTS']), ip)) if args.move else ()))
                 line = json.dumps(row)
                 print(line, flush=True)
                 if args.out:

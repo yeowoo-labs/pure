@@ -177,17 +177,22 @@ static PureLinkSender *sender_of(size_t device) {
     return s;
 }
 
-/* What a sender has to send, to its socket. */
-static void send_packets(PureLinkSender *s, int fd, uint64_t now) {
+/* What a sender has to send, to its socket: false when the system said
+ * there is no way there (no route, nobody at the port). */
+static bool send_packets(PureLinkSender *s, int fd, uint64_t now) {
     unsigned char packet[PURE_LINK_DATAGRAM_MOST];
     uint64_t number;
+    bool way = true;
     for (size_t size; (size = pure_link_sender_packet(s, packet, false, now, &number));) {
-        if (send(fd, packet, size, 0) < 0 && (errno == EAGAIN || errno == ENOBUFS)) {
+        ssize_t sent = send(fd, packet, size, 0);
+        if (sent < 0 && (errno == EAGAIN || errno == ENOBUFS)) {
             pure_link_sender_refused(s, number);
             break;
         }
+        if (sent < 0 && (errno == ECONNREFUSED || errno == EHOSTUNREACH || errno == ENETUNREACH)) way = false;
         ++sends;
     }
+    return way;
 }
 
 /* Answers waiting on fd, to the sender. */
@@ -293,8 +298,31 @@ typedef struct {
     uint64_t made, stored;    /* records made and stored: numbers 1..made, 1..stored */
     uint64_t next_make;       /* when the next record is made */
     uint64_t due;             /* its sender's next timer (0: none), as it was when last touched */
+    unsigned looked;          /* its probes unanswered when it last looked for the node */
+    bool nowhere;             /* a send failed: the system saw no way there */
     uint64_t made_at[OUTBOX]; /* when each record not stored was made (ns), by number % OUTBOX */
 } Device;
+
+/* A device whose probes go unanswered three times in a row, or whose send
+ * the system said had no way there, looks for the node again, as
+ * link/link.c does: its name looked up, and a new socket connected there in
+ * place of the one before (before the next packet goes). */
+static void look(Device *d, int poller, size_t k, const char *host, const char *port) {
+    struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM}, *found;
+    if (getaddrinfo(host, port, &hints, &found)) return;
+    int fd = socket(found->ai_family, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    bool ok = fd >= 0 && !connect(fd, found->ai_addr, found->ai_addrlen);
+    freeaddrinfo(found);
+    if (!ok) {
+        if (fd >= 0) close(fd);
+        return;
+    }
+    epoll_ctl(poller, EPOLL_CTL_DEL, d->fd, NULL);
+    close(d->fd);
+    d->fd = fd;
+    struct epoll_event e = {.events = EPOLLIN, .data.u64 = k};
+    epoll_ctl(poller, EPOLL_CTL_ADD, d->fd, &e);
+}
 
 static int run_all(char **argv) {
     size_t first = strtoull(argv[8], NULL, 10), count = strtoull(argv[9], NULL, 10);
@@ -342,8 +370,9 @@ static int run_all(char **argv) {
                 ++stored;
             }
             if (heard > d->stored) d->stored = heard;
-            send_packets(d->sender, d->fd, now); /* what the answer let go */
+            d->nowhere |= !send_packets(d->sender, d->fd, now); /* what the answer let go */
             d->due = pure_link_sender_due(d->sender);
+            if (!pure_link_sender_probes(d->sender)) d->looked = 0;
         }
         if (now - last_scan < 5000000u) continue; /* the devices' clocks, every 5 ms */
         last_scan = now;
@@ -361,7 +390,10 @@ static int run_all(char **argv) {
              * sender is touched (so ten thousand at rest cost a glance each). */
             if (d->due && d->due <= now) pure_link_sender_tick(d->sender, now), more = true;
             if (more) {
-                send_packets(d->sender, d->fd, now);
+                unsigned probes = pure_link_sender_probes(d->sender);
+                if ((probes >= 3 && probes != d->looked) || d->nowhere) look(d, poller, k, argv[5], argv[6]);
+                d->looked = probes;
+                d->nowhere = !send_packets(d->sender, d->fd, now);
                 d->due = pure_link_sender_due(d->sender);
             }
         }
