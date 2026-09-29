@@ -42,9 +42,10 @@ unsigned long pure_save_test_checkpoints;
 enum { JOURNAL_MIN = 1 << 20 };
 #define LOG_KEPT (UINT64_C(64) << 20)
 #endif
-/* links: "PLK3"; u8 outputs, each {u8 name length, name, u8 field count, the
- * fields' types, u64le last number} (the module's outputs, then those it
- * dropped, without fields). Before the outbox list, "PLK2" kept the sent
+/* links: "PLK4"; u8 outputs, each {u8 name length, name, u8 field count, each
+ * field's {u8 type, u8 name length, name}, u64le last number} (the module's
+ * outputs, then those it dropped, without fields). "PLK3" kept the fields'
+ * types alone. Before the outbox list, "PLK2" kept the sent
  * messages after them, to the end, each {u8 output (in the table), u64le
  * number, u32le size, payload}; before the heard list, "PLK1" also kept the
  * numbers heard between the two: u16le sources, each {u8 length, the name,
@@ -56,8 +57,8 @@ enum { JOURNAL_MIN = 1 << 20 };
  * seq number, payload bytes). What only grows with the sources a node hears
  * from, or with the sends its receivers have not stored yet, so costs a
  * save only the records of its changes. */
-static const unsigned char links_magic[4] = {'P', 'L', 'K', '3'}, links_magic_2[4] = {'P', 'L', 'K', '2'},
-                           links_magic_1[4] = {'P', 'L', 'K', '1'};
+static const unsigned char links_magic[4] = {'P', 'L', 'K', '4'}, links_magic_3[4] = {'P', 'L', 'K', '3'},
+                           links_magic_2[4] = {'P', 'L', 'K', '2'}, links_magic_1[4] = {'P', 'L', 'K', '1'};
 typedef struct { const char *name; unsigned fields; uint8_t kinds[3]; char names[3][PURE_MODULE_NAME]; } RuntimeList;
 static const RuntimeList runtime_lists[PURE_LISTS_STORED - PURE_LIST_HEARD] = {
     {"0heard", 2, {1, 0}, {"source", "seq"}},
@@ -644,7 +645,11 @@ PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, do
 
 static bool same_version(PureVersion a, PureVersion b) { return a.ref == b.ref && a.bytes == b.bytes; }
 
-/* The links as stored; NULL when memory runs out. */
+/* The links as stored; NULL when memory runs out. Each output: its name,
+ * its fields (each its type and name: what its sends' bytes mean, so a
+ * module that orders or names them otherwise is refused while sends wait),
+ * and the last number it sent; then the outputs carried from modules
+ * before, with none. */
 static unsigned char *encode_links(const PureApp *app, size_t *size) {
     const PureModule *m = app->module;
     unsigned outputs = 0;
@@ -653,7 +658,9 @@ static unsigned char *encode_links(const PureApp *app, size_t *size) {
     for (uint32_t i = 0; i < m->inputs; ++i)
         if (m->input[i].kind == PURE_KIND_OUTPUT) {
             table[i] = (uint8_t)outputs++;
-            total += 2 + strlen(m->input_names[i]) + m->input[i].field_count + 8;
+            total += 2 + strlen(m->input_names[i]) + 8;
+            for (uint32_t f = 0; f < m->input[i].field_count; ++f)
+                total += 2 + strlen(m->field[m->input[i].field_start + f].name);
         }
     for (unsigned c = 0; c < app->carried_count; ++c) total += 2 + strlen(app->carried[c].name) + 8;
     unsigned char *bytes = malloc(total), *at = bytes;
@@ -668,7 +675,14 @@ static unsigned char *encode_links(const PureApp *app, size_t *size) {
         memcpy(at, m->input_names[i], length);
         at += length;
         *at++ = (unsigned char)m->input[i].field_count;
-        for (uint32_t f = 0; f < m->input[i].field_count; ++f) *at++ = m->field[m->input[i].field_start + f].type;
+        for (uint32_t f = 0; f < m->input[i].field_count; ++f) {
+            const PureField *field = &m->field[m->input[i].field_start + f];
+            size_t named = strlen(field->name);
+            *at++ = field->type;
+            *at++ = (unsigned char)named;
+            memcpy(at, field->name, named);
+            at += named;
+        }
         at = put_le(at, app->last_sent[i], 8);
     }
     for (unsigned c = 0; c < app->carried_count; ++c) {
@@ -706,7 +720,8 @@ PURE_COLD static PureResult sent_before(PureApp *app, const char *output, uint64
  * fields changed or that the module lacks refuses the start while it has
  * sends left in the outbox: CONFLICT; one without sends keeps its number
  * for later); the sources and sends links kept before the runtime's lists
- * go to them (heard_moved, sent_moved: they need images). */
+ * go to them (heard_moved, sent_moved: they need images). Links kept
+ * before PLK4 have their fields' types alone. */
 PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, bool *heard_moved, bool *sent_moved) {
     *heard_moved = *sent_moved = false;
     PureResult result = app->stored_links ? PURE_OK : open_state(app, "", "links", &app->stored_links);
@@ -719,7 +734,8 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, boo
     char names[256][PURE_MODULE_NAME];
     size_t at = 5;
     bool first = size >= 5 && !memcmp(bytes, links_magic_1, 4), second = size >= 5 && !memcmp(bytes, links_magic_2, 4),
-         known = first || second || (size >= 5 && !memcmp(bytes, links_magic, 4));
+         named = size >= 5 && !memcmp(bytes, links_magic, 4),
+         known = first || second || named || (size >= 5 && !memcmp(bytes, links_magic_3, 4));
     unsigned outputs = known ? bytes[4] : 0;
     result = known ? PURE_OK : PURE_STORE_ERROR;
     for (unsigned t = 0; t < outputs && result == PURE_OK; ++t) {
@@ -730,13 +746,20 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, boo
         name[length] = 0;
         unsigned fields = bytes[at + 1 + length];
         at += 2 + length;
-        if (size - at < fields + 8) { result = PURE_STORE_ERROR; break; }
         int i = pure_module_input(m, name);
         output[t] = i >= 0 && m->input[i].kind == PURE_KIND_OUTPUT ? i : -1;
         fits[t] = output[t] >= 0 && m->input[i].field_count == fields;
-        for (unsigned f = 0; fits[t] && f < fields; ++f) fits[t] = m->field[m->input[i].field_start + f].type == bytes[at + f];
-        uint64_t last = get_le(bytes + at + fields, 8);
-        at += fields + 8;
+        for (unsigned f = 0; f < fields && result == PURE_OK; ++f) { /* its type, then (PLK4) its name */
+            size_t named_length = named && size - at >= 2 ? bytes[at + 1] : 0;
+            if (size - at < (named ? 2 + named_length : 1)) { result = PURE_STORE_ERROR; break; }
+            const PureField *field = fits[t] ? &m->field[m->input[i].field_start + f] : NULL;
+            fits[t] = field && field->type == bytes[at] &&
+                      (!named || (strlen(field->name) == named_length && !memcmp(field->name, bytes + at + 2, named_length)));
+            at += named ? 2 + named_length : 1;
+        }
+        if (result != PURE_OK || size - at < 8) { result = PURE_STORE_ERROR; break; }
+        uint64_t last = get_le(bytes + at, 8);
+        at += 8;
         if (output[t] >= 0) app->last_sent[output[t]] = last;
         else if (last) {
             struct PureCarried *grown = realloc(app->carried, (app->carried_count + 1) * sizeof(*grown));

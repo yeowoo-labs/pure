@@ -3997,7 +3997,7 @@ static void links(void) {
     CHECK(pure_app_heard(&b, "legacy") == 5 && pure_app_heard(&b, "orders.ordered") == 2 && pure_app_heard(&b, "x") == 1);
     CHECK(deliver(&b, "legacy", 5, "old", 1) == PURE_OK && b.duplicate && deliver(&b, "legacy", 6, "new", 1) == PURE_OK && !b.duplicate);
     pure_app_stop(&b);
-    CHECK(pure_state_open(path_b, "links", &stored_links) == PURE_OK && !memcmp(read_state(stored_links), "PLK3", 4));
+    CHECK(pure_state_open(path_b, "links", &stored_links) == PURE_OK && !memcmp(read_state(stored_links), "PLK4", 4));
     pure_draft_close(stored_links);
     /* Links stored before the outbox list kept the sends: a start moves them
      * to it; numbering goes on from the output's last number. */
@@ -4029,7 +4029,7 @@ static void links(void) {
           !memcmp(o.items[1].payload, "abcd", 4));
     CHECK(buy(&c, 0, "next", 1) == PURE_OK && outbox_of(&c).items[2].seq == 3);
     pure_app_stop(&c);
-    CHECK(pure_state_open(path_c, "links", &stored_links) == PURE_OK && !memcmp(read_state(stored_links), "PLK3", 4));
+    CHECK(pure_state_open(path_c, "links", &stored_links) == PURE_OK && !memcmp(read_state(stored_links), "PLK4", 4));
     pure_draft_close(stored_links);
     /* A large outbox costs a save only its changes: the links stay small, the
      * sends and trims come back after a start. */
@@ -4158,6 +4158,43 @@ static void links(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "handler event"));
 }
 
+/* An output whose fields are named otherwise (here two numbers swapped) is
+ * another output: its waiting sends' bytes would mean something else. A
+ * module that has it so is refused while sends wait, replacing or starting
+ * over the store; once they are trimmed it replaces (review 004, F3). */
+static void output_meaning(void) {
+    static const S nums[] = {{"n", 0}};
+    static const F was_fields[] = {{"debit", PURE_FIELD_NUMBER}, {"credit", PURE_FIELD_NUMBER}};
+    static const F now_fields[] = {{"credit", PURE_FIELD_NUMBER}, {"debit", PURE_FIELD_NUMBER}};
+    static const I was_inputs[] = {KEY("tap", "KeyT"), {"pay", NULL, PURE_KIND_OUTPUT, false, was_fields, 2}};
+    static const I now_inputs[] = {KEY("tap", "KeyT"), {"pay", NULL, PURE_KIND_OUTPUT, false, now_fields, 2}};
+    static const O was_code[] = {{C, 0, 10}, {C, 0, 20}, {SEND, 1, 0}}; /* pay { debit: 10, credit: 20 } */
+    static const O now_code[] = {{C, 0, 20}, {C, 0, 10}, {SEND, 1, 0}}; /* the same, fields in the new order */
+    static const H handlers[] = {{1, 0, 3}};
+    Spec was = {nums, 1, was_inputs, 2, NULL, 0, handlers, 1, was_code, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
+                NULL, 0};
+    Spec now = {nums, 1, now_inputs, 2, NULL, 0, handlers, 1, now_code, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
+                NULL, 0};
+    CHECK(load(was, &module_a) == PURE_OK && load(now, &module_b) == PURE_OK);
+    CHECK(pure_module_shape(&module_a, 1) != pure_module_shape(&module_b, 1));
+    char *path = new_store();
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && outbox_of(&app).count == 1);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_CONFLICT && app.module == &module_a);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_CONFLICT);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && outbox_of(&app).count == 1);
+    pure_app_trim(&app, 1, 1);
+    CHECK(pure_app_save(&app) == PURE_OK && pure_app_replace(&app, &module_b) == PURE_OK);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && outbox_of(&app).items[0].seq == 2);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && outbox_of(&app).count == 1);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_CONFLICT);
+    remove_store(path);
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -4271,6 +4308,7 @@ int main(void) {
     keyed_mutations();
     snapshots();
     links();
+    output_meaning();
     fold_mutations();
     pointing();
     list_mutations();

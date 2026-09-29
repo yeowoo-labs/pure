@@ -3246,9 +3246,10 @@ PURE_COLD static PureResult keep_list(PureList **out, PureList *from, const Pure
  * again, and the next event or save publishes the module's states; a state
  * the module drops stays stored as it was. Starting an app opens its module
  * over none. */
-/* Outputs of old that module has by name and with the same fields keep their
- * sends and numbers; one it lacks or changed refuses the module while sends
- * are left on it (CONFLICT), and otherwise keeps its number for later. */
+/* Outputs of old that module has by name and with the same fields (their
+ * names and types, in order: what a send's bytes mean) keep their sends and
+ * numbers; one it lacks or changed refuses the module while sends are left
+ * on it (CONFLICT), and otherwise keeps its number for later. */
 PURE_COLD static PureResult remap_outputs(PureApp *app, const PureModule *old, const PureModule *module, bool apply) {
     int map[PURE_MODULE_INPUTS];
     for (uint32_t i = 0; i < old->inputs; ++i) {
@@ -3257,8 +3258,11 @@ PURE_COLD static PureResult remap_outputs(PureApp *app, const PureModule *old, c
         int to = pure_module_input(module, old->input_names[i]);
         bool same = to >= 0 && module->input[to].kind == PURE_KIND_OUTPUT &&
                     module->input[to].field_count == old->input[i].field_count;
-        for (uint32_t f = 0; same && f < old->input[i].field_count; ++f)
-            same = module->field[module->input[to].field_start + f].type == old->field[old->input[i].field_start + f].type;
+        for (uint32_t f = 0; same && f < old->input[i].field_count; ++f) {
+            const PureField *now = &module->field[module->input[to].field_start + f],
+                            *was = &old->field[old->input[i].field_start + f];
+            same = now->type == was->type && !strcmp(now->name, was->name);
+        }
         map[i] = same ? to : -1;
         size_t length = strlen(old->input_names[i]);
         for (size_t s = 0, count = app->outbox ? pure_list_count(app->outbox) : 0; !same && s < count; ++s) {
