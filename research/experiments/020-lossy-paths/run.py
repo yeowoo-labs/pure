@@ -16,8 +16,10 @@ GSO: a qdisc takes a GSO burst as one packet.
          receiver's records in each 100 ms, the first 2 s left out.
   paced  50 records a second for --seconds (well within what each carries); the time each took from
          queued (written) to handed over (read): p50, p99, max.
-  share  Pure, quinn or a second TCP flow beside a TCP CUBIC flow, both
-         for --seconds; each one's share of the goodput from 5 s on.
+  share  Pure, quinn or a second TCP flow beside a TCP CUBIC flow, each a
+         process of its own, started together, for --share-seconds; each
+         one's share of the goodput from 10 s on (CUBIC's flows converge
+         slowly at an RTT of 100 ms).
 
     python3 research/experiments/020-lossy-paths/run.py [--rounds 3] [--out FILE]
 """
@@ -94,13 +96,21 @@ def goodput(timeline, record_bytes, skip_s=2.0, until_s=None):
     return round(sum(counted) * record_bytes * 8 / (len(counted) / 10) / 1e6, 2) if counted else 0.0
 
 
-def pure(work, seconds, rate=0, count=2000000):
-    done = subprocess.run([str(ROOT / 'build/link-transport'), str(work / 'sender.pmod'), str(work / 'receiver.pmod'),
-                           str(count), str(SIZE), '20000', str(rate), str(seconds)], capture_output=True, text=True,
-                          env={**os.environ, 'TRANSPORT_GSO': '0', 'TRANSPORT_PORT': str(PURE_PORT)},
-                          timeout=seconds + 120)
-    assert done.returncode == 0, done.stderr[-2000:]
-    return json.loads(done.stdout)
+def start_pure(work, seconds, rate=0, count=2000000):
+    return subprocess.Popen([str(ROOT / 'build/link-transport'), str(work / 'sender.pmod'), str(work / 'receiver.pmod'),
+                             str(count), str(SIZE), '20000', str(rate), str(seconds)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True,
+                            env={**os.environ, 'TRANSPORT_GSO': '0', 'TRANSPORT_PORT': str(PURE_PORT)})
+
+
+def finish_pure(process, seconds):
+    out, error = process.communicate(timeout=seconds + 120)
+    assert process.returncode == 0, error[-2000:]
+    return json.loads(out)
+
+
+def pure(work, seconds, rate=0):
+    return finish_pure(start_pure(work, seconds, rate), seconds)
 
 
 def quinn_server(work):
@@ -110,19 +120,40 @@ def quinn_server(work):
     return server, port
 
 
-def quinn(work, seconds, rate=0, count=2000000):
+def start_quinn(work, seconds, rate=0, count=2000000):
     server, port = quinn_server(work)
+    # The bytes of Pure's record: its prefix (count, item's length), the item and the city ("Seoul").
+    client = subprocess.Popen([str(QUINN), 'drain', str(port), str(count), str(SIZE + 8 + 5), str(rate), str(seconds)],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              env={**os.environ, 'QUIC_GSO': '0'})
+    return server, client
+
+
+def finish_quinn(started, seconds):
+    server, client = started
     try:
-        # The bytes of Pure's record: its prefix (count, item's length), the item and the city ("Seoul").
-        client = subprocess.run([str(QUINN), 'drain', str(port), str(count), str(SIZE + 8 + 5), str(rate), str(seconds)],
-                                capture_output=True, text=True, env={**os.environ, 'QUIC_GSO': '0'},
-                                timeout=seconds + 300)
-        assert client.returncode == 0, client.stderr[-2000:]
+        _, error = client.communicate(timeout=seconds + 300)
+        assert client.returncode == 0, error[-2000:]
         line = server.stdout.readline()
     finally:
         server.kill()
         server.wait()
     return json.loads(line)
+
+
+def quinn(work, seconds, rate=0):
+    return finish_quinn(start_quinn(work, seconds, rate), seconds)
+
+
+def start_tcp(port, seconds):
+    """A TCP CUBIC flow in a process of its own (--tcp)."""
+    return subprocess.Popen([sys.executable, __file__, '--tcp', f'{port}:{seconds}'], stdout=subprocess.PIPE, text=True)
+
+
+def finish_tcp(process, seconds):
+    out, _ = process.communicate(timeout=seconds + 60)
+    assert process.returncode == 0
+    return json.loads(out)['timeline_100ms']
 
 
 class Tcp:
@@ -188,18 +219,17 @@ def inner(case):
         for key in ('waited_ms_p50', 'waited_ms_p99', 'waited_ms_max', 'resent', 'lost', 'late', 'undone', 'packets'):
             if key in result:
                 row[key] = result[key]
-    else:  # share: who beside a TCP CUBIC flow
-        tcp = Tcp(seconds, TCP_PORT)
-        tcp.start()
+    else:  # share: who beside a TCP CUBIC flow, started together
+        tcp = start_tcp(TCP_PORT, seconds)
         if who == 'tcp':
-            other = Tcp(seconds, OTHER_TCP_PORT)
-            other.start()
-            theirs = [b / (SIZE + 13) for b in other.join()]
+            theirs = [b / (SIZE + 13) for b in finish_tcp(start_tcp(OTHER_TCP_PORT, seconds), seconds)]
+        elif who == 'pure':
+            theirs = finish_pure(start_pure(work, seconds), seconds)['timeline_100ms']
         else:
-            theirs = (pure(work, seconds) if who == 'pure' else quinn(work, seconds))['timeline_100ms']
-        mine = tcp.join()
-        row['mbit'] = goodput(theirs, SIZE + 13, 5.0, seconds - 1)
-        row['tcp_mbit'] = goodput(mine, 1, 5.0, seconds - 1)
+            theirs = finish_quinn(start_quinn(work, seconds), seconds)['timeline_100ms']
+        mine = finish_tcp(tcp, seconds)
+        row['mbit'] = goodput(theirs, SIZE + 13, 10.0, seconds - 1)
+        row['tcp_mbit'] = goodput(mine, 1, 10.0, seconds - 1)
         total = row['mbit'] + row['tcp_mbit']
         row['share'] = round(row['mbit'] / total, 3) if total else 0.0
     return row
@@ -225,11 +255,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--rounds', type=int, default=1)
     parser.add_argument('--seconds', type=int, default=20)
-    parser.add_argument('--share-seconds', type=int, default=30)
+    parser.add_argument('--share-seconds', type=int, default=40)
     parser.add_argument('--only', default=None, help='kinds to run, for example bulk,share')
     parser.add_argument('--out', type=Path, default=None)
     parser.add_argument('--inner', default=None, help=argparse.SUPPRESS)
+    parser.add_argument('--tcp', default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.tcp:
+        port, seconds = (int(v) for v in args.tcp.split(':'))
+        flow = Tcp(seconds, port)
+        flow.start()
+        print(json.dumps({'timeline_100ms': flow.join()}), flush=True)
+        return
     if args.inner:
         print(json.dumps(inner(json.loads(args.inner))), flush=True)
         return
