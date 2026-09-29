@@ -51,9 +51,10 @@ static const double CUBIC_C = 0.4, CUBIC_BETA = 0.7, RENO_PACE = 3 * (1 - 0.7) /
 #define MS UINT64_C(1000000)
 /* RFC 9002's values, but a first RTT of 100 ms (a LAN's, not the 333 ms of
  * the Internet at large); a probe at least every second while a receiver is
- * away; a record received but not stored after a second is sent again. */
+ * away; a record received but not stored after a second is sent again. A
+ * receiver holds as much of a stream not yet stored as a record may be. */
 static const uint64_t FIRST_RTT = 100 * MS, ACK_DELAY_MOST = 25 * MS, GRANULARITY = 1 * MS, PTO_MOST = 1000 * MS,
-                      STORED_WAIT = 1000 * MS, RECORD_MOST = UINT64_C(64) << 20, HELD_MOST = UINT64_C(16) << 20,
+                      STORED_WAIT = 1000 * MS, RECORD_MOST = PURE_LINK_RECORD_MOST, HELD_MOST = RECORD_MOST,
                       REACH_AGAIN = 1000 * MS, REACH_RARELY = 600000 * MS;
 /* An epoch lasts an hour or a GiB sent; a sender that hears nothing for 2 s
  * with packets out, and four probes, takes its epoch for lost. */

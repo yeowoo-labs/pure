@@ -118,8 +118,11 @@
  * goes back to the first size when the larger stop coming, §4.3); a
  * source's or an input's name is 1 to PURE_LINK_NAME bytes; a receiver
  * keeps a packet's path (where it came from, and the address of its own it
- * came to: link/link.c answers from there) in PURE_LINK_ADDRESS bytes. */
-enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 48 };
+ * came to: link/link.c answers from there) in PURE_LINK_ADDRESS bytes; a
+ * send is PURE_LINK_RECORD_MOST bytes at most (what a receiver holds of a
+ * stream not yet stored). */
+enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 48,
+       PURE_LINK_RECORD_MOST = 16 << 20 };
 
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,
@@ -150,7 +153,8 @@ bool pure_link_sender_peer(PureLinkSender *, const unsigned char peer[PURE_SEAL_
  * a key kept in hardware, say, or a test's many keys): no X25519 here. */
 bool pure_link_sender_shared(PureLinkSender *, const unsigned char peer[PURE_SEAL_KEY], const unsigned char secret[32]);
 /* A saved send, numbered one past the last queued (any number when none
- * waits); false when it cannot be kept. */
+ * waits); false when it cannot be kept (or is larger than
+ * PURE_LINK_RECORD_MOST). */
 bool pure_link_sender_queue(PureLinkSender *, uint64_t seq, const unsigned char *bytes, size_t size);
 /* A packet that came (the receiver's answers; others are let be). */
 void pure_link_sender_take(PureLinkSender *, const unsigned char *packet, size_t size, uint64_t now);

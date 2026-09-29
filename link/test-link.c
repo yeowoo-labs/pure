@@ -652,6 +652,64 @@ static void flood(const char *dir) {
     free(w.packets);
 }
 
+/* The largest send (PURE_LINK_RECORD_MOST) goes whole, over a receiver that
+ * never heard of the stream before; one byte more is not taken to send. */
+typedef struct { World *w; PureLinkSender *s; } Largest;
+static bool deliver_largest(void *context, const PureLinkDelivery *d) {
+    World *w = context;
+    uint32_t size = (uint32_t)d->records[0] | (uint32_t)d->records[1] << 8 | (uint32_t)d->records[2] << 16 |
+                    (uint32_t)d->records[3] << 24;
+    bool same = d->first == 1 && d->count == 1 && size == PURE_LINK_RECORD_MOST;
+    for (size_t i = 0; same && i < size; i += 4099) same = d->records[4 + i] == record_byte(1, i);
+    CHECK(same, "largest: a delivery of %u records from %llu, the first %u bytes", d->count,
+          (unsigned long long)d->first, size);
+    w->heard = same ? 1 : w->heard;
+    w->done[w->done_count++] = (PureLinkDone){d->token, 1, true, false};
+    return true;
+}
+static bool answer_largest(void *context, const unsigned char *packet, size_t size, const unsigned char *to,
+                           size_t to_size) {
+    (void)to, (void)to_size;
+    Largest *l = context;
+    pure_link_sender_take(l->s, packet, size, l->w->now);
+    return true;
+}
+static void largest(const char *dir) {
+    unsigned char public_a[PURE_SEAL_KEY], public_b[PURE_SEAL_KEY], out[PURE_LINK_DATAGRAM_MOST];
+    char error[256];
+    PureSealKey *a = key(dir, "a.key", public_a), *b = key(dir, "b.key", public_b);
+    World w = {0};
+    PureLinkReceiver *r = pure_link_receiver(b, public_b, &(PureLinkHost){input_of, deliver_largest, &w}, error,
+                                             sizeof(error));
+    PureLinkSender *s = pure_link_sender("test.ordered", "order", 0x5eed, a, public_a);
+    unsigned char *bytes = malloc(PURE_LINK_RECORD_MOST + 1);
+    if (!r || !s || !bytes || !pure_link_allow(r, "test.ordered", public_a, error, sizeof(error)) ||
+        !pure_link_sender_peer(s, public_b))
+        exit(1);
+    for (size_t i = 0; i <= PURE_LINK_RECORD_MOST; ++i) bytes[i] = record_byte(1, i);
+    CHECK(!pure_link_sender_queue(s, 1, bytes, PURE_LINK_RECORD_MOST + 1), "largest: a send past the most was taken");
+    CHECK(pure_link_sender_queue(s, 1, bytes, PURE_LINK_RECORD_MOST), "largest: the most a send may be was not taken");
+    free(bytes);
+    Largest l = {&w, s};
+    uint64_t number;
+    for (; w.now < 60000 * MS && pure_link_sender_stored(s) < 1; w.now += MS) {
+        for (size_t size; (size = pure_link_sender_packet(s, out, false, w.now, &number));)
+            pure_link_receiver_take(r, out, size, "sender0", 7, w.now);
+        size_t told = w.done_count;
+        memcpy(w.told, w.done, told * sizeof(*w.done));
+        w.done_count = 0;
+        pure_link_receiver_turn(r, w.told, told, w.now, answer_largest, &l);
+        pure_link_sender_tick(s, w.now);
+    }
+    CHECK(w.heard == 1 && pure_link_sender_stored(s) == 1, "largest: heard %llu, stored %llu after %llu ms",
+          (unsigned long long)w.heard, (unsigned long long)pure_link_sender_stored(s), (unsigned long long)(w.now / MS));
+    printf("{\"case\":\"largest\",\"bytes\":%d,\"virtual_ms\":%llu}\n", PURE_LINK_RECORD_MOST,
+           (unsigned long long)(w.now / MS));
+    pure_link_sender_free(s);
+    pure_link_receiver_free(r);
+    pure_seal_key_free(a), pure_seal_key_free(b);
+}
+
 int main(void) {
     char dir[] = "/tmp/pure-test-link-XXXXXX", error[256];
     if (!mkdtemp(dir) || !pure_seal_ready(error, sizeof(error))) {
@@ -710,6 +768,7 @@ int main(void) {
           o.hole ? "opened" : "never opened", o.datagram);
     impostors(dir);
     flood(dir);
+    largest(dir);
     char command[600];
     snprintf(command, sizeof(command), "rm -rf %s", dir);
     if (system(command)) { /* left behind in /tmp */ }
