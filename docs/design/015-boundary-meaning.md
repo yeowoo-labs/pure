@@ -67,4 +67,16 @@
 전달이 한 번씩, 순서대로 적용되는 것은 링크의 검사들(`server_links_udp_lossy`, `server_links_moved`, `server_upgrade`)과
 [012](012-link-protocol.md)이 지킨다. 필드를 이름으로 받는 규칙은 `server_fields`가 지킨다.
 
-화면(Vega가 보기를 그리는 것)은 이 문서 밖이다. 다음 단계다.
+## 화면
+
+보기를 그리는 것은 Vega다. 규칙은 Vega의 `docs/design/001-first-component.md`("값이 보이는 방식")에 있고, 요약하면
+이렇다.
+
+- 값은 제 자리 안에서 제 글자로 보인다.
+- 화면에 작용할 글자만 그림으로 보인다. 제어 문자, DEL, C1 제어, 줄과 문단의 구분자가 그렇고, 터미널에서는 방향 제어도
+  그렇다.
+- 문장(NUI)에서는 그것을 공백으로 말하거나 말하지 않는다.
+- 웹의 JSON은 값을 그대로 싣는다.
+- 값의 어떤 바이트도 터미널에 제어로 닿지 않는다.
+
+Vega의 `screen_meaning`과 `browser` 검사가 지킨다.
