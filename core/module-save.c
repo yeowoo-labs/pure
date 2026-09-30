@@ -30,6 +30,13 @@
  * its image and empties it. */
 static const unsigned char values_magic[4] = {'P', 'V', 'S', '1'}, image_magic[4] = {'P', 'L', 'I', '1'},
                            list_magic[4] = {'P', 'L', 'S', '2'}, list_magic_1[4] = {'P', 'L', 'S', '1'};
+/* The outbox's image names the fields its sends were laid out with: "PLO1"
+ * in the place of "PLI1", and after the save it holds u8 outputs, each {u8
+ * name length, name, u8 field count, each field's {u8 type, u8 name length,
+ * name}} (the module's outputs when it was written). The sends logged after
+ * it are laid out so too: a module whose outputs differ writes it again
+ * first. So what they mean moves with them, whatever the links hold. */
+static const unsigned char sends_magic[4] = {'P', 'L', 'O', '1'};
 /* Logged changes a list keeps before its image is written again: at least
  * JOURNAL_MIN, else as many bytes as its items; and whatever the lists, the
  * log is kept within as many bytes as all their items (and LOG_KEPT) by
@@ -149,7 +156,8 @@ PURE_COLD PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint
 
 /* ---- Lists: images and the log */
 
-enum { IMAGE_HEADER = 5 + PURE_RECORD_FIELDS * (2 + PURE_MODULE_NAME) + 8 };
+enum { OUTPUTS_NAMED = 1 + PURE_MODULE_INPUTS * (2 + PURE_MODULE_NAME) + PURE_MODULE_FIELDS * (2 + PURE_MODULE_NAME),
+       IMAGE_HEADER = 5 + PURE_RECORD_FIELDS * (2 + PURE_MODULE_NAME) + 8 + OUTPUTS_NAMED };
 
 static size_t header_of(unsigned count, const uint8_t *text, const char (*names)[PURE_MODULE_NAME], uint64_t seq,
                         unsigned char *out) {
@@ -181,6 +189,71 @@ static size_t runtime_header(uint32_t place, uint64_t seq, unsigned char *out) {
     return header_of(r->fields, r->kinds, r->names, seq, out);
 }
 
+/* The outbox's image header: m's outputs named after the save it holds. */
+static size_t outbox_header(const PureModule *m, uint64_t seq, unsigned char *out) {
+    size_t at = runtime_header(PURE_LIST_OUTBOX, seq, out);
+    memcpy(out, sends_magic, 4);
+    unsigned char *count = out + at++;
+    *count = 0;
+    for (uint32_t i = 0; i < m->inputs; ++i) {
+        if (m->input[i].kind != PURE_KIND_OUTPUT) continue;
+        ++*count;
+        size_t length = strlen(m->input_names[i]);
+        out[at++] = (unsigned char)length;
+        memcpy(out + at, m->input_names[i], length);
+        at += length;
+        out[at++] = (unsigned char)m->input[i].field_count;
+        for (uint32_t f = 0; f < m->input[i].field_count; ++f) {
+            const PureField *field = &m->field[m->input[i].field_start + f];
+            size_t named = strlen(field->name);
+            out[at++] = field->type;
+            out[at++] = (unsigned char)named;
+            memcpy(out + at, field->name, named);
+            at += named;
+        }
+    }
+    return at;
+}
+
+/* What an output's sends were laid out with, as a store names it: its
+ * fields (laid out), or their types alone (named false: links before PLK4). */
+typedef struct { char name[PURE_MODULE_NAME]; PureField fields[PURE_MODULE_FIELDS]; uint32_t count; bool named; } SentShape;
+
+/* The outputs an outbox image names (at, size bytes): how many, or -1 when
+ * they are not well formed; shapes (when not NULL) takes them. */
+static int read_outputs(const unsigned char *at, size_t size, SentShape *shapes, size_t *used) {
+    size_t k = 0;
+    if (size < 1) return -1;
+    unsigned outputs = at[k++];
+    for (unsigned t = 0; t < outputs; ++t) {
+        size_t length = k < size ? at[k] : 0;
+        if (!length || length >= PURE_MODULE_NAME || size - k < 2 + length) return -1;
+        unsigned fields = at[k + 1 + length];
+        if (fields > PURE_MODULE_FIELDS) return -1;
+        if (shapes) {
+            memcpy(shapes[t].name, at + k + 1, length);
+            shapes[t].name[length] = 0;
+            shapes[t].count = fields;
+            shapes[t].named = true;
+        }
+        k += 2 + length;
+        for (unsigned f = 0; f < fields; ++f) {
+            size_t named = size - k >= 2 ? at[k + 1] : 0;
+            if (size - k < 2 || !named || named >= PURE_MODULE_NAME || size - k < 2 + named || !at[k] ||
+                at[k] >= PURE_FIELD_ROWS)
+                return -1;
+            if (shapes) {
+                shapes[t].fields[f] = (PureField){.type = at[k]};
+                memcpy(shapes[t].fields[f].name, at + k + 2, named);
+            }
+            k += 2 + named;
+        }
+        if (shapes) pure_fields_lay_out(shapes[t].fields, fields);
+    }
+    *used = k;
+    return (int)outputs;
+}
+
 /* A stored list by its place: a list state, or one of the runtime's. */
 static PureList *stored_list(const PureApp *app, uint32_t i) {
     if (i == PURE_LIST_HEARD) return app->heard;
@@ -204,6 +277,8 @@ struct PureStartLog {
     size_t count, capacity;
     uint64_t tree, last; /* the tree's last save; the last entry that counts */
     bool stopped, damaged;
+    SentShape *sent;     /* the outputs the outbox's image names (PLO1), sent_count of them */
+    int sent_count;      /* -1: its image names none */
 };
 
 static struct Named *named_list(struct PureStartLog *index, const char *name, size_t length, bool add) {
@@ -259,6 +334,7 @@ void pure_save_close_start(PureApp *app) {
     if (!index) return;
     for (size_t i = 0; i < index->count; ++i) free(index->lists[i].changes);
     free(index->lists);
+    free(index->sent);
     free(index);
     app->start_log = NULL;
 }
@@ -270,6 +346,7 @@ PURE_COLD PureResult pure_save_open_log(PureApp *app) {
     if (result == PURE_OK) result = open_state(app, "", "seq", &app->stored_seq);
     struct PureStartLog *index = result == PURE_OK ? calloc(1, sizeof(*index)) : NULL;
     if (result == PURE_OK && !index) result = PURE_ALLOCATION;
+    if (index) index->sent_count = -1;
     if (result == PURE_OK && pure_draft_revision(app->stored_seq)) {
         unsigned char *bytes;
         size_t size;
@@ -455,14 +532,31 @@ PURE_COLD PureResult pure_save_open_runtime(PureApp *app, uint32_t place, PureLi
     *out = NULL;
     if (!directory_of(app)) return PURE_STORE_ERROR;
     unsigned char *bytes = NULL, header[IMAGE_HEADER];
-    size_t size = 0, length = runtime_header(place, 0, header) - 8;
+    size_t size = 0, length = runtime_header(place, 0, header) - 8, at = length + 8;
     PureResult result = pure_image_read(directory_of(app), name, &bytes, &size);
     bool image = result == PURE_OK;
-    uint64_t holds = image && size >= length + 8 && !memcmp(bytes, header, length) ? get_le(bytes + length, 8) : 0;
-    if (image && (size < length + 8 || memcmp(bytes, header, length))) result = PURE_STORE_ERROR;
+    bool named = image && place == PURE_LIST_OUTBOX && size >= 4 && !memcmp(bytes, sends_magic, 4);
+    bool formed = image && size >= at && (named || !memcmp(bytes, image_magic, 4)) &&
+                  !memcmp(bytes + 4, header + 4, length - 4);
+    uint64_t holds = formed ? get_le(bytes + length, 8) : 0;
+    if (formed && named) { /* the outputs its sends were laid out with */
+        size_t used = 0;
+        int outputs = read_outputs(bytes + at, size - at, NULL, &used);
+        SentShape *shapes = outputs > 0 ? calloc((size_t)outputs, sizeof(*shapes)) : NULL;
+        if (outputs < 0 || (outputs > 0 && !shapes)) formed = false;
+        else if (app->start_log) {
+            read_outputs(bytes + at, size - at, shapes, &used);
+            free(app->start_log->sent);
+            app->start_log->sent = shapes, app->start_log->sent_count = outputs;
+            shapes = NULL;
+        }
+        free(shapes);
+        at += used;
+    }
+    if (image && !formed) result = PURE_STORE_ERROR;
     else if (image || result == PURE_NOT_FOUND) {
         result = (*out = pure_runtime_list_new(place)) ? PURE_OK : PURE_ALLOCATION;
-        if (result == PURE_OK && image) result = pure_list_read(*out, bytes + length + 8, size - length - 8);
+        if (result == PURE_OK && image) result = pure_list_read(*out, bytes + at, size - at);
     }
     free(bytes);
     /* Then the changes logged after the save it holds (an image is written
@@ -487,11 +581,12 @@ PURE_COLD PureResult pure_save_open_runtime(PureApp *app, uint32_t place, PureLi
     return PURE_OK;
 }
 
-PureResult pure_save_runtime_image(PureApp *app, uint32_t place) {
+PureResult pure_save_runtime_image(PureApp *app, const PureModule *m, uint32_t place, const PureList *list) {
     unsigned char header[IMAGE_HEADER];
-    size_t header_size = runtime_header(place, app->seq, header);
+    size_t header_size = place == PURE_LIST_OUTBOX ? outbox_header(m, app->seq, header) :
+                                                     runtime_header(place, app->seq, header);
     return write_image(directory_of(app), runtime_lists[place - PURE_LIST_HEARD].name, header, header_size,
-                       stored_list(app, place));
+                       list ? list : stored_list(app, place));
 }
 
 /* ---- Checkpoints */
@@ -536,7 +631,8 @@ PureCheckpoint *pure_app_checkpoint(PureApp *app) {
     c->state = (uint32_t)pick;
     snprintf(c->name, sizeof(c->name), "%s", stored_name(app, (uint32_t)pick));
     c->seq = app->seq;
-    c->header_size = pick >= PURE_LIST_HEARD ? runtime_header((uint32_t)pick, c->seq, c->header) :
+    c->header_size = pick == PURE_LIST_OUTBOX ? outbox_header(m, c->seq, c->header) :
+                     pick >= PURE_LIST_HEARD ? runtime_header((uint32_t)pick, c->seq, c->header) :
                                                image_header(m, m->state_ref[pick], c->seq, c->header);
     c->logged = app->logged[pick];
     c->since = app->logged_since[pick];
@@ -722,6 +818,24 @@ PURE_COLD static PureResult sent_before(PureApp *app, const char *output, uint64
  * for later); the sources and sends links kept before the runtime's lists
  * go to them (heard_moved, sent_moved: they need images). Links kept
  * before PLK4 have their fields' types alone. */
+/* The shape of the output of that name among shapes, or NULL. */
+static const SentShape *sent_shape(const SentShape *shapes, unsigned count, const char *name) {
+    for (unsigned t = 0; t < count; ++t)
+        if (!strcmp(shapes[t].name, name)) return &shapes[t];
+    return NULL;
+}
+
+/* Whether sends laid out as was are laid out as m's output i: the same
+ * fields, names and types in order (types alone when was names none). */
+static bool same_shape(const SentShape *was, const PureModule *m, uint32_t i) {
+    if (was->count != m->input[i].field_count) return false;
+    for (uint32_t f = 0; f < was->count; ++f) {
+        const PureField *field = &m->field[m->input[i].field_start + f];
+        if (field->type != was->fields[f].type || (was->named && strcmp(field->name, was->fields[f].name))) return false;
+    }
+    return true;
+}
+
 PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, bool *heard_moved, bool *sent_moved) {
     *heard_moved = *sent_moved = false;
     PureResult result = app->stored_links ? PURE_OK : open_state(app, "", "links", &app->stored_links);
@@ -738,6 +852,8 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, boo
          known = first || second || named || (size >= 5 && !memcmp(bytes, links_magic_3, 4));
     unsigned outputs = known ? bytes[4] : 0;
     result = known ? PURE_OK : PURE_STORE_ERROR;
+    SentShape *linked = calloc(outputs ? outputs : 1, sizeof(*linked)); /* what each was sent with, as the links say */
+    if (!linked) result = PURE_ALLOCATION;
     for (unsigned t = 0; t < outputs && result == PURE_OK; ++t) {
         char *name = names[t];
         size_t length = at < size ? bytes[at] : 0;
@@ -749,14 +865,24 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, boo
         int i = pure_module_input(m, name);
         output[t] = i >= 0 && m->input[i].kind == PURE_KIND_OUTPUT ? i : -1;
         fits[t] = output[t] >= 0 && m->input[i].field_count == fields;
+        memcpy(linked[t].name, name, length + 1);
+        linked[t].count = fields;
+        linked[t].named = named;
+        if (fields > PURE_MODULE_FIELDS) result = PURE_STORE_ERROR;
         for (unsigned f = 0; f < fields && result == PURE_OK; ++f) { /* its type, then (PLK4) its name */
             size_t named_length = named && size - at >= 2 ? bytes[at + 1] : 0;
-            if (size - at < (named ? 2 + named_length : 1)) { result = PURE_STORE_ERROR; break; }
+            if (size - at < (named ? 2 + named_length : 1) || named_length >= PURE_MODULE_NAME) {
+                result = PURE_STORE_ERROR;
+                break;
+            }
             const PureField *field = fits[t] ? &m->field[m->input[i].field_start + f] : NULL;
             fits[t] = field && field->type == bytes[at] &&
                       (!named || (strlen(field->name) == named_length && !memcmp(field->name, bytes + at + 2, named_length)));
+            linked[t].fields[f] = (PureField){.type = bytes[at]};
+            if (named) memcpy(linked[t].fields[f].name, bytes + at + 2, named_length);
             at += named ? 2 + named_length : 1;
         }
+        if (result == PURE_OK) pure_fields_lay_out(linked[t].fields, fields);
         if (result != PURE_OK || size - at < 8) { result = PURE_STORE_ERROR; break; }
         uint64_t last = get_le(bytes + at, 8);
         at += 8;
@@ -795,13 +921,48 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, boo
         app->links_changed = true;
     }
     if (result == PURE_OK && !first && !second && at != size) result = PURE_STORE_ERROR;
-    /* Every send left goes out on an output of this module with its fields. */
+    /* Every send left goes out on an output of this module, laid out with
+     * its fields: one laid out otherwise (as the outbox's image names them,
+     * else as the links do) is recast by name. */
+    bool imaged = app->start_log && app->start_log->sent_count >= 0;
+    const SentShape *shapes = imaged ? app->start_log->sent : linked;
+    unsigned shape_count = imaged ? (unsigned)app->start_log->sent_count : outputs;
     for (size_t k = 0, count = pure_list_count(app->outbox); result == PURE_OK && k < count; ++k) {
-        PureCell name = pure_list_get(app->outbox, k, 0);
-        unsigned t = 0;
-        while (t < outputs && (strlen(names[t]) != name.size || memcmp(names[t], name.text, name.size))) ++t;
-        if (t == outputs || !fits[t]) result = PURE_CONFLICT;
+        PureCell cell = pure_list_get(app->outbox, k, 0);
+        char name[PURE_MODULE_NAME] = "";
+        if (cell.size < PURE_MODULE_NAME) memcpy(name, cell.text, cell.size);
+        int i = pure_module_input(m, name);
+        const SentShape *was = sent_shape(shapes, shape_count, name);
+        if (i < 0 || m->input[i].kind != PURE_KIND_OUTPUT) {
+            snprintf(app->why, sizeof(app->why), "sends wait on the output '%s', which this module does not have", name);
+            result = PURE_CONFLICT;
+        } else if (!was) result = PURE_STORE_ERROR; /* sent on an output its store does not name */
+        else if (!same_shape(was, m, (uint32_t)i)) {
+            PureCell payload = pure_list_get(app->outbox, k, 2);
+            unsigned char *made = NULL;
+            size_t made_size = 0;
+            if (!was->named) {
+                snprintf(app->why, sizeof(app->why),
+                         "sends wait on '%s', laid out with fields its store names by type alone: start the old module once",
+                         name);
+                result = PURE_CONFLICT;
+            } else if ((result = pure_send_recast(was->fields, was->count, &m->field[m->input[i].field_start],
+                                                  m->input[i].field_count, (PureSpan){payload.text, payload.size},
+                                                  &made, &made_size)) == PURE_OK) {
+                result = pure_list_set(app->outbox, k, 2, (PureCell){.text = made, .size = made_size}, NULL);
+                *sent_moved = true;
+            }
+            free(made);
+        }
     }
+    /* Sends from now on are laid out with this module's fields: an image
+     * naming others is written again, naming these. */
+    for (uint32_t i = 0; result == PURE_OK && i < m->inputs && !*sent_moved; ++i) {
+        if (m->input[i].kind != PURE_KIND_OUTPUT) continue;
+        const SentShape *was = sent_shape(shapes, shape_count, m->input_names[i]);
+        *sent_moved = !was || !same_shape(was, m, i);
+    }
+    free(linked);
     free(bytes);
     app->sent_saved = pure_list_count(app->outbox);
     memcpy(app->saved_sent, app->last_sent, sizeof(app->saved_sent));

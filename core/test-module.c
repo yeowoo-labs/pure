@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "module.h"
+#include "module-save.h"
 #include "module-store.h"
 #include "module-text.h"
 #include "store.h"
@@ -4307,40 +4308,115 @@ static void memory_budget(void) {
     remove_store(path);
 }
 
-/* An output whose fields are named otherwise (here two numbers swapped) is
- * another output: its waiting sends' bytes would mean something else. A
- * module that has it so is refused while sends wait, replacing or starting
- * over the store; once they are trimmed it replaces (review 004, F3). */
+/* A send laid out for some fields, made anew for others by name: values
+ * the new types can hold go over (a u32 widened, a number narrowed when it
+ * is one; text to bytes, and bytes that are UTF-8 to text), the rest start
+ * at 0 or empty. There and back again, nothing changes. */
+static void send_recast(void) {
+    PureField ordered[3] = {{"item", PURE_FIELD_TEXT, 0, 0}, {"count", PURE_FIELD_U32, 0, 0},
+                            {"total", PURE_FIELD_NUMBER, 0, 0}};
+    PureField kept[5] = {{"total", PURE_FIELD_NUMBER, 0, 0}, {"item", PURE_FIELD_TEXT, 0, 0},
+                         {"count", PURE_FIELD_NUMBER, 0, 0}, {"memo", PURE_FIELD_BYTES, 0, 0},
+                         {"extra", PURE_FIELD_U32, 0, 0}};
+    CHECK(pure_fields_lay_out(ordered, 3) == 12 && ordered[0].offset == PURE_FIELD_REST);
+    CHECK(pure_fields_lay_out(kept, 5) == 24 && kept[1].offset == 8 && kept[3].offset == PURE_FIELD_REST);
+    unsigned char payload[15] = {2, 0, 0, 0}; /* count 2, total 7.5, then the item */
+    double total = 7.5;
+    memcpy(payload + 4, &total, 8);
+    memcpy(payload + 12, "pen", 3);
+    unsigned char *made, *back;
+    size_t size, back_size;
+    CHECK(pure_send_recast(ordered, 3, kept, 5, (PureSpan){payload, 15}, &made, &size) == PURE_OK && size == 27);
+    double count, first;
+    memcpy(&first, made, 8);
+    memcpy(&count, made + 12, 8);
+    CHECK(first == 7.5 && made[8] == 3 && count == 2 && !memcmp(made + 20, "\0\0\0\0", 4) && !memcmp(made + 24, "pen", 3));
+    CHECK(pure_send_recast(kept, 5, ordered, 3, (PureSpan){made, size}, &back, &back_size) == PURE_OK &&
+          back_size == 15 && !memcmp(back, payload, 15));
+    free(back);
+    /* A number that is not a u32, and bytes that are not UTF-8, start empty. */
+    PureField narrow[2] = {{"count", PURE_FIELD_U32, 0, 0}, {"memo", PURE_FIELD_TEXT, 0, 0}};
+    pure_fields_lay_out(narrow, 2);
+    count = 2.5;
+    memcpy(made + 12, &count, 8);
+    memcpy(made + 24, "p\xffn", 3); /* the memo (the rest) is those three bytes now, the item none */
+    made[8] = 0;
+    CHECK(pure_send_recast(kept, 5, narrow, 2, (PureSpan){made, 24 + 3}, &back, &back_size) == PURE_OK &&
+          back_size == 4 && !memcmp(back, "\0\0\0\0", 4));
+    free(back);
+    PureField bytes_memo[1] = {{"memo", PURE_FIELD_BYTES, 0, 0}};
+    pure_fields_lay_out(bytes_memo, 1);
+    CHECK(pure_send_recast(kept, 5, bytes_memo, 1, (PureSpan){made, 24 + 3}, &back, &back_size) == PURE_OK &&
+          back_size == 3 && !memcmp(back, "p\xffn", 3));
+    free(back);
+    /* A payload not laid out by its fields is the store's error. */
+    CHECK(pure_send_recast(kept, 5, ordered, 3, (PureSpan){made, 10}, &back, &back_size) == PURE_STORE_ERROR && !back);
+    free(made);
+}
+
+/* Two numbers of a waiting send, as laid out (pay's fields in the app's module). */
+static bool pay_reads(const PureApp *app, size_t k, double first, double second) {
+    Outbox o = outbox_of(app);
+    double a, b;
+    if (k >= o.count || o.items[k].size != 16) return false;
+    memcpy(&a, o.items[k].payload, 8);
+    memcpy(&b, o.items[k].payload + 8, 8);
+    return a == first && b == second;
+}
+
+/* An output whose fields are named otherwise (here two numbers swapped)
+ * would mean something else of the bytes its sends wait with: replacing or
+ * starting the module recasts them by field name, as a list's items move.
+ * The outbox's image names the fields it holds its sends in, so a start
+ * after a replace whose save never came (the links still naming the old
+ * fields) reads them right. A module without the output is refused while
+ * sends wait on it, and says so. */
 static void output_meaning(void) {
     static const S nums[] = {{"n", 0}};
     static const F was_fields[] = {{"debit", PURE_FIELD_NUMBER}, {"credit", PURE_FIELD_NUMBER}};
     static const F now_fields[] = {{"credit", PURE_FIELD_NUMBER}, {"debit", PURE_FIELD_NUMBER}};
     static const I was_inputs[] = {KEY("tap", "KeyT"), {"pay", NULL, PURE_KIND_OUTPUT, false, was_fields, 2}};
     static const I now_inputs[] = {KEY("tap", "KeyT"), {"pay", NULL, PURE_KIND_OUTPUT, false, now_fields, 2}};
+    static const I none_inputs[] = {KEY("tap", "KeyT")};
     static const O was_code[] = {{C, 0, 10}, {C, 0, 20}, {SEND, 1, 0}}; /* pay { debit: 10, credit: 20 } */
     static const O now_code[] = {{C, 0, 20}, {C, 0, 10}, {SEND, 1, 0}}; /* the same, fields in the new order */
-    static const H handlers[] = {{1, 0, 3}};
+    static const O none_code[] = {{C, 0, 1}, {ST, 0, 0}};
+    static const H handlers[] = {{1, 0, 3}}, none_handlers[] = {{1, 0, 2}};
     Spec was = {nums, 1, was_inputs, 2, NULL, 0, handlers, 1, was_code, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
                 NULL, 0};
     Spec now = {nums, 1, now_inputs, 2, NULL, 0, handlers, 1, now_code, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
                 NULL, 0};
-    CHECK(load(was, &module_a) == PURE_OK && load(now, &module_b) == PURE_OK);
+    Spec none = {nums, 1, none_inputs, 1, NULL, 0, none_handlers, 1, none_code, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
+                 NULL, 0, NULL, 0};
+    PureModule without;
+    CHECK(load(was, &module_a) == PURE_OK && load(now, &module_b) == PURE_OK && load(none, &without) == PURE_OK);
     CHECK(pure_module_shape(&module_a, 1) != pure_module_shape(&module_b, 1));
     char *path = new_store();
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && outbox_of(&app).count == 1);
-    CHECK(pure_app_replace(&app, &module_b) == PURE_CONFLICT && app.module == &module_a);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pay_reads(&app, 0, 10, 20));
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.module == &module_b && pay_reads(&app, 0, 20, 10));
+    pure_app_stop(&app); /* no save since: the links name a's fields, the outbox's image b's */
+    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && pay_reads(&app, 0, 20, 10));
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_CONFLICT);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && outbox_of(&app).count == 1);
-    pure_app_trim(&app, 1, 1);
-    CHECK(pure_app_save(&app) == PURE_OK && pure_app_replace(&app, &module_b) == PURE_OK);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && outbox_of(&app).items[0].seq == 2);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pay_reads(&app, 0, 10, 20));
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pay_reads(&app, 1, 10, 20));
+    CHECK(outbox_of(&app).items[1].seq == 2);
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && outbox_of(&app).count == 1);
+    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && pay_reads(&app, 0, 20, 10) &&
+          pay_reads(&app, 1, 20, 10) && outbox_of(&app).items[1].seq == 2);
+    /* Sent with b's fields, logged after the image named them. */
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pay_reads(&app, 2, 20, 10));
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_CONFLICT);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pay_reads(&app, 2, 10, 20));
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &without, pure_tree_data(path)) == PURE_CONFLICT && strstr(app.why, "'pay'"));
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && !app.why[0]);
+    CHECK(pure_app_replace(&app, &without) == PURE_CONFLICT && app.module == &module_a && strstr(app.why, "'pay'"));
+    pure_app_trim(&app, 1, 3);
+    CHECK(pure_app_save(&app) == PURE_OK && pure_app_replace(&app, &without) == PURE_OK && !app.why[0]);
+    pure_app_stop(&app);
+    pure_module_release(&without);
     remove_store(path);
 }
 
@@ -4457,6 +4533,7 @@ int main(void) {
     keyed_mutations();
     snapshots();
     links();
+    send_recast();
     output_meaning();
     memory_budget();
     fold_mutations();

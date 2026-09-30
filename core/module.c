@@ -133,6 +133,101 @@ static double read_double(const unsigned char *p) {
     return value;
 }
 
+static void write_double(unsigned char *p, double value) {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    write32(p, (uint32_t)bits);
+    write32(p + 4, (uint32_t)(bits >> 32));
+}
+
+static bool variable_field(uint8_t type) {
+    return type == PURE_FIELD_BYTES || type == PURE_FIELD_TEXT || type == PURE_FIELD_ROWS;
+}
+
+uint32_t pure_fields_lay_out(PureField *fields, uint32_t count) {
+    uint32_t last = UINT32_MAX, prefix = 0;
+    for (uint32_t f = 0; f < count; ++f)
+        if (variable_field(fields[f].type)) last = f;
+    for (uint32_t f = 0; f < count; ++f) {
+        fields[f].offset = f == last ? PURE_FIELD_REST : prefix;
+        if (f != last) prefix += fields[f].type == PURE_FIELD_NUMBER ? 8 : 4;
+    }
+    return prefix;
+}
+
+/* A field's value in a payload: a number, or bytes (of the payload). */
+typedef struct { double num; PureSpan bytes; } FieldValue;
+
+/* Each field's value in payload, laid out by fields (their offsets set):
+ * false when the payload is not so laid out. */
+static bool read_fields(const PureField *fields, uint32_t count, PureSpan payload, FieldValue *values) {
+    uint32_t prefix = 0;
+    for (uint32_t f = 0; f < count; ++f)
+        if (fields[f].offset != PURE_FIELD_REST) prefix += fields[f].type == PURE_FIELD_NUMBER ? 8 : 4;
+    if (payload.size < prefix) return false;
+    size_t at = prefix;
+    for (uint32_t f = 0; f < count; ++f) {
+        const PureField *field = &fields[f];
+        values[f] = (FieldValue){0};
+        if (field->type == PURE_FIELD_U32) values[f].num = read32(payload.data + field->offset);
+        else if (field->type == PURE_FIELD_NUMBER) values[f].num = read_double(payload.data + field->offset);
+        else if (field->type == PURE_FIELD_BYTES || field->type == PURE_FIELD_TEXT) {
+            size_t size = field->offset == PURE_FIELD_REST ? payload.size - at : read32(payload.data + field->offset);
+            if (size > payload.size - at) return false;
+            values[f].bytes = (PureSpan){payload.data + at, size};
+            at += size;
+        } else return false; /* rows: an output sends none */
+    }
+    return at == payload.size;
+}
+
+PureResult pure_send_recast(const PureField *from, uint32_t from_count, const PureField *to, uint32_t to_count,
+                            PureSpan payload, unsigned char **out, size_t *size) {
+    FieldValue was[PURE_MODULE_FIELDS], now[PURE_MODULE_FIELDS];
+    *out = NULL;
+    *size = 0;
+    if (from_count > PURE_MODULE_FIELDS || to_count > PURE_MODULE_FIELDS || !read_fields(from, from_count, payload, was))
+        return PURE_STORE_ERROR;
+    size_t total = 0;
+    for (uint32_t g = 0; g < to_count; ++g) {
+        const PureField *field = &to[g];
+        now[g] = (FieldValue){0};
+        uint32_t f = 0;
+        while (f < from_count && strcmp(from[f].name, field->name)) ++f;
+        bool number = field->type == PURE_FIELD_U32 || field->type == PURE_FIELD_NUMBER;
+        if (f < from_count && number && (from[f].type == PURE_FIELD_U32 || from[f].type == PURE_FIELD_NUMBER)) {
+            double v = was[f].num;
+            bool fits = field->type == PURE_FIELD_NUMBER || (v >= 0 && v <= UINT32_MAX && v == (double)(uint32_t)v);
+            now[g].num = fits ? v : 0;
+        } else if (f < from_count && !number && (from[f].type == PURE_FIELD_BYTES || from[f].type == PURE_FIELD_TEXT)) {
+            bool fits = field->type == PURE_FIELD_BYTES || from[f].type == PURE_FIELD_TEXT || pure_utf8_valid(was[f].bytes);
+            if (fits) now[g].bytes = was[f].bytes;
+        }
+        total += field->offset == PURE_FIELD_REST || number ? 0 : 4;
+        total += number ? (field->type == PURE_FIELD_NUMBER ? 8 : 4) : now[g].bytes.size;
+    }
+    unsigned char *made = malloc(total ? total : 1);
+    if (!made) return PURE_ALLOCATION;
+    uint32_t prefix = 0;
+    for (uint32_t g = 0; g < to_count; ++g)
+        if (to[g].offset != PURE_FIELD_REST) prefix += to[g].type == PURE_FIELD_NUMBER ? 8 : 4;
+    size_t at = prefix;
+    for (uint32_t g = 0; g < to_count; ++g) {
+        const PureField *field = &to[g];
+        unsigned char *place = field->offset == PURE_FIELD_REST ? made + at : made + field->offset;
+        if (field->type == PURE_FIELD_U32) write32(place, (uint32_t)now[g].num);
+        else if (field->type == PURE_FIELD_NUMBER) write_double(place, now[g].num);
+        else {
+            if (field->offset != PURE_FIELD_REST) write32(place, (uint32_t)now[g].bytes.size);
+            if (now[g].bytes.size) memcpy(made + at, now[g].bytes.data, now[g].bytes.size);
+            at += now[g].bytes.size;
+        }
+    }
+    *out = made;
+    *size = at;
+    return PURE_OK;
+}
+
 PURE_COLD static bool key_name(const char *key) {
     static const char *const named[] = {"Space", "Enter", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
                                         "Backspace", "Delete", "Home", "End", "Tab", "Escape", "PageUp", "PageDown"};
@@ -914,13 +1009,6 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             ((shape->kind == PURE_KIND_OUTPUT || arguments) && shape->keyed) || shape->field_start != next_field ||
             shape->field_count > out->fields - next_field) REFUSE("message shape", i);
         shape->view = arguments ? read32(at + 8) : 0;
-        /* The prefix holds the fixed fields and the variable fields' lengths
-         * in order, but the last variable field's: it takes the rest. */
-        uint32_t last = UINT32_MAX;
-        for (uint32_t f = 0; f < shape->field_count; ++f) {
-            uint32_t type = read32(fields + (size_t)(next_field + f) * FIELD_BYTES + 4) & 0xFF;
-            if (type == PURE_FIELD_BYTES || type == PURE_FIELD_TEXT || type == PURE_FIELD_ROWS) last = f;
-        }
         for (uint32_t f = 0; f < shape->field_count; ++f) {
             const unsigned char *entry = fields + (size_t)(next_field + f) * FIELD_BYTES;
             PureField *field = &out->field[next_field + f];
@@ -947,9 +1035,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                 if ((la < lb && !memcmp(a, b, la) && b[la] == '.') || (lb < la && !memcmp(a, b, lb) && a[lb] == '.'))
                     REFUSE("field and group", next_field + f);
             }
-            field->offset = f == last ? PURE_FIELD_REST : shape->prefix;
-            if (f != last) shape->prefix += field->type == PURE_FIELD_NUMBER ? 8 : 4;
         }
+        shape->prefix = pure_fields_lay_out(&out->field[next_field], shape->field_count);
         next_field += shape->field_count;
     }
     if (next_field != out->fields) REFUSE("unused message fields", next_field);
@@ -3325,31 +3412,85 @@ PURE_COLD static PureResult keep_list(PureList **out, PureList *from, const Pure
  * again, and the next event or save publishes the module's states; a state
  * the module drops stays stored as it was. Starting an app opens its module
  * over none. */
-/* Outputs of old that module has by name and with the same fields (their
- * names and types, in order: what a send's bytes mean) keep their sends and
- * numbers; one it lacks or changed refuses the module while sends are left
- * on it (CONFLICT), and otherwise keeps its number for later. */
-PURE_COLD static PureResult remap_outputs(PureApp *app, const PureModule *old, const PureModule *module, bool apply) {
+/* Whether module's output `to` lays out its fields as old's `from` does:
+ * the same names and types, in order (what a send's bytes mean). */
+static bool same_fields(const PureModule *old, uint32_t from, const PureModule *module, uint32_t to) {
+    if (module->input[to].field_count != old->input[from].field_count) return false;
+    for (uint32_t f = 0; f < old->input[from].field_count; ++f) {
+        const PureField *now = &module->field[module->input[to].field_start + f],
+                        *was = &old->field[old->input[from].field_start + f];
+        if (now->type != was->type || strcmp(now->name, was->name)) return false;
+    }
+    return true;
+}
+
+/* Outputs of old that module has by name keep their sends and numbers;
+ * the sends of one whose fields changed are recast to its new fields by
+ * name (pure_send_recast), into a new outbox (*recast; NULL when none is).
+ * One it lacks refuses the module while sends are left on it (CONFLICT,
+ * app->why says), and otherwise keeps its number for later. *changed: an
+ * output of module is laid out otherwise than old's (or old has none of
+ * that name), so the outbox's image, which names them, is written again. */
+PURE_COLD static PureResult remap_outputs(PureApp *app, const PureModule *old, const PureModule *module, bool apply,
+                                          PureList **recast, bool *changed) {
     int map[PURE_MODULE_INPUTS];
+    bool differs[PURE_MODULE_INPUTS] = {false}, recasting = false;
     for (uint32_t i = 0; i < old->inputs; ++i) {
         map[i] = -1;
         if (old->input[i].kind != PURE_KIND_OUTPUT) continue;
         int to = pure_module_input(module, old->input_names[i]);
-        bool same = to >= 0 && module->input[to].kind == PURE_KIND_OUTPUT &&
-                    module->input[to].field_count == old->input[i].field_count;
-        for (uint32_t f = 0; same && f < old->input[i].field_count; ++f) {
-            const PureField *now = &module->field[module->input[to].field_start + f],
-                            *was = &old->field[old->input[i].field_start + f];
-            same = now->type == was->type && !strcmp(now->name, was->name);
-        }
-        map[i] = same ? to : -1;
-        size_t length = strlen(old->input_names[i]);
-        for (size_t s = 0, count = app->outbox ? pure_list_count(app->outbox) : 0; !same && s < count; ++s) {
-            PureCell name = pure_list_get(app->outbox, s, 0);
-            if (name.size == length && !memcmp(name.text, old->input_names[i], length)) return PURE_CONFLICT;
-        }
+        if (to < 0 || module->input[to].kind != PURE_KIND_OUTPUT) continue;
+        map[i] = to;
+        differs[i] = !same_fields(old, i, module, (uint32_t)to);
     }
-    if (!apply) return PURE_OK;
+    if (!apply) {
+        *recast = NULL;
+        *changed = false;
+        for (uint32_t k = 0; k < module->inputs && !*changed; ++k) {
+            if (module->input[k].kind != PURE_KIND_OUTPUT) continue;
+            int from = pure_module_input(old, module->input_names[k]);
+            *changed = from < 0 || old->input[from].kind != PURE_KIND_OUTPUT || differs[from];
+        }
+        size_t count = app->outbox ? pure_list_count(app->outbox) : 0;
+        for (size_t s = 0; s < count; ++s) {
+            PureCell cell = pure_list_get(app->outbox, s, 0);
+            char name[PURE_MODULE_NAME] = "";
+            if (cell.size < PURE_MODULE_NAME) memcpy(name, cell.text, cell.size);
+            int i = pure_module_input(old, name);
+            if (i < 0 || map[i] < 0) {
+                snprintf(app->why, sizeof(app->why), "sends wait on the output '%s', which this module does not have",
+                         name);
+                return PURE_CONFLICT;
+            }
+            recasting = recasting || differs[i];
+        }
+        if (!recasting) return PURE_OK;
+        PureList *made = pure_runtime_list_new(PURE_LIST_OUTBOX);
+        PureResult result = made ? PURE_OK : PURE_ALLOCATION;
+        for (size_t s = 0; result == PURE_OK && s < count; ++s) {
+            PureCell item[3] = {pure_list_get(app->outbox, s, 0), pure_list_get(app->outbox, s, 1),
+                                pure_list_get(app->outbox, s, 2)};
+            char name[PURE_MODULE_NAME] = "";
+            memcpy(name, item[0].text, item[0].size);
+            int i = pure_module_input(old, name);
+            unsigned char *bytes = NULL;
+            size_t size = 0;
+            if (differs[i]) {
+                const PureInputShape *was = &old->input[i], *now = &module->input[map[i]];
+                result = pure_send_recast(&old->field[was->field_start], was->field_count, &module->field[now->field_start],
+                                          now->field_count, (PureSpan){item[2].text, item[2].size}, &bytes, &size);
+                item[2] = (PureCell){.text = bytes, .size = size};
+            }
+            if (result == PURE_OK) result = pure_list_insert(made, s, item, NULL);
+            free(bytes);
+        }
+        if (result != PURE_OK) {
+            pure_list_free(made);
+            return result;
+        }
+        *recast = made;
+        return PURE_OK;
+    }
     uint64_t last[PURE_MODULE_INPUTS] = {0}, saved[PURE_MODULE_INPUTS] = {0};
     for (uint32_t i = 0; i < old->inputs; ++i) {
         if (old->input[i].kind != PURE_KIND_OUTPUT || !app->last_sent[i]) continue;
@@ -3389,6 +3530,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     bool rewrite[PURE_MODULE_STATES] = {false};
     /* Lists are stored where the host names a directory for them (module-save.c). */
     bool lists_stored = stored && app->data.directory && app->data.directory(app->data.context);
+    app->why[0] = 0;
     if (old && app->checkpoint) return PURE_CONFLICT; /* the host has a checkpoint of the running module out */
     PureResult result = !old && lists_stored ? pure_save_open_log(app) : PURE_OK;
     /* The numbers heard and the outbox belong to the app, whatever its module. */
@@ -3455,8 +3597,10 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     /* Outputs keep their sends and numbers by name. */
     bool heard_moved = false, sent_moved = false;
     if (result == PURE_OK && !old && !stored) app->sent_saved = pure_list_count(app->outbox);
+    PureList *recast = NULL; /* the outbox, its sends laid out with module's fields */
+    bool outputs_changed = false;
     if (result == PURE_OK)
-        result = old ? remap_outputs(app, old, module, false) :
+        result = old ? remap_outputs(app, old, module, false, &recast, &outputs_changed) :
                  stored ? pure_save_open_links(app, module, &heard_moved, &sent_moved) : PURE_OK;
     heard.rewrite = heard.rewrite || (heard_moved && lists_stored);
     sent.rewrite = sent.rewrite || (sent_moved && lists_stored);
@@ -3481,12 +3625,20 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i)
         if (rewrite[i] && (result = pure_save_image(app, module, i, lists[i])) == PURE_OK)
             listed[i] = (PureSaved){.image = app->seq};
-    if (result == PURE_OK && heard.rewrite && (result = pure_save_runtime_image(app, PURE_LIST_HEARD)) == PURE_OK)
+    if (result == PURE_OK && heard.rewrite &&
+        (result = pure_save_runtime_image(app, module, PURE_LIST_HEARD, NULL)) == PURE_OK)
         heard = (PureSaved){.image = app->seq};
-    if (result == PURE_OK && sent.rewrite && (result = pure_save_runtime_image(app, PURE_LIST_OUTBOX)) == PURE_OK)
+    if (result == PURE_OK && sent.rewrite &&
+        (result = pure_save_runtime_image(app, module, PURE_LIST_OUTBOX, NULL)) == PURE_OK)
         sent = (PureSaved){.image = app->seq};
+    /* A replace that changes how sends are laid out names it in the outbox's image first. */
+    bool outbox_imaged = false;
+    if (result == PURE_OK && old && lists_stored && (recast || outputs_changed) &&
+        (result = pure_save_runtime_image(app, module, PURE_LIST_OUTBOX, recast)) == PURE_OK)
+        outbox_imaged = true;
     if (imaged && result != PURE_OK && old) app->uncertain = true;
     if (result != PURE_OK) {
+        pure_list_free(recast);
         for (uint32_t i = 0; i < module->states; ++i) {
             if (kept[i] >= 0) {
                 if (lists[i] && lists[i] != app->lists[kept[i]]) pure_list_free(lists[i]);
@@ -3538,7 +3690,18 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         if (module->state_type[i] == PURE_STATE_LIST)
             (void)pure_list_keyed(lists[i], module->state_key[i] ? (int)module->state_key[i] - 1 : -1);
     }
-    if (old) remap_outputs(app, old, module, true);
+    if (old) remap_outputs(app, old, module, true, NULL, NULL);
+    if (recast) { /* in the place of the outbox, its sends now the new module's */
+        pure_list_free(app->outbox);
+        app->outbox = recast;
+        app->durable_outbox = 0;
+        if (lists_stored) pure_list_journal(recast, true);
+    }
+    if (outbox_imaged) {
+        app->image_seq[PURE_LIST_OUTBOX] = app->seq;
+        app->logged_since[PURE_LIST_OUTBOX] = 0;
+        app->logged[PURE_LIST_OUTBOX] = 0;
+    }
     drop_passes(app); /* kept by instruction of the module they were made for */
     app->module = module;
     app->counted = 0;
@@ -3554,7 +3717,12 @@ PURE_COLD PureResult pure_app_start(PureApp *app, const PureModule *module, Pure
     *app = (PureApp){.data = data, .fault_pc = UINT32_MAX};
     PureResult result = open_module(app, module);
     if (result == PURE_OK) result = pure_app_save(app);
-    if (result != PURE_OK) pure_app_stop(app);
+    if (result != PURE_OK) { /* stopped, saying why when it can */
+        char why[sizeof(app->why)];
+        memcpy(why, app->why, sizeof(why));
+        pure_app_stop(app);
+        memcpy(app->why, why, sizeof(why));
+    }
     return result;
 }
 

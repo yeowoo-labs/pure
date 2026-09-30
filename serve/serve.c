@@ -2230,7 +2230,7 @@ static bool start_executor(Executor *ex, const PureModule *module, uint32_t show
     ex->edit = edit;
     if (pure_store_open(store, &ex->store) != PURE_OK) { fputs("Cannot open the store\n", stderr); return false; }
     if (pure_app_start(&ex->app, module, pure_store_data(ex->store)) != PURE_OK || !pure_app_defer(&ex->app, true)) {
-        fputs("Cannot start the module on the store\n", stderr);
+        fprintf(stderr, "Cannot start the module on the store%s%s\n", ex->app.why[0] ? ": " : "", ex->app.why);
         return false;
     }
     pure_app_background_checkpoints(&ex->app, true);

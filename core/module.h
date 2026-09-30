@@ -315,6 +315,7 @@ typedef struct {
     PureFault fault;
     uint32_t fault_pc;
     size_t memory; /* the budget of what the states hold (0: none): pure_app_memory */
+    char why[128]; /* why the last start or replace was refused, when it says (else empty; a failed start keeps it) */
     uint32_t counted; /* the states it counts, a bit each: lists (not a message's rows) and texts */
     uint64_t ticks, events;
     /* The time events see as now, in milliseconds since 1970 (UTC). The host

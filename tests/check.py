@@ -1317,6 +1317,128 @@ def server_windows(aup, pure, work):
     return {'windows_full': stats['a']['windows_full'], 'wire_deliveries': stats['a']['delivered'],
             'link_records': stats['a']['link_records']}
 
+
+UPGRADED_SENDER = """state n = 0
+input buy = message {
+  item: text
+  count: u32
+}
+output ordered = message {
+  note: text
+  item: text
+  count: u32
+}
+on buy {
+  n = n + 1
+  send ordered { note: "second", item: buy.item, count: buy.count }
+}
+view sent = n
+"""
+
+UPGRADED_RECEIVER = """state orders = 0
+state noted = 0
+state stock = 0
+input order = message {
+  note: text
+  item: text
+  count: u32
+}
+on order {
+  orders = orders + 1
+  stock = stock + order.count
+  if order.note == "second" { noted = noted + 1 }
+}
+view count = orders
+view noted_count = noted
+view total = stock
+"""
+
+
+def server_upgrade(aup, pure, work):
+    """A rolling upgrade of an output's fields between two linked nodes. The
+    sender, its receiver down, holds five sends of ordered {item, count,
+    to.city}; started again with ordered {note, item, count} it recasts them
+    by name (note empty, to.city gone) where it was refused before (review
+    004's F3), and a module without the output is refused naming it. The old
+    receiver refuses the new shape, so the sends wait; the upgraded receiver
+    takes all eight, once each."""
+    import select
+    import socket
+    import time
+    modules = {}
+    for name, text in (('sender-1', LINK_SENDER), ('sender-2', UPGRADED_SENDER), ('receiver-1', LINK_RECEIVER),
+                       ('receiver-2', UPGRADED_RECEIVER), ('sender-0', 'state n = 0\ninput tap = key KeyT\non tap.down { n = 1 }\n')):
+        source = work / f'upgrade-{name}.aup'
+        source.write_text(text)
+        modules[name] = compile_module(aup, source, source.with_suffix('.pmod')) and source.with_suffix('.pmod')
+
+    def free_port(kind=socket.SOCK_STREAM):
+        with socket.socket(socket.AF_INET, kind) as probe:
+            probe.bind(('127.0.0.1', 0))
+            return probe.getsockname()[1]
+
+    def start(args, port):
+        process = subprocess.Popen([str(a) for a in args] + ['--port', str(port)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        line = process.stdout.readline() if ready else b''
+        assert line, f'host did not start: {process.stderr.read(2000) if process.poll() is not None else ""}'
+        return process, json.loads(line)
+
+    def stop(process):
+        process.terminate()
+        _, error = process.communicate(timeout=30)
+        assert process.returncode == 0, error[-1000:]
+        return [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
+
+    def number(port, view):
+        return int(http(port, 'GET', f'/views/{view}')[3])
+
+    keys = {}
+    for name in ('sender', 'receiver'):
+        process, info = start([pure / 'build/pure-serve', '--module', modules['receiver-1'], '--store',
+                               work / 'upgrade-key', '--key', work / f'upgrade-{name}.key'], 0)
+        keys[name] = info['public_key']
+        stop(process)
+    port_a, port_b, link_port = free_port(), free_port(), free_port(socket.SOCK_DGRAM)
+
+    def sender_args(module):
+        return [pure / 'build/pure-serve', '--module', modules[module], '--store', work / 'upgrade-a', '--key',
+                work / 'upgrade-sender.key', '--name', 'up', '--send', f'ordered=pure://127.0.0.1:{link_port}/order',
+                '--seal', f'ordered={keys["receiver"]}']
+
+    def receiver_args(module):
+        return [pure / 'build/pure-serve', '--module', modules[module], '--store', work / 'upgrade-b', '--key',
+                work / 'upgrade-receiver.key', '--link-port', link_port, '--sender', f'up.ordered={keys["sender"]}']
+
+    running, stats, said = {}, {}, ''
+    try:
+        running['a'] = start(sender_args('sender-1'), port_a)[0]
+        for i in range(5):
+            assert post(port_a, '/inputs/buy', {'item': f'first-{i}', 'count': 1})[0] == 200
+        stop(running.pop('a'))
+        refused = subprocess.run([str(a) for a in sender_args('sender-0')] + ['--port', str(port_a)],
+                                 capture_output=True, timeout=30)
+        assert refused.returncode != 0 and b"sends wait on the output 'ordered'" in refused.stderr, refused.stderr
+        running['a'] = start(sender_args('sender-2'), port_a)[0]
+        for i in range(3):
+            assert post(port_a, '/inputs/buy', {'item': f'second-{i}', 'count': 10})[0] == 200
+        running['b'] = start(receiver_args('receiver-1'), port_b)[0]
+        time.sleep(1.5)
+        assert number(port_b, 'count') == 0  # the old input takes another shape: the sends wait
+        stop(running.pop('b'))
+        running['b'] = start(receiver_args('receiver-2'), port_b)[0]
+        deadline = time.time() + 20
+        while number(port_b, 'count') < 8 and time.time() < deadline:
+            time.sleep(0.05)
+        got = (number(port_b, 'count'), number(port_b, 'noted_count'), number(port_b, 'total'))
+        assert got == (8, 3, 35), got
+    finally:
+        for name, process in running.items():
+            stats[name] = stop(process)
+    assert stats['a']['link_refused'] >= 1, stats['a']
+    return {'recast_waiting': 5, 'delivered': 8, 'refused_while_old': stats['a']['link_refused']}
+
 def server_links_independent(aup, pure, work):
     """A receiver written from docs/design/012-link-protocol.md alone, in
     Python with the cryptography package and no code of link/: a Pure node
@@ -3023,6 +3145,7 @@ def main():
         report['server_links_refused'] = server_links_refused(aup, pure, work)
         report['server_memory'] = server_memory(aup, pure, work)
         report['server_windows'] = server_windows(aup, pure, work)
+        report['server_upgrade'] = server_upgrade(aup, pure, work)
         report['server_links_independent'] = server_links_independent(aup, pure, work)
         report['server_links_moved'] = server_links_moved(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)

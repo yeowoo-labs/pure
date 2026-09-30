@@ -34,7 +34,10 @@ PureSnapshot *pure_save_snapshot(PureApp *, uint32_t runtime);
  * changes made again, or new (saved.rewrite: it needs an image, which
  * pure_save_runtime_image writes). */
 PureResult pure_save_open_runtime(PureApp *, uint32_t place, PureList **out, PureSaved *saved);
-PureResult pure_save_runtime_image(PureApp *, uint32_t place);
+/* A runtime list's image, holding the last save: list, or the app's when
+ * NULL. The outbox's names the fields its sends were laid out with, m's
+ * outputs' ("PLO1"): what they mean whatever the links hold. */
+PureResult pure_save_runtime_image(PureApp *, const PureModule *m, uint32_t place, const PureList *list);
 /* An empty runtime list. */
 PureList *pure_runtime_list_new(uint32_t place);
 /* Open the stored numbers, cursors and indices, and put each stored one of the
@@ -43,14 +46,31 @@ PureList *pure_runtime_list_new(uint32_t place);
 PureResult pure_save_open_values(PureApp *, const PureModule *m, double *values, const int *kept,
                                  PureDraft *const *texts, PureList *const *lists);
 /* The stored links of a starting app (module.h, PureApp), after its runtime
- * lists; CONFLICT when an output with sends left in the outbox is missing or
- * has other fields. Links stored before the runtime lists kept the numbers
- * heard and the sends: they go to them (moved: they need images). */
+ * lists. The sends left in the outbox of an output whose fields changed are
+ * recast to m's by name (pure_send_recast; sent_moved: the outbox needs an
+ * image, as it does when m's outputs are not those its image names);
+ * CONFLICT (app->why says) when one waits on an output m lacks, or on one
+ * whose fields its store does not name (PLK3). Links stored before the
+ * runtime lists kept the numbers heard and the sends: they go to them
+ * (moved: they need images). */
 PureResult pure_save_open_links(PureApp *, const PureModule *m, bool *heard_moved, bool *sent_moved);
 /* Publish the documents and every state changed since the last save
  * (values are the states' numbers); revisions are the documents'. */
 PureResult pure_save_commit(PureApp *, const double *values, void *const *documents, size_t document_count,
                             int64_t *revisions);
+
+/* A message's fields laid out as load lays them: in order, the fixed ones
+ * and the variable ones' lengths in the prefix, but the last variable
+ * field's, which takes what follows the others. The prefix's size. */
+uint32_t pure_fields_lay_out(PureField *fields, uint32_t count);
+/* A send's payload, laid out for from's fields, made anew for to's (both
+ * laid out): each field takes the value of from's of the same name when
+ * its type can hold it (u32 and number are numbers, bytes and text are
+ * bytes; a number that is not a u32, or bytes that are not UTF-8 for a
+ * text, cannot), else it is 0 or empty. The same rule moves a list's items
+ * (pure_list_migrate). STORE_ERROR when payload is not laid out by from. */
+PureResult pure_send_recast(const PureField *from, uint32_t from_count, const PureField *to, uint32_t to_count,
+                            PureSpan payload, unsigned char **out, size_t *size);
 
 /* A list with record's fields, taking from `from` each field of the same name
  * and kind and giving the others their defaults (module.c). */
