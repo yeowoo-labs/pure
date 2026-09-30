@@ -79,6 +79,7 @@
 - 나오는 길: 보기, 질의, 답, 재시작, 체크포인트 뒤의 재시작, 모듈 교체, 두 번 중계한 노드.
 - 거절할 값 52가지(수, u32, text, bool, 행)가 모든 들어오는 길에서 거절되고, 어디에도 남지 않는다. bool은 JSON, 쿼리, 행에서
   거절의 종류까지 본다.
+- bool 보기의 글자(`true`)와 bool 인자(`?want=true`, `?want=false`, 그 밖은 400 `invalid`).
 
 전달이 한 번씩, 순서대로 적용되는 것은 링크의 검사들(`server_links_udp_lossy`, `server_links_moved`, `server_upgrade`)과
 [012](012-link-protocol.md)이 지킨다. 필드를 이름으로 받는 규칙은 `server_fields`가 지킨다.

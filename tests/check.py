@@ -3372,6 +3372,8 @@ on put_plain {
 on touch {
   kept[touch.id].t = touch.t
 }
+view any_ok = count(k in kept where k.ok) > 0
+view with_ok(want: bool) = count(k in kept where k.ok == want)
 """ + MEANING_ROWS
 # B: A's sends over the link, taken by name (fields in another order, u a number), kept and sent on over HTTP.
 MEANING_MIRROR = MEANING_KEPT + """input passed = message {
@@ -3602,6 +3604,14 @@ def server_meaning(aup, pure, work):
         for where, found in exits.items():
             wrong = differing(found, expected)
             assert not wrong, (where, wrong[:3])
+        # A bool view is true or false as text; a bool argument is true or false in a query, nothing else.
+        a = hosts['a'].port
+        assert http(a, 'GET', '/views/any_ok')[::3] == (200, b'true')
+        oks = sum(1 for value in expected.values() if value[5])
+        assert http(a, 'GET', '/views/with_ok?want=true')[::3] == (200, str(oks).encode())
+        assert http(a, 'GET', '/views/with_ok?want=false')[::3] == (200, str(len(expected) - oks).encode())
+        for bad in ('1', 'True', ''):
+            assert http(a, 'GET', f'/views/with_ok?want={bad}')[:2] == (400, 'invalid'), bad
     finally:
         for host in hosts.values():
             host.stop()
