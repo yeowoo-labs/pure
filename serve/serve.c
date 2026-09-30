@@ -269,6 +269,7 @@ static void checkpoint_round(Executor *ex) {
             pure_app_checkpointed(&ex->app, due, pure_checkpoint_write(due));
             return;
         }
+        pthread_setname_np(w->thread, "pure-checkpoint"); /* its CPU, seen apart */
         ex->writer = w;
     }
     pthread_mutex_lock(&w->lock);
@@ -2738,6 +2739,7 @@ int main(int argc, char **argv) {
         if (!start_shard(&hosts[i], &module, documents, show, edit, store, budget, &port)) return 1;
     }
     if (owned && pthread_create(&owner_thread, NULL, run_owner, &owner)) { fputs("Cannot start the owner\n", stderr); return 1; }
+    if (owned) pthread_setname_np(owner_thread, "pure-owner"); /* its CPU, seen apart: one core at most */
     if (link_port) { /* records from the senders named, over UDP */
         char error[256];
         if (!owned || !seal_key) {
