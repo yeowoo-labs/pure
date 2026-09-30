@@ -47,7 +47,6 @@ struct PureWire {
     int answer_input; /* the input answers become events of, or -1 */
     Answer *answers;  /* made, for the owner to take in order */
     size_t answer_head, answer_count, answer_capacity;
-    Answer taken;     /* the one the owner took last, kept until it takes the next */
     uint32_t placed[2 * PURE_MODULE_FIELDS];
     /* Sealed sends: to peer's key, authenticated by the node's own key when
      * it has one (its public half is from), in one session made at the first
@@ -240,22 +239,25 @@ bool pure_wire_reply(PureWire *w, uint32_t input, char *error, size_t size) {
 }
 
 bool pure_wire_answer(PureWire *w, PureWireAnswer *out) {
-    free(w->taken.bytes);
-    w->taken = (Answer){0};
     pthread_mutex_lock(&w->lock);
     bool some = w->answer_count > 0;
-    if (some) {
-        w->taken = w->answers[w->answer_head++];
-        --w->answer_count;
-        w->delivered = w->taken.seq; /* trimmed after the owner applies it */
-    }
+    Answer next = some ? w->answers[w->answer_head] : (Answer){0}; /* its bytes stay put while the array moves */
     pthread_mutex_unlock(&w->lock);
     if (!some) return false;
     const PureInputShape *in = &w->module->input[w->answer_input];
-    for (size_t i = 0; i < 2 * (size_t)in->field_count; ++i) w->placed[i] = read_u32(w->taken.bytes + 4 * i);
-    *out = (PureWireAnswer){(uint32_t)w->answer_input, w->taken.seq,
-                            {w->taken.bytes + w->taken.table, w->taken.size - w->taken.table}, w->placed, w->source};
+    for (size_t i = 0; i < 2 * (size_t)in->field_count; ++i) w->placed[i] = read_u32(next.bytes + 4 * i);
+    *out = (PureWireAnswer){(uint32_t)w->answer_input, next.seq, {next.bytes + next.table, next.size - next.table},
+                            w->placed, w->source};
     return true;
+}
+
+void pure_wire_answered(PureWire *w) {
+    pthread_mutex_lock(&w->lock);
+    Answer done = w->answers[w->answer_head++];
+    --w->answer_count;
+    w->delivered = done.seq; /* trimmed after the owner applies it */
+    pthread_mutex_unlock(&w->lock);
+    free(done.bytes);
 }
 uint64_t pure_wire_queued(const PureWire *w) { return w->queued; }
 
@@ -771,7 +773,6 @@ void pure_wire_close(PureWire *w) {
     }
     for (size_t i = 0; i < w->answer_count; ++i) free(w->answers[w->answer_head + i].bytes);
     free(w->answers);
-    free(w->taken.bytes);
     free(w->queue);
     pthread_cond_destroy(&w->changed);
     pthread_mutex_destroy(&w->lock);

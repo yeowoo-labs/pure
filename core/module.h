@@ -109,10 +109,12 @@ typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2 } Pure
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
 /* EXISTS: an item with that key is already in the keyed list (the event
- * reports PURE_CONFLICT). */
+ * reports PURE_CONFLICT). MEMORY: the event would leave the states holding
+ * more than the app's budget (pure_app_memory; it reports PURE_BUDGET). */
 typedef enum {
     PURE_FAULT_NONE, PURE_FAULT_DIVIDE, PURE_FAULT_NON_FINITE, PURE_FAULT_CLAMP,
-    PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING, PURE_FAULT_EXISTS
+    PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING, PURE_FAULT_EXISTS,
+    PURE_FAULT_MEMORY
 } PureFault;
 
 /* plan, shape and range are the runtime's, set at load: a fold whose block
@@ -310,6 +312,7 @@ typedef struct {
     bool document_pending; /* the current event's document is among them */
     PureFault fault;
     uint32_t fault_pc;
+    size_t memory; /* the budget of what the states hold (0: none): pure_app_memory */
     uint64_t ticks, events;
     /* The time events see as now, in milliseconds since 1970 (UTC). The host
      * sets it, so a script can replay any time; views never see it. */
@@ -346,7 +349,7 @@ typedef struct {
     PureDraft *stored_links;
     bool links_changed; /* since the last save */
     bool duplicate;     /* the last delivery was heard before and not applied */
-    struct { const char *source; uint64_t seq; bool pending; } delivering;
+    struct { const char *source; uint64_t seq; uint32_t release; bool pending; } delivering;
     /* The arguments given for a view (pure_app_arguments): its input + 1 (0:
      * none), where their fields are, and a count of the times they were given. */
     unsigned argued;
@@ -443,12 +446,30 @@ void pure_app_trim(PureApp *, uint32_t output, uint64_t through);
  * before is not applied again: it succeeds with app->duplicate set. The
  * number counts as heard with the event's changes, and also when the app
  * refuses the message (a fault: it was delivered, and refused); not when a
- * save fails. placed is as for pure_app_message_fields, or NULL. */
+ * save fails, nor when the app has no memory for it (pure_app_memory: it
+ * comes again). placed is as for pure_app_message_fields, or NULL. */
 PureResult pure_app_deliver(PureApp *, uint32_t input, const char *source, uint64_t seq, PureSpan payload,
                             const uint32_t *placed);
+/* An answer to the send numbered seq of output (serve/deliver.h's --reply),
+ * delivered as pure_app_deliver delivers from source; in the same event the
+ * output's saved sends through seq leave the outbox, so the answer has the
+ * room its send held. */
+PureResult pure_app_answer(PureApp *, uint32_t input, uint32_t output, const char *source, uint64_t seq,
+                           PureSpan payload, const uint32_t *placed);
 /* The last number heard from source (0 when none): a host that gets
  * numbered messages out of order hands them over from the one after it. */
 uint64_t pure_app_heard(const PureApp *, const char *source);
+
+/* An app's memory budget (docs/design/013-memory-budget.md): what its
+ * states hold, as they are stored (their lists' items, their texts, the
+ * outbox and the numbers heard), at most bytes (0: no budget, at first). An
+ * event after which they hold more than that, and more than before it,
+ * fails with the fault PURE_FAULT_MEMORY (PURE_BUDGET) and changes nothing;
+ * one that frees or keeps them goes on. A delivery refused so is not heard:
+ * its sender sends it again. */
+void pure_app_memory(PureApp *, size_t bytes);
+/* What the states hold now, as the budget counts it. */
+size_t pure_app_state_bytes(const PureApp *);
 
 /* Readers on other threads. Right after a save an app can make a snapshot of
  * its saved states, for evaluating views anywhere while it keeps applying

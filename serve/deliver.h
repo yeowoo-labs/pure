@@ -49,11 +49,10 @@ void pure_wire_close(PureWire *);
  * http_status is the answer's status. An answer that makes no message is
  * logged and the send tried again every 10 s. Answers go one per request. */
 bool pure_wire_reply(PureWire *, uint32_t input, char *error, size_t size);
-/* The owner's side: the next answer in order, or false. Taking it counts
- * its send delivered (the owner applies the answer, then trims); what out
- * points to is the wire's until the next call. The answer is applied with
- * pure_app_deliver from the wire's source with the send's number, so an
- * answer that comes again after a restart is applied once. */
+/* The owner's side: the next answer in order, or false; it stays the next,
+ * and what out points to the wire's, until pure_wire_answered. The answer
+ * is applied with pure_app_answer from the wire's source with the send's
+ * number, so an answer that comes again after a restart is applied once. */
 typedef struct {
     uint32_t input;
     uint64_t seq;
@@ -62,6 +61,9 @@ typedef struct {
     const char *source;
 } PureWireAnswer;
 bool pure_wire_answer(PureWire *, PureWireAnswer *out);
+/* The next answer was applied, or refused by the app: it goes, and its send
+ * counts delivered (the owner trims it). */
+void pure_wire_answered(PureWire *);
 /* Counts for a host's report. */
 void pure_wire_counts(PureWire *, uint64_t *delivered, uint64_t *attempts);
 #endif

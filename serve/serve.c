@@ -185,6 +185,8 @@ typedef struct {
     bool reads_first; /* the owner's: a round's reads before its writes */
     uint64_t next[PURE_MODULE_INPUTS]; /* when each timer ticks next (monotonic clock, ms; 0: not yet begun) */
     uint64_t ticks;
+    uint64_t memory_refused; /* events refused for the app's memory budget */
+    bool answers_wait; /* an answer the app had no room for: tried again after ANSWER_WAIT_MS */
     /* The owner's: the last save's snapshot (NULL: the owner shows views),
      * taken under the lock, and the app's changes it shows. */
     bool publishes;
@@ -517,11 +519,12 @@ static void answer(Connection *c, PureOutcome result) {
 }
 
 static const char *const fault_names[] = {"none", "divide", "non_finite", "clamp", "limit", "not_found", "encoding",
-                                          "exists"};
+                                          "exists", "memory"};
 
 /* An app route's answer: a view's value, or what an event replied. A failed
- * event names its fault: 404 not_found, 409 exists, 422 for the others;
- * a view without a value is 404 no_value. */
+ * event names its fault: 404 not_found, 409 exists, 503 memory (the app's
+ * budget: again later), 422 for the others; a view without a value is 404
+ * no_value. */
 static void answer_app(Connection *c, PureOutcome result, bool view, PureFault fault, const char *type) {
     const char *named = fault != PURE_FAULT_NONE ? fault_names[fault] : NULL;
     if (result.status == PURE_OK) {
@@ -532,6 +535,8 @@ static void answer_app(Connection *c, PureOutcome result, bool view, PureFault f
         respond(c, 404, "Not Found", view ? "no_value" : named ? named : "not_found", 0, (PureSpan){0});
     } else if (result.status == PURE_CONFLICT) {
         respond(c, 409, "Conflict", named ? named : "conflict", 0, (PureSpan){0});
+    } else if (fault == PURE_FAULT_MEMORY) {
+        respond(c, 503, "Service Unavailable", named, 0, (PureSpan){0});
     } else if (named && (result.status == PURE_LIMIT || result.status == PURE_INVALID)) {
         respond(c, 422, "Unprocessable Content", named, 0, (PureSpan){0});
     } else if (result.status == PURE_INVALID) {
@@ -1346,6 +1351,10 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
     return PURE_OK;
 }
 
+/* The app refused a message it was given (a fault of its own): it was
+ * delivered, and is heard. Refused for memory it was not. */
+static bool app_refused(const PureApp *app) { return app->fault != PURE_FAULT_NONE && app->fault != PURE_FAULT_MEMORY; }
+
 /* An input's event: a text, a key pressed (down, then up), or a message
  * whose reply (a field of it) is borrowed from the request. */
 static PureResult apply_input(PureApp *app, const Route *route, const PureEffect *effect, Applied *out) {
@@ -1360,6 +1369,7 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
         unsigned count = get_u32(delivery + 8);
         const unsigned char *at = effect->value.data + 4 + DELIVERY;
         out->gap = false;
+        out->fault = PURE_FAULT_NONE;
         for (unsigned i = 0; i < count; ++i) {
             uint32_t size = get_u32(at);
             PureSpan record = {at + 4, size};
@@ -1370,11 +1380,13 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
                 break;
             }
             PureResult status = pure_app_deliver(app, route->target, source, first + i, record, NULL);
-            if (status != PURE_OK && app->fault == PURE_FAULT_NONE) break; /* not applied: sent again */
+            if (status != PURE_OK && !app_refused(app)) { /* not applied: sent again */
+                out->fault = app->fault;
+                break;
+            }
             heard = first + i;
         }
         out->heard = pure_app_heard(app, source);
-        out->fault = PURE_FAULT_NONE;
         return PURE_OK; /* the save says whether they are stored */
     }
     unsigned batch = header & DELIVERED ? get_u32(delivery + 8) : 1;
@@ -1396,14 +1408,15 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
             source[delivery[12]] = 0;
             status = pure_app_deliver(app, route->target, source, get_u64(delivery), payload, table ? placed : NULL);
             /* The rest of a batch, in order: an app's refusal was heard and the
-             * batch goes on; another failure stops it, to be sent again. */
-            for (unsigned i = 1; i < batch && (status == PURE_OK || app->fault != PURE_FAULT_NONE); ++i) {
+             * batch goes on; another failure (the budget's too) stops it, to
+             * be sent again. */
+            for (unsigned i = 1; i < batch && (status == PURE_OK || app_refused(app)); ++i) {
                 const unsigned char *at = effect->value.data + lead + i * table;
                 for (size_t k = 0; k < 2 * (size_t)shape->field_count; ++k) placed[k] = get_u32(at + 4 * k);
                 PureSpan next = {payload.data + i * shape->prefix, payload.size - i * shape->prefix};
                 status = pure_app_deliver(app, route->target, source, get_u64(delivery) + i, next, placed);
             }
-            if (batch > 1 && app->fault != PURE_FAULT_NONE) status = PURE_OK;
+            if (batch > 1 && app_refused(app)) status = PURE_OK;
         } else
             status = table ? pure_app_message_fields(app, route->target, NULL, -1, payload, placed) :
                              pure_app_message(app, route->target, NULL, -1, payload);
@@ -1428,6 +1441,7 @@ static void apply_effect(Executor *ex, const Job *job, Applied *out) {
     if (job->route.kind == ROUTE_INPUT) {
         out->status = apply_input(app, &job->route, effect, out);
         if (out->status == PURE_OK) ++ex->burst_events;
+        ex->memory_refused += out->fault == PURE_FAULT_MEMORY;
         return;
     }
     bool read = effect->input == PURE_INPUT_READ;
@@ -1549,22 +1563,34 @@ static void after_save(Executor *ex) {
     free(q.fresh);
 }
 
-/* The answers the wires made become events, in order; then what the wires
+enum { ANSWER_WAIT_MS = 100 };
+
+/* The answers the wires made become events, in order, each taking its send
+ * out of the outbox; one the app has no room for waits, with the wire's
+ * after it, and is tried again after ANSWER_WAIT_MS. Then what the wires
  * delivered leaves the outbox (with the next save). True when an answer was
  * applied (the caller saves). */
 static bool take_deliveries(Executor *ex) {
     bool answered = false;
+    ex->answers_wait = false;
     for (unsigned i = 0; i < ex->wire_count; ++i) {
         PureWireAnswer answer;
         while (pure_wire_answer(ex->wires[i], &answer)) {
             ex->app.now = wall_ms();
-            PureResult result = pure_app_deliver(&ex->app, answer.input, answer.source, answer.seq, answer.payload,
-                                                 answer.placed);
+            PureResult result = pure_app_answer(&ex->app, answer.input, pure_wire_output(ex->wires[i]), answer.source,
+                                                answer.seq, answer.payload, answer.placed);
+            if (result != PURE_OK && ex->app.fault == PURE_FAULT_MEMORY) {
+                pure_app_finish(&ex->app);
+                ++ex->memory_refused;
+                ex->answers_wait = true;
+                break;
+            }
             if (result != PURE_OK && ex->app.fault == PURE_FAULT_NONE) {
                 ex->held[i] = true; /* not applied and not refused: sent again after a restart */
                 fprintf(stderr, "{\"wire\":\"%s\",\"seq\":%" PRIu64 ",\"error\":\"its answer was not applied\"}\n",
                         answer.source, answer.seq);
             }
+            pure_wire_answered(ex->wires[i]);
             pure_app_finish(&ex->app);
             answered = true;
             ++ex->answers;
@@ -1711,7 +1737,7 @@ static void hand_back(void *context, Applied *applied, size_t count) {
         LinkJob *link = applied[i].link;
         if (!link) continue; /* records a link delivered: stored now, or not */
         pure_link_done(link->listener, (PureLinkDone){link->token, applied[i].heard, applied[i].status == PURE_OK,
-                                                     applied[i].gap, false});
+                                                     applied[i].gap, applied[i].fault == PURE_FAULT_MEMORY});
         free(link->ingress);
         free(link);
     }
@@ -1948,7 +1974,8 @@ static void *run_owner(void *context) {
             owner->delivered = false;
             pthread_mutex_unlock(&owner->lock);
             long due = run_timers(&owner->executor);
-            bool answered = delivered && take_deliveries(&owner->executor);
+            bool answered = (delivered || owner->executor.answers_wait) && take_deliveries(&owner->executor);
+            if (owner->executor.answers_wait && (due < 0 || due > ANSWER_WAIT_MS)) due = ANSWER_WAIT_MS;
             pthread_mutex_lock(&owner->lock);
             /* Answers are saved with the next round, or now if none waits. */
             if (answered && !owner->count && !owner->stopping) {
@@ -2193,6 +2220,8 @@ static void accept_all(Host *host) {
     }
 }
 
+static size_t memory_budget; /* --memory: the app's budget of what its states hold (0: none) */
+
 static bool start_executor(Executor *ex, const PureModule *module, uint32_t show, uint32_t edit, const char *store) {
     ex->module = module;
     ex->show = show;
@@ -2203,6 +2232,7 @@ static bool start_executor(Executor *ex, const PureModule *module, uint32_t show
         return false;
     }
     pure_app_background_checkpoints(&ex->app, true);
+    pure_app_memory(&ex->app, memory_budget);
     return true;
 }
 
@@ -2600,6 +2630,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--senders")) senders_path = argv[i + 1];
         else if (!strcmp(argv[i], "--link-idle-ms") && number(argv[i + 1], 86400000, &value) && value) link_idle_ms = value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
+        else if (!strcmp(argv[i], "--memory") && number(argv[i + 1], SIZE_MAX, &value) && value) memory_budget = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
         else if (!strcmp(argv[i], "--threads") && !strcmp(argv[i + 1], "auto")) threads = 0;
         else if (!strcmp(argv[i], "--threads") && number(argv[i + 1], 256, &value) && value) threads = (unsigned)value;
@@ -2721,7 +2752,7 @@ int main(int argc, char **argv) {
     pure_link_listener_close(link_listener, &heard); /* after the owner, which tells it what it stored */
     size_t active = 0, retained = 0;
     uint64_t accepted = 0, requests = 0, bursts = owner.executor.bursts, events = owner.executor.burst_events, expired = 0,
-             ticks = owner.executor.ticks, shown = 0, checkpoints = 0;
+             ticks = owner.executor.ticks, shown = 0, checkpoints = 0, memory_refused = owner.executor.memory_refused;
     for (unsigned i = 0; i < threads; ++i) {
         shown += hosts[i].shown;
         active += hosts[i].active;
@@ -2731,6 +2762,7 @@ int main(int argc, char **argv) {
         bursts += hosts[i].local.bursts;
         events += hosts[i].local.burst_events;
         ticks += hosts[i].local.ticks;
+        memory_refused += hosts[i].local.memory_refused;
         expired += hosts[i].expired;
         stop_shard(&hosts[i]);
     }
@@ -2750,6 +2782,7 @@ int main(int argc, char **argv) {
         sent.refused += c.refused;
         pure_link_close(owner.executor.links[i]); /* what was not stored stays in the outbox */
     }
+    size_t state_bytes = owned ? pure_app_state_bytes(&owner.executor.app) : 0;
     if (owned) {
         checkpoints = owner.executor.checkpoints;
         stop_executor(&owner.executor);
@@ -2768,12 +2801,13 @@ int main(int argc, char **argv) {
             ",\"link_refused\":%" PRIu64 ",\"listener_packets\":%" PRIu64 ",\"listener_received\":%" PRIu64
             ",\"listener_deliveries\":%" PRIu64 ",\"listener_woken\":%" PRIu64 ",\"listener_remembered\":%" PRIu64
             ",\"listener_swept\":%" PRIu64 ",\"listener_active\":%" PRIu64 ",\"listener_keyed\":%" PRIu64
-            ",\"listener_secrets\":%" PRIu64 ",\"listener_epochs\":%" PRIu64 ",\"listener_refused\":%" PRIu64 "}\n",
+            ",\"listener_secrets\":%" PRIu64 ",\"listener_epochs\":%" PRIu64 ",\"listener_refused\":%" PRIu64
+            ",\"state_bytes\":%zu,\"memory_refused\":%" PRIu64 "}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
             owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
             sent.refused, heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept,
-            heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused);
+            heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused);
     free(hosts);
     free(thread);
     return 0;
@@ -2781,11 +2815,13 @@ usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
           "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=URL ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
-          "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] "
+          "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] "
           "[--surface LIBRARY [-- ARGUMENTS]]\n"
           "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
           "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"
           "  --send OUTPUT=http[s]://host:port/path: to anything else, over HTTP\n"
-          "  --senders FILE: more senders the --link-port takes, a line each: NAME KEY\n", stderr);
+          "  --senders FILE: more senders the --link-port takes, a line each: NAME KEY\n"
+          "  --memory BYTES: what the app's states may hold (lists' items, texts, sends not yet stored): an event\n"
+          "      past it is refused, 503 memory (docs/design/013-memory-budget.md)\n", stderr);
     return 2;
 }

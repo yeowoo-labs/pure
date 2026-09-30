@@ -444,6 +444,20 @@ view leaders = each e in board {
 """
 
 
+def post(port, path, body):
+    """A JSON body posted on its own connection: status, X-Pure-Error."""
+    import http.client
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=30)
+    try:
+        data = json.dumps(body).encode()
+        connection.request('POST', path, data, {'Content-Length': str(len(data)), 'Content-Type': 'application/json'})
+        response = connection.getresponse()
+        response.read()
+        return response.status, response.getheader('X-Pure-Error')
+    finally:
+        connection.close()
+
+
 def http(port, method, path, body=b''):
     """One request on its own connection: status, X-Pure-Error, content type, body."""
     import http.client
@@ -1073,6 +1087,131 @@ def server_links_refused(aup, pure, work):
     assert stats['a']['link_refused'] >= 2 and stats['b']['listener_refused'] >= 2, (stats['a'], stats['b'])
     return {'said': said[0]['error'], 'packets': stats['a']['link_packets']}
 
+
+
+MEMORY_RECEIVER = """record Order {
+  item: text
+  count = 0
+}
+state kept: list of Order
+state got = 0
+input order = message {
+  item: text
+  count: u32
+  to: {
+    city: text
+  }
+}
+input clean = message {
+  below: u32
+}
+on order {
+  kept.append(Order { item: order.item, count: order.count })
+  got = got + 1
+}
+on clean {
+  for o in kept where o.count < clean.below {
+    kept.remove(o)
+  }
+}
+view count = got
+view held = kept.count
+"""
+
+
+def server_memory(aup, pure, work):
+    """What an app holds, bounded (--memory, docs/design/013-memory-budget.md).
+    A sender whose link's receiver is down fills its outbox: its next buy is
+    refused, 503 memory, and changes nothing, while its views still read;
+    once the receiver is up and stores what waited, it takes buys again. The
+    receiver, started again with a budget below what it keeps, refuses the
+    link's deliveries (and a client's order, 503 memory) but not the clean
+    that frees them; meanwhile its link hands the records over a few times a
+    second, not at every turn, and once freed it takes them all, once."""
+    import select
+    import socket
+    import time
+    sender_module, receiver_module = work / 'memory-sender.pmod', work / 'memory-receiver.pmod'
+    for module, text in ((sender_module, LINK_SENDER), (receiver_module, MEMORY_RECEIVER)):
+        source = module.with_suffix('.aup')
+        source.write_text(text)
+        compile_module(aup, source, module)
+
+    def free_port(kind=socket.SOCK_STREAM):
+        with socket.socket(socket.AF_INET, kind) as probe:
+            probe.bind(('127.0.0.1', 0))
+            return probe.getsockname()[1]
+
+    def start(args, port):
+        process = subprocess.Popen([str(a) for a in args] + ['--port', str(port)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        line = process.stdout.readline() if ready else b''
+        assert line, f'host did not start: {process.stderr.read(2000) if process.poll() is not None else ""}'
+        return process, json.loads(line)
+
+    def stop(process):
+        process.terminate()
+        _, error = process.communicate(timeout=30)
+        assert process.returncode == 0, error[-1000:]
+        return [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
+
+    def number(port, view):
+        return int(http(port, 'GET', f'/views/{view}')[3])
+
+    def until(test, seconds):  # test once more at most after the deadline: it may post
+        deadline = time.time() + seconds
+        while not test():
+            if time.time() > deadline:
+                return False
+            time.sleep(0.02)
+        return True
+
+    keys = {}
+    for name in ('sender', 'receiver'):
+        process, info = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'memory-key',
+                               '--key', work / f'memory-{name}.key'], 0)
+        keys[name] = info['public_key']
+        stop(process)
+    port_a, port_b, link_port = free_port(), free_port(), free_port(socket.SOCK_DGRAM)
+    receiving = [pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'memory-b',
+                 '--key', work / 'memory-receiver.key', '--link-port', link_port,
+                 '--sender', f'memory-sender.ordered={keys["sender"]}']
+    sender = start([pure / 'build/pure-serve', '--module', sender_module, '--store', work / 'memory-a',
+                    '--key', work / 'memory-sender.key', '--send', f'ordered=pure://127.0.0.1:{link_port}/order',
+                    '--seal', f'ordered={keys["receiver"]}', '--memory', 1000], port_a)[0]
+    receiver, stats, item = None, {}, 'x' * 40
+    try:
+        accepted, refused = 0, None
+        while accepted < 200 and not refused:
+            status = post(port_a, '/inputs/buy', {'item': item, 'count': 1})
+            accepted += status[0] == 200
+            refused = status if status[0] != 200 else None
+        assert refused == (503, 'memory') and 3 <= accepted < 200, (accepted, refused)
+        assert number(port_a, 'sent') == accepted
+        receiver = start(receiving, port_b)[0]
+        assert until(lambda: number(port_b, 'count') == accepted, 20), number(port_b, 'count')
+        assert until(lambda: post(port_a, '/inputs/buy', {'item': item, 'count': 1})[0] == 200, 10)
+        assert until(lambda: number(port_b, 'count') == accepted + 1, 10)
+        stop(receiver)
+        receiver = start(receiving + ['--memory', 300], port_b)[0]  # below what it keeps
+        order = {'item': item, 'count': 1, 'to': {'city': 'Seoul'}}
+        assert post(port_b, '/inputs/order', order) == (503, 'memory')
+        for _ in range(3):
+            assert post(port_a, '/inputs/buy', {'item': item, 'count': 1})[0] == 200
+        time.sleep(2.0)
+        assert number(port_b, 'count') == accepted + 1 and number(port_a, 'sent') == accepted + 4
+        assert post(port_b, '/inputs/clean', {'below': 100})[0] == 200
+        assert until(lambda: number(port_b, 'count') == accepted + 4, 5), number(port_b, 'count')
+        assert number(port_b, 'held') == 3
+    finally:
+        for name, process in (('b', receiver), ('a', sender)):
+            if process:
+                stats[name] = stop(process)
+    assert stats['a']['memory_refused'] >= 1 and stats['a']['state_bytes'] <= 1000, stats['a']
+    assert 2 <= stats['b']['memory_refused'] <= 40 and stats['b']['state_bytes'] <= 300, stats['b']
+    return {'sends_held': accepted, 'receiver_refused': stats['b']['memory_refused'],
+            'link_resent': stats['a']['link_resent']}
 
 def server_links_independent(aup, pure, work):
     """A receiver written from docs/design/012-link-protocol.md alone, in
@@ -2312,6 +2451,113 @@ def server_answers(aup, pure, work):
     return {'orders': sent, 'paid': paid, 'declined': declined, 'answers_after_restart': stats['answers']}
 
 
+
+RECEIPT_SOURCE = """record Receipt {
+  order: text
+  note: text
+  status = 0
+}
+state receipts: list of Receipt
+state sent = 0
+state answered = 0
+input buy = message {
+  order: text
+}
+output charge = message {
+  order: text
+}
+input charged = message {
+  order: text
+  note: text
+  http_status: u32
+}
+input clean = message {
+  below: u32
+}
+on buy {
+  sent = sent + 1
+  send charge { order: buy.order }
+}
+on charged {
+  answered = answered + 1
+  receipts.append(Receipt { order: charged.order, note: charged.note, status: charged.http_status })
+}
+on clean {
+  for r in receipts where r.status < clean.below {
+    receipts.remove(r)
+  }
+}
+view sent_view = sent
+view answered_view = answered
+view receipts_view = receipts.count
+"""
+
+
+def server_answers_memory(aup, pure, work):
+    """Answers (--reply) under a memory budget: an answer keeps a receipt
+    larger than its send, so once receipts fill the budget the next answer
+    waits (it is not lost, and not applied twice) and buys are refused, 503
+    memory. A clean that frees the receipts lets the answers in, each once."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    import time
+    module = work / 'receipt.pmod'
+    module.with_suffix('.aup').write_text(RECEIPT_SOURCE)
+    compile_module(aup, module.with_suffix('.aup'), module)
+    seen, lock = {}, threading.Lock()
+
+    class Api(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            with lock:
+                seen[body['order']] = seen.get(body['order'], 0) + 1
+            data = json.dumps({'note': 'n' * 200}).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Api)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'receipt-store', '--memory', 3000,
+                     '--send', f'charge=http://127.0.0.1:{server.server_address[1]}/charge', '--reply', 'charge=charged'])
+
+    def number(view):
+        return int(http(host.port, 'GET', f'/views/{view}')[3])
+
+    try:
+        bought, refusals = 0, 0
+        while refusals < 3 and bought < 200:
+            status = post(host.port, '/inputs/buy', {'order': f'o{bought}'})
+            if status[0] == 200:
+                bought += 1
+            else:
+                assert status == (503, 'memory'), status
+                refusals += 1
+            time.sleep(0.02)
+        time.sleep(0.5)
+        assert 3 <= bought < 200 and number('sent_view') == bought, bought
+        waiting = bought - number('answered_view')
+        assert waiting >= 1, (bought, number('answered_view'))
+        assert post(host.port, '/inputs/clean', {'below': 1000})[0] == 200
+        deadline = time.time() + 10
+        while number('answered_view') < bought and time.time() < deadline:
+            time.sleep(0.02)
+        assert number('answered_view') == bought and number('receipts_view') == waiting, (number('answered_view'), waiting)
+    finally:
+        stats = host.stop()
+        server.shutdown()
+    with lock:
+        assert len(seen) == bought and all(count == 1 for count in seen.values()), seen
+    assert stats[-1]['memory_refused'] >= refusals + 1, stats[-1]
+    return {'bought': bought, 'answers_waited': waiting, 'refused': stats[-1]['memory_refused']}
+
 BEAT_SOURCE = """state beats = 0
 state last = 0
 state stamped = 0
@@ -2605,6 +2851,7 @@ def main():
         report['server_links_udp'] = server_links_udp(aup, pure, work)
         report['server_links_udp_lossy'] = server_links_udp_lossy(aup, pure, work)
         report['server_links_refused'] = server_links_refused(aup, pure, work)
+        report['server_memory'] = server_memory(aup, pure, work)
         report['server_links_independent'] = server_links_independent(aup, pure, work)
         report['server_links_moved'] = server_links_moved(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)
@@ -2614,6 +2861,7 @@ def main():
         report['server_rows'] = server_rows(aup, pure, work)
         report['server_arguments'] = server_arguments(aup, pure, work)
         report['server_answers'] = server_answers(aup, pure, work)
+        report['server_answers_memory'] = server_answers_memory(aup, pure, work)
     print(json.dumps(report))
 
 

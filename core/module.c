@@ -1179,7 +1179,7 @@ static PureResult fault(PureApp *app, PureFault kind, uint32_t pc) {
     app->fault = kind;
     app->fault_pc = pc;
     return kind == PURE_FAULT_LIMIT ? PURE_LIMIT : kind == PURE_FAULT_NOT_FOUND ? PURE_NOT_FOUND :
-           kind == PURE_FAULT_EXISTS ? PURE_CONFLICT : PURE_INVALID;
+           kind == PURE_FAULT_EXISTS ? PURE_CONFLICT : kind == PURE_FAULT_MEMORY ? PURE_BUDGET : PURE_INVALID;
 }
 
 static bool reserve(PureArena *arena, size_t more) {
@@ -2645,7 +2645,7 @@ void pure_app_stop(PureApp *app) {
 typedef struct {
     PureVersion texts[PURE_MODULE_STATES];
     size_t lists[PURE_MODULE_STATES], heard, outbox; /* stored lists' journal lengths */
-    size_t undo;
+    size_t undo, sent_saved;
     uint64_t last_sent[PURE_MODULE_INPUTS];
     bool opened;
 } Mark;
@@ -2660,6 +2660,7 @@ static void mark_event(PureApp *app, Mark *mark) {
     mark->heard = app->heard ? pure_list_changes(app->heard).size : 0;
     mark->outbox = app->outbox ? pure_list_changes(app->outbox).size : 0;
     mark->undo = app->undo.count;
+    mark->sent_saved = app->sent_saved;
     memcpy(mark->last_sent, app->last_sent, sizeof(mark->last_sent));
 }
 
@@ -2671,6 +2672,7 @@ static void undo_event(PureApp *app, const Mark *mark) {
     if (app->heard) pure_list_forget(app->heard, mark->heard);
     if (app->outbox) pure_list_forget(app->outbox, mark->outbox);
     pure_undo_rollback(&app->undo, mark->undo);
+    app->sent_saved = mark->sent_saved;
     memcpy(app->last_sent, mark->last_sent, sizeof(app->last_sent));
     if (mark->opened) close_burst(app, true); /* nothing happened: release the holds */
 }
@@ -2696,6 +2698,24 @@ static PureResult hear(PureApp *app, const char *source, uint64_t seq) {
     return pure_list_insert(app->heard, at, item, &app->undo);
 }
 
+/* The output's saved sends through seq leave the outbox: their receiver
+ * stored them, or answered them (in the answer's event). */
+static PureResult let_sends_go(PureApp *app, uint32_t output, uint64_t through) {
+    if (!app->outbox) return PURE_OK;
+    const char *name = app->module->input_names[output];
+    size_t length = strlen(name);
+    for (size_t i = 0; i < app->sent_saved;) {
+        PureCell of = pure_list_get(app->outbox, i, 0);
+        if (of.size != length || memcmp(of.text, name, length)) { ++i; continue; }
+        if ((uint64_t)pure_list_get(app->outbox, i, 1).num > through) break;
+        PureResult removed = pure_list_remove(app->outbox, i, &app->undo);
+        if (removed != PURE_OK) return removed;
+        --app->sent_saved;
+        app->links_changed = true;
+    }
+    return PURE_OK;
+}
+
 static PureResult keep_reply(PureApp *app);
 
 /* Every list of a message's rows emptied: an event's rows are its own. */
@@ -2705,14 +2725,29 @@ static void clear_rows(PureApp *app) {
         if (m->state_type[i] == PURE_STATE_LIST && m->state_flags[i] & PURE_LIST_ROWS >> 8) pure_list_clear(app->lists[i]);
 }
 
+void pure_app_memory(PureApp *app, size_t bytes) { app->memory = bytes; }
+
+size_t pure_app_state_bytes(const PureApp *app) {
+    const PureModule *m = app->module;
+    size_t bytes = (app->outbox ? pure_list_size(app->outbox) : 0) + (app->heard ? pure_list_size(app->heard) : 0);
+    for (uint32_t i = 0; i < m->states; ++i) {
+        if (app->lists[i] && !(m->state_flags[i] & PURE_LIST_ROWS >> 8)) bytes += pure_list_size(app->lists[i]);
+        else if (app->texts[i]) bytes += pure_draft_size(app->texts[i]);
+    }
+    return bytes; /* a message's rows are its own, gone when it ends */
+}
+
 /* One event: every handler for it runs in module order against pending
  * states, all or nothing. A key, text or message event saves before it
  * returns unless saving is deferred; a frame leaves that to the next event
- * (frames come 60 times a second). A message's document joins the burst. */
+ * (frames come 60 times a second). A message's document joins the burst.
+ * With a memory budget, an event that leaves the states over it, and
+ * holding more than before, fails. */
 static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     const PureModule *m = app->module;
     double pending[PURE_MODULE_STATES], locals[PURE_MODULE_LOCALS] = {0};
     ev->locals = locals;
+    size_t held = app->memory ? pure_app_state_bytes(app) : 0;
     Mark mark;
     mark_event(app, &mark);
     memcpy(pending, app->values, sizeof(app->values));
@@ -2728,8 +2763,14 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     if (result == PURE_OK && app->has_reply &&
         ((app->reply.source == FROM_DOCUMENT && ev->modified) || app->reply.source == FROM_TEXT))
         result = keep_reply(app);
-    /* A delivery's number is heard with its changes. */
+    /* A delivery's number is heard with its changes, and an answer's sends go with it. */
     if (result == PURE_OK && app->delivering.pending) result = hear(app, app->delivering.source, app->delivering.seq);
+    if (result == PURE_OK && app->delivering.pending && app->delivering.release)
+        result = let_sends_go(app, app->delivering.release - 1, app->delivering.seq);
+    if (result == PURE_OK && app->memory) {
+        size_t holds = pure_app_state_bytes(app);
+        if (holds > app->memory && holds > held) result = fault(app, PURE_FAULT_MEMORY, UINT32_MAX);
+    }
     if (result != PURE_OK) {
         undo_event(app, &mark);
         clear_rows(app);
@@ -2950,23 +2991,14 @@ void pure_app_outbox_newest(const PureApp *app, PureSentVisit visit, void *conte
  * store with the next save; a failed save brings them back. Its sends are
  * in order among the others: the look stops at its first one kept. */
 void pure_app_trim(PureApp *app, uint32_t output, uint64_t through) {
-    const PureModule *m = app->module;
-    if (!app->outbox || output >= m->inputs) return;
-    const char *name = m->input_names[output];
-    size_t length = strlen(name);
+    if (!app->outbox || output >= app->module->inputs) return;
     open_burst(app);
-    for (size_t i = 0; i < app->sent_saved;) {
-        PureCell of = pure_list_get(app->outbox, i, 0);
-        if (of.size != length || memcmp(of.text, name, length)) { ++i; continue; }
-        if ((uint64_t)pure_list_get(app->outbox, i, 1).num > through) break;
-        if (pure_list_remove(app->outbox, i, &app->undo) != PURE_OK) break;
-        --app->sent_saved;
-        app->links_changed = true;
-    }
+    let_sends_go(app, output, through);
 }
 
-PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, uint64_t seq, PureSpan payload,
-                            const uint32_t *placed) {
+/* A delivery, or an answer to the sends of output (release: its number + 1). */
+static PureResult deliver(PureApp *app, uint32_t input, uint32_t release, const char *source, uint64_t seq,
+                          PureSpan payload, const uint32_t *placed) {
     const PureModule *m = app->module;
     size_t length = source ? strlen(source) : 0;
     app->duplicate = false;
@@ -2983,22 +3015,36 @@ PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, ui
     }
     app->delivering.source = source;
     app->delivering.seq = seq;
+    app->delivering.release = release;
     app->delivering.pending = true;
     PureResult result = message(app, input, NULL, -1, payload, placed);
     if (!app->delivering.pending) return result;
     /* Not applied. Refused by the app (a fault), the message was delivered
-     * all the same: its number is heard, saved like a key event's changes. */
+     * all the same: its number is heard, saved like a key event's changes.
+     * Refused for memory it was not: its sender sends it again. */
     app->delivering.pending = false;
-    if (app->fault == PURE_FAULT_NONE) return result;
+    if (app->fault == PURE_FAULT_NONE || app->fault == PURE_FAULT_MEMORY) return result;
     Mark mark;
     mark_event(app, &mark);
     PureResult heard = hear(app, source, seq);
+    if (heard == PURE_OK && release) heard = let_sends_go(app, release - 1, seq);
     if (heard != PURE_OK) {
         undo_event(app, &mark);
         return heard;
     }
     PureResult saved = app->deferred ? PURE_OK : pure_app_save(app);
     return saved == PURE_OK ? result : saved;
+}
+
+PureResult pure_app_deliver(PureApp *app, uint32_t input, const char *source, uint64_t seq, PureSpan payload,
+                            const uint32_t *placed) {
+    return deliver(app, input, 0, source, seq, payload, placed);
+}
+
+PureResult pure_app_answer(PureApp *app, uint32_t input, uint32_t output, const char *source, uint64_t seq,
+                           PureSpan payload, const uint32_t *placed) {
+    if (output >= app->module->inputs || app->module->input[output].kind != PURE_KIND_OUTPUT) return PURE_INVALID;
+    return deliver(app, input, output + 1, source, seq, payload, placed);
 }
 
 PureResult pure_app_reply(const PureApp *app, bool (*visit)(void *, PureSpan), void *context) {

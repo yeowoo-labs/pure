@@ -4209,6 +4209,104 @@ static void links(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "handler event"));
 }
 
+/* The app's memory budget (docs/design/013-memory-budget.md): an event that
+ * would leave the states over it and holding more is refused and changes
+ * nothing; one that frees them goes on; sends waiting for their receivers
+ * count, so a full outbox refuses more until some are trimmed; a delivery
+ * refused so is not heard, and comes again; an answer has its send's room. */
+static void memory_budget(void) {
+    enum { ADD, DROP, SEND_KEY, OUT, TAKE, ANSWER };
+    static const S nums[] = {{"n", 0}};
+    static const T states[] = {{"rows", 3, 0}};
+    static const RF fields[] = {{"value", 0, 0}};
+    static const R records[] = {{"row", fields, 1}};
+    static const F value[] = {{"value", PURE_FIELD_NUMBER}};
+    static const I inputs[] = {KEY("add", "KeyA"), KEY("drop", "KeyD"), KEY("send", "KeyS"),
+                               {"out", NULL, PURE_KIND_OUTPUT, false, value, 1},
+                               {"take", NULL, PURE_KIND_MESSAGE, false, value, 1},
+                               {"answer", NULL, PURE_KIND_MESSAGE, false, value, 1}};
+    static const O code[] = {
+        {L, 0, 0}, {LA, 1, 0},     /* add: rows.append(row { n }) */
+        {XF, 1, 0}, {LR, 1, 0},    /* drop: rows.remove(rows.first) */
+        {C, 0, 1}, {SEND, 3, 0},   /* send: send out { value: 1 } */
+        {FIELD, 0, 0}, {LA, 1, 0}, /* take: rows.append(row { take.value }) */
+        {FIELD, 0, 0}, {LA, 1, 0}, {FIELD, 0, 0}, {LA, 1, 0}, {FIELD, 0, 0}, {LA, 1, 0}, /* answer: six rows */
+        {FIELD, 0, 0}, {LA, 1, 0}, {FIELD, 0, 0}, {LA, 1, 0}, {FIELD, 0, 0}, {LA, 1, 0},
+    };
+    static const H handlers[] = {{1 + 2 * ADD, 0, 2}, {1 + 2 * DROP, 2, 2}, {1 + 2 * SEND_KEY, 4, 2}, {1 + 2 * TAKE, 6, 2},
+                                 {1 + 2 * ANSWER, 8, 12}};
+    Spec spec = {nums, 1, inputs, 6, NULL, 0, handlers, 5, code, LEN(code), NULL, 0, states, 1, NULL, 0, NULL, 0,
+                 records, 1, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    char *path = new_store();
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, ADD, PURE_EDGE_DOWN) == PURE_OK);
+    size_t three = pure_app_state_bytes(&app);
+    CHECK(three == 3 * 8); /* a row's number as it is stored */
+    /* Room for one row more: the next is refused, and nothing of it stays. */
+    pure_app_memory(&app, three + 8);
+    CHECK(pure_app_input(&app, ADD, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 4);
+    CHECK(pure_app_input(&app, ADD, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY &&
+          pure_list_count(app.lists[1]) == 4 && pure_app_state_bytes(&app) == three + 8);
+    /* Over the budget (made smaller), what frees goes on and what grows does not. */
+    pure_app_memory(&app, 8);
+    CHECK(pure_app_input(&app, ADD, PURE_EDGE_DOWN) == PURE_BUDGET);
+    CHECK(pure_app_input(&app, DROP, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 3);
+    /* Sends count while they wait: a full outbox refuses the next until some are trimmed. */
+    size_t before = pure_app_state_bytes(&app);
+    pure_app_memory(&app, before);
+    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_BUDGET && !pure_list_count(app.outbox));
+    pure_app_memory(&app, 0);
+    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.outbox) == 1);
+    size_t one = pure_app_state_bytes(&app) - before;
+    pure_app_memory(&app, before + 2 * one);
+    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_BUDGET && pure_list_count(app.outbox) == 2);
+    pure_app_trim(&app, OUT, 1);
+    CHECK(pure_app_save(&app) == PURE_OK && pure_list_count(app.outbox) == 1);
+    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_OK && outbox_of(&app).items[1].seq == 3);
+    /* A delivery refused for memory is not heard: given again with room, it is applied once. */
+    double taken = 7;
+    pure_app_memory(&app, pure_app_state_bytes(&app));
+    CHECK(pure_app_deliver(&app, TAKE, "far.out", 1, (PureSpan){(const unsigned char *)&taken, 8}, NULL) == PURE_BUDGET &&
+          app.fault == PURE_FAULT_MEMORY && pure_app_heard(&app, "far.out") == 0 && pure_list_count(app.lists[1]) == 3);
+    pure_app_finish(&app);
+    pure_app_memory(&app, 0);
+    CHECK(pure_app_deliver(&app, TAKE, "far.out", 1, (PureSpan){(const unsigned char *)&taken, 8}, NULL) == PURE_OK &&
+          !app.duplicate && pure_app_heard(&app, "far.out") == 1 && pure_list_count(app.lists[1]) == 4);
+    pure_app_finish(&app);
+    CHECK(pure_list_get(app.lists[1], 3, 0).num == 7);
+    /* An answer takes its send out of the outbox in its own event: one that
+     * keeps more than the send held is refused whole at the budget (the send
+     * stays), and goes on with room; one that keeps less goes on at it. */
+    size_t full = pure_app_state_bytes(&app);
+    CHECK(one < 6 * 8 && one > 8);
+    double paid = 9;
+    PureSpan nine = {(const unsigned char *)&paid, 8};
+    pure_app_memory(&app, full);
+    CHECK(pure_app_answer(&app, ANSWER, OUT, "wire.out", 2, nine, NULL) == PURE_BUDGET &&
+          app.fault == PURE_FAULT_MEMORY && pure_list_count(app.outbox) == 2 && pure_list_count(app.lists[1]) == 4 &&
+          pure_app_heard(&app, "wire.out") == 0 && pure_app_state_bytes(&app) == full);
+    pure_app_finish(&app);
+    size_t heard = 4 + strlen("wire.out") + 8; /* its source among the numbers heard */
+    pure_app_memory(&app, full + 6 * 8 + heard - one);
+    CHECK(pure_app_answer(&app, ANSWER, OUT, "wire.out", 2, nine, NULL) == PURE_OK && pure_list_count(app.outbox) == 1 &&
+          outbox_of(&app).items[0].seq == 3 && pure_list_count(app.lists[1]) == 10 &&
+          pure_app_heard(&app, "wire.out") == 2 && pure_app_state_bytes(&app) == full + 6 * 8 + heard - one);
+    pure_app_finish(&app);
+    pure_app_memory(&app, pure_app_state_bytes(&app));
+    CHECK(pure_app_answer(&app, TAKE, OUT, "wire.out", 3, nine, NULL) == PURE_OK && !pure_list_count(app.outbox) &&
+          pure_list_count(app.lists[1]) == 11);
+    pure_app_finish(&app);
+    CHECK(pure_app_answer(&app, TAKE, TAKE, "wire.out", 4, nine, NULL) == PURE_INVALID); /* not an output */
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_list_count(app.lists[1]) == 11 &&
+          !pure_list_count(app.outbox) && pure_app_heard(&app, "far.out") == 1 && pure_app_heard(&app, "wire.out") == 3);
+    pure_app_stop(&app);
+    remove_store(path);
+}
+
 /* An output whose fields are named otherwise (here two numbers swapped) is
  * another output: its waiting sends' bytes would mean something else. A
  * module that has it so is refused while sends wait, replacing or starting
@@ -4360,6 +4458,7 @@ int main(void) {
     snapshots();
     links();
     output_meaning();
+    memory_budget();
     fold_mutations();
     pointing();
     list_mutations();
