@@ -157,6 +157,8 @@ typedef struct { uint8_t form, relation; uint16_t field; uint32_t test; PureBloc
 enum { PURE_MODULE_RANGES = 64 };
 typedef struct { uint8_t lower_relation, upper_relation; PureBlock lower, upper; } PureRange;
 
+_Static_assert(PURE_MODULE_STATES <= 32, "a state is a bit of PureApp.counted");
+
 typedef struct {
     uint16_t states, inputs, views, handlers, fields, collections, constants, records, record_fields;
     uint32_t code_count;
@@ -313,6 +315,7 @@ typedef struct {
     PureFault fault;
     uint32_t fault_pc;
     size_t memory; /* the budget of what the states hold (0: none): pure_app_memory */
+    uint32_t counted; /* the states it counts, a bit each: lists (not a message's rows) and texts */
     uint64_t ticks, events;
     /* The time events see as now, in milliseconds since 1970 (UTC). The host
      * sets it, so a script can replay any time; views never see it. */

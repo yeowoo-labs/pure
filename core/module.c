@@ -2728,13 +2728,12 @@ static void clear_rows(PureApp *app) {
 void pure_app_memory(PureApp *app, size_t bytes) { app->memory = bytes; }
 
 size_t pure_app_state_bytes(const PureApp *app) {
-    const PureModule *m = app->module;
     size_t bytes = (app->outbox ? pure_list_size(app->outbox) : 0) + (app->heard ? pure_list_size(app->heard) : 0);
-    for (uint32_t i = 0; i < m->states; ++i) {
-        if (app->lists[i] && !(m->state_flags[i] & PURE_LIST_ROWS >> 8)) bytes += pure_list_size(app->lists[i]);
-        else if (app->texts[i]) bytes += pure_draft_size(app->texts[i]);
+    for (uint32_t left = app->counted; left; left &= left - 1) {
+        unsigned i = (unsigned)__builtin_ctz(left);
+        bytes += app->lists[i] ? pure_list_size(app->lists[i]) : app->texts[i] ? pure_draft_size(app->texts[i]) : 0;
     }
-    return bytes; /* a message's rows are its own, gone when it ends */
+    return bytes;
 }
 
 /* One event: every handler for it runs in module order against pending
@@ -3550,6 +3549,11 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     if (old) remap_outputs(app, old, module, true);
     drop_passes(app); /* kept by instruction of the module they were made for */
     app->module = module;
+    app->counted = 0;
+    for (uint32_t i = 0; i < module->states; ++i)
+        if (module->state_type[i] == PURE_STATE_TEXT ||
+            (module->state_type[i] == PURE_STATE_LIST && !(module->state_flags[i] & PURE_LIST_ROWS >> 8)))
+            app->counted |= UINT32_C(1) << i; /* a message's rows are its own, gone when it ends */
     ++app->changes;
     return PURE_OK;
 }
