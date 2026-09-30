@@ -18,6 +18,10 @@ typedef struct PureLink PureLink;
 PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, const PureSealKey *own,
                          const unsigned char own_public[PURE_SEAL_KEY], char *error, size_t size);
 void pure_link_peer(PureLink *, const unsigned char peer[PURE_SEAL_KEY]);
+/* The fields its sends are laid out with (core/module.h's
+ * pure_module_fields): a receiver whose input takes another shape may take
+ * them by name (docs/design/014-fields-by-name.md). */
+bool pure_link_fields(PureLink *, const unsigned char *fields, size_t size);
 bool pure_link_queue(PureLink *, uint64_t seq, const unsigned char *bytes, size_t size);
 uint64_t pure_link_queued(PureLink *);
 /* The last number the receiver saved; any thread. */

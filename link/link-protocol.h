@@ -111,6 +111,12 @@
  *                sender sends one packet of them a wait from then (a
  *                second, twice as long each time, 64 s at most) until one
  *                is stored
+ *   0x0d FIELDS  source, input, u32 shape (as STREAM), then the fields the
+ *                stream's records are laid out with (core/module.h's
+ *                pure_module_fields): after a REFUSED for another shape,
+ *                in every packet (after OFFER, before records) until the
+ *                stream is taken. A receiver whose input has every field
+ *                takes it by name (docs/design/014-fields-by-name.md)
  *   0x00 PADDING to the end of the packet: a full packet sent in a burst is
  *                a whole datagram
  * Losses are detected as RFC 9002 says, with RACK's patience for packets
@@ -129,9 +135,10 @@
 enum { PURE_LINK_DATAGRAM = 1200, PURE_LINK_DATAGRAM_MOST = 1452, PURE_LINK_NAME = 64, PURE_LINK_ADDRESS = 48,
        PURE_LINK_RECORD_MOST = 16 << 20 };
 /* Why a receiver refuses a stream (REFUSED): no input of that name takes
- * messages, the input takes messages of another shape, or the sender's key
- * may not send as that source. */
-enum { PURE_LINK_NO_INPUT = 1, PURE_LINK_OTHER_SHAPE = 2, PURE_LINK_NOT_ALLOWED = 3 };
+ * messages, the input takes messages of another shape (send FIELDS), the
+ * sender's key may not send as that source, or the input lacks fields the
+ * stream sends (it would drop them). */
+enum { PURE_LINK_NO_INPUT = 1, PURE_LINK_OTHER_SHAPE = 2, PURE_LINK_NOT_ALLOWED = 3, PURE_LINK_FIELDS_LACKED = 4 };
 
 /* Counts for a host's report: packets and records sent, records sent again,
  * packets lost and acknowledged, packets received, deliveries handed over,
@@ -193,6 +200,9 @@ unsigned pure_link_sender_refusal(const PureLinkSender *);
 /* How often it moves on to a new epoch (ns), and after how many bytes sent
  * (an hour and a GiB at first). */
 void pure_link_sender_epochs(PureLinkSender *, uint64_t every_ns, uint64_t bytes);
+/* The fields its records are laid out with (pure_module_fields), for a
+ * receiver whose input takes another shape (FIELDS); none at first. */
+bool pure_link_sender_fields(PureLinkSender *, const unsigned char *fields, size_t size);
 /* The last number queued; the last the receiver stored. */
 uint64_t pure_link_sender_queued(const PureLinkSender *);
 uint64_t pure_link_sender_stored(const PureLinkSender *);
@@ -206,7 +216,9 @@ void pure_link_sender_free(PureLinkSender *);
  * pure_link_idle). A stream (a source to an input) goes to the host's input
  * its name and shape find: its number, or -PURE_LINK_OTHER_SHAPE when it
  * takes another shape, or -1 (PURE_LINK_NO_INPUT) when none takes messages
- * by that name; a stream refused is said to be (REFUSED). Whole
+ * by that name; asked again with the fields the sender names (FIELDS),
+ * its number when it takes them by name, else -PURE_LINK_FIELDS_LACKED. A
+ * stream refused is said to be (REFUSED). Whole
  * records of a stream, in order, go to deliver as one delivery; the host
  * applies them from the one after the source's last heard number, stops at
  * a gap, saves, and then says so with a done (pure_link_receiver_turn).
@@ -220,9 +232,13 @@ typedef struct {
     const unsigned char *records; /* count of: u32le size, bytes (the receiver's: the host's during the call) */
     size_t size;
     void *token; /* for its done */
+    /* The fields the records are laid out with when the input took them by
+     * name (the host lays each out anew for it), else NULL. */
+    const unsigned char *fields;
+    size_t fields_size;
 } PureLinkDelivery;
 typedef struct {
-    int (*input)(void *context, const char *name, uint32_t shape);
+    int (*input)(void *context, const char *name, uint32_t shape, const unsigned char *fields, size_t fields_size);
     bool (*deliver)(void *context, const PureLinkDelivery *);
     void *context;
 } PureLinkHost;

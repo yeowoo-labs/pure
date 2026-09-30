@@ -210,6 +210,13 @@ uint64_t pure_link_delivered(PureLink *l) {
     return stored;
 }
 
+bool pure_link_fields(PureLink *l, const unsigned char *fields, size_t size) {
+    pthread_mutex_lock(&l->lock);
+    bool kept = pure_link_sender_fields(l->sender, fields, size);
+    pthread_mutex_unlock(&l->lock);
+    return kept;
+}
+
 size_t pure_link_held(PureLink *l) {
     pthread_mutex_lock(&l->lock);
     size_t held = pure_link_sender_held(l->sender);
@@ -380,7 +387,8 @@ static void *run_link(void *context) {
                     "trying again\"}\n", l->host, l->port, l->input, l->source,
                     refusal == PURE_LINK_NOT_ALLOWED ? "this node's key may not send as that source"
                     : refusal == PURE_LINK_OTHER_SHAPE ? "its input takes messages of another shape"
-                                                       : "it has no input of that name taking messages");
+                    : refusal == PURE_LINK_FIELDS_LACKED ? "its input lacks fields this output sends (it would drop them)"
+                                                         : "it has no input of that name taking messages");
     }
     return NULL;
 }

@@ -843,8 +843,17 @@ static const char *convert(Connection *c) {
         memset(b.seen, 0, sizeof(b.seen));
         if (!why) why = pure_json_message(&b, json, size, &at);
         at = pure_json_space(json, at, size);
-        for (uint32_t f = 0; !why && f < shape->field_count; ++f)
-            if (!b.seen[f] && !c->given[f]) why = "missing_field";
+        /* A delivery from another node may lack fields its sender's module has
+         * not (docs/design/014-fields-by-name.md): they are 0 or empty. A
+         * member naming no field is refused all the same: it would be dropped. */
+        for (uint32_t f = 0; !why && f < shape->field_count; ++f) {
+            if (b.seen[f] || c->given[f]) continue;
+            const PureField *field = &c->host->module->field[shape->field_start + f];
+            if (!delivered || field->type == PURE_FIELD_ROWS) why = "missing_field";
+            else if (field->type == PURE_FIELD_U32 || field->type == PURE_FIELD_NUMBER)
+                memset(b.payload + field->offset, 0, field->type == PURE_FIELD_NUMBER ? 8 : 4);
+            else put_u32(b.table + 8 * f, 0), put_u32(b.table + 8 * f + 4, 0);
+        }
         if (!why && c->batch > 1 && b.rows_size) why = "delivery"; /* an output sends no rows */
     }
     if (!why && c->batch > 1 && (at == size || json[at++] != ']')) why = "json";
@@ -1374,6 +1383,9 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
         uint64_t first = get_u64(delivery), heard = pure_app_heard(app, source);
         unsigned count = get_u32(delivery + 8);
         const unsigned char *at = effect->value.data + 4 + DELIVERY;
+        /* Records laid out with other fields (named after them) are laid out anew for the input. */
+        size_t records = header & (STORED_RECORDS - 1), named = effect->value.size - 4 - DELIVERY - records;
+        const unsigned char *fields = named ? at + records : NULL;
         out->gap = false;
         out->fault = PURE_FAULT_NONE;
         for (unsigned i = 0; i < count; ++i) {
@@ -1385,7 +1397,14 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
                 out->gap = true;
                 break;
             }
-            PureResult status = pure_app_deliver(app, route->target, source, first + i, record, NULL);
+            unsigned char *recast = NULL;
+            size_t recast_size = 0;
+            if (fields && pure_module_recast(app->module, route->target, fields, named, record, &recast, &recast_size) !=
+                              PURE_OK)
+                break; /* not laid out as its fields were named: not applied, sent again */
+            PureResult status = pure_app_deliver(app, route->target, source, first + i,
+                                                 recast ? (PureSpan){recast, recast_size} : record, NULL);
+            free(recast);
             if (status != PURE_OK && !app_refused(app)) { /* not applied: sent again */
                 out->fault = app->fault;
                 break;
@@ -2375,12 +2394,15 @@ static void stop_shard(Host *host) {
 }
 
 /* The input a link's stream goes to: one taking messages (not keyed) of the
- * sender's shape. */
-static int link_input(void *context, const char *name, uint32_t shape) {
+ * sender's shape, or, named its fields, one that takes them by name
+ * (pure_module_takes: each record is laid out anew for it). */
+static int link_input(void *context, const char *name, uint32_t shape, const unsigned char *fields, size_t size) {
     const PureModule *m = ((Owner *)context)->executor.app.module;
     int index = pure_module_input(m, name);
     if (index < 0 || m->input[index].kind != PURE_KIND_MESSAGE || m->input[index].keyed) return -PURE_LINK_NO_INPUT;
-    return pure_module_shape(m, (uint32_t)index) == shape ? index : -PURE_LINK_OTHER_SHAPE;
+    if (pure_module_shape(m, (uint32_t)index) == shape) return index;
+    if (!fields) return -PURE_LINK_OTHER_SHAPE;
+    return pure_module_takes(m, (uint32_t)index, fields, size) ? index : -PURE_LINK_FIELDS_LACKED;
 }
 
 /* Records a link delivered, queued at the owner as a request is: applied
@@ -2388,7 +2410,7 @@ static int link_input(void *context, const char *name, uint32_t shape) {
 static PureLinkListener *link_listener;
 static bool link_deliver(void *context, const PureLinkDelivery *d) {
     Owner *owner = context;
-    size_t size = 4 + DELIVERY + d->size, length = strlen(d->source);
+    size_t size = 4 + DELIVERY + d->size + d->fields_size, length = strlen(d->source);
     unsigned char *ingress = malloc(size);
     LinkJob *link = malloc(sizeof(*link));
     if (!ingress || !link || d->size > (STORED_RECORDS - 1) || length > PURE_SOURCE) {
@@ -2403,6 +2425,7 @@ static bool link_deliver(void *context, const PureLinkDelivery *d) {
     ingress[16] = (unsigned char)length;
     memcpy(ingress + 17, d->source, length);
     memcpy(ingress + 4 + DELIVERY, d->records, d->size);
+    if (d->fields_size) memcpy(ingress + 4 + DELIVERY + d->size, d->fields, d->fields_size); /* laid out with those */
     *link = (LinkJob){link_listener, d->token, ingress};
     Job job = {.route = {.kind = ROUTE_INPUT, .target = d->input}, .link = link,
                .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {ingress, size}}};
@@ -2451,6 +2474,12 @@ static bool open_wires(Executor *ex, const PureModule *m, const char *const *sen
                                  ? pure_link_open(equals + 1, source, pure_module_shape(m, (uint32_t)index), seal_key,
                                                   own_public, error, sizeof(error))
                                  : NULL;
+            unsigned char named[PURE_FIELDS_NAMED];
+            if (link && !pure_link_fields(link, named, pure_module_fields(m, (uint32_t)index, named))) {
+                pure_link_close(link);
+                link = NULL;
+                snprintf(error, sizeof(error), "no memory");
+            }
             if (!link) {
                 fprintf(stderr, "--send %s: %s\n", sends[i], written > PURE_SOURCE ? "the name and output are longer than 64 bytes" : error);
                 return false;

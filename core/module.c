@@ -1211,6 +1211,71 @@ uint32_t pure_module_shape(const PureModule *m, uint32_t input) {
     return h;
 }
 
+size_t pure_module_fields(const PureModule *m, uint32_t input, unsigned char out[PURE_FIELDS_NAMED]) {
+    const PureInputShape *s = &m->input[input];
+    size_t at = 0;
+    out[at++] = (unsigned char)s->field_count;
+    for (uint32_t f = 0; f < s->field_count; ++f) {
+        const PureField *field = &m->field[s->field_start + f];
+        size_t length = strlen(field->name);
+        out[at++] = field->type;
+        out[at++] = (unsigned char)length;
+        memcpy(out + at, field->name, length);
+        at += length;
+    }
+    return at;
+}
+
+/* Fields as a sender names them, laid out: their count, or -1 when they are
+ * not well named (no rows: a sender sends none). */
+static int named_fields(const unsigned char *bytes, size_t size, PureField *fields) {
+    if (!size || bytes[0] > PURE_MODULE_FIELDS) return -1;
+    unsigned count = bytes[0];
+    size_t at = 1;
+    for (unsigned f = 0; f < count; ++f) {
+        size_t length = size - at >= 2 ? bytes[at + 1] : 0;
+        if (size - at < 2 || !length || length >= PURE_MODULE_NAME || size - at < 2 + length || !bytes[at] ||
+            bytes[at] >= PURE_FIELD_ROWS)
+            return -1;
+        fields[f] = (PureField){.type = bytes[at]};
+        memcpy(fields[f].name, bytes + at + 2, length);
+        for (unsigned k = 0; k < f; ++k)
+            if (!strcmp(fields[k].name, fields[f].name)) return -1;
+        at += 2 + length;
+    }
+    if (at != size) return -1;
+    pure_fields_lay_out(fields, count);
+    return (int)count;
+}
+
+bool pure_module_takes(const PureModule *m, uint32_t input, const unsigned char *fields, size_t size) {
+    PureField sent[PURE_MODULE_FIELDS];
+    int count = named_fields(fields, size, sent);
+    if (count < 0) return false;
+    const PureInputShape *s = &m->input[input];
+    for (int k = 0; k < count; ++k) {
+        uint32_t f = 0;
+        while (f < s->field_count && strcmp(m->field[s->field_start + f].name, sent[k].name)) ++f;
+        if (f == s->field_count) return false; /* its value would be dropped */
+        uint8_t type = m->field[s->field_start + f].type, from = sent[k].type;
+        if (type != from && !(type == PURE_FIELD_NUMBER && from == PURE_FIELD_U32) &&
+            !(type == PURE_FIELD_BYTES && from == PURE_FIELD_TEXT))
+            return false;
+    }
+    return true;
+}
+
+PureResult pure_module_recast(const PureModule *m, uint32_t input, const unsigned char *fields, size_t size,
+                              PureSpan payload, unsigned char **out, size_t *out_size) {
+    PureField sent[PURE_MODULE_FIELDS];
+    int count = named_fields(fields, size, sent);
+    *out = NULL;
+    *out_size = 0;
+    if (count < 0) return PURE_STORE_ERROR;
+    const PureInputShape *s = &m->input[input];
+    return pure_send_recast(sent, (uint32_t)count, &m->field[s->field_start], s->field_count, payload, out, out_size);
+}
+
 int pure_module_view(const PureModule *m, const char *name) {
     for (uint32_t i = 0; i < m->views; ++i)
         if (!m->view_table[i] && !strcmp(m->view_names[i], name)) return (int)i;

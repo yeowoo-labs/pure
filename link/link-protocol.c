@@ -19,7 +19,7 @@ enum { DATAGRAM_MOST = PURE_LINK_DATAGRAM_MOST, BODY_MOST = DATAGRAM_MOST - HEAD
  * at least this much of it fits. */
 enum { PART_LEAST = 64 };
 enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, F_RECORDS = 6, F_CHALLENGE = 7,
-       F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, F_LOST = 11, F_REFUSED = 12 };
+       F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, F_LOST = 11, F_REFUSED = 12, F_FIELDS = 13 };
 /* STORED's flags: what came after a gap was not kept; the app is full (no
  * room for more now), and what came is kept for when it has room. */
 enum { STORED_GAP = 1, STORED_FULL = 2 };
@@ -307,6 +307,11 @@ struct PureLinkSender {
      * answer with no REFUSED. */
     unsigned refusal, tried;
     uint64_t refused_until, refused_wait, tried_pn;
+    /* The fields its records are laid out with, named (FIELDS) in each
+     * packet from a refusal for another shape until the stream is taken. */
+    unsigned char *fields;
+    size_t fields_size;
+    bool naming;
     PureLinkCounts counts;
     /* Epochs (forward secrecy). Keys come from the secret of the epoch it
      * sends in (epoch 0's is the two nodes' static secret), each made from
@@ -696,6 +701,7 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
     unsigned flags = p[names + 8];
     uint32_t credit = get32(p + names + 9);
     l->refusal = l->tried = 0, l->refused_until = l->refused_wait = 0; /* the stream is taken, and stored */
+    l->naming = false;
     if (heard > l->stored) {
         while (l->count && record_at(l, 0)->seq <= heard) {
             Record *r = record_at(l, 0);
@@ -725,8 +731,12 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
 static void refused(PureLinkSender *l, unsigned why, uint64_t now) {
     if (l->refusal && l->tried != TRIED) return;
     l->refusal = why ? why : PURE_LINK_NO_INPUT;
-    l->refused_wait = l->refused_wait ? least(2 * l->refused_wait, REFUSED_MOST) : REFUSED_FIRST;
-    l->refused_until = now + l->refused_wait;
+    /* Another shape, and its fields not named yet: named in a packet at once. */
+    bool naming = (why == PURE_LINK_OTHER_SHAPE || why == PURE_LINK_FIELDS_LACKED) && l->fields;
+    bool at_once = naming && !l->naming;
+    l->naming = l->naming || naming;
+    if (!at_once) l->refused_wait = l->refused_wait ? least(2 * l->refused_wait, REFUSED_MOST) : REFUSED_FIRST;
+    l->refused_until = at_once ? 0 : now + l->refused_wait;
     l->tried = 0;
     ++l->counts.refused;
     for (size_t k = 0; k < l->count; ++k) {
@@ -804,7 +814,8 @@ void pure_link_sender_take(PureLinkSender *l, const unsigned char *packet, size_
         } else if (type != F_PING)
             break; /* padding, or what this side does not know: the rest */
     }
-    if (l->refusal && l->tried == TRIED && !refusing) l->refusal = l->tried = 0, l->refused_until = 0; /* taken now */
+    if (l->refusal && l->tried == TRIED && !refusing) /* taken now */
+        l->refusal = l->tried = 0, l->refused_until = 0, l->naming = false;
 }
 
 /* A packet of what is not sent yet, in order, within the receiver's credit
@@ -830,6 +841,17 @@ static size_t fill(PureLinkSender *l, unsigned char *body, Flight *f, bool pad, 
         put32(body + at + 1, l->offer_epoch);
         memcpy(body + at + 5, l->offer_public, PURE_SEAL_KEY);
         at += EPOCH_FRAME;
+    }
+    /* The fields, for a receiver whose input takes another shape: after the
+     * frames one that knows no FIELDS reads, before the records. */
+    size_t names = 2 + strlen(l->source) + strlen(l->input);
+    if (l->naming && at + 1 + names + 4 + l->fields_size <= most) {
+        body[at++] = F_FIELDS;
+        at += put_names(body + at, l->source, l->input);
+        put32(body + at, l->shape);
+        at += 4;
+        memcpy(body + at, l->fields, l->fields_size);
+        at += l->fields_size;
     }
     if (l->renegotiating) { /* no record under the static keys */
         l->responding = 0;
@@ -1196,6 +1218,15 @@ uint64_t pure_link_sender_stored(const PureLinkSender *l) { return l->stored; }
 
 size_t pure_link_sender_held(const PureLinkSender *l) { return l->held; }
 
+bool pure_link_sender_fields(PureLinkSender *l, const unsigned char *fields, size_t size) {
+    unsigned char *kept = size ? malloc(size) : NULL;
+    if (size && !kept) return false;
+    if (size) memcpy(kept, fields, size);
+    free(l->fields);
+    l->fields = kept, l->fields_size = size;
+    return true;
+}
+
 void pure_link_sender_counts(const PureLinkSender *l, PureLinkCounts *out) {
     *out = l->counts;
     out->stored = l->stored;
@@ -1213,6 +1244,7 @@ void pure_link_sender_free(PureLinkSender *l) {
     explicit_bzero(l->epoch_secret, sizeof(l->epoch_secret));
     explicit_bzero(l->before_secret, sizeof(l->before_secret));
     explicit_bzero(l->offer_private, sizeof(l->offer_private));
+    free(l->fields);
     free(l);
 }
 
@@ -1298,6 +1330,8 @@ typedef struct Stream {
     size_t held_first, held_count, held_capacity, held_bytes;
     Run *run;                    /* the run that sent to it last: where STORED goes */
     uint64_t run_id;
+    unsigned char *fields;       /* the fields its records are laid out with, when its input took them by name */
+    size_t fields_size;
 } Stream;
 struct Active {
     uint32_t peer;               /* its place among the peers */
@@ -1720,6 +1754,7 @@ static void let_go(PureLinkReceiver *s, Active *a) {
         while (a->streams[k]->held_count) drop_first(a->streams[k]);
         free(a->streams[k]->held);
         free(a->streams[k]->line);
+        free(a->streams[k]->fields);
         free(a->streams[k]);
     }
     free(a->streams);
@@ -1845,30 +1880,56 @@ static bool allowed(const PureLinkReceiver *s, const Peer *peer, const char *sou
     return false;
 }
 
+/* Whose fields a stream's records are laid out with, kept (NULL, 0: its
+ * input's). False when memory runs out. */
+static bool keep_fields(Stream *st, const unsigned char *fields, size_t size) {
+    unsigned char *kept = fields && size ? malloc(size) : NULL;
+    if (fields && size && !kept) return false;
+    if (kept) memcpy(kept, fields, size);
+    free(st->fields);
+    st->fields = kept, st->fields_size = kept ? size : 0;
+    return true;
+}
+
 /* The stream of a peer's source to input, made the first time: NULL when it
- * is refused (why: the source is not allowed from the peer, or the host has
- * no input that takes such messages), or memory runs out (why 0). */
+ * is refused (why: the source is not allowed from the peer, the host has no
+ * input that takes such messages, one of another shape unless it takes the
+ * fields named, which come with FIELDS), or memory runs out (why 0). A
+ * stream the sender now sends in another shape (it started again with
+ * another module) starts over with what it holds let go: the sender sends
+ * those again, laid out anew. */
 static Stream *stream_of(PureLinkReceiver *s, Active *a, const char *source, const char *input, uint32_t shape,
-                         unsigned *why) {
+                         const unsigned char *fields, size_t fields_size, unsigned *why) {
     *why = 0;
-    for (unsigned k = 0; k < a->stream_count; ++k) {
-        Stream *st = a->streams[k];
-        if (strcmp(st->input_name, input) || strcmp(st->source, source)) continue;
-        if (st->shape != shape) *why = PURE_LINK_OTHER_SHAPE;
-        return *why ? NULL : st;
-    }
-    int index = allowed(s, &s->peers[a->peer], source) ? s->host.input(s->host.context, input, shape)
-                                                       : -PURE_LINK_NOT_ALLOWED;
+    Stream *st = NULL;
+    for (unsigned k = 0; k < a->stream_count && !st; ++k)
+        if (!strcmp(a->streams[k]->input_name, input) && !strcmp(a->streams[k]->source, source)) st = a->streams[k];
+    if (st && st->shape == shape) return st;
+    int index = !allowed(s, &s->peers[a->peer], source) ? -PURE_LINK_NOT_ALLOWED :
+                s->host.input(s->host.context, input, shape, fields, fields ? fields_size : 0);
     if (index < 0) {
-        *why = index == -PURE_LINK_OTHER_SHAPE || index == -PURE_LINK_NOT_ALLOWED ? (unsigned)-index : PURE_LINK_NO_INPUT;
+        *why = index == -PURE_LINK_OTHER_SHAPE || index == -PURE_LINK_NOT_ALLOWED || index == -PURE_LINK_FIELDS_LACKED
+                   ? (unsigned)-index : PURE_LINK_NO_INPUT;
         return NULL;
     }
+    if (st) { /* another shape now */
+        if (st->out) { *why = PURE_LINK_OTHER_SHAPE; return NULL; } /* its last delivery first */
+        if (!keep_fields(st, fields, fields_size)) return NULL;
+        while (st->held_count) drop_first(st);
+        st->line_head = st->line_size = 0;
+        st->line_count = 0;
+        st->tail = st->known = false;
+        st->input = (uint32_t)index;
+        st->shape = shape;
+        return st;
+    }
     size_t capacity = a->stream_capacity;
-    Stream **streams = room(a->streams, &capacity, a->stream_count, sizeof(*streams), 2), *st;
+    Stream **streams = room(a->streams, &capacity, a->stream_count, sizeof(*streams), 2);
     if (!streams) return NULL;
     a->streams = streams;
     a->stream_capacity = (unsigned)capacity;
     if (!(st = calloc(1, sizeof(*st)))) return NULL;
+    if (!keep_fields(st, fields, fields_size)) { free(st); return NULL; }
     st->active = a;
     st->input = (uint32_t)index;
     st->shape = shape;
@@ -2023,7 +2084,8 @@ static bool hand_over(PureLinkReceiver *s, Stream *st) {
         size_t bytes = st->line_size - st->line_head; /* the whole line, when it is a batch or less */
         if (n > BATCH)
             for (n = 0, bytes = 0; n < BATCH; ++n) bytes += 4 + (size_t)get32(st->line + st->line_head + bytes);
-        PureLinkDelivery d = {st->input, st->source, st->line_first, n, st->line + st->line_head, bytes, st};
+        PureLinkDelivery d = {st->input, st->source, st->line_first, n, st->line + st->line_head, bytes, st,
+                              st->fields, st->fields_size};
         if (!s->host.deliver(s->host.context, &d)) return false;
         st->out = true;
         st->out_count = n, st->out_bytes = bytes;
@@ -2052,7 +2114,8 @@ static bool hand_over(PureLinkReceiver *s, Stream *st) {
         memcpy(s->batch + at + 4, held_at(st, k)->bytes, held_at(st, k)->size);
         at += 4 + held_at(st, k)->size;
     }
-    PureLinkDelivery d = {st->input, st->source, held_at(st, first)->seq, (unsigned)n, s->batch, bytes, st};
+    PureLinkDelivery d = {st->input, st->source, held_at(st, first)->seq, (unsigned)n, s->batch, bytes, st,
+                          st->fields, st->fields_size};
     if (!s->host.deliver(s->host.context, &d)) return false;
     st->out = true;
     ++s->counts.deliveries;
@@ -2215,8 +2278,10 @@ static void lost(PureLinkReceiver *s, const Peer *peer, const Active *a, uint64_
  * to its run: once a turn. */
 static void refuse(PureLinkReceiver *s, Run *r, const unsigned char *names, size_t size, unsigned why) {
     for (size_t k = 0; k < s->refusal_count; ++k)
-        if (s->refusals[k].run == r && s->refusals[k].size == size + 2 && !memcmp(s->refusals[k].frame + 1, names, size))
+        if (s->refusals[k].run == r && s->refusals[k].size == size + 2 && !memcmp(s->refusals[k].frame + 1, names, size)) {
+            s->refusals[k].frame[1 + size] = (unsigned char)why; /* said once, as last judged (named fields, say) */
             return;
+        }
     void *more = room(s->refusals, &s->refusal_capacity, s->refusal_count, sizeof(*s->refusals), 4);
     if (!more) return;
     s->refusals = more;
@@ -2318,6 +2383,10 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
     Stream *st = NULL;
     bool eliciting = false, records = false;
     const unsigned char *offer = NULL; /* taken after the frames: whether records came with it */
+    /* A stream of another shape: refused at the end unless this packet's
+     * FIELDS names fields its input takes. */
+    const unsigned char *other = NULL;
+    size_t other_names = 0;
     for (size_t at = 0; at < size;) {
         unsigned type = plain[at++];
         if (type == F_STREAM) {
@@ -2325,13 +2394,35 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
             size_t names = get_names(plain + at, size - at, source, input);
             if (!names || at + names + 4 > size) break;
             unsigned why;
-            st = stream_of(s, a, source, input, get32(plain + at + names), &why);
+            st = stream_of(s, a, source, input, get32(plain + at + names), NULL, 0, &why);
             if (st) {
                 st->run = r;
                 st->run_id = r->run;
-            } else if (why)
+            } else if (why == PURE_LINK_OTHER_SHAPE)
+                other = plain + at, other_names = names;
+            else if (why)
                 refuse(s, r, plain + at, names, why);
             at += names + 4;
+            eliciting = true;
+        } else if (type == F_FIELDS) {
+            char source[PURE_LINK_NAME + 1], input[PURE_LINK_NAME + 1];
+            size_t names = get_names(plain + at, size - at, source, input), length = 1;
+            if (!names || at + names + 5 > size) break;
+            const unsigned char *fields = plain + at + names + 4;
+            for (unsigned f = 0; f < fields[0] && length != SIZE_MAX; ++f) /* each {type, name length, name} */
+                length = at + names + 4 + length + 2 <= size ? length + 2 + fields[length + 1] : SIZE_MAX;
+            if (length == SIZE_MAX || at + names + 4 + length > size) break;
+            if (other && names == other_names && !memcmp(plain + at, other, names + 4)) {
+                unsigned why;
+                st = stream_of(s, a, source, input, get32(plain + at + names), fields, length, &why);
+                if (st) {
+                    st->run = r;
+                    st->run_id = r->run;
+                } else if (why)
+                    refuse(s, r, other, other_names, why);
+                other = NULL;
+            }
+            at += names + 4 + length;
             eliciting = true;
         } else if (type == F_RECORD) {
             if (at + RECORD_HEAD - 1 > size) break;
@@ -2384,6 +2475,7 @@ static bool take_from(PureLinkReceiver *s, Peer *peer, const unsigned char *pack
         } else
             break; /* padding, or what this side does not know: the rest */
     }
+    if (other) refuse(s, r, other, other_names, PURE_LINK_OTHER_SHAPE); /* its fields not named */
     if (offer) offer_taken(s, a, r, get32(offer), offer + 4, e, !records, now);
     if (eliciting) {
         r->ack_due = true;

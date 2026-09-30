@@ -1339,9 +1339,9 @@ UPGRADED_RECEIVER = """state orders = 0
 state noted = 0
 state stock = 0
 input order = message {
-  note: text
   item: text
   count: u32
+  note: text
 }
 on order {
   orders = orders + 1
@@ -1360,8 +1360,9 @@ def server_upgrade(aup, pure, work):
     to.city}; started again with ordered {note, item, count} it recasts them
     by name (note empty, to.city gone) where it was refused before (review
     004's F3), and a module without the output is refused naming it. The old
-    receiver refuses the new shape, so the sends wait; the upgraded receiver
-    takes all eight, once each."""
+    receiver lacks note, so it refuses them (it would drop the field) and
+    they wait; the upgraded receiver, its fields in another order, takes all
+    eight by name, once each."""
     import select
     import socket
     import time
@@ -1438,6 +1439,191 @@ def server_upgrade(aup, pure, work):
             stats[name] = stop(process)
     assert stats['a']['link_refused'] >= 1, stats['a']
     return {'recast_waiting': 5, 'delivered': 8, 'refused_while_old': stats['a']['link_refused']}
+
+
+FIELDS_SENDER = """input buy = message {
+  item: text
+  count: u32
+}
+output swapped = message {
+  count: u32
+  item: text
+}
+output plain = message {
+  item: text
+  count: u32
+}
+output noted = message {
+  item: text
+  count: u32
+  note: text
+}
+output over_http = message {
+  item: text
+  count: u32
+}
+output noted_http = message {
+  item: text
+  count: u32
+  note: text
+}
+on buy {
+  send swapped { count: buy.count, item: buy.item }
+  send plain { item: buy.item, count: buy.count }
+  send noted { item: buy.item, count: buy.count, note: "kept" }
+  send over_http { item: buy.item, count: buy.count }
+  send noted_http { item: buy.item, count: buy.count, note: "kept" }
+}
+"""
+
+
+def fields_receiver(narrow_notes):
+    """Inputs for FIELDS_SENDER's outputs; narrow ones lack note unless narrow_notes."""
+    note = '  note: text\n' if narrow_notes else ''
+    kept = lambda name: f'  if {name}.note == "kept" {{ {name}_kept = {name}_kept + 1 }}\n' if narrow_notes else ''
+    return (f"""state swapped_n = 0
+state swapped_total = 0
+state wider_n = 0
+state wider_blank = 0
+state narrow_n = 0
+state narrow_kept = 0
+state wider_http_n = 0
+state wider_http_blank = 0
+state narrow_http_n = 0
+state narrow_http_kept = 0
+input swapped_in = message {{
+  item: text
+  count: u32
+}}
+input wider = message {{
+  note: text
+  item: text
+  count: u32
+}}
+input narrow = message {{
+  item: text
+  count: u32
+{note}}}
+input wider_http = message {{
+  item: text
+  count: u32
+  note: text
+}}
+input narrow_http = message {{
+  item: text
+  count: u32
+{note}}}
+on swapped_in {{
+  swapped_n = swapped_n + 1
+  swapped_total = swapped_total + swapped_in.count
+}}
+on wider {{
+  wider_n = wider_n + 1
+  if wider.note == "" {{ wider_blank = wider_blank + 1 }}
+}}
+on narrow {{
+  narrow_n = narrow_n + 1
+{kept('narrow')}}}
+on wider_http {{
+  wider_http_n = wider_http_n + 1
+  if wider_http.note == "" {{ wider_http_blank = wider_http_blank + 1 }}
+}}
+on narrow_http {{
+  narrow_http_n = narrow_http_n + 1
+{kept('narrow_http')}}}
+view counts = "{{swapped_n}} {{swapped_total}} {{wider_n}} {{wider_blank}} {{narrow_n}} {{narrow_kept}} {{wider_http_n}} {{wider_http_blank}} {{narrow_http_n}} {{narrow_http_kept}}"
+""")
+
+
+def server_fields(aup, pure, work):
+    """Deliveries take their fields by name (docs/design/014-fields-by-name.md).
+    A sender's five outputs, three linked and two over HTTP, to one receiver:
+    fields in another order are taken; an input with a field more takes
+    messages without it (empty); an input lacking a field the output sends
+    refuses it, over the link (REFUSED, fields lacked) and over HTTP
+    (json_field), so nothing is dropped, and once the receiver starts again
+    with the field, every waiting message comes, the field kept."""
+    import select
+    import socket
+    import time
+    modules = {}
+    for name, text in (('sender', FIELDS_SENDER), ('receiver-1', fields_receiver(False)),
+                       ('receiver-2', fields_receiver(True))):
+        source = work / f'fields-{name}.aup'
+        source.write_text(text)
+        compile_module(aup, source, source.with_suffix('.pmod'))
+        modules[name] = source.with_suffix('.pmod')
+
+    def free_port(kind=socket.SOCK_STREAM):
+        with socket.socket(socket.AF_INET, kind) as probe:
+            probe.bind(('127.0.0.1', 0))
+            return probe.getsockname()[1]
+
+    def start(args, port):
+        process = subprocess.Popen([str(a) for a in args] + ['--port', str(port)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        line = process.stdout.readline() if ready else b''
+        assert line, f'host did not start: {process.stderr.read(2000) if process.poll() is not None else ""}'
+        return process, json.loads(line)
+
+    def stop(process):
+        process.terminate()
+        _, error = process.communicate(timeout=30)
+        assert process.returncode == 0, error[-1000:]
+        return error.decode()
+
+    def counts(port):
+        return [int(n) for n in http(port, 'GET', '/views/counts')[3].split()]
+
+    keys = {}
+    for name in ('sender', 'receiver'):
+        process, info = start([pure / 'build/pure-serve', '--module', modules['receiver-1'], '--store',
+                               work / 'fields-key', '--key', work / f'fields-{name}.key'], 0)
+        keys[name] = info['public_key']
+        stop(process)
+    port_a, port_b, link_port = free_port(), free_port(), free_port(socket.SOCK_DGRAM)
+    links = {'swapped': 'swapped_in', 'plain': 'wider', 'noted': 'narrow'}
+    sending = [pure / 'build/pure-serve', '--module', modules['sender'], '--store', work / 'fields-a', '--key',
+               work / 'fields-sender.key', '--name', 'up',
+               '--send', f'over_http=http://127.0.0.1:{port_b}/inputs/wider_http',
+               '--send', f'noted_http=http://127.0.0.1:{port_b}/inputs/narrow_http',
+               '--seal', f'over_http={keys["receiver"]}', '--seal', f'noted_http={keys["receiver"]}']
+    for output, input_name in links.items():
+        sending += ['--send', f'{output}=pure://127.0.0.1:{link_port}/{input_name}', '--seal', f'{output}={keys["receiver"]}']
+
+    def receiving(module):
+        args = [pure / 'build/pure-serve', '--module', modules[module], '--store', work / 'fields-b', '--key',
+                work / 'fields-receiver.key', '--link-port', link_port]
+        for output in (*links, 'over_http', 'noted_http'):
+            args += ['--sender', f'up.{output}={keys["sender"]}']
+        return args
+
+    running, said = {}, ''
+    try:
+        running['b'] = start(receiving('receiver-1'), port_b)[0]
+        running['a'] = start(sending, port_a)[0]
+        for i in range(3):
+            assert post(port_a, '/inputs/buy', {'item': f'i{i}', 'count': i + 1})[0] == 200
+        deadline = time.time() + 20
+        while counts(port_b)[:4] + counts(port_b)[6:8] != [3, 6, 3, 3, 3, 3] and time.time() < deadline:
+            time.sleep(0.05)
+        got = counts(port_b)
+        assert got == [3, 6, 3, 3, 0, 0, 3, 3, 0, 0], got  # the narrow inputs took none: nothing is dropped
+        time.sleep(1.5)  # the refused link tried with its fields named: the sender has said why
+        stop(running.pop('b'))
+        running['b'] = start(receiving('receiver-2'), port_b)[0]
+        deadline = time.time() + 30
+        while counts(port_b)[4:6] + counts(port_b)[8:] != [3, 3, 3, 3] and time.time() < deadline:
+            time.sleep(0.1)
+        got = counts(port_b)
+        assert got == [3, 6, 3, 3, 3, 3, 3, 3, 3, 3], got
+    finally:
+        for name, process in running.items():
+            text = stop(process)
+            said += text if name == 'a' else ''
+    assert 'its input lacks fields this output sends' in said, said[-2000:]
+    return {'links': 3, 'wires': 2, 'waited_then_taken': 6}
 
 def server_links_independent(aup, pure, work):
     """A receiver written from docs/design/012-link-protocol.md alone, in
@@ -3146,6 +3332,7 @@ def main():
         report['server_memory'] = server_memory(aup, pure, work)
         report['server_windows'] = server_windows(aup, pure, work)
         report['server_upgrade'] = server_upgrade(aup, pure, work)
+        report['server_fields'] = server_fields(aup, pure, work)
         report['server_links_independent'] = server_links_independent(aup, pure, work)
         report['server_links_moved'] = server_links_moved(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)

@@ -102,6 +102,8 @@ typedef struct {
      * handed records meanwhile, and how long after it had room again. */
     uint64_t full_at, full_ms, full_until, full_tries, full_late;
     bool later_open;     /* the app has an input "later" (as "order") */
+    bool takes;          /* its input takes the fields a sender of another shape names (NAMED) */
+    uint64_t named_deliveries; /* deliveries that came with those fields */
 } World;
 
 static void put_packet(World *w, bool to_receiver, const unsigned char *bytes, size_t size) {
@@ -146,10 +148,15 @@ static bool answer(void *context, const unsigned char *packet, size_t size, cons
     return true;
 }
 
-static int input_of(void *context, const char *name, uint32_t shape) {
+/* The fields a sender of another shape (0x5eee) names; opaque to the link. */
+static const unsigned char NAMED[] = {2, 4, 4, 'i', 't', 'e', 'm', 1, 5, 'c', 'o', 'u', 'n', 't'};
+
+static int input_of(void *context, const char *name, uint32_t shape, const unsigned char *fields, size_t size) {
     const World *w = context;
     if (strcmp(name, "order") && !(w && w->later_open && !strcmp(name, "later"))) return -PURE_LINK_NO_INPUT;
-    return shape == 0x5eed ? 3 : -PURE_LINK_OTHER_SHAPE;
+    if (shape == 0x5eed) return 3;
+    if (!fields) return -PURE_LINK_OTHER_SHAPE;
+    return w && w->takes && size == sizeof(NAMED) && !memcmp(fields, NAMED, size) ? 3 : -PURE_LINK_FIELDS_LACKED;
 }
 
 /* Applied from the one after the last heard, in order; a gap stops it. */
@@ -158,6 +165,7 @@ static bool deliver(void *context, const PureLinkDelivery *d) {
     CHECK(d->input == 3 && !strcmp(d->source, "test.ordered"), "a delivery to input %u from %s", d->input, d->source);
     if (w->done_count == sizeof(w->done) / sizeof(w->done[0])) return false; /* busy: tried again */
     ++w->deliveries;
+    w->named_deliveries += d->fields && d->fields_size == sizeof(NAMED) && !memcmp(d->fields, NAMED, sizeof(NAMED));
     if (w->full_ms && !w->full_until && w->heard >= w->full_at) w->full_until = w->now + w->full_ms * MS;
     if (w->now < w->full_until) {
         ++w->full_tries;
@@ -682,8 +690,8 @@ typedef struct {
     PureLinkDone done[64];
     size_t done_count;
 } Outputs;
-static int output_input(void *context, const char *name, uint32_t shape) {
-    (void)context;
+static int output_input(void *context, const char *name, uint32_t shape, const unsigned char *fields, size_t size) {
+    (void)context, (void)fields, (void)size;
     return shape != 0x5eed ? -1 : !strcmp(name, "one") ? 0 : !strcmp(name, "two") ? 1 : !strcmp(name, "three") ? 2 : -1;
 }
 static bool output_deliver(void *context, const PureLinkDelivery *d) {
@@ -958,6 +966,73 @@ static void refused_restarted(const char *dir) {
     free(w.packets);
 }
 
+/* A stream of another shape whose sender names its fields (FIELDS): the
+ * receiver's input takes them by name and every record is stored, each
+ * delivery naming them for the host to lay the records out anew; an input
+ * that does not take them refuses the stream (it would drop fields), and the
+ * sender tries a packet a wait as for any refusal. One that names none stays
+ * refused for another shape (refusals, above). */
+static void named(const char *dir) {
+    for (int takes = 1; takes >= 0; --takes) {
+        unsigned char public_a[PURE_SEAL_KEY], public_b[PURE_SEAL_KEY], out[PURE_LINK_DATAGRAM_MOST];
+        PureSealKey *a = key(dir, "a.key", public_a), *b = key(dir, "b.key", public_b);
+        char memo[512];
+        snprintf(memo, sizeof(memo), "%s/b.key.links", dir);
+        unlink(memo);
+        World w = {.packets = malloc(PACKETS * sizeof(Packet)), .takes = takes};
+        if (!w.packets) exit(1);
+        PureLinkReceiver *r = receiver_of(&w, b, public_b, public_a, memo, 120000);
+        PureLinkSender *s = pure_link_sender("test.ordered", "order", 0x5eee, a, public_a);
+        if (!s || !pure_link_sender_peer(s, public_b) || !pure_link_sender_fields(s, NAMED, sizeof(NAMED))) exit(1);
+        static unsigned char bytes[20200];
+        for (uint64_t seq = 1; seq <= 200; ++seq) {
+            size_t size = record_size(seq);
+            for (size_t k = 0; k < size; ++k) bytes[k] = record_byte(seq, k);
+            if (!pure_link_sender_queue(s, seq, bytes, size)) exit(1);
+        }
+        uint64_t number, packets = 0, stored_at = 0;
+        for (; w.now < 30000 * MS; w.now += MS) {
+            for (size_t size; (size = pure_link_sender_packet(s, out, false, w.now, &number)); ++packets)
+                pure_link_receiver_take(r, out, size, "sender0", 7, w.now);
+            size_t told = w.done_count;
+            memcpy(w.told, w.done, told * sizeof(*w.done));
+            w.done_count = 0;
+            pure_link_receiver_turn(r, w.told, told, w.now, answer, &w);
+            for (size_t k = 0; k < w.count;) {
+                if (w.packets[k].at > w.now) {
+                    ++k;
+                    continue;
+                }
+                pure_link_sender_take(s, w.packets[k].bytes, w.packets[k].size, w.now);
+                w.packets[k] = w.packets[--w.count];
+            }
+            pure_link_sender_tick(s, w.now);
+            if (!stored_at && pure_link_sender_stored(s) == 200) stored_at = w.now;
+        }
+        PureLinkCounts c;
+        pure_link_sender_counts(s, &c);
+        unsigned why = pure_link_sender_refusal(s);
+        printf("{\"case\":\"named\",\"takes\":%d,\"why\":%u,\"refused\":%llu,\"packets\":%llu,\"stored\":%llu,"
+               "\"stored_ms\":%llu,\"named_deliveries\":%llu}\n", takes, why, (unsigned long long)c.refused,
+               (unsigned long long)packets, (unsigned long long)pure_link_sender_stored(s),
+               (unsigned long long)(stored_at / MS), (unsigned long long)w.named_deliveries);
+        if (takes)
+            CHECK(!why && c.refused == 1 && stored_at && stored_at < 1000 * MS && w.heard == 200 &&
+                      w.named_deliveries == w.deliveries,
+                  "named and taken: why %u, refused %llu, stored at %llu ms, %llu of %llu deliveries named", why,
+                  (unsigned long long)c.refused, (unsigned long long)(stored_at / MS),
+                  (unsigned long long)w.named_deliveries, (unsigned long long)w.deliveries);
+        else /* refused at once, named at once, then at 1, 3, 7 and 15 s */
+            CHECK(why == PURE_LINK_FIELDS_LACKED && c.refused == 6 && !pure_link_sender_stored(s) && packets <= 20,
+                  "named and not taken: why %u, refused %llu, %llu packets", why, (unsigned long long)c.refused,
+                  (unsigned long long)packets);
+        pure_link_sender_free(s);
+        pure_link_receiver_free(r);
+        pure_seal_key_free(a), pure_seal_key_free(b);
+        free(w.packets);
+    }
+}
+
 /* The largest send (PURE_LINK_RECORD_MOST) goes whole, over a receiver that
  * never heard of the stream before; one byte more is not taken to send. */
 typedef struct { World *w; PureLinkSender *s; } Largest;
@@ -1089,6 +1164,7 @@ int main(void) {
     outputs(dir);
     refusals(dir);
     refused_restarted(dir);
+    named(dir);
     largest(dir);
     char command[600];
     snprintf(command, sizeof(command), "rm -rf %s", dir);

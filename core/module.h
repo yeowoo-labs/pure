@@ -217,8 +217,24 @@ int pure_module_view(const PureModule *, const char *name);
 int pure_module_column(const PureModule *, uint32_t table, const char *name);
 /* What a message of an input looks like, as 32 bits: its fields' names,
  * types and places (FNV-1a). A sender's output and the input it sends to
- * across nodes must agree on it (link/link.h). */
+ * across nodes agree on it, or the input takes the output's fields by name
+ * (link/link.h, docs/design/014-fields-by-name.md). */
 uint32_t pure_module_shape(const PureModule *, uint32_t input);
+/* An input's (or output's) fields as a sender names them to a receiver: u8
+ * count, each field's {u8 type, u8 name length, name}. Its size (at most
+ * PURE_FIELDS_NAMED), written to out. */
+enum { PURE_FIELDS_NAMED = 1 + PURE_MODULE_FIELDS * (2 + PURE_MODULE_NAME) };
+size_t pure_module_fields(const PureModule *, uint32_t input, unsigned char out[PURE_FIELDS_NAMED]);
+/* Whether input takes messages laid out with the fields named (as
+ * pure_module_fields names them): it has every one by name, of the same type
+ * or one that holds all its values (a u32 in a number, text in bytes). A
+ * field it has that they lack is 0 or empty; none of theirs is dropped. */
+bool pure_module_takes(const PureModule *, uint32_t input, const unsigned char *fields, size_t size);
+/* A payload laid out with the fields named, laid out anew for input by
+ * name (pure_module_takes says it can be; out is malloc'd). STORE_ERROR
+ * when payload is not laid out with them. */
+PureResult pure_module_recast(const PureModule *, uint32_t input, const unsigned char *fields, size_t size,
+                              PureSpan payload, unsigned char **out, size_t *out_size);
 /* The index state a number view shows as its position (a view that is just
  * `at.position`), or -1: what a host moves with pure_app_point. */
 int pure_module_position(const PureModule *, uint32_t view);
