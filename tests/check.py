@@ -3306,6 +3306,7 @@ MEANING_KEPT = """record Kept {
   x = 0
   label: text
   ok = false
+  big: i64
 }
 state kept: list of Kept by id
 """
@@ -3317,6 +3318,7 @@ MEANING_ROWS = """view rows = each k in kept {
   x = k.x
   label = k.label
   ok = k.ok
+  big = k.big
 }
 """
 # A: what comes in (a JSON body, its rows, or a query and a plain body) is kept, and sent on; a put is answered
@@ -3327,6 +3329,7 @@ MEANING_ORIGIN = MEANING_KEPT + """record Part {
   u = 0
   t: text
   ok = false
+  big: i64
 }
 input put = message {
   id: u32
@@ -3334,6 +3337,7 @@ input put = message {
   u: u32
   t: text
   ok: bool
+  big: i64
   at: {
     x: number
     label: text
@@ -3345,6 +3349,7 @@ input put_plain = message {
   u: u32
   t: text
   ok: bool
+  big: i64
 }
 input put_rows = message {
   parts: list of Part
@@ -3355,28 +3360,35 @@ input touch = message {
 }
 output passed = message like put
 on put {
-  kept.add(Kept { id: put.id, n: put.n, u: put.u, t: put.t, x: put.at.x, label: put.at.label, ok: put.ok })
+  kept.add(Kept { id: put.id, n: put.n, u: put.u, t: put.t, x: put.at.x, label: put.at.label, ok: put.ok, big: put.big })
   send passed { ..put }
   reply put.t
 }
 on put_rows {
   for p in put_rows.parts {
-    kept.add(Kept { id: p.id, n: p.n, u: p.u, t: p.t, x: 0, label: "rows", ok: p.ok })
-    send passed { id: p.id, n: p.n, u: p.u, t: p.t, ok: p.ok, at: { x: 0, label: "rows" } }
+    kept.add(Kept { id: p.id, n: p.n, u: p.u, t: p.t, x: 0, label: "rows", ok: p.ok, big: p.big })
+    send passed { id: p.id, n: p.n, u: p.u, t: p.t, ok: p.ok, big: p.big, at: { x: 0, label: "rows" } }
   }
 }
 on put_plain {
-  kept.add(Kept { id: put_plain.id, n: put_plain.n, u: put_plain.u, t: put_plain.t, x: 0, label: "", ok: put_plain.ok })
-  send passed { id: put_plain.id, n: put_plain.n, u: put_plain.u, t: put_plain.t, ok: put_plain.ok, at: { x: 0, label: "" } }
+  kept.add(Kept { id: put_plain.id, n: put_plain.n, u: put_plain.u, t: put_plain.t, x: 0, label: "", ok: put_plain.ok,
+                  big: put_plain.big })
+  send passed { id: put_plain.id, n: put_plain.n, u: put_plain.u, t: put_plain.t, ok: put_plain.ok, big: put_plain.big,
+                at: { x: 0, label: "" } }
 }
 on touch {
   kept[touch.id].t = touch.t
 }
 view any_ok = count(k in kept where k.ok) > 0
 view with_ok(want: bool) = count(k in kept where k.ok == want)
+view biggest = max(k.big for k in kept)
+view smallest = min(k.big for k in kept)
+view with_big(want: i64) = count(k in kept where k.big == want)
 """ + MEANING_ROWS
-# B: A's sends over the link, taken by name (fields in another order, u a number), kept and sent on over HTTP.
+# B: A's sends over the link, taken by name (fields in another order, u a number, id an i64), kept and sent on over
+# HTTP.
 MEANING_MIRROR = MEANING_KEPT + """input passed = message {
+  big: i64
   ok: bool
   at: {
     label: text
@@ -3385,12 +3397,12 @@ MEANING_MIRROR = MEANING_KEPT + """input passed = message {
   t: text
   u: number
   n: number
-  id: u32
+  id: i64
 }
 output onward = message like passed
 on passed {
-  kept.add(Kept { id: passed.id, n: passed.n, u: passed.u, t: passed.t, x: passed.at.x, label: passed.at.label,
-                  ok: passed.ok })
+  kept.add(Kept { id: number(passed.id), n: passed.n, u: passed.u, t: passed.t, x: passed.at.x, label: passed.at.label,
+                  ok: passed.ok, big: passed.big })
   send onward { ..passed }
 }
 """ + MEANING_ROWS
@@ -3405,10 +3417,11 @@ MEANING_END = MEANING_KEPT + """input onward = message {
     label: text
   }
   ok: bool
+  big: i64
 }
 on onward {
   kept.add(Kept { id: onward.id, n: onward.n, u: onward.u, t: onward.t, x: onward.at.x, label: onward.at.label,
-                  ok: onward.ok })
+                  ok: onward.ok, big: onward.big })
 }
 """ + MEANING_ROWS
 # The value set: every number a JSON reader must round correctly, u32s to its ends, texts JSON escapes and UTF-8.
@@ -3417,6 +3430,8 @@ MEANING_NUMBERS = ['0', '-0', '1', '-1', '0.1', '0.3333333333333333', '900719925
                    '1.7976931348623157e308', '1.7976931348623158e308', '2.2250738585072014e-308',
                    '2.2250738585072011e-308', '5e-324', '2.4703282292062328e-324', '1E+2', '-2.5e-10']
 MEANING_U32 = [0, 1, 2147483648, 4294967295]
+MEANING_I64 = ['0', '-0', '1', '-1', '9007199254740992', '9007199254740993', '-9007199254740993', '9223372036854775807',
+               '-9223372036854775808', '9223372036854775806', '-9223372036854775807', '4294967296', '1234567890123456789']
 MEANING_TEXTS = ['', 'a', '한글 텍스트', 'emoji 🎉 and 𝄞', 'quote " backslash \\ slash /', 'line\nfeed\ttab\rreturn',
                  'control \x01\x1f\x7f', 'nul \x00 inside', 'separator \u2028 and \u2029', '\ufeffbom',
                  '\uffff not a character', 'x' * 4096]
@@ -3426,13 +3441,13 @@ def server_meaning(aup, pure, work):
     """One value, every path (docs/research/108): values at the edges of what
     JSON, a query and a plain body can say come in to A; A keeps them and sends
     them over a link to B, which takes them by name (fields in another order,
-    u widened to a number) and sends them over HTTP to C. Each value must come
-    out the same at every exit: A's view, a query on A, B's and C's views, A
-    after a restart and after a checkpoint, B after its module was replaced.
-    A number keeps its bits (zero has no sign: -0 shows as 0 and counts as 0),
-    a text its bytes, a bool is true or false (never 1 or 0). What must be
-    refused is refused on every way in, and leaves nothing behind (no row, no
-    send)."""
+    u widened to a number, id to an i64) and sends them over HTTP to C. Each
+    value must come out the same at every exit: A's view, a query on A, B's
+    and C's views, A after a restart and after a checkpoint, B after its
+    module was replaced. A number keeps its bits (zero has no sign: -0 shows
+    as 0 and counts as 0), a text its bytes, a bool is true or false (never 1
+    or 0), an i64 every digit (past 2^53, to its ends). What must be refused
+    is refused on every way in, and leaves nothing behind (no row, no send)."""
     import socket
     import struct
     import time
@@ -3440,8 +3455,8 @@ def server_meaning(aup, pure, work):
     from urllib.parse import quote
     modules = {}
     for name, text in (('origin', MEANING_ORIGIN), ('mirror', MEANING_MIRROR), ('end', MEANING_END),
-                       ('mirror-2', MEANING_MIRROR.replace('  id = 0\n  n = 0\n  u = 0\n  t: text\n  x = 0\n  label: text\n  ok = false\n',
-                                                           '  ok = false\n  label: text\n  x = 0\n  t: text\n  u = 0\n  n = 0\n  id = 0\n'))):
+                       ('mirror-2', MEANING_MIRROR.replace('  id = 0\n  n = 0\n  u = 0\n  t: text\n  x = 0\n  label: text\n  ok = false\n  big: i64\n',
+                                                           '  big: i64\n  ok = false\n  label: text\n  x = 0\n  t: text\n  u = 0\n  n = 0\n  id = 0\n'))):
         source = work / f'meaning-{name}.aup'
         source.write_text(text)
         compile_module(aup, source, source.with_suffix('.pmod'))
@@ -3498,10 +3513,11 @@ def server_meaning(aup, pure, work):
         return float(shown) == want == 0 or struct.pack('<d', float(shown)) == struct.pack('<d', want)
 
     def differing(found, expected):
-        wrong = [(key, found.get(key)) for key, (n, u, t, x, label, ok) in expected.items()
+        wrong = [(key, found.get(key)) for key, (n, u, t, x, label, ok, big) in expected.items()
                  if key not in found or not (same(found[key]['n'], n) and float(found[key]['u']) == u and
                                              found[key]['t'] == t and same(found[key]['x'], x) and found[key]['label'] == label
-                                             and found[key]['ok'] is ok)]
+                                             and found[key]['ok'] is ok and type(found[key]['big']) is int
+                                             and found[key]['big'] == big)]
         return wrong + [(key, 'not sent') for key in set(found) - set(expected)]
 
     hosts, expected, refused = {}, {}, 0
@@ -3515,28 +3531,29 @@ def server_meaning(aup, pure, work):
         for i, n in enumerate(MEANING_NUMBERS):
             u, t = MEANING_U32[i % len(MEANING_U32)], MEANING_TEXTS[i % len(MEANING_TEXTS)]
             x, label = MEANING_NUMBERS[(i + 5) % count], MEANING_TEXTS[(i + 3) % len(MEANING_TEXTS)]
-            ascii_only, ok = i % 2 == 0, i % 3 != 0
-            body = '{"id": %d, "n": %s, "u": %d, "t": %s, "ok": %s, "at": {"x": %s, "label": %s}}' % (
-                i + 1, n, u, json.dumps(t, ensure_ascii=ascii_only), json.dumps(ok), x, json.dumps(label, ensure_ascii=ascii_only))
+            ascii_only, ok, big = i % 2 == 0, i % 3 != 0, MEANING_I64[i % len(MEANING_I64)]
+            body = '{"id": %d, "n": %s, "u": %d, "t": %s, "ok": %s, "big": %s, "at": {"x": %s, "label": %s}}' % (
+                i + 1, n, u, json.dumps(t, ensure_ascii=ascii_only), json.dumps(ok), big, x,
+                json.dumps(label, ensure_ascii=ascii_only))
             assert send(a, '/inputs/put', body.encode(), 'application/json', t.encode()) == 200, body[:200]
-            expected[i + 1] = (float(n), u, t, float(x), label, ok)
+            expected[i + 1] = (float(n), u, t, float(x), label, ok, int(big))
         # In as rows of one message: a JSON array, placed as its list's stored form.
-        parts = [(501 + i, n, MEANING_U32[(i + 2) % len(MEANING_U32)], MEANING_TEXTS[(i + 4) % len(MEANING_TEXTS)], i % 2 == 0)
-                 for i, n in enumerate(MEANING_NUMBERS)]
-        body = '{"parts": [%s]}' % ', '.join('{"id": %d, "n": %s, "u": %d, "t": %s, "ok": %s}' % (key, n, u, json.dumps(t),
-                                                                                                 json.dumps(ok))
-                                             for key, n, u, t, ok in parts)
+        parts = [(501 + i, n, MEANING_U32[(i + 2) % len(MEANING_U32)], MEANING_TEXTS[(i + 4) % len(MEANING_TEXTS)], i % 2 == 0,
+                  MEANING_I64[(i + 4) % len(MEANING_I64)]) for i, n in enumerate(MEANING_NUMBERS)]
+        body = '{"parts": [%s]}' % ', '.join('{"id": %d, "n": %s, "u": %d, "t": %s, "ok": %s, "big": %s}' % (
+            key, n, u, json.dumps(t), json.dumps(ok), big) for key, n, u, t, ok, big in parts)
         assert send(a, '/inputs/put_rows', body.encode(), 'application/json') == 200, body[:200]
-        expected.update({key: (float(n), u, t, 0.0, 'rows', ok) for key, n, u, t, ok in parts})
+        expected.update({key: (float(n), u, t, 0.0, 'rows', ok, int(big)) for key, n, u, t, ok, big in parts})
         # In as a query (%XX where a client would write it so) and a plain body.
         for i, n in enumerate(MEANING_NUMBERS):
             u, t, ok = MEANING_U32[(i + 1) % len(MEANING_U32)], MEANING_TEXTS[(i + 2) % len(MEANING_TEXTS)], i % 2 == 1
-            assert send(a, f'/inputs/put_plain?id={101 + i}&n={quote(n, safe="")}&u={u}&ok={json.dumps(ok)}', t.encode(),
-                        'text/plain; charset=utf-8') == 200, n
-            expected[101 + i] = (float(n), u, t, 0.0, '', ok)
+            big = MEANING_I64[(i + 8) % len(MEANING_I64)]
+            assert send(a, f'/inputs/put_plain?id={101 + i}&n={quote(n, safe="")}&u={u}&ok={json.dumps(ok)}&big={big}',
+                        t.encode(), 'text/plain; charset=utf-8') == 200, n
+            expected[101 + i] = (float(n), u, t, 0.0, '', ok, int(big))
         # What must be refused: numbers past the finite, u32s out of range or not whole, texts that are no UTF-8,
-        # bools that are not true or false.
-        good = '{"id": %d, "n": %s, "u": %s, "t": %s, "ok": true, "at": {"x": 1, "label": ""}}'
+        # bools that are not true or false, i64s that are not an integer's digits in range.
+        good = '{"id": %d, "n": %s, "u": %s, "t": %s, "ok": true, "big": 1, "at": {"x": 1, "label": ""}}'
         bad_json = [good % (201, '1e999', '1', '"t"'), good % (202, '-1e999', '1', '"t"'), good % (203, 'NaN', '1', '"t"'),
                     good % (204, '00', '1', '"t"'), good % (205, '+1', '1', '"t"'), good % (206, '.5', '1', '"t"'),
                     good % (207, '1', '4294967296', '"t"'), good % (208, '1', '-1', '"t"'), good % (209, '1', '1.5', '"t"'),
@@ -3547,20 +3564,32 @@ def server_meaning(aup, pure, work):
         not_bools = [('1', 'json_type'), ('0', 'json_type'), ('"true"', 'json_type'), ('null', 'json_type'), ('[]', 'json_type'),
                      ('True', 'json')]  # no JSON at all
         for i, (bad, why) in enumerate(not_bools):
-            body = '{"id": %d, "n": 1, "u": 1, "t": "t", "ok": %s, "at": {"x": 1, "label": ""}}' % (231 + i, bad)
+            body = '{"id": %d, "n": 1, "u": 1, "t": "t", "ok": %s, "big": 1, "at": {"x": 1, "label": ""}}' % (231 + i, bad)
+            assert refused_as(a, '/inputs/put', body.encode(), 'application/json') == (400, why), body
+        not_integers = [('1.0', 'json_type'), ('1e3', 'json_type'), ('1.5', 'json_type'), ('9223372036854775808', 'json_type'),
+                        ('-9223372036854775809', 'json_type'), ('99999999999999999999', 'json_type'), ('"1"', 'json_type'),
+                        ('true', 'json_type'), ('null', 'json_type'), ('+1', 'json'), ('01', 'json'), ('-', 'json'),
+                        ('0x10', 'json')]
+        for i, (bad, why) in enumerate(not_integers):
+            body = '{"id": %d, "n": 1, "u": 1, "t": "t", "ok": true, "big": %s, "at": {"x": 1, "label": ""}}' % (241 + i, bad)
             assert refused_as(a, '/inputs/put', body.encode(), 'application/json') == (400, why), body
         no_utf8 = [b'\xff', b'\xc3', b'\xed\xa0\x80', b'\xc0\xaf', b'\xf4\x90\x80\x80']  # a surrogate, too long, past U+10FFFF
         for i, bad in enumerate(no_utf8):
-            body = b'{"id": %d, "n": 1, "u": 1, "t": "' % (215 + i) + bad + b'", "ok": true, "at": {"x": 1, "label": ""}}'
+            body = b'{"id": %d, "n": 1, "u": 1, "t": "' % (215 + i) + bad + b'", "ok": true, "big": 1, "at": {"x": 1, "label": ""}}'
             assert send(a, '/inputs/put', body, 'application/json') == 400, body
         bad_query = [('1e999', '1'), ('inf', '1'), ('nan', '1'), ('0x10', '1'), ('', '1'), ('1', '4294967296'), ('1', '-1'),
                      ('1', '1.5'), ('1', '1e3'), ('1', '%2D0'), ('1', '%201'), ('1', '%zz')]
         for i, (n, u) in enumerate(bad_query):
-            assert send(a, f'/inputs/put_plain?id={301 + i}&n={n}&u={u}&ok=true', b't', 'text/plain') == 400, (n, u)
+            assert send(a, f'/inputs/put_plain?id={301 + i}&n={n}&u={u}&ok=true&big=1', b't', 'text/plain') == 400, (n, u)
         for i, bad in enumerate(['1', '0', 'True', 'TRUE', '%74rue%20', '']):
-            assert refused_as(a, f'/inputs/put_plain?id={331 + i}&n=1&u=1&ok={bad}', b't', 'text/plain') == (400, 'query'), bad
+            assert refused_as(a, f'/inputs/put_plain?id={331 + i}&n=1&u=1&ok={bad}&big=1', b't', 'text/plain') == (400, 'query'), bad
+        bad_i64_query = ['1.0', '1e3', '+1', '%2B1', '01', '', '-', '0x10', '9223372036854775808', '-9223372036854775809',
+                         '%201', '1%20', 'true', '%31%2E0']
+        for i, bad in enumerate(bad_i64_query):
+            assert refused_as(a, f'/inputs/put_plain?id={341 + i}&n=1&u=1&ok=true&big={bad}', b't', 'text/plain') == \
+                (400, 'query'), bad
         for i, bad in enumerate(no_utf8 + [b'ok \xc3']):
-            assert send(a, f'/inputs/put_plain?id={401 + i}&n=1&u=1&ok=false', bad, 'text/plain') == 422, bad
+            assert send(a, f'/inputs/put_plain?id={401 + i}&n=1&u=1&ok=false&big=1', bad, 'text/plain') == 422, bad
         # Rows go whole or not at all: one number past the finite refuses them all; a u that a row holds (a
         # number) but a u32 cannot fails the event where it is sent, and none is kept.
         assert send(a, '/inputs/put_rows', b'{"parts": [{"id": 601, "n": 1, "u": 1, "t": "a"}, '
@@ -3569,11 +3598,15 @@ def server_meaning(aup, pure, work):
                                            b'{"id": 604, "n": 1, "u": 1.5, "t": "b"}]}', 'application/json') != 200
         assert refused_as(a, '/inputs/put_rows', b'{"parts": [{"id": 605, "ok": true}, {"id": 606, "ok": 1}]}',
                           'application/json') == (400, 'json_type')
-        refused = len(bad_json) + len(not_bools) + len(no_utf8) + len(bad_query) + 6 + len(no_utf8) + 1 + 2 + 1
+        for i, bad in enumerate(['1.5', '9223372036854775808', '"1"', '1e3', '-9223372036854775809']):
+            body = b'{"parts": [{"id": %d, "big": 1}, {"id": %d, "big": %s}]}' % (607 + 2 * i, 608 + 2 * i, bad.encode())
+            assert refused_as(a, '/inputs/put_rows', body, 'application/json') == (400, 'json_type'), bad
+        refused = len(bad_json) + len(not_bools) + len(not_integers) + len(no_utf8) + len(bad_query) + 6 + \
+            len(bad_i64_query) + len(no_utf8) + 1 + 2 + 1 + 5
         # A row to change often on A alone, until a checkpoint writes its list anew; it ends as it began.
-        assert send(a, '/inputs/put', json.dumps({'id': 900, 'n': 9, 'u': 9, 't': 'filler', 'ok': True,
+        assert send(a, '/inputs/put', json.dumps({'id': 900, 'n': 9, 'u': 9, 't': 'filler', 'ok': True, 'big': 9,
                                                   'at': {'x': 9, 'label': 'filler'}}).encode(), 'application/json') == 200
-        expected[900] = (9.0, 9, 'filler', 9.0, 'filler', True)
+        expected[900] = (9.0, 9, 'filler', 9.0, 'filler', True, 9)
         exits = {'a': rows('a')}
         deadline = time.time() + 30
         while time.time() < deadline and (len(rows('b')) < len(expected) or len(rows('c')) < len(expected)):
@@ -3612,6 +3645,14 @@ def server_meaning(aup, pure, work):
         assert http(a, 'GET', '/views/with_ok?want=false')[::3] == (200, str(len(expected) - oks).encode())
         for bad in ('1', 'True', ''):
             assert http(a, 'GET', f'/views/with_ok?want={bad}')[:2] == (400, 'invalid'), bad
+        # An i64 view is every digit; an i64 argument is an integer's digits in range, nothing else.
+        assert http(a, 'GET', '/views/biggest')[::3] == (200, b'9223372036854775807')
+        assert http(a, 'GET', '/views/smallest')[::3] == (200, b'-9223372036854775808')
+        for want in ('9007199254740993', '-9007199254740993', '-0', '9223372036854775807', '-9223372036854775808'):
+            count = sum(1 for value in expected.values() if value[6] == int(want))
+            assert count and http(a, 'GET', f'/views/with_big?want={want}')[::3] == (200, str(count).encode()), want
+        for bad in ('9007199254740993.0', '1e3', '9223372036854775808', '-9223372036854775809', '+1', '01', '', 'true'):
+            assert http(a, 'GET', f'/views/with_big?want={bad}')[:2] == (400, 'invalid'), bad
     finally:
         for host in hosts.values():
             host.stop()
