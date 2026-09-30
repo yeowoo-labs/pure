@@ -30,6 +30,7 @@
  * threads hand it their ready requests and answer what it hands back. Its
  * bursts take the requests of every thread, one save each. */
 #include "deliver.h"
+#include "wait.h"
 #include "link.h"
 #include "seal.h"
 #include "surface.h"
@@ -1989,9 +1990,7 @@ static void *run_owner(void *context) {
                 pthread_cond_wait(&owner->waiting, &owner->lock);
                 continue;
             }
-            struct timespec wake;
-            clock_gettime(CLOCK_REALTIME, &wake);
-            wake = later(wake, due * 1000000L);
+            struct timespec wake = pure_wait_until(due * 1000000LL);
             pthread_cond_timedwait(&owner->waiting, &owner->lock, &wake);
         }
         /* After a round that saved, its answers bring requests back from the
@@ -2009,7 +2008,7 @@ static void *run_owner(void *context) {
          * there gathering would only leave the owner idle). */
         uint64_t waited = owner->executor.save_waited, budget = waited < 1000000 ? waited : 1000000;
         struct timespec now, end;
-        clock_gettime(CLOCK_REALTIME, &now);
+        clock_gettime(PURE_WAIT_CLOCK, &now);
         end = later(now, (long)budget);
         while (gather && owner->count && !owner->stopping && before(now, end)) {
             size_t seen = owner->count;
@@ -2017,7 +2016,7 @@ static void *run_owner(void *context) {
             struct timespec quiet = later(now, budget < 100000 ? (long)budget : 100000);
             pthread_cond_timedwait(&owner->waiting, &owner->lock, returned && before(quiet, end) ? &quiet : &end);
             if (returned && owner->count == seen) break;
-            clock_gettime(CLOCK_REALTIME, &now);
+            clock_gettime(PURE_WAIT_CLOCK, &now);
         }
         if (!owner->count) {
             pthread_mutex_unlock(&owner->lock);
@@ -2678,7 +2677,7 @@ int main(int argc, char **argv) {
     }
     if (owned) {
         if (!start_executor(&owner.executor, &module, show, edit, store) || pthread_mutex_init(&owner.lock, NULL) ||
-            pthread_cond_init(&owner.waiting, NULL) || pthread_mutex_init(&owner.executor.published_lock, NULL))
+            pure_cond_monotonic(&owner.waiting) || pthread_mutex_init(&owner.executor.published_lock, NULL))
             return 1;
         owner.executor.reads_first = true;
         owner.executor.publishes = true;

@@ -14,6 +14,7 @@
 #define _DARWIN_C_SOURCE
 #endif
 #include "store.h"
+#include "wait.h"
 #include "state.h"
 #include "digest.h"
 #include <errno.h>
@@ -1592,6 +1593,13 @@ void pure_store_group_counts(unsigned long *groups, unsigned long *requests) {
 
 enum { GATHER_NS = 2000000 };
 
+/* Once: joined waits on the monotonic clock (core/wait.h). */
+static pthread_once_t group_made = PTHREAD_ONCE_INIT;
+static void make_group(void) {
+    pthread_cond_destroy(&group.joined);
+    if (pure_cond_monotonic(&group.joined)) pthread_cond_init(&group.joined, NULL); /* then it does not gather */
+}
+
 /* Publish the queued requests of the store at path in one session. */
 static void commit_group(const char *path, Waiter *first) {
     size_t total = 0;
@@ -1695,6 +1703,7 @@ PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t
     }
     if (!count) return PURE_OK;
     Waiter me = {.drafts = drafts, .count = count, .revisions = revisions};
+    pthread_once(&group_made, make_group);
     pthread_mutex_lock(&group.lock);
     if (group.tail) group.tail->next = &me; else group.head = &me;
     group.tail = &me;
@@ -1707,10 +1716,7 @@ PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t
          * a moment (at most 2 ms) to join, or they would miss this group and
          * wait for the next one: a sync costs far more. One thread never waits. */
         if (group.expected > 1 && group.queued < group.expected) {
-            struct timespec deadline;
-            clock_gettime(CLOCK_REALTIME, &deadline);
-            deadline.tv_nsec += GATHER_NS;
-            if (deadline.tv_nsec >= 1000000000) { ++deadline.tv_sec; deadline.tv_nsec -= 1000000000; }
+            struct timespec deadline = pure_wait_until(GATHER_NS);
             while (group.queued < group.expected &&
                    pthread_cond_timedwait(&group.joined, &group.lock, &deadline) == 0) {}
         }

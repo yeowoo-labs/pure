@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "deliver.h"
+#include "wait.h"
 #include "seal.h"
 #include "message-json.h"
 #include "module-text.h"
@@ -222,7 +223,7 @@ PureWire *pure_wire_open(const PureModule *m, const char *output, const char *ur
     w->tls = tls;
     w->answer_input = -1;
     pthread_mutex_init(&w->lock, NULL);
-    pthread_cond_init(&w->changed, NULL);
+    pure_cond_monotonic(&w->changed);
     return w;
 }
 
@@ -738,11 +739,7 @@ static void *deliver(void *context) {
         }
         pause_ms = outcome != AGAIN ? LONGEST_PAUSE_MS : pause_ms ? 2 * pause_ms : FIRST_PAUSE_MS;
         if (pause_ms > LONGEST_PAUSE_MS) pause_ms = LONGEST_PAUSE_MS;
-        struct timespec until;
-        clock_gettime(CLOCK_REALTIME, &until);
-        until.tv_sec += pause_ms / 1000;
-        until.tv_nsec += (pause_ms % 1000) * 1000000;
-        if (until.tv_nsec >= 1000000000) { ++until.tv_sec; until.tv_nsec -= 1000000000; }
+        struct timespec until = pure_wait_until(pause_ms * 1000000LL);
         while (!w->stopping && pthread_cond_timedwait(&w->changed, &w->lock, &until) == 0) {}
     }
     pthread_mutex_unlock(&w->lock);

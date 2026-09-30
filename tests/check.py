@@ -2653,17 +2653,82 @@ def server_timers(aup, pure, work):
         stats = host.stop()
     assert stats[0]['ticks'] >= 10, stats
     seen['stateless'] = stats[0]['ticks']
-    # The wall clock set back an hour 0.2 s in (build/clock-back.so): the
-    # timers wait on the monotonic clock, so they go on ticking.
+    return seen
+
+
+def cpu_seconds(pid):
+    """The CPU time a process has used (user and system)."""
     import os
-    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'heartbeat-back'],
-                    env={**os.environ, 'LD_PRELOAD': str(pure / 'build/clock-back.so')})
+    with open(f'/proc/{pid}/stat') as stat:
+        fields = stat.read().rsplit(')', 1)[1].split()
+    return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+
+
+def server_clocks(aup, pure, work):
+    """The wall clock moved an hour while a node runs (build/clock-back.so
+    moves what the node reads of it, from its start): its timers, the pauses
+    of a wire whose receiver is down, the owner's waits and a store's group
+    commit all count on the monotonic clock. Were a wait's deadline read
+    from the wall clock, set back it would end at once, again and again (a
+    core spun, the wire tried thousands of times); set forward it would last
+    an hour (the timers stopped, the wire tried once, and a lone commit
+    after a group waited that long for the others to join it)."""
+    import os
+    import socket
+    import struct
+    import threading
+    import time
+    module, source = work / 'clocks.pmod', work / 'clocks.aup'
+    source.write_text(HEARTBEAT_SOURCE)
+    compile_module(aup, source, module)
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        nobody = probe.getsockname()[1]
+    seen = {}
+    for shift in (-3600, 3600):
+        env = {**os.environ, 'LD_PRELOAD': str(pure / 'build/clock-back.so'), 'CLOCK_BACK_MS': '0',
+               'CLOCK_SHIFT_S': str(shift)}
+        host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / f'clocks{shift}',
+                         '--send', f'pulse=http://127.0.0.1:{nobody}/inputs/pulse'], env=env)
+        try:
+            time.sleep(0.2)
+            began, used = time.time(), cpu_seconds(host.process.pid)
+            time.sleep(1.0)
+            share = (cpu_seconds(host.process.pid) - used) / (time.time() - began)
+        finally:
+            stats = host.stop()[-1]
+        assert stats['ticks'] >= 30 and share < 0.25 and 3 <= stats['delivery_attempts'] <= 12, \
+            (shift, stats['ticks'], share, stats['delivery_attempts'])
+        seen[f'shift_{shift}'] = {'ticks': stats['ticks'], 'cpu_share': round(share, 3),
+                                  'wire_attempts': stats['delivery_attempts']}
+    editor = work / 'clocks-editor.pmod'
+    compile_module(aup, EDITOR, editor)
+    env = {**os.environ, 'LD_PRELOAD': str(pure / 'build/clock-back.so'), 'CLOCK_BACK_MS': '0', 'CLOCK_SHIFT_S': '3600'}
+    host = HttpHost([pure / 'build/pure-serve', '--module', editor, '--store', work / 'clocks-docs', '--threads', 3],
+                    env=env)
+    new = struct.pack('<II', 0, 0)  # an edit that makes the document: at 0, none removed, then its bytes
+    statuses, alone = [], 0.0
     try:
-        time.sleep(0.6)
+        for round_number in range(20):  # three at once, grouped; then one alone
+            together = threading.Barrier(3)
+
+            def put(k):
+                together.wait()
+                statuses.append(host.request('PUT', f'd{round_number}-{k}', new + b'x' * 100000, 0)[0])
+
+            threads = [threading.Thread(target=put, args=(k,)) for k in range(3)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            began = time.time()
+            statuses.append(host.request('PUT', f'alone-{round_number}', new + b'y', 0)[0])
+            alone = max(alone, time.time() - began)
     finally:
-        stats = host.stop()
-    assert stats[0]['ticks'] >= 20, stats
-    seen['clock_set_back'] = stats[0]['ticks']
+        stats = host.stop()[-1]
+    assert statuses == [200] * 80 and alone < 1 and stats['grouped_commits'] > stats['commit_groups'], \
+        (statuses, alone, stats)
+    seen['alone_after_groups_s'] = round(alone, 4)
     return seen
 
 
@@ -2846,6 +2911,7 @@ def main():
             server_app(aup, pure, work, range(args.seeds), threads=3)
         report['server_json_requests'] = server_json(aup, pure, work)
         report['server_timer_beats'] = server_timers(aup, pure, work)
+        report['server_clocks'] = server_clocks(aup, pure, work)
         report['server_plain_edit'] = server_plain_edit(aup, pure, work)
         report['server_links'] = server_links(aup, pure, work)
         report['server_links_udp'] = server_links_udp(aup, pure, work)
