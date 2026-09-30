@@ -83,9 +83,22 @@ static bool json_double(const unsigned char *text, size_t size, double *value) {
     return isfinite(*value);
 }
 
-/* A fixed field's value from its text (a query value or a JSON number) into
- * the prefix: a u32 in range, or a finite number. */
+/* A JSON true or false at text: its length (4 or 5), or 0. */
+static size_t json_bool(const unsigned char *text, size_t size, bool *value) {
+    if (size >= 4 && !memcmp(text, "true", 4)) return *value = true, 4;
+    if (size >= 5 && !memcmp(text, "false", 5)) return *value = false, 5;
+    return 0;
+}
+
+/* A fixed field's value from its text (a query value or a JSON value) into
+ * the prefix: a u32 in range, a finite number, or true or false for a bool. */
 bool pure_json_fixed(const PureField *field, const unsigned char *text, size_t size, unsigned char *prefix) {
+    if (field->type == PURE_FIELD_BOOL) { /* true or false, as a JSON value says it */
+        bool value;
+        if (!size || json_bool(text, size, &value) != size) return false;
+        prefix[field->offset] = value;
+        return true;
+    }
     bool integer;
     if (!size || json_number(text, size, &integer) != size || size > 40) return false;
     if (field->type == PURE_FIELD_U32) {
@@ -304,7 +317,14 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
             }
             if (given[k]) return "json_field";
             given[k] = true;
-            bool text = m->record_field_text[record->first + k];
+            bool text = m->record_field_text[record->first + k], truth;
+            if (m->record_field_bool[record->first + k]) { /* true or false, nothing else */
+                size_t word = json_bool(json + *at, size - *at, &truth);
+                if (!word) return "json_type";
+                numbers[k] = truth;
+                *at = pure_json_space(json, *at + word, size);
+                continue;
+            }
             if (*at < size && json[*at] == '"') {
                 size_t end = json_string_end(json + *at + 1, size - *at - 1), written;
                 if (!end) return "json";
@@ -406,7 +426,13 @@ static const char *members(PureJsonMessage *b, unsigned char *json, size_t size,
         if (b->seen[f] || (b->given && b->given[f])) return "json_field";
         b->seen[f] = true;
         const PureField *field = &m->field[b->shape->field_start + f];
-        bool variable = field->type == PURE_FIELD_BYTES || field->type == PURE_FIELD_TEXT, integer;
+        bool variable = field->type == PURE_FIELD_BYTES || field->type == PURE_FIELD_TEXT, integer, truth;
+        size_t word = field->type == PURE_FIELD_BOOL ? json_bool(json + *at, size - *at, &truth) : 0;
+        if (word) { /* any other value for a bool is of another type (below) */
+            b->payload[field->offset] = truth;
+            *at = pure_json_space(json, *at + word, size);
+            continue;
+        }
         if (*at < size && json[*at] == '"') {
             size_t end = json_string_end(json + *at + 1, size - *at - 1), written;
             if (!end) return "json";

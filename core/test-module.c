@@ -36,15 +36,18 @@ typedef struct { const char *name, *key; int kind; bool keyed; const F *fields; 
 #define KEY(name, key) {name, key, 0, false, NULL, 0}
 /* A timer's period (milliseconds) rides in nfields. */
 #define TIMER(name, period) {name, NULL, PURE_KIND_TIMER, false, NULL, period}
+/* A number view, or a bool view when its length carries BOOL_VIEW. */
 typedef struct { const char *name; uint32_t start, length; } V;
+#define BOOL_VIEW (1u << 31)
 typedef struct { uint32_t event, start, length; } H;
 typedef struct { uint8_t op; uint32_t arg; double value; } O;
 /* Text (type 1, ref = constant), cursor (type 2, ref = text state), list
- * (type 3, ref = record) and index (type 4, ref = list state) states follow
- * the number states; text views follow the number views. */
+ * (type 3, ref = record), index (type 4, ref = list state) and bool (type 5,
+ * ref = its initial value) states follow the number states; text views
+ * follow the number views. */
 typedef struct { const char *name; uint32_t type, ref; } T; /* type: the state type, its flags from bit 8 */
-/* A record field: a number and its default, or text (text = 1) whose
- * default is the constant numbered initial. */
+/* A record field: a number and its default, text (text = 1) whose default
+ * is the constant numbered initial, or a bool (text = 2) and its default. */
 typedef struct { const char *name; uint32_t text; double initial; } RF;
 typedef struct { const char *name; const RF *fields; size_t nfields; } R;
 /* A further view: a table (type 2, start = list state) or a column of the
@@ -69,7 +72,7 @@ static unsigned char *put_double(unsigned char *p, double value) {
     return put32(p + 4, (uint32_t)(bits >> 32));
 }
 
-/* Test-side encoder for format v5; the toolchain has its own. */
+/* Test-side encoder for format v6; the toolchain has its own. */
 static size_t build(unsigned char *out, Spec spec) {
     unsigned char strings[4096], blob[4096];
     size_t used = 0, blob_used = 0;
@@ -106,7 +109,7 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.nk; ++i) { memcpy(blob + blob_used, spec.k[i], strlen(spec.k[i])); blob_used += strlen(spec.k[i]); }
     unsigned char *p = out;
     memset(p, 0, 40);
-    memcpy(p, "PUREMOD5", 8);
+    memcpy(p, "PUREMOD6", 8);
     size_t states = spec.ns + spec.nt, views = spec.nv + spec.ntv + spec.nw;
     p[8] = (unsigned char)states; p[9] = (unsigned char)(states >> 8);
     p[10] = (unsigned char)spec.ni; p[12] = (unsigned char)views; p[14] = (unsigned char)spec.nh;
@@ -121,6 +124,7 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.nt; ++i) {
         p = put32(p, offset[n++]);
         p = put32(p, spec.t[i].type & 0xFF);
+        if ((spec.t[i].type & 0xFF) == PURE_STATE_BOOL) { p = put_double(p, spec.t[i].ref); continue; }
         p = put32(p, spec.t[i].ref);
         p = put32(p, spec.t[i].type >> 8);
     }
@@ -160,10 +164,15 @@ static size_t build(unsigned char *out, Spec spec) {
             const RF *field = &spec.r[i].fields[f];
             p = put32(p, offset[++n]);
             p = put32(p, field->text);
-            if (field->text) { p = put32(p, (uint32_t)field->initial); p = put32(p, 0); }
+            if (field->text == 1) { p = put32(p, (uint32_t)field->initial); p = put32(p, 0); }
             else p = put_double(p, field->initial);
         }
-    for (size_t i = 0; i < spec.nv; ++i) { p = put32(p, offset[n++]); p = put32(p, 0); p = put32(p, spec.v[i].start); p = put32(p, spec.v[i].length); }
+    for (size_t i = 0; i < spec.nv; ++i) {
+        p = put32(p, offset[n++]);
+        p = put32(p, spec.v[i].length & BOOL_VIEW ? PURE_VIEW_BOOL : 0);
+        p = put32(p, spec.v[i].start);
+        p = put32(p, spec.v[i].length & ~BOOL_VIEW);
+    }
     for (size_t i = 0; i < spec.ntv; ++i) { p = put32(p, offset[n++]); p = put32(p, 1); p = put32(p, spec.tv[i].start); p = put32(p, spec.tv[i].length); }
     for (size_t i = 0; i < spec.nw; ++i) {
         const W *w = &spec.w[i];
@@ -307,10 +316,10 @@ static void rejections(void) {
     static const O store[] = {{C, 0, 1}, {ST, 0, 0}, {DT, 0, 0}};
     static const H h0[] = {{0, 0, 2}};
     static const H h_bad_event[] = {{3, 0, 2}};
-    static const O back[] = {{C, 0, 1}, {JZ, 0, 0}};
-    static const O beyond[] = {{C, 0, 1}, {JZ, 3, 0}};
+    static const O back[] = {{C, 1, 1}, {JZ, 0, 0}};
+    static const O beyond[] = {{C, 1, 1}, {JZ, 3, 0}};
     static const O under[] = {{ADD, 0, 0}};
-    static const O join[] = {{C, 0, 1}, {JZ, 4, 0}, {C, 0, 1}, {C, 0, 1}, {ST, 0, 0}};
+    static const O join[] = {{C, 1, 1}, {JZ, 4, 0}, {C, 0, 1}, {C, 0, 1}, {ST, 0, 0}};
     static const O leftover[] = {{C, 0, 1}, {C, 0, 2}};
     static const O unknown_state[] = {{L, 1, 0}, {ST, 0, 0}};
     static const O nan_const[] = {{C, 0, NAN}, {ST, 0, 0}};
@@ -640,7 +649,7 @@ static void messages(void) {
     static const H note_handler[] = {{1, 0, 2}};
     bad = (Spec){states, 1, unkeyed, 1, views, 0, note_handler, 1, doc_read, 2, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "document operation outside"));
-    static const F unknown_type[] = {{"insert", 6}, {"start", 1}};
+    static const F unknown_type[] = {{"insert", 7}, {"start", 1}};
     static const I misplaced[] = {{"edit", NULL, PURE_KIND_MESSAGE, true, unknown_type, 2}};
     bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "message field"));
@@ -652,8 +661,8 @@ static void messages(void) {
     bad = (Spec){states, 1, inputs, 2, field_view, 1, NULL, 0, field_only, 1, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view with an effect"));
     /* A value may cross a join when every path brings the same stack. */
-    static const O branch_value[] = {{C, 0, 1}, {C, 0, 1}, {JZ, 3, 0}, {ST, 0, 0}};
-    static const O branch_mismatch[] = {{C, 0, 1}, {C, 0, 1}, {JZ, 4, 0}, {C, 0, 2}, {ST, 0, 0}};
+    static const O branch_value[] = {{C, 0, 1}, {C, 1, 1}, {JZ, 3, 0}, {ST, 0, 0}};
+    static const O branch_mismatch[] = {{C, 0, 1}, {C, 1, 1}, {JZ, 4, 0}, {C, 0, 2}, {ST, 0, 0}};
     static const H frame_handler[] = {{0, 0, 4}};
     bad = (Spec){states, 1, inputs, 0, views, 0, frame_handler, 1, branch_value, 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_OK);
@@ -1284,7 +1293,7 @@ static void list_trees(void) {
 static void lists(void) {
     static const S nums[] = {{"made", 0}};
     static const T states[] = {{"tasks", 3, 0}, {"at", 4, 1}};
-    static const RF task_fields[] = {{"title", 1, 0}, {"done", 0, 0}};
+    static const RF task_fields[] = {{"title", 1, 0}, {"done", 2, 0}};
     static const R records[] = {{"task", task_fields, 2}};
     static const char *const constants[] = {"", "new", "x"};
     static const I inputs[] = {
@@ -1292,14 +1301,14 @@ static void lists(void) {
         KEY("up", "ArrowUp"), KEY("down", "ArrowDown"), KEY("toggle", "Space"), KEY("rename", "KeyR"), KEY("bad", "KeyB"),
     };
     static const O code[] = {
-        {TI, 0, 0}, {C, 0, 0}, {LA, 1, 0}, {XE, 1, 0}, {XS, 2, 0}, {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, /* 0 typed */
-        {XL, 2, 0}, {TK, 1, 0}, {C, 0, 0}, {LI, 1, 0},                                           /* 9 ins */
+        {TI, 0, 0}, {C, 1, 0}, {LA, 1, 0}, {XE, 1, 0}, {XS, 2, 0}, {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, /* 0 typed */
+        {XL, 2, 0}, {TK, 1, 0}, {C, 1, 0}, {LI, 1, 0},                                           /* 9 ins */
         {XL, 2, 0}, {LR, 1, 0},                                                                  /* 13 del */
         {XL, 2, 0}, {C, 0, -1}, {XM, 0, 0}, {XS, 2, 0},                                          /* 15 up */
         {XL, 2, 0}, {C, 0, 1}, {XM, 0, 0}, {XS, 2, 0},                                           /* 19 down */
         {XL, 2, 0}, {XL, 2, 0}, {IG, DONE, 0}, {NOT, 0, 0}, {IS, DONE, 0},                         /* 23 toggle */
         {XL, 2, 0}, {XL, 2, 0}, {IG, TITLE, 0}, {TK, 2, 0}, {CAT, 0, 0}, {IS, TITLE, 0},           /* 28 rename */
-        {XL, 2, 0}, {TK, 2, 0}, {IS, TITLE, 0}, {XL, 2, 0}, {LR, 1, 0}, {TK, 1, 0}, {C, 0, 0},     /* 34 bad */
+        {XL, 2, 0}, {TK, 2, 0}, {IS, TITLE, 0}, {XL, 2, 0}, {LR, 1, 0}, {TK, 1, 0}, {C, 1, 0},     /* 34 bad */
         {LA, 1, 0}, {C, 0, 1}, {C, 0, 0}, {DIV, 0, 0}, {ST, 0, 0},
         {LC, 1, 0},                                                                              /* 46 view count */
         {XL, 2, 0}, {XN, 0, 0},                                                                  /* 47 view position */
@@ -1308,7 +1317,7 @@ static void lists(void) {
     };
     static const H handlers[] = {{1, 0, 9}, {3, 9, 4}, {5, 13, 2}, {7, 15, 4}, {9, 19, 4}, {11, 23, 5},
                                  {13, 28, 6}, {15, 34, 12}};
-    static const V number_views[] = {{"count", 46, 1}, {"position", 47, 2}, {"done", 49, 2}};
+    static const V number_views[] = {{"count", 46, 1}, {"position", 47, 2}, {"done", 49, 2 | BOOL_VIEW}};
     static const V text_views[] = {{"current", 51, 2}};
     Spec spec = {nums, 1, inputs, LEN(inputs), number_views, 3, handlers, LEN(handlers), code, LEN(code),
                  NULL, 0, states, 2, constants, 3, text_views, 1, records, 1, NULL, 0};
@@ -1493,12 +1502,12 @@ enum { ROW = PURE_OP_ROW, EQ = PURE_OP_EQ, LT = PURE_OP_LT, PICK = PURE_OP_PICK,
 static void tables(void) {
     static const S nums[] = {{"n", 0}};
     static const T states[] = {{"tasks", 3, 0}, {"at", 4, 1}};
-    static const RF task_fields[] = {{"title", 1, 0}, {"done", 0, 0}};
+    static const RF task_fields[] = {{"title", 1, 0}, {"done", 2, 0}};
     static const R records[] = {{"task", task_fields, 2}};
     static const char *const constants[] = {"", "x", " ", "empty"};
     static const I inputs[] = {{"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("toggle", "Space")};
     static const O code[] = {
-        {TI, 0, 0}, {C, 0, 0}, {LA, 1, 0}, {XE, 1, 0}, {XS, 2, 0},                          /* 0 typed */
+        {TI, 0, 0}, {C, 1, 0}, {LA, 1, 0}, {XE, 1, 0}, {XS, 2, 0},                          /* 0 typed */
         {XL, 2, 0}, {XL, 2, 0}, {IG, DONE, 0}, {NOT, 0, 0}, {IS, DONE, 0},                     /* 5 toggle */
         {LC, 1, 0}, {C, 0, 0}, {GT, 0, 0}, {JZ, 17, 0}, {XL, 2, 0}, {IG, TITLE, 0}, {JMP, 18, 0},
         {TK, 3, 0},                                                                          /* 10 current */
@@ -1510,7 +1519,7 @@ static void tables(void) {
     static const H handlers[] = {{1, 0, 5}, {3, 5, 5}};
     static const V text_views[] = {{"current", 10, 8}};
     static const W table[] = {{"board", 2, 0, 1, 0}, {"title", 1, 2, 18, 2}, {"mark", 1, 2, 20, 6},
-                              {"pos", 0, 2, 26, 2}, {"here", 0, 2, 28, 5}};
+                              {"pos", 0, 2, 26, 2}, {"here", PURE_VIEW_BOOL, 2, 28, 5}};
     Spec spec = {nums, 1, inputs, 2, NULL, 0, handlers, 2, code, LEN(code), NULL, 0, states, 2, constants, 4,
                  text_views, 1, records, 1, table, 5};
     table_spec = spec;
@@ -1563,16 +1572,20 @@ static void tables(void) {
     bad = spec; bad.o = other_row; bad.no = 2; bad.h = NULL; bad.nh = 0; bad.tv = NULL; bad.ntv = 0;
     bad.w = other_row_column; bad.nw = 2;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "no such state"));
-    static const O typed_join[] = {{L, 0, 0}, {JZ, 4, 0}, {TK, 0, 0}, {JMP, 5, 0}, {C, 0, 1}};
+    static const O typed_join[] = {{C, 1, 1}, {JZ, 4, 0}, {TK, 0, 0}, {JMP, 5, 0}, {C, 0, 1}};
     static const V mixed[] = {{"current", 0, 5}};
     bad = spec; bad.o = typed_join; bad.no = 5; bad.h = NULL; bad.nh = 0; bad.tv = mixed; bad.w = NULL; bad.nw = 0;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "join with different stacks"));
+    static const O truth_join[] = {{C, 1, 1}, {JZ, 4, 0}, {C, 1, 1}, {JMP, 5, 0}, {C, 0, 1}}; /* a bool is not a number */
+    static const V truth_view[] = {{"v", 0, 5}};
+    bad.o = truth_join; bad.tv = NULL; bad.ntv = 0; bad.v = truth_view; bad.nv = 1;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "join with different stacks"));
     /* At most 8 joins with a value may be ahead at once. */
     for (unsigned open = 8; open <= 9; ++open) {
         static O nested[1 + 2 * 9 + 9 + 1];
         unsigned n = 0;
         nested[n++] = (O){C, 0, 1};
-        for (unsigned k = 0; k < open; ++k) { nested[n++] = (O){C, 0, 0}; nested[n++] = (O){JZ, 1 + 2 * open + k, 0}; }
+        for (unsigned k = 0; k < open; ++k) { nested[n++] = (O){C, 1, 0}; nested[n++] = (O){JZ, 1 + 2 * open + k, 0}; }
         for (unsigned k = 0; k < open; ++k) nested[n++] = (O){NEG, 0, 0};
         nested[n++] = (O){ST, 0, 0};
         H frame = {0, 0, n};
@@ -2242,24 +2255,24 @@ static void marks(void) {
  * count, a sum, a maximum or a minimum; an empty maximum has no value. */
 enum { FOLD = PURE_OP_FOLD };
 #define FOLDING(kind, list, length) ((uint32_t)(kind) | (uint32_t)(list) << 8 | (uint32_t)(length) << 16)
-static const RF fold_fields[] = {{"title", 1, 0}, {"done", 0, 0}, {"points", 0, 0}};
+static const RF fold_fields[] = {{"title", 1, 0}, {"done", 2, 0}, {"points", 0, 0}};
 static const R fold_records[] = {{"task", fold_fields, 3}};
 static const T fold_states[] = {{"tasks", 3, 0}, {"at", 4, 0}};
 static const char *const fold_constants[] = {""};
 static const I fold_inputs[] = {{"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("toggle", "KeyT")};
 enum { F_TITLE = 0, F_DONE = 1u << 16, F_POINTS = 2u << 16 };
 static const O fold_code[] = {
-    {TI, 0, 0}, {C, 0, 0}, {TI, 0, 0}, {CHR, 0, 0}, {LA, 0, 0}, {XE, 0, 0}, {XS, 1, 0},     /* 0 typed */
+    {TI, 0, 0}, {C, 1, 0}, {TI, 0, 0}, {CHR, 0, 0}, {LA, 0, 0}, {XE, 0, 0}, {XS, 1, 0},     /* 0 typed */
     {XL, 1, 0}, {XL, 1, 0}, {IG, F_DONE, 0}, {NOT, 0, 0}, {IS, F_DONE, 0},                 /* 7 toggle */
     {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 3), 0}, {ROW, 0, 0}, {IG, F_DONE, 0}, {NOT, 0, 0},   /* 12 open */
-    {FOLD, FOLDING(PURE_FOLD_SUM, 0, 3), 0}, {ROW, 0, 0}, {IG, F_POINTS, 0}, {C, 0, 1},     /* 16 points */
+    {FOLD, FOLDING(PURE_FOLD_SUM, 0, 3), 0}, {ROW, 0, 0}, {IG, F_POINTS, 0}, {C, 1, 1},     /* 16 points */
     {FOLD, FOLDING(PURE_FOLD_MAX, 0, 4), 0}, {ROW, 0, 0}, {IG, F_TITLE, 0}, {CHR, 0, 0},    /* 20 longest */
-    {C, 0, 1},
+    {C, 1, 1},
     {FOLD, FOLDING(PURE_FOLD_SUM, 0, 4), 0}, {ROW, 0, 0}, {IG, F_POINTS, 0}, {ROW, 0, 0},   /* 25 done_points */
     {IG, F_DONE, 0},
     {FOLD, FOLDING(PURE_FOLD_MIN, 0, 5), 0}, {ROW, 0, 0}, {IG, F_POINTS, 0}, {ROW, 0, 0},   /* 30 fewest_open */
     {IG, F_DONE, 0}, {NOT, 0, 0},
-    {C, 0, 10}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}, {ADD, 0, 0},         /* 36 count_plus */
+    {C, 0, 10}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 1, 1}, {ADD, 0, 0},         /* 36 count_plus */
     {FOLD, FOLDING(PURE_FOLD_FIRST, 0, 3), 0}, {ROW, 0, 0}, {IG, F_DONE, 0}, {NOT, 0, 0},   /* 40 first_open */
     {XN, 0, 0},
 };
@@ -2295,20 +2308,29 @@ static void folds(void) {
     pure_app_stop(&app);
 
     /* What a fold may not be. */
-    static const O nested[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 2), 0}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}};
-    static const O into[] = {{C, 0, 1}, {JZ, 3, 0}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}};
-    static const O effect[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 3), 0}, {ROW, 0, 0}, {XS, 1, 0}, {C, 0, 1},
-                               {PURE_OP_REQUIRE, 0, 0}};
-    static const O short_sum[] = {{FOLD, FOLDING(PURE_FOLD_SUM, 0, 1), 0}, {C, 0, 1}};
-    static const O outside[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 5), 0}, {C, 0, 1}};
-    static const O not_list[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 1, 1), 0}, {C, 0, 1}};
+    static const O nested[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 2), 0}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 1, 1}};
+    static const O into[] = {{C, 1, 1}, {JZ, 3, 0}, {FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 1, 1}};
+    static const O effect[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 3), 0}, {ROW, 0, 0}, {XS, 1, 0}, {C, 1, 1},
+                               {C, 0, 0}, {GT, 0, 0}, {PURE_OP_REQUIRE, 0, 0}};
+    static const O short_sum[] = {{FOLD, FOLDING(PURE_FOLD_SUM, 0, 1), 0}, {C, 1, 1}};
+    static const O outside[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 5), 0}, {C, 1, 1}};
+    static const O not_list[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 1, 1), 0}, {C, 1, 1}};
+    /* Whether an item counts is a bool, not a number; a sum's value is a number. */
+    static const O count_number[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}};
+    static const O sum_numbers[] = {{FOLD, FOLDING(PURE_FOLD_SUM, 0, 2), 0}, {C, 0, 1}, {C, 0, 1}};
+    static const O sum_bools[] = {{FOLD, FOLDING(PURE_FOLD_SUM, 0, 2), 0}, {C, 1, 1}, {C, 1, 1}};
+    static const O first_number[] = {{FOLD, FOLDING(PURE_FOLD_FIRST, 0, 1), 0}, {C, 0, 0}, {XN, 0, 0}};
     static const struct { const O *code; size_t count, length; bool handler; const char *reason; } refused[] = {
         {nested, LEN(nested), 3, false, "fold inside a fold"},
         {into, LEN(into), 4, false, "branch into a fold"},
-        {effect, LEN(effect), 5, true, "fold with an effect"},
-        {short_sum, LEN(short_sum), 2, false, "fold block must leave its numbers"},
+        {effect, LEN(effect), 7, true, "fold with an effect"},
+        {short_sum, LEN(short_sum), 2, false, "fold block must leave a number and a bool"},
         {outside, LEN(outside), 2, false, "fold block outside its block"},
         {not_list, LEN(not_list), 2, false, "no such state"},
+        {count_number, LEN(count_number), 2, false, "fold block must leave one bool"},
+        {sum_numbers, LEN(sum_numbers), 3, false, "fold block must leave a number and a bool"},
+        {sum_bools, LEN(sum_bools), 3, false, "fold block must leave a number and a bool"},
+        {first_number, LEN(first_number), 3, false, "fold block must leave one bool"},
     };
     for (size_t i = 0; i < LEN(refused); ++i) {
         V view = {"v", 0, (uint32_t)refused[i].length};
@@ -2326,7 +2348,7 @@ static void folds(void) {
  * item (ROW is the item, not the row), and hosts turn rows into items and
  * back. The rows follow every change. */
 static const O filter_code[] = {
-    {TI, 0, 0}, {C, 0, 0}, {TI, 0, 0}, {CHR, 0, 0}, {LA, 0, 0}, {XE, 0, 0}, {XS, 1, 0},     /* 0 typed */
+    {TI, 0, 0}, {C, 1, 0}, {TI, 0, 0}, {CHR, 0, 0}, {LA, 0, 0}, {XE, 0, 0}, {XS, 1, 0},     /* 0 typed */
     {XL, 1, 0}, {XL, 1, 0}, {IG, F_DONE, 0}, {NOT, 0, 0}, {IS, F_DONE, 0},                 /* 7 toggle */
     {ROW, 0, 0}, {IG, F_DONE, 0}, {NOT, 0, 0},                                            /* 12 filter: open */
     {ROW, 0, 0}, {IG, F_TITLE, 0},                                                        /* 15 title */
@@ -2370,16 +2392,18 @@ static void filters(void) {
     pure_app_stop(&app);
 
     /* What a filter may not be. */
-    static const O effect[] = {{ROW, 0, 0}, {XS, 1, 0}, {C, 0, 1}};
+    static const O effect[] = {{ROW, 0, 0}, {XS, 1, 0}, {C, 1, 1}};
     static const O text_filter[] = {{ROW, 0, 0}, {IG, F_TITLE, 0}};
-    static const O folded[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 0, 1}};
+    static const O number_filter[] = {{ROW, 0, 0}, {IG, F_POINTS, 0}};
+    static const O folded[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 1, 1}};
     static const W filtered_by[] = {{"open", FILTERED, 0, 0, 0}}, open3[] = {{"open", FILTERED, 0, 0, 3}},
                    open2[] = {{"open", FILTERED, 0, 0, 2}};
     static const W not_a_list[] = {{"open", 2 | 2 << 8, 0, 0, 3}};
     static const W flagged_column[] = {{"open", FILTERED, 0, 0, 3}, {"c", 0 | 1 << 8, 1, 0, 3}};
     static const struct { const O *code; size_t count; const W *views; size_t nviews; const char *reason; } refused[] = {
         {effect, LEN(effect), open3, 1, "filter with an effect"},
-        {text_filter, LEN(text_filter), open2, 1, "filter must leave one number"},
+        {text_filter, LEN(text_filter), open2, 1, "filter must leave one bool"},
+        {number_filter, LEN(number_filter), open2, 1, "filter must leave one bool"},
         {folded, LEN(folded), open2, 1, "fold inside a filter"},
         {effect, LEN(effect), filtered_by, 1, "table list"},       /* a filtered table needs its block */
         {effect, LEN(effect), not_a_list, 1, "table list"},        /* state 1 is an index */
@@ -2428,53 +2452,96 @@ static void gen_index(Gen *g, int list, int depth) {
         put_op(g, roll(g, 2) ? PURE_OP_INDEX_FIRST : PURE_OP_INDEX_LAST, (uint32_t)list, 0);
 }
 
+static void gen_bool(Gen *g, int depth);
+
+/* An item's field: a number (L's key, a or b, M's x or y) or a bool (L's c, M's z). */
+static void gen_field(Gen *g, int depth, bool flag) {
+    int list = g->fold_list >= 0 && (depth <= 0 || roll(g, 3)) ? g->fold_list : roll(g, 2) ? LANE_L : LANE_M;
+    gen_index(g, list, depth - 1);
+    uint32_t field = flag ? (list == LANE_L ? 3 : 2) : roll(g, list == LANE_L ? 3 : 2);
+    put_op(g, PURE_OP_ITEM_GET, (uint32_t)list | field << 16, 0);
+}
+
 static void gen_num(Gen *g, int depth) {
     static const double pool[] = {0, -0.0, 1, -1, 2, 0.5, 3, 7, 100, -3.5, 1e308, -1e308, 4, 10};
-    static const uint8_t binary[] = {PURE_OP_ADD, PURE_OP_SUB, PURE_OP_MUL, PURE_OP_DIV, PURE_OP_LT, PURE_OP_LE,
-                                     PURE_OP_GT, PURE_OP_GE, PURE_OP_EQ, PURE_OP_NE, PURE_OP_AND, PURE_OP_OR,
-                                     PURE_OP_MIN, PURE_OP_MAX, PURE_OP_MOD};
-    static const uint8_t unary[] = {PURE_OP_NEG, PURE_OP_NOT, PURE_OP_FLOOR};
-    unsigned choice = roll(g, depth <= 0 ? 4 : 12);
-    if (g->tree && (choice == 9 || choice == 10)) choice = 11;
+    static const uint8_t binary[] = {PURE_OP_ADD, PURE_OP_SUB, PURE_OP_MUL, PURE_OP_DIV, PURE_OP_MIN, PURE_OP_MAX, PURE_OP_MOD};
+    static const uint8_t unary[] = {PURE_OP_NEG, PURE_OP_FLOOR};
+    unsigned choice = roll(g, depth <= 0 ? 4 : 11);
+    if (g->tree && (choice == 8 || choice == 9)) choice = 10;
     switch (choice) {
     case 0: put_op(g, C, 0, pool[roll(g, LEN(pool))]); return;
     case 1: put_op(g, L, LANE_K, 0); return;
-    case 2: case 3: { /* a field of an item */
-        int list = g->fold_list >= 0 && (depth <= 0 || roll(g, 3)) ? g->fold_list : roll(g, 2) ? LANE_L : LANE_M;
-        gen_index(g, list, depth - 1);
-        put_op(g, PURE_OP_ITEM_GET, (uint32_t)list | (uint32_t)roll(g, list == LANE_L ? 3 : 2) << 16, 0);
-        return;
-    }
+    case 2: case 3: gen_field(g, depth, false); return;
     case 4: put_op(g, PURE_OP_LIST_COUNT, roll(g, 2) ? LANE_L : LANE_M, 0); return;
     case 5:
         gen_index(g, roll(g, 2) ? LANE_L : LANE_M, depth - 1);
         put_op(g, PURE_OP_INDEX_NUM, 0, 0);
         return;
-    case 6: gen_num(g, depth - 1); put_op(g, PURE_OP_LIST_HAS, LANE_L, 0); return;
-    case 7: gen_num(g, depth - 1); put_op(g, unary[roll(g, LEN(unary))], 0, 0); return;
-    case 8: gen_num(g, depth - 1); gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, CL, 0, 0); return;
-    case 9: gen_num(g, depth - 1); put_op(g, PURE_OP_PICK, 0, 0); put_op(g, binary[roll(g, LEN(binary))], 0, 0); return;
-    case 10: gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, PURE_OP_SLIDE, 1, 0); return;
+    case 6: gen_num(g, depth - 1); put_op(g, unary[roll(g, LEN(unary))], 0, 0); return;
+    case 7: gen_num(g, depth - 1); gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, CL, 0, 0); return;
+    case 8: gen_num(g, depth - 1); put_op(g, PURE_OP_PICK, 0, 0); put_op(g, binary[roll(g, LEN(binary))], 0, 0); return;
+    case 9: /* a value of either type dropped under a number */
+        if (roll(g, 2)) gen_bool(g, depth - 1);
+        else gen_num(g, depth - 1);
+        gen_num(g, depth - 1);
+        put_op(g, PURE_OP_SLIDE, 1, 0);
+        return;
     default: gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, binary[roll(g, LEN(binary))], 0, 0); return;
     }
 }
 
-/* What reads only the fold's list, its item and constants (a shaped fold's own parts). */
-static void gen_own(Gen *g, int depth) {
+/* A bool: a constant, an item's flag, a key looked up, numbers or bools
+ * compared, or bools combined. */
+static void gen_bool(Gen *g, int depth) {
+    static const uint8_t compare[] = {PURE_OP_LT, PURE_OP_LE, PURE_OP_GT, PURE_OP_GE, PURE_OP_EQ, PURE_OP_NE};
+    static const uint8_t logic[] = {PURE_OP_AND, PURE_OP_OR, PURE_OP_EQ, PURE_OP_NE};
+    unsigned choice = roll(g, depth <= 0 ? 2 : 10);
+    if (g->tree && (choice == 8 || choice == 9)) choice = 7;
+    switch (choice) {
+    case 0: put_op(g, C, 1, roll(g, 2)); return;
+    case 1: gen_field(g, depth, true); return;
+    case 2: gen_num(g, depth - 1); put_op(g, PURE_OP_LIST_HAS, LANE_L, 0); return;
+    case 3: case 4: gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, compare[roll(g, LEN(compare))], 0, 0); return;
+    case 5: gen_bool(g, depth - 1); put_op(g, PURE_OP_NOT, 0, 0); return;
+    case 8: gen_bool(g, depth - 1); put_op(g, PURE_OP_PICK, 0, 0); put_op(g, logic[roll(g, LEN(logic))], 0, 0); return;
+    case 9: /* a value of either type dropped under a bool */
+        if (roll(g, 2)) gen_bool(g, depth - 1);
+        else gen_num(g, depth - 1);
+        gen_bool(g, depth - 1);
+        put_op(g, PURE_OP_SLIDE, 1, 0);
+        return;
+    default: gen_bool(g, depth - 1); gen_bool(g, depth - 1); put_op(g, logic[roll(g, LEN(logic))], 0, 0); return;
+    }
+}
+
+/* What reads only the fold's list, its item and constants (a shaped fold's
+ * own parts): a number, or a bool (flag). */
+static void gen_own(Gen *g, int depth, bool flag) {
     static const double pool[] = {0, -0.0, 1, -1, 2, 0.5, 3, 5, 1e308};
-    static const uint8_t binary[] = {PURE_OP_ADD, PURE_OP_SUB, PURE_OP_MUL, PURE_OP_DIV, PURE_OP_LT, PURE_OP_GT,
-                                     PURE_OP_EQ, PURE_OP_NE, PURE_OP_AND, PURE_OP_OR, PURE_OP_MIN, PURE_OP_MOD};
+    static const uint8_t binary[] = {PURE_OP_ADD, PURE_OP_SUB, PURE_OP_MUL, PURE_OP_DIV, PURE_OP_MIN, PURE_OP_MOD};
+    static const uint8_t compare[] = {PURE_OP_LT, PURE_OP_GT, PURE_OP_EQ, PURE_OP_NE};
+    static const uint8_t logic[] = {PURE_OP_AND, PURE_OP_OR, PURE_OP_EQ, PURE_OP_NE};
     int list = g->fold_list;
     switch (roll(g, depth <= 0 ? 3 : 7)) {
-    case 0: put_op(g, C, 0, pool[roll(g, LEN(pool))]); return;
+    case 0:
+        if (flag) put_op(g, C, 1, roll(g, 2));
+        else put_op(g, C, 0, pool[roll(g, LEN(pool))]);
+        return;
     case 1: case 2:
         if (roll(g, 4)) put_op(g, PURE_OP_ROW, (uint32_t)list, 0);
         else put_op(g, roll(g, 2) ? PURE_OP_INDEX_FIRST : PURE_OP_INDEX_LAST, (uint32_t)list, 0);
-        put_op(g, PURE_OP_ITEM_GET, (uint32_t)list | (uint32_t)roll(g, list == LANE_L ? 3 : 2) << 16, 0);
+        put_op(g, PURE_OP_ITEM_GET, (uint32_t)list | (flag ? (list == LANE_L ? 3u : 2u) : (uint32_t)roll(g, list == LANE_L ? 3 : 2)) << 16, 0);
         return;
-    case 3: put_op(g, PURE_OP_LIST_COUNT, (uint32_t)list, 0); return;
-    case 4: gen_own(g, depth - 1); put_op(g, roll(g, 2) ? NEG : PURE_OP_NOT, 0, 0); return;
-    default: gen_own(g, depth - 1); gen_own(g, depth - 1); put_op(g, binary[roll(g, LEN(binary))], 0, 0); return;
+    case 3:
+        if (flag) { gen_own(g, depth - 1, false); gen_own(g, depth - 1, false); put_op(g, compare[roll(g, LEN(compare))], 0, 0); }
+        else put_op(g, PURE_OP_LIST_COUNT, (uint32_t)list, 0);
+        return;
+    case 4: gen_own(g, depth - 1, flag); put_op(g, flag ? PURE_OP_NOT : NEG, 0, 0); return;
+    default:
+        gen_own(g, depth - 1, flag);
+        gen_own(g, depth - 1, flag);
+        put_op(g, flag ? logic[roll(g, LEN(logic))] : binary[roll(g, LEN(binary))], 0, 0);
+        return;
     }
 }
 
@@ -2488,9 +2555,9 @@ static void gen_shaped(Gen *g, int list) {
     put_op(g, PURE_OP_FOLD, 0, 0);
     int fold_list = g->fold_list, fold_outer = g->outer;
     g->fold_list = list, g->outer = LANE_L, g->tree = true;
-    if (how != PURE_FOLD_COUNT && how != PURE_FOLD_FIRST) gen_own(g, 2);
+    if (how != PURE_FOLD_COUNT && how != PURE_FOLD_FIRST) gen_own(g, 2, false);
     for (unsigned k = 0; k < before; ++k) {
-        gen_own(g, 2);
+        gen_own(g, 2, true);
         if (k) put_op(g, PURE_OP_AND, 0, 0);
     }
     bool field_first = roll(g, 2);
@@ -2511,7 +2578,7 @@ static void gen_shaped(Gen *g, int list) {
     put_op(g, relations[roll(g, LEN(relations))], 0, 0);
     if (before) put_op(g, PURE_OP_AND, 0, 0);
     for (unsigned k = 0; k < after; ++k) {
-        gen_own(g, 2);
+        gen_own(g, 2, true);
         put_op(g, PURE_OP_AND, 0, 0);
     }
     g->fold_list = fold_list, g->outer = fold_outer, g->tree = false;
@@ -2527,7 +2594,7 @@ static void gen_fold(Gen *g, int list, int outer) {
     int fold_list = g->fold_list, fold_outer = g->outer;
     g->fold_list = list, g->outer = outer;
     if (how != PURE_FOLD_COUNT && how != PURE_FOLD_FIRST) gen_num(g, 3);
-    gen_num(g, 3);
+    gen_bool(g, 3);
     g->fold_list = fold_list, g->outer = fold_outer;
     g->code[at].arg = FOLDING(how, list, g->count - at - 1);
     if (how == PURE_FOLD_FIRST) put_op(g, PURE_OP_INDEX_NUM, 0, 0);
@@ -2540,8 +2607,9 @@ static bool same_number(bool a_ok, double a, bool b_ok, double b) {
 static void lane_folds(void) {
     static const S numbers[] = {{"k", 3}, {"h0", 0}, {"h1", 0}, {"h2", 0}};
     static const T lists[] = {{"l", 3 | 1 << 8, 0}, {"m", 3, 1}};
-    static const RF l_fields[] = {{"key", 0, 0}, {"a", 0, 0}, {"b", 0, 0}}, m_fields[] = {{"x", 0, 0}, {"y", 0, 0}};
-    static const R records[] = {{"lrec", l_fields, 3}, {"mrec", m_fields, 2}};
+    static const RF l_fields[] = {{"key", 0, 0}, {"a", 0, 0}, {"b", 0, 0}, {"c", 2, 0}},
+                    m_fields[] = {{"x", 0, 0}, {"y", 0, 0}, {"z", 2, 1}};
+    static const R records[] = {{"lrec", l_fields, 4}, {"mrec", m_fields, 3}};
     static const I inputs[] = {KEY("go", "KeyG")};
     static const double values[] = {0, -0.0, 1, -1, 2, 3, 0.5, -2.5, 5, 10, 1e308, -7};
     enum { VIEWS = 6, COLUMNS = 3, HANDLED = 3 };
@@ -2561,7 +2629,7 @@ static void lane_folds(void) {
         }
         tables[0] = (W){"t", 2 | (LANE_L + 1) << 8, 0, (uint32_t)g.count, 0};
         g.fold_list = LANE_L;
-        gen_num(&g, 3);
+        gen_bool(&g, 3);
         g.fold_list = -1;
         tables[0].length = (uint32_t)(g.count - tables[0].start);
         for (unsigned c = 0; c < COLUMNS; ++c) {
@@ -2597,8 +2665,10 @@ static void lane_folds(void) {
         size_t l_items = roll(&g, 4) ? roll(&g, 200) : 0, m_items = roll(&g, 4) ? roll(&g, 100) : 0;
         for (size_t i = 0; i < l_items + m_items; ++i) {
             bool in_l = i < l_items;
-            PureCell cells_[3] = {{in_l ? 2.0 * (double)i : values[roll(&g, LEN(values))], NULL, 0},
-                                  {values[roll(&g, LEN(values))], NULL, 0}, {values[roll(&g, LEN(values))], NULL, 0}};
+            double flag = roll(&g, 2);
+            PureCell cells_[4] = {{in_l ? 2.0 * (double)i : values[roll(&g, LEN(values))], NULL, 0},
+                                  {values[roll(&g, LEN(values))], NULL, 0},
+                                  {in_l ? values[roll(&g, LEN(values))] : flag, NULL, 0}, {flag, NULL, 0}};
             PureList *list_a = a.lists[in_l ? LANE_L : LANE_M], *list_b = b.lists[in_l ? LANE_L : LANE_M];
             CHECK(pure_list_insert(list_a, pure_list_count(list_a), cells_, NULL) == PURE_OK &&
                   pure_list_insert(list_b, pure_list_count(list_b), cells_, NULL) == PURE_OK);
@@ -2678,7 +2748,7 @@ static const O walk_code[] = {
     /* 21: n += 1; sum += sum(l.qty for l in order.lines) */
     {L, W_N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, W_N, 0},
     {L, W_SUM, 0}, {FOLD, FOLDING(PURE_FOLD_SUM, W_LINES, 3), 0}, {ROW, W_LINES, 0}, {IG, ITEM(W_LINES, 1), 0},
-    {C, 0, 1}, {ADD, 0, 0}, {ST, W_SUM, 0},
+    {C, 1, 1}, {ADD, 0, 0}, {ST, W_SUM, 0},
     /* 32 clean: for s in stock { if s.left == 0 { stock.remove(s) } else if s.left == 1 { stock.remove(stock.first) }
      *                             else { s.left = s.left + 1 } } */
     {EACH, WALKING(W_STOCK, 22), 0},
@@ -2823,7 +2893,7 @@ static void walks(void) {
     static const O nested[] = {{EACH, WALKING(W_STOCK, 3), 0}, {EACH, WALKING(W_LOG, 2), 0}, {C, 0, 1}, {ST, W_N, 0}};
     static const O replied[] = {{EACH, WALKING(W_STOCK, 2), 0}, {FIELD, 1, 0}, {REPLY, 0, 0}};
     static const O rows_read[] = {{FIELD, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {REPLY, 0, 0}};
-    static const O into_each[] = {{C, 0, 1}, {JZ, 3, 0}, {EACH, WALKING(W_STOCK, 2), 0}, {C, 0, 1}, {ST, W_N, 0}};
+    static const O into_each[] = {{C, 1, 1}, {JZ, 3, 0}, {EACH, WALKING(W_STOCK, 2), 0}, {C, 0, 1}, {ST, W_N, 0}};
     static const O view_each[] = {{EACH, WALKING(W_STOCK, 2), 0}, {C, 0, 1}, {ST, W_N, 0}, {C, 0, 1}};
     static const H first3[] = {{1, 0, 4}}, first3b[] = {{1, 0, 3}}, first5[] = {{1, 0, 5}};
     static const V walk_view[] = {{"v", 0, 4}};
@@ -3302,13 +3372,13 @@ static void pointing(void) {
  * key once; found by key; a list that becomes keyed is put in order with
  * its indices following their items, or refused when two items share a key. */
 enum { FIND = PURE_OP_LIST_FIND, HAS = PURE_OP_LIST_HAS, TCMP = PURE_OP_TEXT_COMPARE,
-       PEOPLE = 1, K_AT = 2, SCORES = 3, K_NAME = 0, K_VISITS = 1u << 16 };
+       PEOPLE = 1, K_AT = 2, SCORES = 3, K_FOUND = 4, K_NAME = 0, K_VISITS = 1u << 16 };
 static const S keyed_nums[] = {{"n", 0}};
-static const T keyed_states[] = {{"people", 3 | 1 << 8, 0}, {"at", 4, 1}, {"scores", 3 | 1 << 8, 1}};
-static const T unkeyed_states[] = {{"people", 3, 0}, {"at", 4, 1}, {"scores", 3, 1}};
+static const T keyed_states[] = {{"people", 3 | 1 << 8, 0}, {"at", 4, 1}, {"scores", 3 | 1 << 8, 1}, {"found", 5, 0}};
+static const T unkeyed_states[] = {{"people", 3, 0}, {"at", 4, 1}, {"scores", 3, 1}, {"found", 5, 0}};
 static const RF person_fields[] = {{"name", 1, 0}, {"visits", 0, 0}};
-static const RF score_fields[] = {{"score", 0, 0}};
-static const R keyed_records[] = {{"person", person_fields, 2}, {"score", score_fields, 1}};
+static const RF score_fields[] = {{"score", 0, 0}}, flag_fields[] = {{"on", 2, 0}};
+static const R keyed_records[] = {{"person", person_fields, 2}, {"score", score_fields, 1}, {"flag", flag_fields, 1}};
 static const char *const keyed_constants[] = {"", "bob", "m"};
 static const I keyed_inputs[] = {
     {"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, {"seek", NULL, PURE_KIND_TEXT, false, NULL, 0},
@@ -3318,7 +3388,7 @@ static const I keyed_inputs[] = {
 static const O keyed_code[] = {
     {TI, 0, 0}, {C, 0, 0}, {LA, PEOPLE, 0}, {TI, 0, 0}, {FIND, PEOPLE, 0}, {XS, K_AT, 0},        /* 0 typed: add, point at it */
     {TI, 0, 0}, {FIND, PEOPLE, 0}, {XS, K_AT, 0},                                               /* 6 seek */
-    {TI, 0, 0}, {HAS, PEOPLE, 0}, {ST, 0, 0},                                                   /* 9 has */
+    {TI, 0, 0}, {HAS, PEOPLE, 0}, {ST, K_FOUND, 0},                                             /* 9 has */
     {XL, K_AT, 0}, {LR, PEOPLE, 0},                                                             /* 12 drop */
     {XL, K_AT, 0}, {XL, K_AT, 0}, {IG, PEOPLE | K_VISITS, 0}, {C, 0, 1}, {ADD, 0, 0},            /* 14 bump */
     {IS, PEOPLE | K_VISITS, 0},
@@ -3333,7 +3403,7 @@ static const O keyed_code[] = {
 };
 static const H keyed_handlers[] = {{1, 0, 6}, {3, 6, 3}, {5, 9, 3}, {7, 12, 2}, {9, 14, 6}, {11, 20, 2}, {13, 22, 2},
                                    {15, 24, 2}, {17, 26, 6}};
-static const V keyed_views[] = {{"count", 32, 1}, {"position", 33, 2}, {"is_bob", 35, 4}, {"before_m", 39, 4},
+static const V keyed_views[] = {{"count", 32, 1}, {"position", 33, 2}, {"is_bob", 35, 4 | BOOL_VIEW}, {"before_m", 39, 4 | BOOL_VIEW},
                                 {"scores_count", 43, 1}};
 static const V keyed_text_views[] = {{"current", 44, 2}};
 /* Unkeyed, the same states: typed appends and points at the new last item. */
@@ -3344,7 +3414,7 @@ static Spec keyed_spec(const T *states, const O *code, size_t count, const H *ha
     bool views = code == keyed_code;
     return (Spec){keyed_nums, 1, keyed_inputs, LEN(keyed_inputs), keyed_views, views ? LEN(keyed_views) : 0, handlers,
                   nhandlers, code, count, NULL, 0, states, LEN(keyed_states), keyed_constants, LEN(keyed_constants),
-                  keyed_text_views, views ? 1 : 0, keyed_records, 2, NULL, 0};
+                  keyed_text_views, views ? 1 : 0, keyed_records, LEN(keyed_records), NULL, 0};
 }
 
 static PureResult type_text(PureApp *app, uint32_t input, const char *text) {
@@ -3378,8 +3448,8 @@ static void keyed(void) {
     CHECK(type_text(&app, 8, "c") == PURE_CONFLICT && !strcmp(names_of(&app, PEOPLE), "a,b,m,z") && app.values[K_AT] == 0);
     CHECK(type_text(&app, 1, "z") == PURE_OK && app.values[K_AT] == 3 && !strcmp(view_text(&app, 5), "z"));
     CHECK(type_text(&app, 1, "q") == PURE_NOT_FOUND && app.fault == PURE_FAULT_NOT_FOUND && app.values[K_AT] == 3);
-    CHECK(type_text(&app, 2, "m") == PURE_OK && app.values[0] == 1);
-    CHECK(type_text(&app, 2, "c") == PURE_OK && app.values[0] == 0);
+    CHECK(type_text(&app, 2, "m") == PURE_OK && app.values[K_FOUND] == 1);
+    CHECK(type_text(&app, 2, "c") == PURE_OK && app.values[K_FOUND] == 0);
     CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && pure_list_get(app.lists[PEOPLE], 3, 1).num == 1);
     CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && !strcmp(names_of(&app, PEOPLE), "a,b,m"));
     CHECK(app.values[K_AT] == 2 && number_view(&app, 2) == 0 && number_view(&app, 3) == 0);  /* "m": not bob, not before m */
@@ -3436,10 +3506,12 @@ static void keyed(void) {
     static const O set_key[] = {{XL, K_AT, 0}, {TK, 0, 0}, {IS, PEOPLE | K_NAME, 0}};
     static const O find_number[] = {{C, 0, 1}, {FIND, PEOPLE, 0}, {XS, K_AT, 0}};
     static const O find[] = {{TI, 0, 0}, {FIND, PEOPLE, 0}, {XS, K_AT, 0}};
-    static const O relation[] = {{TI, 0, 0}, {TI, 0, 0}, {TCMP, PURE_NOT_EQUAL + 1, 0}, {ST, 0, 0}};
-    static const O compare_numbers[] = {{C, 0, 1}, {C, 0, 1}, {TCMP, PURE_EQUAL, 0}, {ST, 0, 0}};
-    static const T far_key[] = {{"people", 3 | 3 << 8, 0}, {"at", 4, 1}, {"scores", 3, 1}};
-    static const T keyed_index[] = {{"people", 3, 0}, {"at", 4 | 1 << 8, 1}, {"scores", 3, 1}};
+    static const O relation[] = {{TI, 0, 0}, {TI, 0, 0}, {TCMP, PURE_NOT_EQUAL + 1, 0}, {ST, K_FOUND, 0}};
+    static const O compare_numbers[] = {{C, 0, 1}, {C, 0, 1}, {TCMP, PURE_EQUAL, 0}, {ST, K_FOUND, 0}};
+    static const O has_number[] = {{TI, 0, 0}, {HAS, PEOPLE, 0}, {ST, 0, 0}}; /* a bool is not a number */
+    static const T far_key[] = {{"people", 3 | 3 << 8, 0}, {"at", 4, 1}, {"scores", 3, 1}, {"found", 5, 0}};
+    static const T keyed_index[] = {{"people", 3, 0}, {"at", 4 | 1 << 8, 1}, {"scores", 3, 1}, {"found", 5, 0}};
+    static const T bool_key[] = {{"people", 3, 0}, {"at", 4, 1}, {"scores", 3 | 1 << 8, 2}, {"found", 5, 0}};
     static const struct { const T *states; const O *code; size_t count; const char *reason; } refused[] = {
         {keyed_states, insert, LEN(insert), "insert by position into a keyed list"},
         {keyed_states, set_key, LEN(set_key), "change of a keyed list's key"},
@@ -3447,6 +3519,8 @@ static void keyed(void) {
         {unkeyed_states, find, LEN(find), "no such state"},
         {keyed_states, relation, LEN(relation), "no such state"},
         {keyed_states, compare_numbers, LEN(compare_numbers), "operand type"},
+        {keyed_states, has_number, LEN(has_number), "operand type"},
+        {bool_key, unkeyed_code, LEN(unkeyed_code), "state reference"},  /* a bool is no key */
         {far_key, unkeyed_code, LEN(unkeyed_code), "state reference"},
         {keyed_index, unkeyed_code, LEN(unkeyed_code), "state reference"},
     };
@@ -3964,7 +4038,7 @@ static void links(void) {
                                       {"ordered", NULL, PURE_KIND_OUTPUT, false, ordered_fields, 3}};
     static const O sender_code[] = {{L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, {FIELD, 0, 0}, {FIELD, 1, 0},
                                     {L, 0, 0}, {SEND, 2, 0},                                           /* buy */
-                                    {FIELD, 0, 0}, {FIELD, 1, 0}, {C, 0, 0}, {SEND, 2, 0}, {C, 0, 0}, {REQ, 0, 0}}; /* fail */
+                                    {FIELD, 0, 0}, {FIELD, 1, 0}, {C, 0, 0}, {SEND, 2, 0}, {C, 1, 0}, {REQ, 0, 0}}; /* fail */
     static const H sender_handlers[] = {{1, 0, 8}, {3, 8, 6}};
     Spec sender = {sender_nums, 1, sender_inputs, 3, NULL, 0, sender_handlers, 2, sender_code, LEN(sender_code),
                    NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
@@ -4450,6 +4524,231 @@ static void output_meaning(void) {
     remove_store(path);
 }
 
+/* ---- Bools (docs/design/016-bool-and-i64.md) -----------------------------
+ * A bool is its own type: comparisons, has and logic give one; branches,
+ * require, filters and folds' tests take one; a number is never one, nor a
+ * bool a number. It runs as 0 or 1 in a number's place, a message holds it
+ * in a byte, and it is written true or false. A number that becomes a bool
+ * (a module replaced, a stored state or item) keeps 0 and 1, of either sign,
+ * and takes the default for any other; a bool that becomes a number is 0 or 1. */
+enum { B_N = 0, B_ON = 1, B_OFF = 2, B_TOLD = 5 };
+#define TRUTH_LOCAL(slot) ((uint32_t)(slot) | 2u << 8)
+static const S bool_nums[] = {{"n", 0}};
+static const T bool_states[] = {{"on", 5, 1}, {"off", 5, 0}};
+static const F set_fields[] = {{"on", PURE_FIELD_BOOL}, {"n", PURE_FIELD_NUMBER}};
+static const F told_fields[] = {{"on", PURE_FIELD_BOOL}, {"big", PURE_FIELD_BOOL}, {"n", PURE_FIELD_NUMBER}};
+static const I bool_inputs[] = {KEY("flip", "KeyF"), KEY("count", "KeyC"), KEY("check", "KeyK"), KEY("tell", "KeyT"),
+                                {"set", NULL, PURE_KIND_MESSAGE, false, set_fields, 2},
+                                {"told", NULL, PURE_KIND_OUTPUT, false, told_fields, 3}};
+static const O bool_code[] = {
+    {L, B_ON, 0}, {NOT, 0, 0}, {ST, B_ON, 0},                                           /* 0 flip: on = !on */
+    {L, B_ON, 0}, {JZ, 9, 0}, {L, B_N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, B_N, 0},          /* 3 count: if on { n += 1 } */
+    {C, 1, 1}, {ST, B_OFF, 0}, {L, B_N, 0}, {C, 0, 3}, {LT, 0, 0}, {REQ, 0, 0},         /* 9 check: off = true; require n < 3 */
+    {L, B_ON, 0}, {L, B_N, 0}, {C, 0, 2}, {GT, 0, 0}, {L, B_N, 0}, {SEND, B_TOLD, 0},   /* 15 tell: told { on, big: n > 2, n } */
+    {FIELD, 0, 0}, {ST, B_ON, 0}, {FIELD, 1, 0}, {ST, B_N, 0},                          /* 21 set */
+    {L, B_ON, 0},                                                                       /* 25 view lit */
+    {L, B_N, 0}, {C, 0, 2}, {GT, 0, 0},                                                 /* 26 view big */
+    {L, B_ON, 0}, {L, B_OFF, 0}, {EQ, 0, 0},                                            /* 29 view same */
+    {L, B_ON, 0}, {L, B_OFF, 0}, {PURE_OP_OR, 0, 0}, {L, B_N, 0}, {C, 0, 0}, {PURE_OP_NE, 0, 0},
+    {PURE_OP_AND, 0, 0},                                                                /* 32 view either */
+    {L, B_ON, 0}, {NT, 1, 0}, {C, 0, 1}, {NT, 0, 0}, {CAT, 0, 0},                       /* 39 view said */
+};
+static const H bool_handlers[] = {{1, 0, 3}, {3, 3, 6}, {5, 9, 6}, {7, 15, 6}, {9, 21, 4}};
+static const V bool_views[] = {{"lit", 25, 1 | BOOL_VIEW}, {"big", 26, 3 | BOOL_VIEW}, {"same", 29, 3 | BOOL_VIEW},
+                               {"either", 32, 7 | BOOL_VIEW}};
+static const V bool_texts[] = {{"said", 39, 5}};
+
+static void bools(void) {
+    Spec spec = {bool_nums, 1, bool_inputs, LEN(bool_inputs), bool_views, LEN(bool_views), bool_handlers,
+                 LEN(bool_handlers), bool_code, LEN(bool_code), NULL, 0, bool_states, LEN(bool_states), NULL, 0,
+                 bool_texts, 1, NULL, 0, NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    CHECK(module_a.state_type[B_ON] == PURE_STATE_BOOL && module_a.view_type[0] == PURE_VIEW_BOOL &&
+          module_a.input[4].prefix == 9 && module_a.input[B_TOLD].prefix == 10);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && app.values[B_ON] == 1 && app.values[B_OFF] == 0);
+    CHECK(number_view(&app, 0) == 1 && number_view(&app, 1) == 0 && number_view(&app, 2) == 0 && number_view(&app, 3) == 0);
+    CHECK(!strcmp(view_text(&app, 4), "true1"));
+    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(app.values[B_N] == 3 && number_view(&app, 1) == 1 && number_view(&app, 3) == 1);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_LIMIT && app.values[B_OFF] == 0); /* require failed: undone */
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && app.values[B_ON] == 0 && !strcmp(view_text(&app, 4), "false1"));
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[B_N] == 3 && number_view(&app, 2) == 1);
+    /* A message's bool is a byte, 0 or 1; any other byte fails the message. */
+    unsigned char payload[9] = {1};
+    double five = 5;
+    memcpy(payload + 1, &five, 8);
+    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 9}) == PURE_OK && app.values[B_ON] == 1 && app.values[B_N] == 5);
+    pure_app_finish(&app);
+    payload[0] = 2;
+    five = 6;
+    memcpy(payload + 1, &five, 8);
+    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 9}) == PURE_LIMIT && app.values[B_N] == 5);
+    pure_app_finish(&app);
+    /* A send holds its bools as bytes. */
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK);
+    Outbox o = outbox_of(&app);
+    double n;
+    memcpy(&n, o.items[0].payload + 2, 8);
+    CHECK(o.count == 1 && o.items[0].size == 10 && o.items[0].payload[0] == 1 && o.items[0].payload[1] == 1 && n == 5);
+    /* Stored, a waiting send keeps its bools. */
+    char *sends = new_store();
+    PureApp kept;
+    CHECK(pure_app_start(&kept, &module_a, pure_tree_data(sends)) == PURE_OK && pure_app_input(&kept, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(pure_app_input(&kept, 3, PURE_EDGE_DOWN) == PURE_OK && pure_app_save(&kept) == PURE_OK);
+    pure_app_stop(&kept);
+    CHECK(pure_app_start(&kept, &module_a, pure_tree_data(sends)) == PURE_OK);
+    Outbox stored_sends = outbox_of(&kept);
+    CHECK(stored_sends.count == 1 && stored_sends.items[0].size == 10 && stored_sends.items[0].payload[0] == 1 &&
+          stored_sends.items[0].payload[1] == 0);
+    pure_app_stop(&kept);
+    remove_store(sends);
+    /* A link delivers a bool to a bool only; a module's outputs replaced
+     * recast a waiting send's values as its states are kept. */
+    static const unsigned char same[] = {2, PURE_FIELD_BOOL, 2, 'o', 'n', PURE_FIELD_NUMBER, 1, 'n'};
+    static const unsigned char number_on[] = {1, PURE_FIELD_NUMBER, 2, 'o', 'n'}, bool_n[] = {1, PURE_FIELD_BOOL, 1, 'n'};
+    CHECK(pure_module_takes(&module_a, 4, same, sizeof(same)) && !pure_module_takes(&module_a, 4, number_on, sizeof(number_on)) &&
+          !pure_module_takes(&module_a, 4, bool_n, sizeof(bool_n)));
+    PureField told[3] = {{"on", PURE_FIELD_BOOL, 0, 0}, {"big", PURE_FIELD_BOOL, 0, 0}, {"n", PURE_FIELD_NUMBER, 0, 0}};
+    PureField other[3] = {{"n", PURE_FIELD_BOOL, 0, 0}, {"on", PURE_FIELD_NUMBER, 0, 0}, {"big", PURE_FIELD_U32, 0, 0}};
+    CHECK(pure_fields_lay_out(told, 3) == 10 && pure_fields_lay_out(other, 3) == 13);
+    unsigned char *made, *back;
+    size_t size, back_size;
+    CHECK(pure_send_recast(told, 3, other, 3, (PureSpan){o.items[0].payload, 10}, &made, &size) == PURE_OK && size == 13);
+    double on;
+    uint32_t big;
+    memcpy(&on, made + 1, 8);
+    memcpy(&big, made + 9, 4);
+    CHECK(made[0] == 0 && on == 1 && big == 1); /* n = 5 is no bool */
+    CHECK(pure_send_recast(other, 3, told, 3, (PureSpan){made, size}, &back, &back_size) == PURE_OK && back_size == 10);
+    memcpy(&n, back + 2, 8);
+    CHECK(back[0] == 1 && back[1] == 1 && n == 0 && !signbit(n));
+    free(made);
+    free(back);
+    /* Replaced: n (5) becomes a bool (its default, false), on a number (1); back again, 0 and 1. */
+    static const S swapped_nums[] = {{"on", 7}};
+    static const T swapped_states[] = {{"n", 5, 0}, {"off", 5, 1}};
+    Spec swapped = {swapped_nums, 1, bool_inputs, LEN(bool_inputs), NULL, 0, NULL, 0, NULL, 0, NULL, 0, swapped_states, 2,
+                    NULL, 0, NULL, 0, NULL, 0, NULL, 0};
+    CHECK(load(swapped, &module_b) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.values[0] == 1 && app.values[1] == 0 && app.values[2] == 0);
+    app.values[0] = -0.0; /* on, a number: -0 is 0 */
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && app.values[B_N] == 0 && app.values[B_ON] == 0 &&
+          !signbit(app.values[B_ON]) && app.values[B_OFF] == 0);
+    pure_app_stop(&app);
+
+    /* What mixes bools and numbers is refused. */
+    static const O add_bools[] = {{C, 1, 1}, {C, 1, 0}, {ADD, 0, 0}, {ST, B_N, 0}};
+    static const O branch_number[] = {{C, 0, 1}, {JZ, 2, 0}};
+    static const O bool_in_number[] = {{C, 1, 1}, {ST, B_N, 0}};
+    static const O number_in_bool[] = {{C, 0, 1}, {ST, B_ON, 0}};
+    static const O order_bools[] = {{C, 1, 1}, {C, 1, 0}, {LT, 0, 0}, {ST, B_ON, 0}};
+    static const O bool_is_number[] = {{C, 1, 1}, {C, 0, 0}, {EQ, 0, 0}, {ST, B_ON, 0}};
+    static const O not_number[] = {{C, 0, 1}, {NOT, 0, 0}, {ST, B_ON, 0}};
+    static const O require_number[] = {{C, 0, 1}, {REQ, 0, 0}};
+    static const O and_number[] = {{C, 1, 1}, {C, 0, 1}, {PURE_OP_AND, 0, 0}, {ST, B_ON, 0}};
+    static const O min_bools[] = {{C, 1, 1}, {C, 1, 1}, {MIN, 0, 0}, {ST, B_N, 0}};
+    static const O neg_bool[] = {{C, 1, 1}, {NEG, 0, 0}, {ST, B_N, 0}};
+    static const O send_number[] = {{C, 1, 1}, {C, 0, 1}, {C, 0, 2}, {SEND, B_TOLD, 0}};
+    static const O local_number[] = {{C, 0, 1}, {LOCAL_S, TRUTH_LOCAL(0), 0}};
+    static const O local_bool[] = {{C, 1, 1}, {LOCAL_S, LOCAL(0, -1), 0}};
+    static const O field_number[] = {{FIELD, 0, 0}, {ST, B_N, 0}};
+    static const O two[] = {{C, 1, 2}, {ST, B_ON, 0}};
+    static const O minus_zero[] = {{C, 1, -0.0}, {ST, B_ON, 0}};
+    static const O half[] = {{C, 1, 0.5}, {ST, B_ON, 0}};
+    static const O kind_two[] = {{C, 2, 1}, {ST, B_ON, 0}};
+    static const struct { const O *code; size_t count; uint32_t event; const char *reason; } refused[] = {
+        {add_bools, LEN(add_bools), 1, "operand type"},
+        {branch_number, LEN(branch_number), 1, "operand type"},
+        {bool_in_number, LEN(bool_in_number), 1, "operand type"},
+        {number_in_bool, LEN(number_in_bool), 1, "operand type"},
+        {order_bools, LEN(order_bools), 1, "operand type"},
+        {bool_is_number, LEN(bool_is_number), 1, "operand type"},
+        {not_number, LEN(not_number), 1, "operand type"},
+        {require_number, LEN(require_number), 1, "operand type"},
+        {and_number, LEN(and_number), 1, "operand type"},
+        {min_bools, LEN(min_bools), 1, "operand type"},
+        {neg_bool, LEN(neg_bool), 1, "operand type"},
+        {send_number, LEN(send_number), 1, "operand type"},
+        {local_number, LEN(local_number), 1, "operand type"},
+        {local_bool, LEN(local_bool), 1, "operand type"},
+        {field_number, LEN(field_number), 9, "operand type"},   /* set's on is a bool */
+        {two, LEN(two), 1, "non-canonical operand"},
+        {minus_zero, LEN(minus_zero), 1, "non-canonical operand"},
+        {half, LEN(half), 1, "non-canonical operand"},
+        {kind_two, LEN(kind_two), 1, "operand names no such"},
+    };
+    for (size_t i = 0; i < LEN(refused); ++i) {
+        H handler = {refused[i].event, 0, (uint32_t)refused[i].count};
+        Spec bad = spec;
+        bad.o = refused[i].code, bad.no = refused[i].count, bad.h = &handler, bad.nh = 1;
+        bad.v = NULL, bad.nv = 0, bad.tv = NULL, bad.ntv = 0;
+        if (load(bad, &module_b) != PURE_INVALID || !strstr(error, refused[i].reason)) {
+            fprintf(stderr, "bool case %zu: expected '%s', got '%s'\n", i, refused[i].reason, error);
+            abort();
+        }
+    }
+    static const O one_number[] = {{C, 0, 1}}, one_bool[] = {{C, 1, 1}};
+    static const O text_of_number[] = {{C, 0, 1}, {NT, 1, 0}}, text_of_bool[] = {{C, 1, 1}, {NT, 0, 0}},
+                   text_kind[] = {{C, 1, 1}, {NT, 2, 0}};
+    V as_bool = {"v", 0, 1 | BOOL_VIEW}, as_number = {"v", 0, 1}, as_text = {"v", 0, 2};
+    Spec bad = spec;
+    bad.h = NULL, bad.nh = 0, bad.tv = NULL, bad.ntv = 0, bad.no = 1, bad.nv = 1;
+    bad.o = one_number, bad.v = &as_bool;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view must leave one value of its type"));
+    bad.o = one_bool, bad.v = &as_number;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view must leave one value of its type"));
+    bad.v = NULL, bad.nv = 0, bad.tv = &as_text, bad.ntv = 1, bad.no = 2;
+    bad.o = text_of_number;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
+    bad.o = text_of_bool;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
+    bad.o = text_kind;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand names no such"));
+    /* A bool's initial value and default are 0 or 1; types past bool are none. */
+    static const T two_initial[] = {{"on", 5, 2}, {"off", 5, 0}}, sixth[] = {{"on", 6, 0}, {"off", 5, 0}};
+    static const RF two_default[] = {{"done", 2, 2}};
+    static const R two_record[] = {{"r", two_default, 1}};
+    static const T with_list[] = {{"on", 5, 1}, {"off", 5, 0}, {"rs", 3, 0}};
+    static const W fourth_view[] = {{"x", 4, 0, 25, 1}};
+    bad = spec;
+    bad.t = two_initial;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "bool initial value"));
+    bad.t = sixth;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "state type"));
+    bad.t = with_list, bad.nt = 3, bad.r = two_record, bad.nr = 1;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "record field default"));
+    bad = spec;
+    bad.w = fourth_view, bad.nw = 1;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view type"));
+
+    /* Stored: n and the items' done, numbers, become bools (1 kept, 2 and 3
+     * the default, false) and done a number again. */
+    char *path = new_store();
+    Spec numbers = {crash_nums, 1, crash_inputs, 1, NULL, 0, crash_handlers, 1, crash_code, LEN(crash_code), NULL, 0,
+                    crash_states, 4, crash_constants, 2, NULL, 0, crash_records, 1, NULL, 0};
+    static const T flagged_states[] = {{"n", 5, 0}, {"note", 1, 0}, {"at", 2, 1}, {"tasks", 3, 0}, {"i", 4, 3}};
+    static const RF flagged_fields[] = {{"title", 1, 0}, {"done", 2, 0}};
+    static const R flagged_records[] = {{"task", flagged_fields, 2}};
+    Spec flagged = {NULL, 0, crash_inputs, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, flagged_states, 5, crash_constants, 2,
+                    NULL, 0, flagged_records, 1, NULL, 0};
+    CHECK(load(numbers, &module_a) == PURE_OK && load(flagged, &module_b) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    pure_app_stop(&app);
+    for (int round = 0; round < 2; ++round) { /* migrated, then stored as migrated */
+        CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && app.values[0] == 0);
+        CHECK(pure_list_count(app.lists[TASKS]) == 3 && pure_list_get(app.lists[TASKS], 0, 1).num == 1 &&
+              pure_list_get(app.lists[TASKS], 1, 1).num == 0 && pure_list_get(app.lists[TASKS], 2, 1).num == 0);
+        pure_app_stop(&app);
+    }
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_list_count(app.lists[TASKS]) == 3);
+    CHECK(pure_list_get(app.lists[TASKS], 0, 1).num == 1 && pure_list_get(app.lists[TASKS], 2, 1).num == 0);
+    pure_app_stop(&app);
+    remove_store(path);
+    printf("{\"bools\":{\"refused\":%zu}}\n", LEN(refused) + 9);
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -4566,6 +4865,7 @@ int main(void) {
     links();
     send_recast();
     output_meaning();
+    bools();
     memory_budget();
     fold_mutations();
     pointing();
@@ -4575,6 +4875,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields-timers-now-snapshots-links\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-bools-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields-timers-now-snapshots-links\"}");
     return 0;
 }

@@ -12,8 +12,10 @@ enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 
        HANDLER_BYTES = 12, OP_BYTES = 16 };
 /* T_FIELD and T_ITEM stand for the type of the message or record field
  * named, T_KEY for the type of the named keyed list's key, T_LOCAL for what
- * the named local holds. */
-enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8, T_LOCAL = 9 };
+ * the named local holds, T_STATE for the type of the number or bool state
+ * named. */
+enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8, T_LOCAL = 9,
+       T_BOOL = 10, T_STATE = 11 };
 enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUMENTS };
 /* Where an opcode may appear. */
 /* IN_ARGUMENTS: fields read where nothing is done with them (a view's arguments, a message's fields in a fold). */
@@ -24,14 +26,16 @@ enum { READ = IN_VIEW | IN_HANDLER };
 /* What an argument names: nothing (it is 0), a state of one type (A_STATE +
  * the type), a list and one of its record's fields, a message field, the
  * collection, a constant, a unit, the column's row, a branch target, a stack
- * depth, a fold, a relation, a keyed list, an output, or the row of the
- * column a fold runs in. */
-enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_INDEX + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
-       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL };
-/* A fold's block is verified as a column that leaves one number (count) or
- * two (a value and whether to include it), a table's filter as a column that
- * leaves one: these stand for a view type. A walk's block (EACH) is verified
- * as its handler's code that may read the item it runs for (WALK). */
+ * depth, a fold, a relation, a keyed list, an output, the row of the column
+ * a fold runs in, a number or a bool state (A_VALUE), or whether the value
+ * is a bool (A_BOOL: 0 or 1). */
+enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_BOOL + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
+       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL, A_VALUE, A_BOOL };
+/* A fold's block is verified as a column that leaves one bool (count, first)
+ * or a number and whether to include it (a bool), a table's filter as a
+ * column that leaves a bool: these stand for a view type. A walk's block
+ * (EACH) is verified as its handler's code that may read the item it runs
+ * for (WALK). */
 enum { FOLD_ONE = 100, FOLD_TWO, FILTER, WALK };
 /* The text or list an opcode works on: its cursor and index operands belong
  * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_OPERAND:
@@ -39,22 +43,24 @@ enum { FOLD_ONE = 100, FOLD_TWO, FILTER, WALK };
  * O_REF: the text or list of the argument's cursor or index state. O_LIST:
  * the list of an item argument. */
 enum { O_ANY, O_OPERAND, O_ARG, O_REF, O_LIST };
-static const unsigned char magic[8] = {'P','U','R','E','M','O','D','5'};
+static const unsigned char magic[8] = {'P','U','R','E','M','O','D','6'};
 
 /* Operand types popped (bottom to top), the type pushed, where allowed, what
  * the argument names and the text or list worked on. */
 #define NUMS(pops) {pops, {T_NUM, T_NUM, T_NUM}, T_NUM, READ, A_NONE, O_ANY}
+#define COMPARE {2, {T_NUM, T_NUM}, T_BOOL, READ, A_NONE, O_ANY}
+#define LOGIC(pops) {pops, {T_BOOL, T_BOOL}, T_BOOL, READ, A_NONE, O_ANY}
 #define STATE(type) A_STATE + PURE_STATE_##type
 static const struct { unsigned char pops, in[3], out; unsigned short where; unsigned char arg, of; } signature[PURE_OP_COUNT] = {
-    [PURE_OP_CONST] = NUMS(0), [PURE_OP_ADD] = NUMS(2), [PURE_OP_SUB] = NUMS(2), [PURE_OP_MUL] = NUMS(2),
-    [PURE_OP_DIV] = NUMS(2), [PURE_OP_NEG] = NUMS(1), [PURE_OP_LT] = NUMS(2), [PURE_OP_LE] = NUMS(2),
-    [PURE_OP_GT] = NUMS(2), [PURE_OP_GE] = NUMS(2), [PURE_OP_EQ] = NUMS(2), [PURE_OP_NE] = NUMS(2),
-    [PURE_OP_AND] = NUMS(2), [PURE_OP_OR] = NUMS(2), [PURE_OP_NOT] = NUMS(1), [PURE_OP_MIN] = NUMS(2),
-    [PURE_OP_MAX] = NUMS(2), [PURE_OP_CLAMP] = NUMS(3),
-    [PURE_OP_LOAD] = {0, {0}, T_NUM, READ, STATE(NUM), O_ANY},
+    [PURE_OP_CONST] = {0, {0}, T_NUM, READ, A_BOOL, O_ANY}, [PURE_OP_ADD] = NUMS(2), [PURE_OP_SUB] = NUMS(2),
+    [PURE_OP_MUL] = NUMS(2), [PURE_OP_DIV] = NUMS(2), [PURE_OP_NEG] = NUMS(1), [PURE_OP_LT] = COMPARE,
+    [PURE_OP_LE] = COMPARE, [PURE_OP_GT] = COMPARE, [PURE_OP_GE] = COMPARE, [PURE_OP_EQ] = COMPARE,
+    [PURE_OP_NE] = COMPARE, [PURE_OP_AND] = LOGIC(2), [PURE_OP_OR] = LOGIC(2), [PURE_OP_NOT] = LOGIC(1),
+    [PURE_OP_MIN] = NUMS(2), [PURE_OP_MAX] = NUMS(2), [PURE_OP_CLAMP] = NUMS(3),
+    [PURE_OP_LOAD] = {0, {0}, T_STATE, READ, A_VALUE, O_ANY},
     [PURE_OP_DT] = {0, {0}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
-    [PURE_OP_STORE] = {1, {T_NUM}, 0, IN_HANDLER, STATE(NUM), O_ANY},
-    [PURE_OP_JZ] = {1, {T_NUM}, 0, READ, A_TARGET, O_ANY},
+    [PURE_OP_STORE] = {1, {T_STATE}, 0, IN_HANDLER, A_VALUE, O_ANY},
+    [PURE_OP_JZ] = {1, {T_BOOL}, 0, READ, A_TARGET, O_ANY},
     [PURE_OP_JMP] = {0, {0}, 0, READ, A_TARGET, O_ANY},
     [PURE_OP_FIELD] = {0, {0}, T_FIELD, IN_MESSAGE | IN_ARGUMENTS, A_FIELD, O_ANY},
     [PURE_OP_DOC] = {0, {0}, T_BYTES, IN_KEYED, A_COLLECTION, O_ANY},
@@ -62,11 +68,11 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_LEN] = {1, {T_BYTES}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
     [PURE_OP_REPLACE] = {3, {T_NUM, T_NUM, T_BYTES}, 0, IN_KEYED, A_COLLECTION, O_ANY},
     [PURE_OP_REPLY] = {1, {T_BYTES}, 0, IN_MESSAGE, A_NONE, O_ANY},
-    [PURE_OP_REQUIRE] = {1, {T_NUM}, 0, IN_HANDLER, A_NONE, O_ANY},
+    [PURE_OP_REQUIRE] = {1, {T_BOOL}, 0, IN_HANDLER, A_NONE, O_ANY},
     [PURE_OP_TEXT_CONST] = {0, {0}, T_TEXT, READ, A_CONSTANT, O_ANY},
     [PURE_OP_TEXT_LOAD] = {0, {0}, T_TEXT, READ, STATE(TEXT), O_ANY},
     [PURE_OP_TEXT_INPUT] = {0, {0}, T_TEXT, IN_TEXT, A_NONE, O_ANY},
-    [PURE_OP_NUM_TEXT] = {1, {T_NUM}, T_TEXT, READ, A_NONE, O_ANY},
+    [PURE_OP_NUM_TEXT] = {1, {T_NUM}, T_TEXT, READ, A_BOOL, O_ANY},
     [PURE_OP_CONCAT] = {2, {T_TEXT, T_TEXT}, T_TEXT, READ, A_NONE, O_ANY},
     [PURE_OP_CHARS] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
     [PURE_OP_LINES] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
@@ -103,9 +109,9 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_PICK] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
     [PURE_OP_SLIDE] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
     [PURE_OP_FOLD] = {0, {0}, T_NUM, READ, A_FOLD, O_ANY},
-    [PURE_OP_TEXT_COMPARE] = {2, {T_TEXT, T_TEXT}, T_NUM, READ, A_RELATION, O_ANY},
+    [PURE_OP_TEXT_COMPARE] = {2, {T_TEXT, T_TEXT}, T_BOOL, READ, A_RELATION, O_ANY},
     [PURE_OP_LIST_FIND] = {1, {T_KEY}, T_INDEX, READ, A_KEYED, O_ARG},
-    [PURE_OP_LIST_HAS] = {1, {T_KEY}, T_NUM, READ, A_KEYED, O_ANY},
+    [PURE_OP_LIST_HAS] = {1, {T_KEY}, T_BOOL, READ, A_KEYED, O_ANY},
     [PURE_OP_NOW] = {0, {0}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
     [PURE_OP_SEND] = {0, {0}, 0, IN_HANDLER, A_OUTPUT, O_ANY},
     [PURE_OP_EACH] = {0, {0}, 0, IN_HANDLER, A_EACH, O_ANY},
@@ -114,6 +120,8 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_FLOOR] = NUMS(1), [PURE_OP_MOD] = NUMS(2),
 };
 #undef NUMS
+#undef COMPARE
+#undef LOGIC
 #undef STATE
 
 static uint32_t read16(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
@@ -140,6 +148,9 @@ static void write_double(unsigned char *p, double value) {
     write32(p + 4, (uint32_t)(bits >> 32));
 }
 
+/* A bool's value: 0 (not -0) or 1. */
+static bool canonical_bool(double value) { return value == 1 || (value == 0 && !signbit(value)); }
+
 static bool variable_field(uint8_t type) {
     return type == PURE_FIELD_BYTES || type == PURE_FIELD_TEXT || type == PURE_FIELD_ROWS;
 }
@@ -150,7 +161,7 @@ uint32_t pure_fields_lay_out(PureField *fields, uint32_t count) {
         if (variable_field(fields[f].type)) last = f;
     for (uint32_t f = 0; f < count; ++f) {
         fields[f].offset = f == last ? PURE_FIELD_REST : prefix;
-        if (f != last) prefix += fields[f].type == PURE_FIELD_NUMBER ? 8 : 4;
+        if (f != last) prefix += pure_field_size(fields[f].type);
     }
     return prefix;
 }
@@ -163,7 +174,7 @@ typedef struct { double num; PureSpan bytes; } FieldValue;
 static bool read_fields(const PureField *fields, uint32_t count, PureSpan payload, FieldValue *values) {
     uint32_t prefix = 0;
     for (uint32_t f = 0; f < count; ++f)
-        if (fields[f].offset != PURE_FIELD_REST) prefix += fields[f].type == PURE_FIELD_NUMBER ? 8 : 4;
+        if (fields[f].offset != PURE_FIELD_REST) prefix += pure_field_size(fields[f].type);
     if (payload.size < prefix) return false;
     size_t at = prefix;
     for (uint32_t f = 0; f < count; ++f) {
@@ -171,7 +182,10 @@ static bool read_fields(const PureField *fields, uint32_t count, PureSpan payloa
         values[f] = (FieldValue){0};
         if (field->type == PURE_FIELD_U32) values[f].num = read32(payload.data + field->offset);
         else if (field->type == PURE_FIELD_NUMBER) values[f].num = read_double(payload.data + field->offset);
-        else if (field->type == PURE_FIELD_BYTES || field->type == PURE_FIELD_TEXT) {
+        else if (field->type == PURE_FIELD_BOOL) {
+            if (payload.data[field->offset] > 1) return false;
+            values[f].num = payload.data[field->offset];
+        } else if (field->type == PURE_FIELD_BYTES || field->type == PURE_FIELD_TEXT) {
             size_t size = field->offset == PURE_FIELD_REST ? payload.size - at : read32(payload.data + field->offset);
             if (size > payload.size - at) return false;
             values[f].bytes = (PureSpan){payload.data + at, size};
@@ -194,29 +208,34 @@ PureResult pure_send_recast(const PureField *from, uint32_t from_count, const Pu
         now[g] = (FieldValue){0};
         uint32_t f = 0;
         while (f < from_count && strcmp(from[f].name, field->name)) ++f;
-        bool number = field->type == PURE_FIELD_U32 || field->type == PURE_FIELD_NUMBER;
-        if (f < from_count && number && (from[f].type == PURE_FIELD_U32 || from[f].type == PURE_FIELD_NUMBER)) {
+        bool value = pure_field_fixed(field->type);
+        if (f < from_count && value && pure_field_fixed(from[f].type)) {
+            /* A number, a u32 or a bool: the value when the field can hold it
+             * (a bool 0 or 1), as a state's is kept. */
             double v = was[f].num;
-            bool fits = field->type == PURE_FIELD_NUMBER || (v >= 0 && v <= UINT32_MAX && v == (double)(uint32_t)v);
+            bool fits = field->type == PURE_FIELD_NUMBER ? true
+                      : field->type == PURE_FIELD_U32 ? v >= 0 && v <= UINT32_MAX && v == (double)(uint32_t)v
+                                                      : v == 0 || v == 1;
             now[g].num = fits ? v : 0;
-        } else if (f < from_count && !number && (from[f].type == PURE_FIELD_BYTES || from[f].type == PURE_FIELD_TEXT)) {
+        } else if (f < from_count && !value && (from[f].type == PURE_FIELD_BYTES || from[f].type == PURE_FIELD_TEXT)) {
             bool fits = field->type == PURE_FIELD_BYTES || from[f].type == PURE_FIELD_TEXT || pure_utf8_valid(was[f].bytes);
             if (fits) now[g].bytes = was[f].bytes;
         }
-        total += field->offset == PURE_FIELD_REST || number ? 0 : 4;
-        total += number ? (field->type == PURE_FIELD_NUMBER ? 8 : 4) : now[g].bytes.size;
+        total += field->offset == PURE_FIELD_REST || value ? 0 : 4;
+        total += value ? pure_field_size(field->type) : now[g].bytes.size;
     }
     unsigned char *made = malloc(total ? total : 1);
     if (!made) return PURE_ALLOCATION;
     uint32_t prefix = 0;
     for (uint32_t g = 0; g < to_count; ++g)
-        if (to[g].offset != PURE_FIELD_REST) prefix += to[g].type == PURE_FIELD_NUMBER ? 8 : 4;
+        if (to[g].offset != PURE_FIELD_REST) prefix += pure_field_size(to[g].type);
     size_t at = prefix;
     for (uint32_t g = 0; g < to_count; ++g) {
         const PureField *field = &to[g];
         unsigned char *place = field->offset == PURE_FIELD_REST ? made + at : made + field->offset;
         if (field->type == PURE_FIELD_U32) write32(place, (uint32_t)now[g].num);
         else if (field->type == PURE_FIELD_NUMBER) write_double(place, now[g].num);
+        else if (field->type == PURE_FIELD_BOOL) *place = (unsigned char)now[g].num;
         else {
             if (field->offset != PURE_FIELD_REST) write32(place, (uint32_t)now[g].bytes.size);
             if (now[g].bytes.size) memcpy(made + at, now[g].bytes.data, now[g].bytes.size);
@@ -284,7 +303,13 @@ static uint32_t list_of(uint32_t arg) { return arg & 0xFFFF; }
 static uint32_t item_field(uint32_t arg) { return arg >> 16; }
 
 static unsigned char field_type(const PureModule *m, uint32_t list, uint32_t field) {
-    return m->record_field_text[m->record[m->state_ref[list]].first + field] ? T_TEXT : T_NUM;
+    uint32_t f = m->record[m->state_ref[list]].first + field;
+    return m->record_field_text[f] ? T_TEXT : m->record_field_bool[f] ? T_BOOL : T_NUM;
+}
+
+/* The stack type of a message field's value (a u32 is a number). */
+static unsigned char message_type(uint8_t type) {
+    return type == PURE_FIELD_TEXT ? T_TEXT : type == PURE_FIELD_BYTES ? T_BYTES : type == PURE_FIELD_BOOL ? T_BOOL : T_NUM;
 }
 
 PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg, const PureInputShape *shape, int row,
@@ -305,9 +330,11 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
                state_of(m, list, PURE_STATE_LIST) && arg >> 16 &&
                (!sliced || (m->state_key[list] && field_type(m, list, m->state_key[list] - 1u) == T_NUM));
     }
-    case A_LOCAL: /* a slot, and a number or an index of a list */
-        return (arg & 0xFF) < PURE_MODULE_LOCALS && (arg >> 8 & 0xFF) <= 1 &&
-               ((arg >> 8 & 0xFF) ? state_of(m, arg >> 16, PURE_STATE_LIST) : !(arg >> 16));
+    case A_LOCAL: /* a slot, and a number, an index of a list or a bool */
+        return (arg & 0xFF) < PURE_MODULE_LOCALS && (arg >> 8 & 0xFF) <= 2 &&
+               ((arg >> 8 & 0xFF) == 1 ? state_of(m, arg >> 16, PURE_STATE_LIST) : !(arg >> 16));
+    case A_VALUE: return state_of(m, arg, PURE_STATE_NUM) || state_of(m, arg, PURE_STATE_BOOL);
+    case A_BOOL: return arg <= 1;
     case A_RELATION: return arg <= PURE_NOT_EQUAL;
     case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
     case A_OUTPUT: return arg < m->inputs && m->input[arg].kind == PURE_KIND_OUTPUT;
@@ -395,7 +422,9 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             REFUSE("message operation outside a message handler");
         }
         uint32_t arg = op->arg;
-        if ((kind == A_NONE && arg) || (op->op == PURE_OP_CONST ? !isfinite(op->value) : op->value != 0))
+        bool truth = op->op == PURE_OP_CONST && arg;
+        if ((kind == A_NONE && arg) ||
+            (truth ? !canonical_bool(op->value) : op->op == PURE_OP_CONST ? !isfinite(op->value) : op->value != 0))
             REFUSE("non-canonical operand");
         if (!names_arg(m, kind, arg, shape, row, outer)) REFUSE("operand names no such state, field, constant or unit");
         /* A keyed list places its items by key, and an item's key stays. */
@@ -445,10 +474,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         memcpy(need, signature[op->op].in, sizeof(signature[op->op].in));
         if (op->op == PURE_OP_SEND) {
             const PureInputShape *output = &m->input[arg];
-            for (unsigned f = 0; f < output->field_count; ++f) {
-                uint8_t type = m->field[output->field_start + f].type;
-                need[f] = type == PURE_FIELD_TEXT ? T_TEXT : type == PURE_FIELD_BYTES ? T_BYTES : T_NUM;
-            }
+            for (unsigned f = 0; f < output->field_count; ++f) need[f] = message_type(m->field[output->field_start + f].type);
             pops = output->field_count;
         } else if (op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT) {
             const PureRecord *record = &m->record[m->state_ref[arg]];
@@ -459,7 +485,14 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         } else if (need[0] == T_KEY) {
             need[0] = field_type(m, arg, m->state_key[arg] - 1u);
         } else if (need[0] == T_LOCAL) {
-            need[0] = arg >> 8 & 0xFF ? T_INDEX : T_NUM;
+            need[0] = (arg >> 8 & 0xFF) == 1 ? T_INDEX : (arg >> 8 & 0xFF) == 2 ? T_BOOL : T_NUM;
+        } else if (need[0] == T_STATE) {
+            need[0] = m->state_type[arg] == PURE_STATE_BOOL ? T_BOOL : T_NUM;
+        } else if (op->op == PURE_OP_NUM_TEXT && arg) {
+            need[0] = T_BOOL;
+        } else if ((op->op == PURE_OP_EQ || op->op == PURE_OP_NE) && height >= 2 && types[height - 1] == T_BOOL &&
+                   types[height - 2] == T_BOOL) {
+            need[0] = need[1] = T_BOOL; /* two bools compare as two numbers do */
         } else if ((kind == A_FOLD && arg & PURE_FOLD_SLICED) || (kind == A_EACH && arg & PURE_EACH_SLICED)) {
             need[0] = need[1] = T_NUM; /* a slice's low and high keys */
             pops = 2;
@@ -484,12 +517,11 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             of = O_ARG;
             owner = arg >> 8 & 0xFF;
         }
-        if (out == T_FIELD) {
-            uint8_t type = m->field[shape->field_start + arg].type;
-            out = type == PURE_FIELD_TEXT ? T_TEXT : type == PURE_FIELD_BYTES ? T_BYTES : T_NUM;
-        }
+        if (out == T_FIELD) out = message_type(m->field[shape->field_start + arg].type);
         if (out == T_ITEM) out = field_type(m, list_of(arg), item_field(arg));
-        if (out == T_LOCAL) out = arg >> 8 & 0xFF ? T_INDEX : T_NUM;
+        if (out == T_LOCAL) out = (arg >> 8 & 0xFF) == 1 ? T_INDEX : (arg >> 8 & 0xFF) == 2 ? T_BOOL : T_NUM;
+        if (out == T_STATE) out = m->state_type[arg] == PURE_STATE_BOOL ? T_BOOL : T_NUM;
+        if (truth) out = T_BOOL;
         if (out) {
             if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
             owners[height] = (unsigned char)(out != T_CURSOR && out != T_INDEX ? 0 : of == O_OPERAND ? owners[height] : owner);
@@ -516,12 +548,11 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         i += skip;
     }
     if (!reachable) return "block end is unreachable";
-    if (view == FILTER) return height != 1 || types[0] != T_NUM ? "filter must leave one number" : NULL;
-    if (folding) {
-        int want = view - FOLD_ONE + 1;
-        return height != want || types[0] != T_NUM || types[want - 1] != T_NUM ? "fold block must leave its numbers" : NULL;
-    }
-    unsigned char result = view == PURE_VIEW_TEXT ? T_TEXT : T_NUM;
+    if (view == FILTER) return height != 1 || types[0] != T_BOOL ? "filter must leave one bool" : NULL;
+    if (view == FOLD_ONE) return height != 1 || types[0] != T_BOOL ? "fold block must leave one bool" : NULL;
+    if (view == FOLD_TWO)
+        return height != 2 || types[0] != T_NUM || types[1] != T_BOOL ? "fold block must leave a number and a bool" : NULL;
+    unsigned char result = view == PURE_VIEW_TEXT ? T_TEXT : view == PURE_VIEW_BOOL ? T_BOOL : T_NUM;
     if (!handler ? height != 1 || types[0] != result : height != 0)
         return !handler ? "view must leave one value of its type" : "handler must leave no value";
     return NULL;
@@ -542,9 +573,9 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
  * once: numbers and indexes, with no branch and no text. */
 PURE_COLD static bool has_lanes(const PureModule *m, const PureOp *op, int input) {
     switch (op->op) {
-    case PURE_OP_FIELD: { /* a number the message or the arguments give, the same for every item */
+    case PURE_OP_FIELD: { /* a number or bool the message or the arguments give, the same for every item */
         uint8_t type = input >= 0 ? m->field[m->input[input].field_start + op->arg].type : 0;
-        return type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER;
+        return type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER || type == PURE_FIELD_BOOL;
     }
     case PURE_OP_CONST: case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_NEG:
     case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE:
@@ -553,7 +584,7 @@ PURE_COLD static bool has_lanes(const PureModule *m, const PureOp *op, int input
     case PURE_OP_INDEX_MOVE: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_INDEX_NUM:
     case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_PICK: case PURE_OP_SLIDE: case PURE_OP_LOCAL_LOAD:
         return true;
-    case PURE_OP_ITEM_GET: return field_type(m, list_of(op->arg), item_field(op->arg)) == T_NUM;
+    case PURE_OP_ITEM_GET: return field_type(m, list_of(op->arg), item_field(op->arg)) != T_TEXT;
     case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: return field_type(m, op->arg, m->state_key[op->arg] - 1u) == T_NUM;
     default: return false;
     }
@@ -902,7 +933,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     if (error_size) error[0] = 0;
     pure_module_release(out);
     memset(out, 0, sizeof(*out));
-    if (!p || size < PURE_MODULE_HEADER || memcmp(p, magic, sizeof(magic))) REFUSE("not a Pure module v5", 0);
+    if (!p || size < PURE_MODULE_HEADER || memcmp(p, magic, sizeof(magic))) REFUSE("not a Pure module v6", 0);
     out->states = (uint16_t)read16(p + 8);
     out->inputs = (uint16_t)read16(p + 10);
     out->views = (uint16_t)read16(p + 12);
@@ -948,18 +979,21 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     if (constant_bytes) memcpy(out->constant_data, p + size - constant_bytes, constant_bytes);
     for (uint32_t i = 0; i < out->states; ++i, at += STATE_BYTES) {
         out->state_type[i] = (uint8_t)read32(at + 4);
-        if (read32(at + 4) > PURE_STATE_INDEX) REFUSE("state type", i);
-        /* Flags: a mark (cursor), a keyed list's key field + 1, or a list of a message's rows. */
-        uint32_t flags = out->state_type[i] == PURE_STATE_NUM ? 0 : read32(at + 12);
+        if (read32(at + 4) > PURE_STATE_BOOL) REFUSE("state type", i);
+        /* A number's or a bool's value is its 8 bytes; others have flags: a
+         * mark (cursor), a keyed list's key field + 1, or a list of a message's rows. */
+        bool value = out->state_type[i] == PURE_STATE_NUM || out->state_type[i] == PURE_STATE_BOOL;
+        uint32_t flags = value ? 0 : read32(at + 12);
         bool cursor = out->state_type[i] == PURE_STATE_CURSOR, list = out->state_type[i] == PURE_STATE_LIST;
         bool rows = list && flags == PURE_LIST_ROWS;
         /* A list of a message's rows is named by the field's path (input.field), no other state. */
         if (!name_at(text, strings, read32(at), rows ? NAME_PATH : NAME_IDENTIFIER, out->state_names[i]) ||
             (rows && !strchr(out->state_names[i], '.')))
             REFUSE("state name", i);
-        if (out->state_type[i] == PURE_STATE_NUM) {
+        if (value) {
             out->initial[i] = read_double(at + 8);
             if (!isfinite(out->initial[i])) REFUSE("non-finite initial value", i);
+            if (out->state_type[i] == PURE_STATE_BOOL && !canonical_bool(out->initial[i])) REFUSE("bool initial value", i);
         } else {
             if ((flags && !(cursor && flags == PURE_CURSOR_STAYS) && !(list && flags <= PURE_RECORD_FIELDS) && !rows) ||
                 read32(at + 8) > UINT16_MAX) REFUSE("state reference", i);
@@ -1016,7 +1050,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             field->type = (uint8_t)type;
             field->rows = (uint16_t)(type >> 8); /* a rows field's list state */
             if (!name_at(text, strings, read32(entry), NAME_PATH, field->name) || field->type < PURE_FIELD_U32 ||
-                field->type > PURE_FIELD_ROWS || (field->type != PURE_FIELD_ROWS && type >> 8) || type >> 24)
+                field->type > PURE_FIELD_BOOL || (field->type != PURE_FIELD_ROWS && type >> 8) || type >> 24)
                 REFUSE("message field", next_field + f);
             /* Rows fill the list named by the input's name and the field's path; an output sends none. */
             if (field->type == PURE_FIELD_ROWS) {
@@ -1060,14 +1094,16 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             REFUSE("record", i);
         for (uint32_t f = record->first; f < record->first + record->count; ++f) {
             const unsigned char *entry = fields_at + (size_t)f * RECORD_FIELD_BYTES;
-            uint32_t type = read32(entry + 4);
+            uint32_t type = read32(entry + 4); /* 0 a number, 1 a text, 2 a bool */
             out->record_field_text[f] = type == 1;
-            if (!name_at(text, strings, read32(entry), NAME_IDENTIFIER, out->record_field_names[f]) || type > 1)
+            out->record_field_bool[f] = type == 2;
+            if (!name_at(text, strings, read32(entry), NAME_IDENTIFIER, out->record_field_names[f]) || type > 2)
                 REFUSE("record field", f);
             for (uint32_t k = record->first; k < f; ++k)
                 if (!strcmp(out->record_field_names[k], out->record_field_names[f])) REFUSE("duplicate record field", f);
-            out->record_field_default[f] = type ? read32(entry + 8) : read_double(entry + 8);
-            if (type ? read32(entry + 12) || read32(entry + 8) >= out->constants : !isfinite(out->record_field_default[f]))
+            out->record_field_default[f] = type == 1 ? read32(entry + 8) : read_double(entry + 8);
+            if (type == 1 ? read32(entry + 12) || read32(entry + 8) >= out->constants
+                          : !isfinite(out->record_field_default[f]) || (type == 2 && !canonical_bool(out->record_field_default[f])))
                 REFUSE("record field default", f);
         }
         next_record_field += record->count;
@@ -1078,7 +1114,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if ((out->state_type[i] == PURE_STATE_TEXT && out->state_ref[i] >= out->constants) ||
             (out->state_type[i] == PURE_STATE_CURSOR && !state_of(out, out->state_ref[i], PURE_STATE_TEXT)) ||
             (out->state_type[i] == PURE_STATE_LIST &&
-             (out->state_ref[i] >= out->records || out->state_key[i] > out->record[out->state_ref[i]].count)) ||
+             (out->state_ref[i] >= out->records || out->state_key[i] > out->record[out->state_ref[i]].count ||
+              (out->state_key[i] && out->record_field_bool[out->record[out->state_ref[i]].first + out->state_key[i] - 1u]))) ||
             (out->state_type[i] == PURE_STATE_INDEX && !state_of(out, out->state_ref[i], PURE_STATE_LIST)))
             REFUSE("state reference", i);
     /* A table names its list in place of code; its columns follow it. */
@@ -1088,7 +1125,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         out->view_table[i] = (uint16_t)read16(at + 6);
         out->view_code[i] = (PureBlock){read32(at + 8), read32(at + 12)};
         uint32_t table = out->view_table[i];
-        if (at[4] > PURE_VIEW_TABLE || (at[5] && at[4] != PURE_VIEW_TABLE) ||
+        if (at[4] > PURE_VIEW_BOOL || (at[5] && at[4] != PURE_VIEW_TABLE) ||
             (table && (table > i || out->view_type[table - 1] != PURE_VIEW_TABLE || at[4] == PURE_VIEW_TABLE)))
             REFUSE("view type", i);
         /* A table names its list in start, or, filtered, in the byte after its
@@ -1235,7 +1272,7 @@ static int named_fields(const unsigned char *bytes, size_t size, PureField *fiel
     for (unsigned f = 0; f < count; ++f) {
         size_t length = size - at >= 2 ? bytes[at + 1] : 0;
         if (size - at < 2 || !length || length >= PURE_MODULE_NAME || size - at < 2 + length || !bytes[at] ||
-            bytes[at] >= PURE_FIELD_ROWS)
+            bytes[at] == PURE_FIELD_ROWS || bytes[at] > PURE_FIELD_BOOL)
             return -1;
         fields[f] = (PureField){.type = bytes[at]};
         memcpy(fields[f].name, bytes + at + 2, length);
@@ -1482,6 +1519,7 @@ static PureResult send(PureApp *app, uint32_t output, const Slot *fields, const 
     for (uint32_t f = 0; f < shape->field_count; ++f) {
         const PureField *field = &m->field[shape->field_start + f];
         if (field->type == PURE_FIELD_U32) write32(payload + field->offset, (uint32_t)fields[f].num);
+        else if (field->type == PURE_FIELD_BOOL) payload[field->offset] = fields[f].num != 0;
         else if (field->type == PURE_FIELD_NUMBER) {
             uint64_t bits;
             memcpy(&bits, &fields[f].num, 8);
@@ -1646,7 +1684,8 @@ static bool run_lanes(const PureModule *m, const double *values, PureBlock block
         case PURE_OP_FIELD: {
             const PureField *field = &m->field[ev->shape->field_start + arg];
             const unsigned char *given = ev->arguments ? app->arguments.data : app->payload.data;
-            double value = field->type == PURE_FIELD_U32 ? read32(given + field->offset) : read_double(given + field->offset);
+            double value = field->type == PURE_FIELD_U32 ? read32(given + field->offset)
+                         : field->type == PURE_FIELD_BOOL ? given[field->offset] : read_double(given + field->offset);
             stack[sp++] = (Lanes){NULL, value, false, 0};
             continue;
         }
@@ -2206,6 +2245,7 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             const unsigned char *given = ev->arguments ? app->arguments.data : app->payload.data;
             if (field->type == PURE_FIELD_U32) stack[sp++].num = read32(given + field->offset);
             else if (field->type == PURE_FIELD_NUMBER) stack[sp++].num = read_double(given + field->offset);
+            else if (field->type == PURE_FIELD_BOOL) stack[sp++].num = given[field->offset];
             else stack[sp++].bytes = (PureBytes){ev->arguments ? FROM_ARGUMENTS : FROM_PAYLOAD, 0, {0, 0}, ev->spans[arg][0],
                                                  ev->spans[arg][1]};
             continue;
@@ -2245,8 +2285,9 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         case PURE_OP_TEXT_INPUT: stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, 0, app->payload.size}; continue;
         case PURE_OP_NUM_TEXT: {
             char digits[32];
-            if ((status = keep_bytes(arena, digits, pure_format_number(top->num, digits), &top->bytes)) != PURE_OK)
-                return status;
+            size_t length = arg ? (size_t)snprintf(digits, sizeof(digits), "%s", top->num ? "true" : "false")
+                                : pure_format_number(top->num, digits);
+            if ((status = keep_bytes(arena, digits, length, &top->bytes)) != PURE_OK) return status;
             continue;
         }
         case PURE_OP_CONCAT: {
@@ -3010,8 +3051,9 @@ static PureResult keep_reply(PureApp *app) {
 
 /* Where each variable field of a payload of shape is: where placed says
  * (start and size in the payload), or, without it, one after another after
- * the prefix. A length past the payload, a text that is not UTF-8 or a
- * number that is not finite is its fault (else NONE). */
+ * the prefix. A length past the payload or a bool that is not 0 or 1 is
+ * LIMIT, a text that is not UTF-8 ENCODING, a number that is not finite
+ * NON_FINITE (else NONE). */
 static PureFault place_fields(const PureModule *m, const PureInputShape *shape, PureSpan payload, const uint32_t *placed,
                               uint32_t spans[][2]) {
     if (payload.size < shape->prefix) return PURE_FAULT_LIMIT;
@@ -3020,6 +3062,7 @@ static PureFault place_fields(const PureModule *m, const PureInputShape *shape, 
         const PureField *field = &m->field[shape->field_start + f];
         if (field->type == PURE_FIELD_NUMBER && !isfinite(read_double(payload.data + field->offset)))
             return PURE_FAULT_NON_FINITE;
+        if (field->type == PURE_FIELD_BOOL && payload.data[field->offset] > 1) return PURE_FAULT_LIMIT;
         if (field->type != PURE_FIELD_BYTES && field->type != PURE_FIELD_TEXT && field->type != PURE_FIELD_ROWS) continue;
         size_t start = placed ? placed[2 * f] : at;
         if (start > payload.size) return PURE_FAULT_LIMIT;
@@ -3327,7 +3370,9 @@ bool pure_app_item_row(PureApp *app, uint32_t table, size_t item, size_t *row) {
 /* A view outside a table (column false), or a column and a row of its table. */
 static PureResult view_of(PureApp *app, uint32_t view, bool column, size_t row, uint8_t type, Slot *slot) {
     const PureModule *m = app->module;
-    if (view >= m->views || m->view_type[view] != type || (m->view_table[view] != 0) != column) return PURE_INVALID;
+    if (view >= m->views) return PURE_INVALID;
+    uint8_t kind = m->view_type[view] == PURE_VIEW_BOOL ? PURE_VIEW_NUM : m->view_type[view]; /* a bool's value is 0 or 1 */
+    if (kind != type || (m->view_table[view] != 0) != column) return PURE_INVALID;
     if (column && !pure_app_row_item(app, m->view_table[view] - 1u, row, &row)) return PURE_NOT_FOUND;
     return evaluate(app, view, row, slot);
 }
@@ -3455,16 +3500,25 @@ void pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
     memcpy(reader->lists, snapshot->lists, sizeof(reader->lists));
 }
 
+uint8_t pure_record_kind(const PureModule *m, uint32_t field) {
+    return m->record_field_bool[field] ? PURE_RECORD_BOOL : m->record_field_text[field];
+}
+
+/* A number and a bool carry over each other; texts only to texts. */
+static bool kinds_carry(uint8_t from, uint8_t to) {
+    return from == to || ((from == 0 || from == PURE_RECORD_BOOL) && (to == 0 || to == PURE_RECORD_BOOL));
+}
+
 /* A list with record's fields: each takes the field of `from` with the same
- * name and kind, or its default. */
+ * name and a kind it carries over from, or its default. */
 PURE_COLD PureResult pure_list_migrate(PureList **out, const PureList *from, const char *const *names,
-                             const uint8_t *text, unsigned count, const PureModule *m, uint32_t record) {
+                             const uint8_t *kinds, unsigned count, const PureModule *m, uint32_t record) {
     const PureRecord *r = &m->record[record];
     int source[PURE_RECORD_FIELDS];
     for (unsigned f = 0; f < r->count; ++f) {
         source[f] = -1;
         for (unsigned k = 0; k < count; ++k)
-            if (!strcmp(m->record_field_names[r->first + f], names[k]) && m->record_field_text[r->first + f] == text[k])
+            if (!strcmp(m->record_field_names[r->first + f], names[k]) && kinds_carry(kinds[k], pure_record_kind(m, r->first + f)))
                 source[f] = (int)k;
     }
     if (!(*out = new_list(m, record))) return PURE_ALLOCATION;
@@ -3478,6 +3532,8 @@ PURE_COLD PureResult pure_list_migrate(PureList **out, const PureList *from, con
                            (PureCell){0, (unsigned char *)m->constant_data + m->constant_offset[constant],
                                       m->constant_length[constant]} :
                            (PureCell){m->record_field_default[field], NULL, 0};
+            if (m->record_field_bool[field])
+                cells[f] = (PureCell){pure_as_bool(cells[f].num, m->record_field_default[field]), NULL, 0};
         }
         result = pure_list_insert(*out, at, cells, NULL);
     }
@@ -3490,14 +3546,15 @@ PURE_COLD static PureResult keep_list(PureList **out, PureList *from, const Pure
                             const PureModule *m, uint32_t record) {
     const PureRecord *r = &m->record[record], *o = &old->record[old_record];
     const char *names[PURE_RECORD_FIELDS];
+    uint8_t kinds[PURE_RECORD_FIELDS];
     bool same = r->count == o->count;
     for (unsigned k = 0; k < o->count; ++k) {
         names[k] = old->record_field_names[o->first + k];
-        same = same && !strcmp(names[k], m->record_field_names[r->first + k]) &&
-               old->record_field_text[o->first + k] == m->record_field_text[r->first + k];
+        kinds[k] = pure_record_kind(old, o->first + k);
+        same = same && !strcmp(names[k], m->record_field_names[r->first + k]) && kinds[k] == pure_record_kind(m, r->first + k);
     }
     if (same) { *out = from; return PURE_OK; }
-    return pure_list_migrate(out, from, names, old->record_field_text + o->first, o->count, m, record);
+    return pure_list_migrate(out, from, names, kinds, o->count, m, record);
 }
 
 /* Open a module in an app. States keep their values by name and kind (texts
@@ -3638,7 +3695,10 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
                  (app->outbox = pure_runtime_list_new(PURE_LIST_OUTBOX)) ? PURE_OK : PURE_ALLOCATION;
     for (uint32_t i = 0; i < module->states; ++i) {
         int previous = old ? pure_module_state(old, module->state_names[i]) : -1;
-        kept[i] = previous >= 0 && old->state_type[previous] == module->state_type[i] ? previous : -1;
+        /* A number and a bool carry over each other: 0 and 1 are false and true (a bool's other numbers start anew). */
+        uint8_t was = previous >= 0 ? old->state_type[previous] : 0, now = module->state_type[i];
+        bool truth = (was == PURE_STATE_NUM && now == PURE_STATE_BOOL) || (was == PURE_STATE_BOOL && now == PURE_STATE_NUM);
+        kept[i] = previous >= 0 && (was == now || truth) ? previous : -1;
         if (kept[i] >= 0) saved[i] = app->saved[kept[i]];
         if (module->state_type[i] == PURE_STATE_TEXT) {
             if (kept[i] >= 0) texts[i] = app->texts[kept[i]];
@@ -3660,6 +3720,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
                 rewrite[i] = result == PURE_OK && listed[i].rewrite;
             } else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
         } else values[i] = kept[i] >= 0 ? app->values[kept[i]] : module->initial[i];
+        if (module->state_type[i] == PURE_STATE_BOOL) values[i] = pure_as_bool(values[i], module->initial[i]);
     }
     /* A keyed list keeps its items in key order: one that was not keyed, or
      * keyed by another field, is put in order and its indices follow their

@@ -65,15 +65,23 @@ PureResult pure_save_commit(PureApp *, const double *values, void *const *docume
 uint32_t pure_fields_lay_out(PureField *fields, uint32_t count);
 /* A send's payload, laid out for from's fields, made anew for to's (both
  * laid out): each field takes the value of from's of the same name when
- * its type can hold it (u32 and number are numbers, bytes and text are
- * bytes; a number that is not a u32, or bytes that are not UTF-8 for a
- * text, cannot), else it is 0 or empty. The same rule moves a list's items
- * (pure_list_migrate). STORE_ERROR when payload is not laid out by from. */
+ * its type can hold it (u32, number and bool are numbers, bytes and text
+ * are bytes; a number that is not a u32, one that is not 0 or 1 for a bool,
+ * or bytes that are not UTF-8 for a text, cannot), else it is 0, false or
+ * empty. The same rule moves a list's items (pure_list_migrate). A link
+ * delivers only to a field of the same kind or a wider one
+ * (pure_module_takes). STORE_ERROR when payload is not laid out by from. */
 PureResult pure_send_recast(const PureField *from, uint32_t from_count, const PureField *to, uint32_t to_count,
                             PureSpan payload, unsigned char **out, size_t *size);
 
-/* A list with record's fields, taking from `from` each field of the same name
- * and kind and giving the others their defaults (module.c). */
+/* A record field's kind as a stored list names it: 0 a number, 1 a text, 3
+ * a bool (2 is a runtime list's bytes); a list holds a bool as a number. */
+enum { PURE_RECORD_BOOL = 3 };
+uint8_t pure_record_kind(const PureModule *, uint32_t field);
+/* A list with record's fields, taking from `from` (its fields' names and
+ * kinds) each field of the same name and kind, or a number and a bool from
+ * each other (0 and 1 are false and true; a bool's other numbers take the
+ * default), and giving the others their defaults (module.c). */
 PureResult pure_list_migrate(PureList **out, const PureList *from, const char *const *names,
-                             const uint8_t *text, unsigned count, const PureModule *m, uint32_t record);
+                             const uint8_t *kinds, unsigned count, const PureModule *m, uint32_t record);
 #endif

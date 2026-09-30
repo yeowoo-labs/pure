@@ -2167,7 +2167,7 @@ def server_sealed(aup, pure, work):
 
 SURFACE_SOURCE = """record Task {
   title: text
-  done = 0
+  done = false
 }
 state tasks: list of Task
 state at: index of tasks
@@ -2233,11 +2233,12 @@ def server_surface(aup, pure, work):
     views = [line['views'] for line in got]
     assert [line['event'] for line in got[:6]] == ['start', 'typed one: 0', 'typed two: 0', 'typed three: 0', 'pressed: 0',
                                                     'wrong kind: 8, no input: 8'], got[:6]
-    assert views[:6] == [{'count': 0, 'current': '(empty)', 'finished': None},
-                         {'count': 1, 'current': 'one', 'finished': 0}, {'count': 2, 'current': 'two', 'finished': 0},
-                         {'count': 3, 'current': 'three', 'finished': 0}, {'count': 3, 'current': 'three', 'finished': 1},
-                         {'count': 3, 'current': 'three', 'finished': 1}], views[:6]
-    assert views[-1] == {'count': 4, 'current': 'four', 'finished': 0}, views[-1]
+    assert json.dumps(views[:6]) == json.dumps([
+        {'count': 0, 'current': '(empty)', 'finished': None},
+        {'count': 1, 'current': 'one', 'finished': False}, {'count': 2, 'current': 'two', 'finished': False},
+        {'count': 3, 'current': 'three', 'finished': False}, {'count': 3, 'current': 'three', 'finished': True},
+        {'count': 3, 'current': 'three', 'finished': True}]), views[:6]  # a bool is true or false, not 1 or 0
+    assert json.dumps(views[-1]) == json.dumps({'count': 4, 'current': 'four', 'finished': False}), views[-1]
     changes = [line['changes'] for line in got]
     assert changes[1:5] == sorted(set(changes[1:5])) and changes[-1] > changes[4], changes
     # A module without states has no owner to apply a surface's events.

@@ -26,7 +26,7 @@ typedef struct {
  * "limit": rows past what a payload holds, "memory"). */
 const char *pure_json_message(PureJsonMessage *, unsigned char *json, size_t size, size_t *at);
 size_t pure_json_space(const unsigned char *json, size_t at, size_t size);
-/* A fixed field's value from its text (a query value or a JSON number) into
- * the prefix: a u32 in range, or a finite number. */
+/* A fixed field's value from its text (a query value or a JSON value) into
+ * the prefix: a u32 in range, a finite number, or true or false for a bool. */
 bool pure_json_fixed(const PureField *field, const unsigned char *text, size_t size, unsigned char *prefix);
 #endif

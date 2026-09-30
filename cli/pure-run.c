@@ -53,7 +53,8 @@ static void show_list(const PureModule *m, const PureList *list, const PureRecor
         for (unsigned f = 0; f < record->count; ++f) {
             PureCell cell = pure_list_get(list, at, f);
             printf("%s\"%s\":", f ? "," : "", m->record_field_names[record->first + f]);
-            if (!m->record_field_text[record->first + f]) printf("%.17g", cell.num);
+            if (m->record_field_bool[record->first + f]) printf("%s", cell.num ? "true" : "false");
+            else if (!m->record_field_text[record->first + f]) printf("%.17g", cell.num);
             else {
                 putchar('"');
                 json_span(NULL, (PureSpan){cell.text, cell.size});
@@ -65,7 +66,7 @@ static void show_list(const PureModule *m, const PureList *list, const PureRecor
     putchar(']');
 }
 
-/* A number or text view, or a column at a row. */
+/* A number, bool or text view, or a column at a row. */
 static void show_value(PureApp *app, uint32_t view, size_t row) {
     const PureModule *m = app->module;
     static Collected text;
@@ -82,8 +83,9 @@ static void show_value(PureApp *app, uint32_t view, size_t row) {
             json_span(NULL, (PureSpan){text.bytes, text.used});
             putchar('"');
         }
-    } else if (column ? pure_app_cell(app, view, row, &value) : pure_app_view(app, view, &value)) printf("%.17g", value);
-    else printf("null");
+    } else if (!(column ? pure_app_cell(app, view, row, &value) : pure_app_view(app, view, &value))) printf("null");
+    else if (m->view_type[view] == PURE_VIEW_BOOL) printf("%s", value ? "true" : "false");
+    else printf("%.17g", value);
 }
 
 static void show(PureApp *app, const char *failure) {
@@ -96,6 +98,7 @@ static void show(PureApp *app, const char *failure) {
             pure_draft_read(app->texts[i], 0, pure_draft_size(app->texts[i]), json_span, NULL);
             putchar('"');
         } else if (m->state_type[i] == PURE_STATE_LIST) show_list(m, app->lists[i], &m->record[m->state_ref[i]]);
+        else if (m->state_type[i] == PURE_STATE_BOOL) printf("%s", app->values[i] ? "true" : "false");
         else printf("%.17g", app->values[i]);
     }
     printf("},\"views\":{");

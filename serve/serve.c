@@ -805,7 +805,7 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
             while (f < (message ? shape->field_count : 0) && strcmp(m->field[shape->field_start + f].name, pair)) ++f;
             const PureField *field = message && f < shape->field_count ? &m->field[shape->field_start + f] : NULL;
             long length = percent_decoded(value, strlen(value)); /* as a view's arguments are */
-            if (!field || c->given[f] || (field->type != PURE_FIELD_U32 && field->type != PURE_FIELD_NUMBER) ||
+            if (!field || c->given[f] || !pure_field_fixed(field->type) ||
                 length < 0 || !pure_json_fixed(field, (const unsigned char *)value, (size_t)length, c->fields))
                 return "query";
             c->given[f] = true;
@@ -814,7 +814,7 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
     }
     for (uint32_t f = 0; message && !c->json && f < shape->field_count; ++f) {
         uint8_t type = m->field[shape->field_start + f].type;
-        if ((type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER) && !c->given[f]) return "missing_field";
+        if (pure_field_fixed(type) && !c->given[f]) return "missing_field";
     }
     for (uint32_t f = 0; c->batch > 1 && f < shape->field_count; ++f)
         if (c->given[f]) return "delivery"; /* a batch's fields are all in its objects */
@@ -871,8 +871,8 @@ static const char *convert(Connection *c) {
             if (b.seen[f] || c->given[f]) continue;
             const PureField *field = &c->host->module->field[shape->field_start + f];
             if (!delivered || field->type == PURE_FIELD_ROWS) why = "missing_field";
-            else if (field->type == PURE_FIELD_U32 || field->type == PURE_FIELD_NUMBER)
-                memset(b.payload + field->offset, 0, field->type == PURE_FIELD_NUMBER ? 8 : 4);
+            else if (pure_field_fixed(field->type))
+                memset(b.payload + field->offset, 0, pure_field_size(field->type));
             else put_u32(b.table + 8 * f, 0), put_u32(b.table + 8 * f + 4, 0);
         }
         if (!why && c->batch > 1 && b.rows_size) why = "delivery"; /* an output sends no rows */
@@ -1258,7 +1258,7 @@ static unsigned char *arguments_payload(const PureModule *m, int input, const ch
     size_t at = shape->prefix;
     for (uint32_t f = 0; ok && f < shape->field_count; ++f) {
         const PureField *field = &m->field[shape->field_start + f];
-        if (field->type == PURE_FIELD_U32 || field->type == PURE_FIELD_NUMBER) {
+        if (pure_field_fixed(field->type)) {
             ok = values[f] && pure_json_fixed(field, (const unsigned char *)values[f], (size_t)lengths[f], payload);
             continue;
         }
@@ -1303,10 +1303,11 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
     PureResult status = PURE_OK;
     double value;
     if (m->view_type[view] == PURE_VIEW_TABLE && !(o.bytes = malloc(o.capacity = 1024))) return PURE_ALLOCATION;
-    if (m->view_type[view] == PURE_VIEW_NUM) {
+    if (m->view_type[view] == PURE_VIEW_NUM || m->view_type[view] == PURE_VIEW_BOOL) {
         *type = "text/plain; charset=utf-8";
-        if (pure_app_view(app, view, &value)) put_number(&o, value);
-        else status = PURE_NOT_FOUND;
+        if (!pure_app_view(app, view, &value)) status = PURE_NOT_FOUND;
+        else if (m->view_type[view] == PURE_VIEW_BOOL) put_bytes(&o, value ? "true" : "false", value ? 4 : 5);
+        else put_number(&o, value);
     } else if (m->view_type[view] == PURE_VIEW_TEXT) {
         *type = "text/plain; charset=utf-8";
         /* A text state shown as it is goes out as its stored extents. */
@@ -1341,9 +1342,11 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
             put_bytes(&o, ",{" + (row == from), 2 - (row == from));
             for (unsigned k = 0; k < count; ++k) {
                 put_bytes(&o, columns[k].key + !k, columns[k].length - !k);
-                if (m->view_type[columns[k].view] == PURE_VIEW_NUM) {
-                    if (pure_app_cell(app, columns[k].view, row, &value)) put_number(&o, value);
-                    else put_bytes(&o, "null", 4);
+                uint8_t kind = m->view_type[columns[k].view];
+                if (kind == PURE_VIEW_NUM || kind == PURE_VIEW_BOOL) {
+                    if (!pure_app_cell(app, columns[k].view, row, &value)) put_bytes(&o, "null", 4);
+                    else if (kind == PURE_VIEW_BOOL) put_bytes(&o, value ? "true" : "false", value ? 4 : 5);
+                    else put_number(&o, value);
                     continue;
                 }
                 size_t mark = o.size;
@@ -1855,7 +1858,8 @@ static bool same_states(const PureModule *a, const PureModule *b) {
             a->record[i].count != b->record[i].count)
             return false;
     for (uint32_t i = 0; i < a->record_fields; ++i)
-        if (strcmp(a->record_field_names[i], b->record_field_names[i]) || a->record_field_text[i] != b->record_field_text[i])
+        if (strcmp(a->record_field_names[i], b->record_field_names[i]) || a->record_field_text[i] != b->record_field_text[i] ||
+            a->record_field_bool[i] != b->record_field_bool[i])
             return false;
     for (uint32_t i = 0; i < a->collections; ++i)
         if (strcmp(a->collection_names[i], b->collection_names[i])) return false;

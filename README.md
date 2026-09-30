@@ -1,7 +1,7 @@
 # Pure
 
 **Current app model (2026-09-27).** Apps are written in [aup](/srv/git/aup.git) and run as Pure modules
-([format v5](docs/design/008-module-format.md)), verified completely before they execute: declared states persist
+([format v6](docs/design/008-module-format.md)), verified completely before they execute: declared states persist
 in Pure's store (lists as images and a log of their changes, the rest in its tree), every event is a transaction,
 views are pure functions of state. The same spec becomes a
 terminal UI, a CLI, spoken sentences and a web page through [Vega](/srv/git/vega.git), and an HTTP service through

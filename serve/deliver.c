@@ -149,6 +149,8 @@ static bool encode(const PureWire *w, PureSpan payload, Text *t) {
         char digits[32];
         if (field->type == PURE_FIELD_U32) {
             put(t, digits, (size_t)snprintf(digits, sizeof(digits), "%u", (unsigned)read_u32(payload.data + field->offset)));
+        } else if (field->type == PURE_FIELD_BOOL) {
+            put(t, payload.data[field->offset] ? "true" : "false", payload.data[field->offset] ? 4 : 5);
         } else if (field->type == PURE_FIELD_NUMBER) {
             uint64_t bits = read_u32(payload.data + field->offset) | (uint64_t)read_u32(payload.data + field->offset + 4) << 32;
             double value;
@@ -544,8 +546,8 @@ static bool form_answer(const PureWire *w, int status, const Text *body, const P
             free(bytes);
             return false;
         }
-        if (field->type == PURE_FIELD_U32 || field->type == PURE_FIELD_NUMBER)
-            memcpy(prefix + field->offset, p->sent + from->offset, field->type == PURE_FIELD_U32 ? 4 : 8);
+        if (pure_field_fixed(field->type))
+            memcpy(prefix + field->offset, p->sent + from->offset, pure_field_size(field->type));
         else {
             write_u32(bytes + 8 * f, (uint32_t)(copy + start - prefix));
             write_u32(bytes + 8 * f + 4, (uint32_t)length);

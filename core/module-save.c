@@ -176,7 +176,9 @@ static size_t header_of(unsigned count, const uint8_t *text, const char (*names)
 
 static size_t image_header(const PureModule *m, uint32_t record, uint64_t seq, unsigned char *out) {
     const PureRecord *r = &m->record[record];
-    return header_of(r->count, m->record_field_text + r->first, m->record_field_names + r->first, seq, out);
+    uint8_t kinds[PURE_RECORD_FIELDS];
+    for (unsigned f = 0; f < r->count; ++f) kinds[f] = pure_record_kind(m, r->first + f);
+    return header_of(r->count, kinds, m->record_field_names + r->first, seq, out);
 }
 
 PureList *pure_runtime_list_new(uint32_t place) {
@@ -240,7 +242,7 @@ static int read_outputs(const unsigned char *at, size_t size, SentShape *shapes,
         for (unsigned f = 0; f < fields; ++f) {
             size_t named = size - k >= 2 ? at[k + 1] : 0;
             if (size - k < 2 || !named || named >= PURE_MODULE_NAME || size - k < 2 + named || !at[k] ||
-                at[k] >= PURE_FIELD_ROWS)
+                at[k] == PURE_FIELD_ROWS || at[k] > PURE_FIELD_BOOL) /* an output sends no rows */
                 return -1;
             if (shapes) {
                 shapes[t].fields[f] = (PureField){.type = at[k]};
@@ -456,7 +458,7 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         count = ok ? bytes[4] : 0;
         at = 5;
         for (unsigned f = 0; ok && f < count; ++f) {
-            ok = named(bytes, size, &at, 0, &text[f], names[f]) && text[f] <= 1;
+            ok = named(bytes, size, &at, 0, &text[f], names[f]) && (text[f] <= 1 || text[f] == PURE_RECORD_BOOL);
             for (unsigned k = 0; k < f; ++k) ok = ok && strcmp(names[k], names[f]);
         }
         if (ok && image) { /* the save it holds, then its items */
@@ -472,7 +474,9 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     }
     PureList *from = NULL;
     if (result == PURE_OK && stored) {
-        from = pure_list_new(count, text);
+        uint8_t layout[PURE_RECORD_FIELDS]; /* a bool is a number as lists go */
+        for (unsigned f = 0; f < count; ++f) layout[f] = text[f] == PURE_RECORD_BOOL ? 0 : text[f];
+        from = pure_list_new(count, layout);
         result = from ? pure_list_read(from, bytes + at, items) : PURE_ALLOCATION;
         if (result == PURE_OK && !image) result = pure_list_replay(from, bytes + at + items, size - at - items);
     }
@@ -491,7 +495,7 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     }
     bool same = stored && count == r->count;
     for (unsigned f = 0; same && f < count; ++f)
-        same = text[f] == m->record_field_text[r->first + f] && !strcmp(names[f], m->record_field_names[r->first + f]);
+        same = text[f] == pure_record_kind(m, r->first + f) && !strcmp(names[f], m->record_field_names[r->first + f]);
     if (result == PURE_OK && same && image) {
         *out = from;
         saved->image = holds;
@@ -665,14 +669,19 @@ void pure_app_checkpointed(PureApp *app, PureCheckpoint *c, PureResult result) {
 }
 
 static bool scalar(uint8_t type) {
-    return type == PURE_STATE_NUM || type == PURE_STATE_CURSOR || type == PURE_STATE_INDEX;
+    return type == PURE_STATE_NUM || type == PURE_STATE_BOOL || type == PURE_STATE_CURSOR || type == PURE_STATE_INDEX;
 }
 
+/* A number's or a bool's (each is stored as the other may be read: 0 and 1 are false and true). */
+static bool valued(uint8_t type) { return type == PURE_STATE_NUM || type == PURE_STATE_BOOL; }
+
 /* A stored value still fits its state: a cursor on a character boundary of
- * its text, an index on an item of its list (or 0), a finite number. */
+ * its text, an index on an item of its list (or 0), a finite number, a bool
+ * 0 or 1. */
 PURE_COLD static bool fits(const PureModule *m, PureDraft *const *texts, PureList *const *lists, uint32_t state, double value) {
     if (!isfinite(value)) return false;
     if (m->state_type[state] == PURE_STATE_NUM) return true;
+    if (m->state_type[state] == PURE_STATE_BOOL) return value == 0 || value == 1;
     if (value < 0 || value != floor(value)) return false;
     if (m->state_type[state] == PURE_STATE_INDEX) {
         size_t count = pure_list_count(lists[m->state_ref[state]]);
@@ -731,9 +740,10 @@ PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, do
         double value;
         memcpy(&value, &bits, sizeof(value));
         int state = pure_module_state(m, name);
-        if (state >= 0 && kept[state] < 0 && m->state_type[state] == type && scalar(type) &&
+        if (state >= 0 && kept[state] < 0 && scalar(type) &&
+            (m->state_type[state] == type || (valued(type) && valued(m->state_type[state]))) &&
             fits(m, texts, lists, (uint32_t)state, value))
-            values[state] = value;
+            values[state] = m->state_type[state] == PURE_STATE_BOOL ? pure_as_bool(value, 0) : value;
     }
     free(bytes);
     return ok ? PURE_OK : PURE_STORE_ERROR;

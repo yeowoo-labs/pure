@@ -32,11 +32,13 @@ aup의 원칙(002)을 따른다. 위치가 정수가 아니듯 참·거짓은 �
 **모듈 형식 v6(Pure).** 판을 올린다. 비교의 결과 종류가 바뀌므로 v5 모듈은 다시 빌드한다.
 
 - 검증기의 스택 종류에 bool을 더한다. 실행 중의 값은 수 칸의 0과 1이다.
-- bool을 내는 명령: LT–NE, TEXT_COMPARE, LIST_HAS, AND·OR·NOT, 새 명령 BOOL_CONST(값 0이나 1).
-- bool을 받는 명령: JZ, REQUIRE, AND·OR·NOT, 집계의 포함 여부(count와 first는 bool 하나, sum·max·min은 수와 bool),
-  걸러진 표의 필터, 새 명령 BOOL_TEXT(bool → text, `true`·`false`).
+- 새 명령은 없다. CONST의 인자 1이 bool 상수(값 +0이나 1)이고, NUM_TEXT의 인자 1이 bool을 `true`·`false`로 쓴다.
+  LOAD·STORE와 지역 칸은 수와 bool을 함께 다룬다(상태의 타입이나 칸의 담는 것이 정한다).
+- bool을 내는 명령: LT–NE, TEXT_COMPARE, LIST_HAS, AND·OR·NOT. EQ와 NE는 bool 둘도 비교한다.
+- bool을 받는 명령: JZ, REQUIRE, AND·OR·NOT, 집계의 포함 여부(count와 first는 bool 하나, sum·max·min·distinct는 수와
+  bool), 걸러진 표의 필터.
 - 새 타입 번호: 상태 5(bool, 8 B 값은 f64 0이나 1), 레코드 필드 2(bool, 기본값 f64 0이나 1), 메시지 필드 6(bool, 접두부의
-  1바이트 0이나 1), 보기 3(bool). 지역 칸의 담는 것 2(bool).
+  1바이트 0이나 1), 보기 3(bool). 지역 칸의 담는 것 2(bool). 상수, 초기값, 기본값은 +0이나 1이어야 한다.
 - 메시지의 bool 필드 바이트가 0이나 1이 아니면 메시지가 `limit`으로 실패한다(도착할 때, 015의 거절과 같은 자리).
 
 **경계(015에 더한다).**
@@ -45,8 +47,8 @@ aup의 원칙(002)을 따른다. 위치가 정수가 아니듯 참·거짓은 �
 - 쿼리: `true`·`false`.
 - 저장: 목록의 bool 필드는 수 열의 0과 1이다(저장 형식도 수다). 레코드의 필드 타입이 뜻을 정한다.
 - 전달: 링크의 FIELDS와 HTTP 전달의 JSON이 bool을 bool로 싣는다. 받는 입력의 필드도 bool이어야 한다. 넓히기는 없다.
-- 모듈 교체: 수 필드나 상태가 bool이 되면 0과 1은 `false`와 `true`로 옮기고, 다른 수는 기본값이 된다. bool이 수가 되면
-  `false`와 `true`는 0과 1이다.
+- 모듈 교체: 수 필드나 상태가 bool이 되면 0(−0도, 015)과 1은 `false`와 `true`로 옮기고, 다른 수는 기본값이 된다. bool이
+  수가 되면 `false`와 `true`는 0과 1이다. 저장소에서 다시 열 때와, 교체가 출력의 필드를 바꿀 때 기다리던 보냄도 같다.
 - 화면(Vega): 글자로는 `true`·`false`다(보간과 같다). 앱이 다르게 보이고 싶으면 조건식으로 글을 고른다.
 
 **옮기는 비용.** 예제의 수 깃발을 bool로 바꾼다(`done`, `urgent`, `running`, `holding`). 저장된 0과 1은 위의 교체 규칙으로

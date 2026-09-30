@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Pure module format v5 (docs/design/008-module-format.md). A toolchain such
+/* Pure module format v6 (docs/design/008-module-format.md). A toolchain such
  * as aup produces it; Pure verifies it completely before anything executes:
  * operand types (including which text a cursor and which list an index
  * belongs to), stack heights and the stack at every join, forward-only
@@ -42,9 +42,16 @@ typedef enum {
     PURE_OP_LOCAL_LOAD, PURE_OP_LOCAL_STORE,
     PURE_OP_COUNT
 } PureOpcode;
+/* A bool is its own type (docs/design/016-bool-and-i64.md), held as a
+ * number 0 or 1 while it runs: comparisons (LT to NE, TEXT_COMPARE) and
+ * LIST_HAS push one, AND, OR and NOT work on them, JZ and REQUIRE take one,
+ * and EQ and NE compare two bools as they compare two numbers. CONST with
+ * argument 1 pushes a bool (its value 0 or 1); LOAD and STORE work on a
+ * number or a bool state as its type says; NUM_TEXT with argument 1 makes
+ * a bool text (true, false). */
 /* A local: one of an event's PURE_MODULE_LOCALS slots, 0 when the event
  * begins and never saved. LOCAL_LOAD and LOCAL_STORE name the slot (bits
- * 0-7), what it holds (bits 8-15: 0 a number, 1 an index) and an index's
+ * 0-7), what it holds (bits 8-15: 0 a number, 1 an index, 2 a bool) and an index's
  * list (bits 16-31); a handler uses a slot for one of them. A handler, the
  * walks in it and the folds in those read locals; the handler and its walks
  * store them. */
@@ -56,10 +63,10 @@ enum { PURE_MODULE_LOCALS = 64 };
  * (an item it removes, or one before it, moves the walk with it). */
 /* FOLD's argument: the kind (bits 0-7), the list state (8-15) and the length
  * of the block that follows (16-31), run once per item as a column of that
- * list. count counts the items whose block leaves a non-zero number; sum,
- * max, min and distinct take a value and an include flag from their block
- * (distinct counts the different values, -0 as 0); first gives the index of
- * the first item whose block leaves a non-zero number. */
+ * list. count counts the items whose block leaves true; sum, max, min and
+ * distinct take a number and whether to include it (a bool) from their
+ * block (distinct counts the different values, -0 as 0); first gives the
+ * index of the first item whose block leaves true. */
 typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PURE_FOLD_FIRST, PURE_FOLD_DISTINCT } PureFold;
 /* A slice: a fold whose kind has PURE_FOLD_SLICED, or a walk whose argument
  * has PURE_EACH_SLICED, first takes two numbers, a low and a high key, and
@@ -82,19 +89,31 @@ typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3, PUR
 enum { PURE_TIMER_LONGEST = 86400000, PURE_SOURCE = 64 };
 /* The largest number a delivery may have: it is kept as a binary64. */
 #define PURE_SEQ_MOST (UINT64_C(1) << 53)
-/* A message field: a u32le or a binary64 (fixed, at its offset in the
- * payload's prefix), or bytes, text or rows of any length. The prefix also
- * holds each variable field's u32le length but the last one's (its offset is
- * PURE_FIELD_REST), which takes what follows the others; the variable
- * fields' bytes follow the prefix in declaration order. A text is UTF-8 and
- * a number finite, or the message fails. Rows are records of a list of a
- * message's rows (rows, a list state), laid out as a list's stored form: a
- * message fills that list with them, and fails when they are not whole. */
+/* A message field: a u32le, a binary64 or a bool's one byte (fixed, at its
+ * offset in the payload's prefix), or bytes, text or rows of any length. The
+ * prefix also holds each variable field's u32le length but the last one's
+ * (its offset is PURE_FIELD_REST), which takes what follows the others; the
+ * variable fields' bytes follow the prefix in declaration order. A text is
+ * UTF-8, a number finite and a bool 0 or 1, or the message fails. Rows are
+ * records of a list of a message's rows (rows, a list state), laid out as a
+ * list's stored form: a message fills that list with them, and fails when
+ * they are not whole. */
 typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2, PURE_FIELD_NUMBER = 3, PURE_FIELD_TEXT = 4,
-               PURE_FIELD_ROWS = 5 } PureFieldType;
+               PURE_FIELD_ROWS = 5, PURE_FIELD_BOOL = 6 } PureFieldType;
 enum { PURE_FIELD_REST = UINT32_MAX };
+/* A field held in its payload's prefix (a u32, a number, a bool), and the bytes it takes there. */
+static inline bool pure_field_fixed(uint8_t type) {
+    return type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER || type == PURE_FIELD_BOOL;
+}
+static inline uint32_t pure_field_size(uint8_t type) {
+    return type == PURE_FIELD_NUMBER ? 8 : type == PURE_FIELD_BOOL ? 1 : 4;
+}
+/* A number as a bool: 0 (of either sign) is false, 1 true, any other the
+ * default given. A state or field that becomes a bool keeps its value so. */
+static inline double pure_as_bool(double value, double otherwise) { return value == 0 ? 0 : value == 1 ? 1 : otherwise; }
 typedef enum {
-    PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4
+    PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4,
+    PURE_STATE_BOOL = 5
 } PureStateType;
 /* A cursor that stays before text inserted at it (a mark); other cursors go
  * after it (a caret). A list of a message's rows (its state's flags hold
@@ -103,9 +122,9 @@ typedef enum {
  * every event ends, and it is never saved nor logged for undoing. */
 enum { PURE_CURSOR_STAYS = 1, PURE_LIST_ROWS = 256 };
 /* A table view has one row per item of a list, or per item its filter
- * keeps; its columns are number or text views evaluated for one row at a
- * time. */
-typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2 } PureViewType;
+ * keeps; its columns are number, bool or text views evaluated for one row at
+ * a time. */
+typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2, PURE_VIEW_BOOL = 3 } PureViewType;
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
 /* EXISTS: an item with that key is already in the keyed list (the event
@@ -198,7 +217,8 @@ typedef struct {
     PureRecord record[PURE_MODULE_RECORDS];
     char record_field_names[PURE_MODULE_RECORD_FIELDS][PURE_MODULE_NAME];
     uint8_t record_field_text[PURE_MODULE_RECORD_FIELDS];
-    double record_field_default[PURE_MODULE_RECORD_FIELDS]; /* number, or text constant index */
+    uint8_t record_field_bool[PURE_MODULE_RECORD_FIELDS]; /* a bool: a number field (0 or 1) as lists go */
+    double record_field_default[PURE_MODULE_RECORD_FIELDS]; /* number (a bool's 0 or 1), or text constant index */
 } PureModule;
 
 /* Decode and verify into out, which must be zeroed (a static one is) or hold
@@ -422,7 +442,8 @@ PureResult pure_app_message_fields(PureApp *, uint32_t input, const char *key, i
  * next event (deferred: copy it before a later save too). */
 PureResult pure_app_reply(const PureApp *, bool (*visit)(void *, PureSpan), void *context);
 void pure_app_finish(PureApp *);
-/* A number view; false for a text view or a failed evaluation. */
+/* A number view, or a bool view (0 or 1: its type says which); false for a
+ * text view or a failed evaluation. */
 bool pure_app_view(PureApp *, uint32_t view, double *out);
 /* A text view, lent in order until the next view evaluation. */
 PureResult pure_app_view_text(PureApp *, uint32_t view, bool (*visit)(void *, PureSpan), void *context);
@@ -444,6 +465,7 @@ unsigned pure_app_passes(const PureApp *);
  * its filter leaves the item out). Without a filter both are the identity. */
 bool pure_app_row_item(PureApp *, uint32_t table, size_t row, size_t *item);
 bool pure_app_item_row(PureApp *, uint32_t table, size_t item, size_t *row);
+/* A number or bool column's cell (as pure_app_view), or a text column's. */
 bool pure_app_cell(PureApp *, uint32_t column, size_t row, double *out);
 PureResult pure_app_cell_text(PureApp *, uint32_t column, size_t row, bool (*visit)(void *, PureSpan), void *context);
 /* Switch to another verified module. States keep their value by name (text

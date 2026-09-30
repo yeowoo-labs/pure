@@ -37,8 +37,9 @@ static void show(const PureSurface *s, PureApp *reader, FILE *out, const char *e
             fputc('"', out);
             pure_app_view_text(reader, (uint32_t)view, put_text, out);
             fputc('"', out);
-        } else if (pure_app_view(reader, (uint32_t)view, &value)) fprintf(out, "%g", value);
-        else fputs("null", out);
+        } else if (!pure_app_view(reader, (uint32_t)view, &value)) fputs("null", out);
+        else if (s->module->view_type[view] == PURE_VIEW_BOOL) fputs(value ? "true" : "false", out);
+        else fprintf(out, "%g", value);
     }
     fputs("}}\n", out);
     fflush(out);

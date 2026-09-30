@@ -1,7 +1,7 @@
 /* JSON numbers are read as strtod reads them, bit for bit: in the forms a
  * client writes (a program's shortest digits, fixed decimals, exponents), at
  * the edges of the exact path (2^53, 10^22) and past them, and refused when
- * not finite or not JSON. */
+ * not finite or not JSON. A bool is true or false, nothing else. */
 #include "message-json.h"
 #include <math.h>
 #include <stdint.h>
@@ -43,6 +43,15 @@ int main(void) {
         double value;
         CHECK(!read_number(refused[i], &value));
     }
+    static const PureField truth = {.type = PURE_FIELD_BOOL, .offset = 1};
+    unsigned char prefix[2] = {7, 7};
+    CHECK(pure_json_fixed(&truth, (const unsigned char *)"true", 4, prefix) && prefix[1] == 1 && prefix[0] == 7);
+    CHECK(pure_json_fixed(&truth, (const unsigned char *)"false", 5, prefix) && prefix[1] == 0);
+    static const char *const not_bools[] = {"", "1", "0", "True", "\"true\"", "tru", "truex", "false ", "null", "t"};
+    for (size_t i = 0; i < sizeof(not_bools) / sizeof(*not_bools); ++i)
+        CHECK(!pure_json_fixed(&truth, (const unsigned char *)not_bools[i], strlen(not_bools[i]), prefix) && prefix[1] == 0);
+    double number;
+    CHECK(!read_number("true", &number) && !read_number("false", &number));
     uint64_t seed = 0x6a736f6eu;
     size_t read = 0;
     for (unsigned i = 0; i < 400000; ++i) {
