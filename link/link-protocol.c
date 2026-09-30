@@ -521,6 +521,7 @@ static void lose(PureLinkSender *l, Flight *f, uint64_t now, bool by_time) {
     f->by_time = by_time;
     f->largest_then = l->largest_acked;
     ++l->counts.lost;
+    if (l->tried == TRYING && f->pn == l->tried_pn) l->tried = 0; /* a refused stream's try, gone: another goes */
     for (uint16_t u = 0; u < f->count; ++u) l->counts.resent += carried(l, &f->units[u], f->pn, false, now);
     if (f->sent > l->cc.recovery_start) { /* one congestion event per round trip */
         if (!l->undo_losses) { /* an episode begins */
@@ -1128,6 +1129,7 @@ static void epoch_lost(PureLinkSender *l) {
     }
     l->renegotiating = false;
     l->pto_count = 0;
+    if (l->tried == TRYING) l->tried = 0; /* its try went with the rest: another goes */
     for (size_t k = 0; k < l->flight_count; ++k) {
         Flight *f = &l->flights[(l->flight_head + k) & (l->flight_capacity - 1)];
         if (!f->done) settle(l, f), f->count = 0;

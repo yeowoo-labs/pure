@@ -892,6 +892,72 @@ static void refusals(const char *dir) {
     free(w.packets);
 }
 
+/* A stream refused, and taken by the receiver started again with the input
+ * (its memo kept) while the sender's next try was due: the try goes to no
+ * one, the sender hears nothing and takes its epoch for lost, and begins
+ * another. The refusal is not over, but the try it waited on is gone: the
+ * sender must try again, and the new receiver take all 200 (the board
+ * whose nodes were upgraded one after the other, 105). */
+static void refused_restarted(const char *dir) {
+    unsigned char public_a[PURE_SEAL_KEY], public_b[PURE_SEAL_KEY], out[PURE_LINK_DATAGRAM_MOST];
+    PureSealKey *a = key(dir, "a.key", public_a), *b = key(dir, "b.key", public_b);
+    char memo[512];
+    snprintf(memo, sizeof(memo), "%s/b.key.links", dir);
+    unlink(memo);
+    World w = {.packets = malloc(PACKETS * sizeof(Packet))};
+    if (!w.packets) exit(1);
+    PureLinkReceiver *r = receiver_of(&w, b, public_b, public_a, memo, 120000);
+    PureLinkSender *s = pure_link_sender("test.ordered", "later", 0x5eed, a, public_a);
+    if (!s || !pure_link_sender_peer(s, public_b)) exit(1);
+    static unsigned char bytes[20200];
+    for (uint64_t seq = 1; seq <= 200; ++seq) {
+        size_t size = record_size(seq);
+        for (size_t k = 0; k < size; ++k) bytes[k] = record_byte(seq, k);
+        if (!pure_link_sender_queue(s, seq, bytes, size)) exit(1);
+    }
+    uint64_t number, taken_at = 0;
+    for (; w.now < 120000 * MS && !taken_at; w.now += MS) {
+        if (w.now == 10000 * MS) { /* killed: what it held is gone, its memo stays */
+            pure_link_receiver_free(r);
+            r = NULL;
+            w.done_count = 0;
+        }
+        if (w.now == 18000 * MS) { /* started again, now with the input */
+            w.later_open = true;
+            r = receiver_of(&w, b, public_b, public_a, memo, 120000);
+        }
+        for (size_t size; (size = pure_link_sender_packet(s, out, false, w.now, &number));)
+            if (r) pure_link_receiver_take(r, out, size, "sender0", 7, w.now);
+        size_t told = w.done_count;
+        memcpy(w.told, w.done, told * sizeof(*w.done));
+        w.done_count = 0;
+        if (r) pure_link_receiver_turn(r, w.told, told, w.now, answer, &w);
+        for (size_t k = 0; k < w.count;) {
+            if (w.packets[k].at > w.now) {
+                ++k;
+                continue;
+            }
+            pure_link_sender_take(s, w.packets[k].bytes, w.packets[k].size, w.now);
+            w.packets[k] = w.packets[--w.count];
+        }
+        pure_link_sender_tick(s, w.now);
+        if (pure_link_sender_stored(s) == 200 && w.heard == 200) taken_at = w.now;
+    }
+    PureLinkCounts c;
+    pure_link_sender_counts(s, &c);
+    printf("{\"case\":\"refused_restarted\",\"refused\":%llu,\"stored\":%llu,\"taken_ms\":%llu}\n",
+           (unsigned long long)c.refused, (unsigned long long)pure_link_sender_stored(s),
+           (unsigned long long)(taken_at / MS));
+    CHECK(taken_at && taken_at < 30000 * MS && !pure_link_sender_refusal(s),
+          "refused, then the receiver started again with the input: %llu stored, %llu heard, taken at %llu ms",
+          (unsigned long long)pure_link_sender_stored(s), (unsigned long long)w.heard,
+          (unsigned long long)(taken_at / MS));
+    pure_link_sender_free(s);
+    if (r) pure_link_receiver_free(r);
+    pure_seal_key_free(a), pure_seal_key_free(b);
+    free(w.packets);
+}
+
 /* The largest send (PURE_LINK_RECORD_MOST) goes whole, over a receiver that
  * never heard of the stream before; one byte more is not taken to send. */
 typedef struct { World *w; PureLinkSender *s; } Largest;
@@ -1022,6 +1088,7 @@ int main(void) {
     flood(dir);
     outputs(dir);
     refusals(dir);
+    refused_restarted(dir);
     largest(dir);
     char command[600];
     snprintf(command, sizeof(command), "rm -rf %s", dir);
