@@ -69,5 +69,6 @@ def table(name, device):
     print()
 
 
-for name in sys.argv[1:] or ['ram-w1', 'ram-w4', 'sd-w1-*', 'sd-w4-*']:
-    table(name, name.startswith('sd'))
+if __name__ == '__main__':
+    for name in sys.argv[1:] or ['ram-w1', 'ram-w4', 'sd-w1-*', 'sd-w4-*']:
+        table(name, name.startswith('sd'))
