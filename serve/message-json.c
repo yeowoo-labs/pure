@@ -83,6 +83,20 @@ static bool json_double(const unsigned char *text, size_t size, double *value) {
     return isfinite(*value);
 }
 
+/* A JSON integer in an i64's range (no point, no exponent), exactly: false for any other text. */
+static bool json_integer(const unsigned char *text, size_t size, int64_t *value) {
+    bool integer, negative = size && text[0] == '-';
+    if (!size || json_number(text, size, &integer) != size || !integer) return false;
+    uint64_t n = 0, most = negative ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX;
+    for (size_t i = negative; i < size; ++i) {
+        unsigned digit = (unsigned)(text[i] - '0');
+        if (n > (most - digit) / 10) return false;
+        n = n * 10 + digit;
+    }
+    *value = !negative ? (int64_t)n : n ? -(int64_t)(n - 1) - 1 : 0; /* -2^63 is; -0 is 0 */
+    return true;
+}
+
 /* A JSON true or false at text: its length (4 or 5), or 0. */
 static size_t json_bool(const unsigned char *text, size_t size, bool *value) {
     if (size >= 4 && !memcmp(text, "true", 4)) return *value = true, 4;
@@ -91,12 +105,19 @@ static size_t json_bool(const unsigned char *text, size_t size, bool *value) {
 }
 
 /* A fixed field's value from its text (a query value or a JSON value) into
- * the prefix: a u32 in range, a finite number, or true or false for a bool. */
+ * the prefix: a u32 in range, a finite number, true or false for a bool, an
+ * integer in range for an i64. */
 bool pure_json_fixed(const PureField *field, const unsigned char *text, size_t size, unsigned char *prefix) {
     if (field->type == PURE_FIELD_BOOL) { /* true or false, as a JSON value says it */
         bool value;
         if (!size || json_bool(text, size, &value) != size) return false;
         prefix[field->offset] = value;
+        return true;
+    }
+    if (field->type == PURE_FIELD_I64) {
+        int64_t value;
+        if (!json_integer(text, size, &value)) return false;
+        for (unsigned i = 0; i < 8; ++i) prefix[field->offset + i] = (unsigned char)((uint64_t)value >> (8 * i));
         return true;
     }
     bool integer;
@@ -289,7 +310,7 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
             *at = pure_json_space(json, *at, size);
         }
         if (*at == size || json[(*at)++] != '{') return "json_type";
-        double numbers[PURE_RECORD_FIELDS];
+        PureValue numbers[PURE_RECORD_FIELDS]; /* a number's, a bool's or an i64's */
         PureSpan texts[PURE_RECORD_FIELDS];
         bool given[PURE_RECORD_FIELDS] = {false};
         *at = pure_json_space(json, *at, size);
@@ -317,11 +338,12 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
             }
             if (given[k]) return "json_field";
             given[k] = true;
-            bool text = m->record_field_text[record->first + k], truth;
-            if (m->record_field_bool[record->first + k]) { /* true or false, nothing else */
+            uint8_t type = m->record_field_type[record->first + k];
+            bool text = type == PURE_RECORD_TEXT, truth;
+            if (type == PURE_RECORD_BOOL) { /* true or false, nothing else */
                 size_t word = json_bool(json + *at, size - *at, &truth);
                 if (!word) return "json_type";
-                numbers[k] = truth;
+                numbers[k].num = truth;
                 *at = pure_json_space(json, *at + word, size);
                 continue;
             }
@@ -341,14 +363,16 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
             size_t length = json_number(json + *at, size - *at, &integer);
             if (!length) return *at < size && (json[*at] == '[' || json[*at] == '{' || json[*at] == 't' || json[*at] == 'f' ||
                                                json[*at] == 'n') ? "json_type" : "json";
-            if (text || !json_double(json + *at, length, &numbers[k])) return "json_type";
+            if (text || !(type == PURE_RECORD_I64 ? json_integer(json + *at, length, &numbers[k].i64)
+                                                  : json_double(json + *at, length, &numbers[k].num)))
+                return "json_type";
             *at = pure_json_space(json, *at + length, size);
         }
         if (*at == size) return "json";
         ++*at;
         for (unsigned k = 0; k < record->count; ++k) {
             uint32_t at_field = record->first + k;
-            if (m->record_field_text[at_field]) {
+            if (m->record_field_type[at_field] == PURE_RECORD_TEXT) {
                 uint32_t constant = (uint32_t)m->record_field_default[at_field].num;
                 PureSpan text = given[k] ? texts[k]
                                          : (PureSpan){m->constant_data + m->constant_offset[constant], m->constant_length[constant]};
@@ -357,9 +381,7 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
                 if (text.size) memcpy(b->rows + b->rows_size + 4, text.data, text.size);
                 b->rows_size += 4 + text.size;
             } else {
-                double value = given[k] ? numbers[k] : m->record_field_default[at_field].num;
-                uint64_t bits;
-                memcpy(&bits, &value, 8);
+                uint64_t bits = (uint64_t)(given[k] ? numbers[k] : m->record_field_default[at_field]).i64; /* its bits */
                 if (!rows_room(b, 8)) return "memory";
                 for (unsigned i = 0; i < 8; ++i) b->rows[b->rows_size + i] = (unsigned char)(bits >> (8 * i));
                 b->rows_size += 8;

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "module-store.h"
 #include "store.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +15,6 @@
  * Text states and text views print as JSON strings; cursors as byte positions;
  * lists as arrays of objects; indices as positions; a table view as an array
  * with an object of its columns per row. A failed view or cell is null. */
-static const char *const fault_names[] = {"none", "divide", "non_finite", "clamp", "limit", "not_found", "encoding", "exists"};
 /* time MS sets the time events see (milliseconds since 1970); tick NAME is a timer's tick. */
 
 static bool load(const char *path, PureModule *module) {
@@ -53,8 +53,10 @@ static void show_list(const PureModule *m, const PureList *list, const PureRecor
         for (unsigned f = 0; f < record->count; ++f) {
             PureCell cell = pure_list_get(list, at, f);
             printf("%s\"%s\":", f ? "," : "", m->record_field_names[record->first + f]);
-            if (m->record_field_bool[record->first + f]) printf("%s", cell.num ? "true" : "false");
-            else if (!m->record_field_text[record->first + f]) printf("%.17g", cell.num);
+            uint8_t type = m->record_field_type[record->first + f];
+            if (type == PURE_RECORD_BOOL) printf("%s", cell.num ? "true" : "false");
+            else if (type == PURE_RECORD_I64) printf("%" PRId64, cell.i64);
+            else if (type == PURE_RECORD_NUMBER) printf("%.17g", cell.num);
             else {
                 putchar('"');
                 json_span(NULL, (PureSpan){cell.text, cell.size});
@@ -66,15 +68,19 @@ static void show_list(const PureModule *m, const PureList *list, const PureRecor
     putchar(']');
 }
 
-/* A number, bool or text view, or a column at a row. */
+/* A number, bool, i64 or text view, or a column at a row. */
 static void show_value(PureApp *app, uint32_t view, size_t row) {
     const PureModule *m = app->module;
     static Collected text;
     text.used = 0;
     text.fits = true;
     double value;
+    int64_t integer;
     bool column = m->view_table[view];
-    if (m->view_type[view] == PURE_VIEW_TEXT) {
+    if (m->view_type[view] == PURE_VIEW_I64) {
+        if (!(column ? pure_app_cell_i64(app, view, row, &integer) : pure_app_view_i64(app, view, &integer))) printf("null");
+        else printf("%" PRId64, integer);
+    } else if (m->view_type[view] == PURE_VIEW_TEXT) {
         PureResult result = column ? pure_app_cell_text(app, view, row, collect, &text)
                                    : pure_app_view_text(app, view, collect, &text);
         if (result != PURE_OK || !text.fits) printf("null");
@@ -99,6 +105,7 @@ static void show(PureApp *app, const char *failure) {
             putchar('"');
         } else if (m->state_type[i] == PURE_STATE_LIST) show_list(m, app->lists[i], &m->record[m->state_ref[i]]);
         else if (m->state_type[i] == PURE_STATE_BOOL) printf("%s", app->values[i].num ? "true" : "false");
+        else if (m->state_type[i] == PURE_STATE_I64) printf("%" PRId64, app->values[i].i64);
         else printf("%.17g", app->values[i].num);
     }
     printf("},\"views\":{");
@@ -121,7 +128,7 @@ static void show(PureApp *app, const char *failure) {
         putchar(']');
     }
     printf("},\"tick\":%llu,\"successfulEvents\":%llu,\"fault\":\"%s\",\"error\":%s%s%s}\n",
-           (unsigned long long)app->ticks, (unsigned long long)app->events, fault_names[app->fault],
+           (unsigned long long)app->ticks, (unsigned long long)app->events, pure_fault_name(app->fault),
            failure ? "\"" : "", failure ? failure : "null", failure ? "\"" : "");
 }
 

@@ -40,6 +40,8 @@ typedef enum {
     PURE_OP_PICK, PURE_OP_SLIDE, PURE_OP_FOLD, PURE_OP_TEXT_COMPARE, PURE_OP_LIST_FIND, PURE_OP_LIST_HAS,
     PURE_OP_NOW, PURE_OP_FLOOR, PURE_OP_MOD, PURE_OP_SEND, PURE_OP_OUTER_ROW, PURE_OP_EACH,
     PURE_OP_LOCAL_LOAD, PURE_OP_LOCAL_STORE,
+    PURE_OP_I64_ADD, PURE_OP_I64_SUB, PURE_OP_I64_MUL, PURE_OP_I64_DIV, PURE_OP_I64_MOD, PURE_OP_I64_NEG,
+    PURE_OP_I64_COMPARE, PURE_OP_I64_MIN, PURE_OP_I64_MAX, PURE_OP_I64_FROM, PURE_OP_NUM_FROM,
     PURE_OP_COUNT
 } PureOpcode;
 /* A bool is its own type (docs/design/016-bool-and-i64.md), held as a
@@ -48,7 +50,15 @@ typedef enum {
  * and EQ and NE compare two bools as they compare two numbers. CONST with
  * argument 1 pushes a bool (its value 0 or 1); LOAD and STORE work on a
  * number or a bool state as its type says; NUM_TEXT with argument 1 makes
- * a bool text (true, false). */
+ * a bool text (true, false).
+ * An i64 is its own type too, an int64_t in a value's 8 bytes: CONST with
+ * argument 2 pushes one (its constant's 8 bytes), NUM_TEXT with argument 2
+ * makes its decimal text, the I64_ opcodes compute on them (ADD, SUB, MUL
+ * and NEG fail as OVERFLOW past its range; DIV and MOD floor, and fail as
+ * DIVIDE by zero; COMPARE takes a relation as TEXT_COMPARE does and gives a
+ * bool), I64_FROM makes one of a whole number in range and NUM_FROM a
+ * number of one within 2^53 (else LIMIT). LOAD, STORE, the item and local
+ * opcodes, FIELD and SEND move them as they move numbers. */
 /* A local: one of an event's PURE_MODULE_LOCALS slots, 0 when the event
  * begins and never saved. LOCAL_LOAD and LOCAL_STORE name the slot (bits
  * 0-7), what it holds (bits 8-15: 0 a number, 1 an index, 2 a bool) and an index's
@@ -61,13 +71,16 @@ enum { PURE_MODULE_LOCALS = 64 };
  * when it began, in order, with ROW the item; the block may change states,
  * the list's items and other lists, but not insert into the list it walks
  * (an item it removes, or one before it, moves the walk with it). */
-/* FOLD's argument: the kind (bits 0-7), the list state (8-15) and the length
- * of the block that follows (16-31), run once per item as a column of that
- * list. count counts the items whose block leaves true; sum, max, min and
- * distinct take a number and whether to include it (a bool) from their
- * block (distinct counts the different values, -0 as 0); first gives the
+/* FOLD's argument: the kind (bits 0-5, with flags above: an i64's, a
+ * slice's), the list state (8-15) and the length of the block that follows
+ * (16-31), run once per item as a column of that list. count counts the
+ * items whose block leaves true; sum, max, min and distinct take a value
+ * and whether to include it (a bool) from their block, the value a number
+ * or, with PURE_FOLD_INTEGER, an i64 (a sum past its range fails as
+ * OVERFLOW; distinct counts the different values, -0 as 0); first gives the
  * index of the first item whose block leaves true. */
 typedef enum { PURE_FOLD_COUNT, PURE_FOLD_SUM, PURE_FOLD_MAX, PURE_FOLD_MIN, PURE_FOLD_FIRST, PURE_FOLD_DISTINCT } PureFold;
+enum { PURE_FOLD_KIND = 0x3F, PURE_FOLD_INTEGER = 0x40 };
 /* A slice: a fold whose kind has PURE_FOLD_SLICED, or a walk whose argument
  * has PURE_EACH_SLICED, first takes two numbers, a low and a high key, and
  * runs for the items of its list (keyed by a number) whose keys are from
@@ -89,8 +102,8 @@ typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3, PUR
 enum { PURE_TIMER_LONGEST = 86400000, PURE_SOURCE = 64 };
 /* The largest number a delivery may have: it is kept as a binary64. */
 #define PURE_SEQ_MOST (UINT64_C(1) << 53)
-/* A message field: a u32le, a binary64 or a bool's one byte (fixed, at its
- * offset in the payload's prefix), or bytes, text or rows of any length. The
+/* A message field: a u32le, a binary64, a bool's one byte or an i64's eight
+ * (fixed, at its offset in the payload's prefix), or bytes, text or rows of any length. The
  * prefix also holds each variable field's u32le length but the last one's
  * (its offset is PURE_FIELD_REST), which takes what follows the others; the
  * variable fields' bytes follow the prefix in declaration order. A text is
@@ -99,22 +112,27 @@ enum { PURE_TIMER_LONGEST = 86400000, PURE_SOURCE = 64 };
  * list's stored form: a message fills that list with them, and fails when
  * they are not whole. */
 typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2, PURE_FIELD_NUMBER = 3, PURE_FIELD_TEXT = 4,
-               PURE_FIELD_ROWS = 5, PURE_FIELD_BOOL = 6 } PureFieldType;
+               PURE_FIELD_ROWS = 5, PURE_FIELD_BOOL = 6, PURE_FIELD_I64 = 7 } PureFieldType;
 enum { PURE_FIELD_REST = UINT32_MAX };
-/* A field held in its payload's prefix (a u32, a number, a bool), and the bytes it takes there. */
+/* A field held in its payload's prefix (a u32, a number, a bool, an i64), and the bytes it takes there. */
 static inline bool pure_field_fixed(uint8_t type) {
-    return type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER || type == PURE_FIELD_BOOL;
+    return type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER || type == PURE_FIELD_BOOL || type == PURE_FIELD_I64;
 }
 static inline uint32_t pure_field_size(uint8_t type) {
-    return type == PURE_FIELD_NUMBER ? 8 : type == PURE_FIELD_BOOL ? 1 : 4;
+    return type == PURE_FIELD_NUMBER || type == PURE_FIELD_I64 ? 8 : type == PURE_FIELD_BOOL ? 1 : 4;
 }
-/* A number as a bool: 0 (of either sign) is false, 1 true, any other the
- * default given. A state or field that becomes a bool keeps its value so. */
-static inline double pure_as_bool(double value, double otherwise) { return value == 0 ? 0 : value == 1 ? 1 : otherwise; }
 typedef enum {
     PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4,
-    PURE_STATE_BOOL = 5
+    PURE_STATE_BOOL = 5, PURE_STATE_I64 = 6
 } PureStateType;
+/* A number's, a bool's or an i64's state as a list cell's kind (PURE_CELL_...,
+ * for pure_cell_as), or 0xFF for any other state. */
+static inline uint8_t pure_value_kind(uint8_t state_type) {
+    return state_type == PURE_STATE_NUM ? PURE_CELL_NUMBER : state_type == PURE_STATE_BOOL ? PURE_CELL_BOOL :
+           state_type == PURE_STATE_I64 ? PURE_CELL_INTEGER : 0xFF;
+}
+/* A record field: a number, a text (its default a constant), a bool or an i64. */
+typedef enum { PURE_RECORD_NUMBER = 0, PURE_RECORD_TEXT = 1, PURE_RECORD_BOOL = 2, PURE_RECORD_I64 = 3 } PureRecordType;
 /* A value's 8 bytes: a number (a bool's 0 or 1, a cursor's or an index's
  * position too), or an integer. What a value is its state's or field's type
  * says, and the verifier keeps to it: moves copy the bytes, and only what
@@ -127,19 +145,23 @@ typedef union { double num; int64_t i64; } PureValue;
  * every event ends, and it is never saved nor logged for undoing. */
 enum { PURE_CURSOR_STAYS = 1, PURE_LIST_ROWS = 256 };
 /* A table view has one row per item of a list, or per item its filter
- * keeps; its columns are number, bool or text views evaluated for one row at
- * a time. */
-typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2, PURE_VIEW_BOOL = 3 } PureViewType;
+ * keeps; its columns are number, bool, i64 or text views evaluated for one
+ * row at a time. */
+typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2, PURE_VIEW_BOOL = 3, PURE_VIEW_I64 = 4 } PureViewType;
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
 /* EXISTS: an item with that key is already in the keyed list (the event
  * reports PURE_CONFLICT). MEMORY: the event would leave the states holding
- * more than the app's budget (pure_app_memory; it reports PURE_BUDGET). */
+ * more than the app's budget (pure_app_memory; it reports PURE_BUDGET).
+ * OVERFLOW: an i64 past its range. */
 typedef enum {
     PURE_FAULT_NONE, PURE_FAULT_DIVIDE, PURE_FAULT_NON_FINITE, PURE_FAULT_CLAMP,
     PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING, PURE_FAULT_EXISTS,
-    PURE_FAULT_MEMORY
+    PURE_FAULT_MEMORY, PURE_FAULT_OVERFLOW, PURE_FAULT_COUNT
 } PureFault;
+/* A fault's name as hosts report it: none, divide, non_finite, clamp, limit,
+ * not_found, encoding, exists, memory, overflow. */
+const char *pure_fault_name(PureFault);
 
 /* plan, shape and range are the runtime's, set at load: a fold whose block
  * has a form for every instruction that works on a leaf of its list at once
@@ -221,9 +243,8 @@ typedef struct {
     char record_names[PURE_MODULE_RECORDS][PURE_MODULE_NAME];
     PureRecord record[PURE_MODULE_RECORDS];
     char record_field_names[PURE_MODULE_RECORD_FIELDS][PURE_MODULE_NAME];
-    uint8_t record_field_text[PURE_MODULE_RECORD_FIELDS];
-    uint8_t record_field_bool[PURE_MODULE_RECORD_FIELDS]; /* a bool: a number field (0 or 1) as lists go */
-    PureValue record_field_default[PURE_MODULE_RECORD_FIELDS]; /* a number (a bool's 0 or 1), or a text constant's index */
+    uint8_t record_field_type[PURE_MODULE_RECORD_FIELDS]; /* PureRecordType */
+    PureValue record_field_default[PURE_MODULE_RECORD_FIELDS]; /* a number (a bool's 0 or 1), an i64, or a text constant's index */
 } PureModule;
 
 /* Decode and verify into out, which must be zeroed (a static one is) or hold
@@ -448,8 +469,11 @@ PureResult pure_app_message_fields(PureApp *, uint32_t input, const char *key, i
 PureResult pure_app_reply(const PureApp *, bool (*visit)(void *, PureSpan), void *context);
 void pure_app_finish(PureApp *);
 /* A number view, or a bool view (0 or 1: its type says which); false for a
- * text view or a failed evaluation. */
+ * text or i64 view or a failed evaluation. */
 bool pure_app_view(PureApp *, uint32_t view, double *out);
+/* An i64 view, and an i64 column's cell; false for any other or a failed evaluation. */
+bool pure_app_view_i64(PureApp *, uint32_t view, int64_t *out);
+bool pure_app_cell_i64(PureApp *, uint32_t column, size_t row, int64_t *out);
 /* A text view, lent in order until the next view evaluation. */
 PureResult pure_app_view_text(PureApp *, uint32_t view, bool (*visit)(void *, PureSpan), void *context);
 /* The rows of a table view (its list's items, or those its filter keeps),

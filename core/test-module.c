@@ -6,6 +6,7 @@
 #include "store.h"
 #include <dirent.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
@@ -36,18 +37,21 @@ typedef struct { const char *name, *key; int kind; bool keyed; const F *fields; 
 #define KEY(name, key) {name, key, 0, false, NULL, 0}
 /* A timer's period (milliseconds) rides in nfields. */
 #define TIMER(name, period) {name, NULL, PURE_KIND_TIMER, false, NULL, period}
-/* A number view, or a bool view when its length carries BOOL_VIEW. */
+/* A number view, or a bool (i64) view when its length carries BOOL_VIEW (I64_VIEW). */
 typedef struct { const char *name; uint32_t start, length; } V;
 #define BOOL_VIEW (1u << 31)
+#define I64_VIEW (1u << 30)
 typedef struct { uint32_t event, start, length; } H;
 typedef struct { uint8_t op; uint32_t arg; double value; } O;
 /* Text (type 1, ref = constant), cursor (type 2, ref = text state), list
- * (type 3, ref = record), index (type 4, ref = list state) and bool (type 5,
- * ref = its initial value) states follow the number states; text views
+ * (type 3, ref = record), index (type 4, ref = list state), bool (type 5,
+ * ref = its initial value) and i64 (type 6, ref = its initial value, a
+ * 32-bit two's complement) states follow the number states; text views
  * follow the number views. */
 typedef struct { const char *name; uint32_t type, ref; } T; /* type: the state type, its flags from bit 8 */
 /* A record field: a number and its default, text (text = 1) whose default
- * is the constant numbered initial, or a bool (text = 2) and its default. */
+ * is the constant numbered initial, a bool (text = 2) or an i64 (text = 3)
+ * and its default. */
 typedef struct { const char *name; uint32_t text; double initial; } RF;
 typedef struct { const char *name; const RF *fields; size_t nfields; } R;
 /* A further view: a table (type 2, start = list state) or a column of the
@@ -125,6 +129,12 @@ static size_t build(unsigned char *out, Spec spec) {
         p = put32(p, offset[n++]);
         p = put32(p, spec.t[i].type & 0xFF);
         if ((spec.t[i].type & 0xFF) == PURE_STATE_BOOL) { p = put_double(p, spec.t[i].ref); continue; }
+        if ((spec.t[i].type & 0xFF) == PURE_STATE_I64) {
+            int64_t initial = (int32_t)spec.t[i].ref;
+            p = put32(p, (uint32_t)(uint64_t)initial);
+            p = put32(p, (uint32_t)((uint64_t)initial >> 32));
+            continue;
+        }
         p = put32(p, spec.t[i].ref);
         p = put32(p, spec.t[i].type >> 8);
     }
@@ -165,13 +175,18 @@ static size_t build(unsigned char *out, Spec spec) {
             p = put32(p, offset[++n]);
             p = put32(p, field->text);
             if (field->text == 1) { p = put32(p, (uint32_t)field->initial); p = put32(p, 0); }
+            else if (field->text == 3) {
+                int64_t initial = (int64_t)field->initial;
+                p = put32(p, (uint32_t)(uint64_t)initial);
+                p = put32(p, (uint32_t)((uint64_t)initial >> 32));
+            }
             else p = put_double(p, field->initial);
         }
     for (size_t i = 0; i < spec.nv; ++i) {
         p = put32(p, offset[n++]);
-        p = put32(p, spec.v[i].length & BOOL_VIEW ? PURE_VIEW_BOOL : 0);
+        p = put32(p, spec.v[i].length & BOOL_VIEW ? PURE_VIEW_BOOL : spec.v[i].length & I64_VIEW ? PURE_VIEW_I64 : 0);
         p = put32(p, spec.v[i].start);
-        p = put32(p, spec.v[i].length & ~BOOL_VIEW);
+        p = put32(p, spec.v[i].length & ~(BOOL_VIEW | I64_VIEW));
     }
     for (size_t i = 0; i < spec.ntv; ++i) { p = put32(p, offset[n++]); p = put32(p, 1); p = put32(p, spec.tv[i].start); p = put32(p, spec.tv[i].length); }
     for (size_t i = 0; i < spec.nw; ++i) {
@@ -649,7 +664,7 @@ static void messages(void) {
     static const H note_handler[] = {{1, 0, 2}};
     bad = (Spec){states, 1, unkeyed, 1, views, 0, note_handler, 1, doc_read, 2, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "document operation outside"));
-    static const F unknown_type[] = {{"insert", 7}, {"start", 1}};
+    static const F unknown_type[] = {{"insert", 8}, {"start", 1}};
     static const I misplaced[] = {{"edit", NULL, PURE_KIND_MESSAGE, true, unknown_type, 2}};
     bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "message field"));
@@ -1473,7 +1488,7 @@ static void list_mutations(void) {
                     for (size_t at = 0; at < pure_list_count(app.lists[s]); ++at)
                         for (unsigned f = 0; f < record->count; ++f) {
                             PureCell cell = pure_list_get(app.lists[s], at, f);
-                            if (module_b.record_field_text[record->first + f])
+                            if ((module_b.record_field_type[record->first + f] == PURE_RECORD_TEXT))
                                 CHECK(pure_utf8_valid((PureSpan){cell.text, cell.size}));
                             else CHECK(isfinite(cell.num));
                         }
@@ -3567,7 +3582,7 @@ static void keyed_mutations(void) {
                 }
                 if (module_b.state_type[s] != PURE_STATE_LIST || !module_b.state_key[s]) continue;
                 unsigned key = module_b.state_key[s] - 1u;
-                bool text = module_b.record_field_text[module_b.record[module_b.state_ref[s]].first + key];
+                bool text = module_b.record_field_type[module_b.record[module_b.state_ref[s]].first + key] == PURE_RECORD_TEXT;
                 for (size_t at = 1; at < pure_list_count(app.lists[s]); ++at) {
                     PureCell a = pure_list_get(app.lists[s], at - 1, key), b = pure_list_get(app.lists[s], at, key);
                     if (!text) { CHECK(a.num < b.num); continue; }
@@ -3611,7 +3626,7 @@ static void describe(PureApp *app, Shown *s) {
             for (size_t at = 0; at < pure_list_count(app->lists[i]); ++at)
                 for (unsigned f = 0; f < r->count; ++f) {
                     PureCell cell = pure_list_get(app->lists[i], at, f);
-                    if (m->record_field_text[r->first + f]) show_span(s, (PureSpan){cell.text, cell.size});
+                    if (m->record_field_type[r->first + f] == PURE_RECORD_TEXT) show_span(s, (PureSpan){cell.text, cell.size});
                     else show(s, "%g", cell.num);
                     show(s, f + 1 < r->count ? "," : ";", 0);
                 }
@@ -4656,7 +4671,7 @@ static void bools(void) {
     static const O two[] = {{C, 1, 2}, {ST, B_ON, 0}};
     static const O minus_zero[] = {{C, 1, -0.0}, {ST, B_ON, 0}};
     static const O half[] = {{C, 1, 0.5}, {ST, B_ON, 0}};
-    static const O kind_two[] = {{C, 2, 1}, {ST, B_ON, 0}};
+    static const O kind_three[] = {{C, 3, 1}, {ST, B_ON, 0}};
     static const struct { const O *code; size_t count; uint32_t event; const char *reason; } refused[] = {
         {add_bools, LEN(add_bools), 1, "operand type"},
         {branch_number, LEN(branch_number), 1, "operand type"},
@@ -4676,7 +4691,7 @@ static void bools(void) {
         {two, LEN(two), 1, "non-canonical operand"},
         {minus_zero, LEN(minus_zero), 1, "non-canonical operand"},
         {half, LEN(half), 1, "non-canonical operand"},
-        {kind_two, LEN(kind_two), 1, "operand names no such"},
+        {kind_three, LEN(kind_three), 1, "operand names no such"},
     };
     for (size_t i = 0; i < LEN(refused); ++i) {
         H handler = {refused[i].event, 0, (uint32_t)refused[i].count};
@@ -4690,7 +4705,7 @@ static void bools(void) {
     }
     static const O one_number[] = {{C, 0, 1}}, one_bool[] = {{C, 1, 1}};
     static const O text_of_number[] = {{C, 0, 1}, {NT, 1, 0}}, text_of_bool[] = {{C, 1, 1}, {NT, 0, 0}},
-                   text_kind[] = {{C, 1, 1}, {NT, 2, 0}};
+                   text_kind[] = {{C, 1, 1}, {NT, 3, 0}};
     V as_bool = {"v", 0, 1 | BOOL_VIEW}, as_number = {"v", 0, 1}, as_text = {"v", 0, 2};
     Spec bad = spec;
     bad.h = NULL, bad.nh = 0, bad.tv = NULL, bad.ntv = 0, bad.no = 1, bad.nv = 1;
@@ -4706,20 +4721,20 @@ static void bools(void) {
     bad.o = text_kind;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand names no such"));
     /* A bool's initial value and default are 0 or 1; types past bool are none. */
-    static const T two_initial[] = {{"on", 5, 2}, {"off", 5, 0}}, sixth[] = {{"on", 6, 0}, {"off", 5, 0}};
+    static const T two_initial[] = {{"on", 5, 2}, {"off", 5, 0}}, seventh[] = {{"on", 7, 0}, {"off", 5, 0}};
     static const RF two_default[] = {{"done", 2, 2}};
     static const R two_record[] = {{"r", two_default, 1}};
     static const T with_list[] = {{"on", 5, 1}, {"off", 5, 0}, {"rs", 3, 0}};
-    static const W fourth_view[] = {{"x", 4, 0, 25, 1}};
+    static const W fifth_view[] = {{"x", 5, 0, 25, 1}};
     bad = spec;
     bad.t = two_initial;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "bool initial value"));
-    bad.t = sixth;
+    bad.t = seventh;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "state type"));
     bad.t = with_list, bad.nt = 3, bad.r = two_record, bad.nr = 1;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "record field default"));
     bad = spec;
-    bad.w = fourth_view, bad.nw = 1;
+    bad.w = fifth_view, bad.nw = 1;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view type"));
 
     /* Stored: n and the items' done, numbers, become bools (1 kept, 2 and 3
@@ -4747,6 +4762,289 @@ static void bools(void) {
     pure_app_stop(&app);
     remove_store(path);
     printf("{\"bools\":{\"refused\":%zu}}\n", LEN(refused) + 9);
+}
+
+/* ---- i64s (docs/design/016-bool-and-i64.md) ------------------------------
+ * An i64 is its own type, exact over its range: arithmetic past it fails
+ * as overflow, division and remainder floor, conversions to and from
+ * numbers happen only where the value fits. Keyed lists order i64 keys as
+ * integers; folds sum, keep the most or least, count the different ones;
+ * stores, logs, messages, sends and replacements keep every bit. */
+enum { IADD = PURE_OP_I64_ADD, ISUB = PURE_OP_I64_SUB, IMUL = PURE_OP_I64_MUL, IDIV = PURE_OP_I64_DIV,
+       IMOD = PURE_OP_I64_MOD, INEG = PURE_OP_I64_NEG, ICMP = PURE_OP_I64_COMPARE, IMIN = PURE_OP_I64_MIN,
+       IMAX = PURE_OP_I64_MAX, IFROM = PURE_OP_I64_FROM, NFROM = PURE_OP_NUM_FROM };
+static const int64_t STEP = INT64_MAX / 7; /* seven of them make the largest i64 */
+
+/* An i64 constant's 8 bytes where an instruction keeps its value. */
+static double integer_bits(int64_t value) {
+    double bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+#define IC(v) ((O){C, 2, integer_bits(v)})
+
+/* Code run as a key's handler over the states n (a number), i (an i64) and
+ * b (a bool): the fault it ends with, and the states after. */
+typedef struct { PureFault fault; PureValue values[3]; } Ran;
+static Ran run_code(const O *code, uint32_t count) {
+    static const S nums[] = {{"n", 0}};
+    static const T others[] = {{"i", PURE_STATE_I64, 0}, {"b", PURE_STATE_BOOL, 0}};
+    static const I inputs[] = {KEY("go", "KeyG")};
+    H handler = {1, 0, count};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, code, count, NULL, 0, others, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
+    if (load(spec, &module_b) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
+    Ran ran = {pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK ? PURE_FAULT_NONE : app.fault, {{0}}};
+    memcpy(ran.values, app.values, sizeof(ran.values));
+    pure_app_stop(&app);
+    return ran;
+}
+
+/* The keyed list app: items keyed by an i64 id, next the id to add. */
+enum { KI_N = 0, KI_NEXT = 1, KI_ITEMS = 2, KI_FOUND = 3 };
+static const S keyed_i64_nums[] = {{"n", 0}};
+static const T keyed_i64_states[] = {{"next", PURE_STATE_I64, 0}, {"items", 3 | 1 << 8, 0}, {"found", PURE_STATE_BOOL, 0}};
+static const RF item_i64_fields[] = {{"id", 3, 0}, {"qty", 0, 0}};
+static const R item_i64_records[] = {{"Item", item_i64_fields, 2}};
+static const F put_i64_fields[] = {{"id", PURE_FIELD_I64}, {"qty", PURE_FIELD_NUMBER}};
+static const F echo_i64_fields[] = {{"id", PURE_FIELD_I64}};
+static const I keyed_i64_inputs[] = {KEY("add", "KeyA"), KEY("low", "KeyL"), KEY("drop", "KeyD"), KEY("ask", "KeyK"),
+                                     {"put", NULL, PURE_KIND_MESSAGE, false, put_i64_fields, 2},
+                                     {"echo", NULL, PURE_KIND_OUTPUT, false, echo_i64_fields, 1}};
+
+static Spec keyed_i64_spec(O *code) {
+    O made[] = {
+        /* 0 add: items.add(Item { id: next, qty: n }); next = next + STEP; n = n + 1 */
+        {L, KI_NEXT, 0}, {L, KI_N, 0}, {LA, KI_ITEMS, 0}, {L, KI_NEXT, 0}, IC(STEP), {IADD, 0, 0}, {ST, KI_NEXT, 0},
+        {L, KI_N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, KI_N, 0},
+        /* 11 low: items.add(Item { id: -next, qty: -1 }) */
+        {L, KI_NEXT, 0}, {INEG, 0, 0}, {C, 0, -1}, {LA, KI_ITEMS, 0},
+        /* 15 drop: items.remove(items.first) */
+        {XF, KI_ITEMS, 0}, {LR, KI_ITEMS, 0},
+        /* 17 ask: found = items.has(next - STEP) */
+        {L, KI_NEXT, 0}, IC(STEP), {ISUB, 0, 0}, {HAS, KI_ITEMS, 0}, {ST, KI_FOUND, 0},
+        /* 22 view total = sum(i.id for i in items), 26 most, 30 least, 34 kinds (distinct) */
+        {FOLD, FOLDING(PURE_FOLD_SUM | PURE_FOLD_INTEGER, KI_ITEMS, 3), 0}, {ROW, KI_ITEMS, 0}, {IG, ITEM(KI_ITEMS, 0), 0}, {C, 1, 1},
+        {FOLD, FOLDING(PURE_FOLD_MAX | PURE_FOLD_INTEGER, KI_ITEMS, 3), 0}, {ROW, KI_ITEMS, 0}, {IG, ITEM(KI_ITEMS, 0), 0}, {C, 1, 1},
+        {FOLD, FOLDING(PURE_FOLD_MIN | PURE_FOLD_INTEGER, KI_ITEMS, 3), 0}, {ROW, KI_ITEMS, 0}, {IG, ITEM(KI_ITEMS, 0), 0}, {C, 1, 1},
+        {FOLD, FOLDING(PURE_FOLD_DISTINCT | PURE_FOLD_INTEGER, KI_ITEMS, 3), 0}, {ROW, KI_ITEMS, 0}, {IG, ITEM(KI_ITEMS, 0), 0},
+        {C, 1, 1},
+        /* 38 view first_id = items.first.id, 40 view said = "{next}" */
+        {XF, KI_ITEMS, 0}, {IG, ITEM(KI_ITEMS, 0), 0}, {L, KI_NEXT, 0}, {NT, 2, 0},
+        /* 42 put: items.add(Item { id: put.id, qty: put.qty }); send echo { id: put.id } */
+        {FIELD, 0, 0}, {FIELD, 1, 0}, {LA, KI_ITEMS, 0}, {FIELD, 0, 0}, {SEND, 5, 0},
+    };
+    memcpy(code, made, sizeof(made));
+    static const H handlers[] = {{1, 0, 11}, {3, 11, 4}, {5, 15, 2}, {7, 17, 5}, {9, 42, 5}};
+    static const V views[] = {{"total", 22, 4 | I64_VIEW}, {"most", 26, 4 | I64_VIEW}, {"least", 30, 4 | I64_VIEW},
+                              {"kinds", 34, 4}, {"first_id", 38, 2 | I64_VIEW}};
+    static const V texts[] = {{"said", 40, 2}};
+    return (Spec){keyed_i64_nums, 1, keyed_i64_inputs, LEN(keyed_i64_inputs), views, LEN(views), handlers, LEN(handlers),
+                  code, LEN(made), NULL, 0, keyed_i64_states, LEN(keyed_i64_states), NULL, 0, texts, 1, item_i64_records, 1,
+                  NULL, 0};
+}
+
+static int64_t i64_view(PureApp *app, uint32_t view) {
+    int64_t value = 0;
+    CHECK(pure_app_view_i64(app, view, &value));
+    return value;
+}
+
+static void integers(void) {
+    /* Arithmetic at the ends of the range, floored division and remainders. */
+    static const struct { uint8_t op; int64_t a, b; PureFault fault; int64_t result; } cases[] = {
+        {IADD, INT64_MAX - 1, 1, PURE_FAULT_NONE, INT64_MAX}, {IADD, INT64_MAX, 1, PURE_FAULT_OVERFLOW, 0},
+        {IADD, INT64_MIN, -1, PURE_FAULT_OVERFLOW, 0}, {ISUB, INT64_MIN + 1, 1, PURE_FAULT_NONE, INT64_MIN},
+        {ISUB, INT64_MIN, 1, PURE_FAULT_OVERFLOW, 0}, {ISUB, 0, INT64_MIN, PURE_FAULT_OVERFLOW, 0},
+        {IMUL, 3037000499, 3037000499, PURE_FAULT_NONE, INT64_C(9223372030926249001)},
+        {IMUL, INT64_MAX, 2, PURE_FAULT_OVERFLOW, 0}, {IMUL, INT64_MIN, -1, PURE_FAULT_OVERFLOW, 0},
+        {IMUL, INT64_MIN, 1, PURE_FAULT_NONE, INT64_MIN},
+        {IDIV, 7, 2, PURE_FAULT_NONE, 3}, {IDIV, -7, 2, PURE_FAULT_NONE, -4}, {IDIV, 7, -2, PURE_FAULT_NONE, -4},
+        {IDIV, -7, -2, PURE_FAULT_NONE, 3}, {IDIV, INT64_MIN, -1, PURE_FAULT_OVERFLOW, 0},
+        {IDIV, INT64_MIN, 1, PURE_FAULT_NONE, INT64_MIN}, {IDIV, INT64_MAX, -1, PURE_FAULT_NONE, -INT64_MAX},
+        {IDIV, 5, 0, PURE_FAULT_DIVIDE, 0},
+        {IMOD, 7, 2, PURE_FAULT_NONE, 1}, {IMOD, -7, 2, PURE_FAULT_NONE, 1}, {IMOD, 7, -2, PURE_FAULT_NONE, -1},
+        {IMOD, -7, -2, PURE_FAULT_NONE, -1}, {IMOD, INT64_MIN, -1, PURE_FAULT_NONE, 0}, {IMOD, 6, -3, PURE_FAULT_NONE, 0},
+        {IMOD, INT64_MIN, INT64_MAX, PURE_FAULT_NONE, INT64_MAX - 1}, {IMOD, 5, 0, PURE_FAULT_DIVIDE, 0},
+        {IMIN, -1, INT64_MIN, PURE_FAULT_NONE, INT64_MIN}, {IMAX, -1, INT64_MAX, PURE_FAULT_NONE, INT64_MAX},
+    };
+    for (size_t k = 0; k < LEN(cases); ++k) {
+        O code[] = {IC(cases[k].a), IC(cases[k].b), {cases[k].op, 0, 0}, {ST, 1, 0}};
+        Ran ran = run_code(code, LEN(code));
+        if (ran.fault != cases[k].fault || ran.values[1].i64 != (cases[k].fault ? 0 : cases[k].result)) {
+            fprintf(stderr, "i64 case %zu: fault %d, %" PRId64 "\n", k, (int)ran.fault, ran.values[1].i64);
+            abort();
+        }
+    }
+    O neg_most[] = {IC(INT64_MIN), {INEG, 0, 0}, {ST, 1, 0}}, neg_max[] = {IC(INT64_MAX), {INEG, 0, 0}, {ST, 1, 0}};
+    CHECK(run_code(neg_most, 3).fault == PURE_FAULT_OVERFLOW);
+    CHECK(run_code(neg_max, 3).values[1].i64 == -INT64_MAX);
+    /* Comparisons give bools, by each relation. */
+    static const struct { int64_t a, b; uint8_t truths; } pairs[] = {{-1, 0, 0x23}, {INT64_MAX, INT64_MIN, 0x2C}, {5, 5, 0x1A}};
+    for (size_t k = 0; k < LEN(pairs); ++k)
+        for (uint32_t relation = 0; relation <= PURE_NOT_EQUAL; ++relation) {
+            O code[] = {IC(pairs[k].a), IC(pairs[k].b), {ICMP, relation, 0}, {ST, 2, 0}};
+            CHECK(run_code(code, LEN(code)).values[2].num == (pairs[k].truths >> relation & 1));
+        }
+    /* Conversions only where the value fits. */
+    static const struct { double from; PureFault fault; int64_t to; } wholes[] = {
+        {9007199254740994.0, PURE_FAULT_NONE, INT64_C(9007199254740994)}, {-0.0, PURE_FAULT_NONE, 0},
+        {-9223372036854775808.0, PURE_FAULT_NONE, INT64_MIN}, {9223372036854775808.0, PURE_FAULT_LIMIT, 0},
+        {0.5, PURE_FAULT_LIMIT, 0}, {-1e300, PURE_FAULT_LIMIT, 0}};
+    for (size_t k = 0; k < LEN(wholes); ++k) {
+        O code[] = {{C, 0, wholes[k].from}, {IFROM, 0, 0}, {ST, 1, 0}};
+        Ran ran = run_code(code, LEN(code));
+        CHECK(ran.fault == wholes[k].fault && ran.values[1].i64 == wholes[k].to);
+    }
+    static const struct { int64_t from; PureFault fault; double to; } numbers_[] = {
+        {INT64_C(9007199254740992), PURE_FAULT_NONE, 9007199254740992.0}, {-INT64_C(9007199254740992), PURE_FAULT_NONE, -9007199254740992.0},
+        {INT64_C(9007199254740993), PURE_FAULT_LIMIT, 0}, {INT64_MIN, PURE_FAULT_LIMIT, 0}};
+    for (size_t k = 0; k < LEN(numbers_); ++k) {
+        O code[] = {IC(numbers_[k].from), {NFROM, 0, 0}, {ST, 0, 0}};
+        Ran ran = run_code(code, LEN(code));
+        CHECK(ran.fault == numbers_[k].fault && ran.values[0].num == numbers_[k].to);
+    }
+
+    /* The keyed list app: ids ordered as integers, a sum that overflows, every digit shown. */
+    O code[64];
+    Spec spec = keyed_i64_spec(code);
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    CHECK(module_a.state_type[KI_NEXT] == PURE_STATE_I64 && module_a.view_type[0] == PURE_VIEW_I64 &&
+          module_a.input[4].prefix == 16 && module_a.input[5].prefix == 8);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    int64_t value;
+    CHECK(i64_view(&app, 0) == 0 && !pure_app_view_i64(&app, 1, &value) && !pure_app_view_i64(&app, 4, &value));
+    double number;
+    CHECK(!pure_app_view(&app, 0, &number) && pure_app_view(&app, 3, &number) && number == 0);
+    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK); /* -3 steps */
+    CHECK(pure_list_count(app.lists[KI_ITEMS]) == 4 && pure_list_get(app.lists[KI_ITEMS], 0, 0).i64 == -3 * STEP &&
+          pure_list_get(app.lists[KI_ITEMS], 1, 0).i64 == 0 && pure_list_get(app.lists[KI_ITEMS], 3, 0).i64 == 2 * STEP);
+    CHECK(i64_view(&app, 0) == 0 && i64_view(&app, 1) == 2 * STEP && i64_view(&app, 2) == -3 * STEP &&
+          pure_app_view(&app, 3, &number) && number == 4 && i64_view(&app, 4) == -3 * STEP);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_CONFLICT && app.fault == PURE_FAULT_EXISTS); /* -3 steps again */
+    for (int k = 0; k < 4; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(app.values[KI_NEXT].i64 == INT64_MAX && !pure_app_view_i64(&app, 0, &value)); /* the sum overflows */
+    CHECK(!strcmp(view_text(&app, 5), "9223372036854775807"));
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_OVERFLOW);
+    CHECK(pure_list_count(app.lists[KI_ITEMS]) == 8 && app.values[KI_NEXT].i64 == INT64_MAX && app.values[KI_N].num == 7);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[KI_FOUND].num == 1);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && i64_view(&app, 4) == 0);
+    /* A message's i64 is 8 bytes, a send's too. */
+    unsigned char payload[16];
+    int64_t least = INT64_MIN;
+    double qty = 2.5;
+    memcpy(payload, &least, 8);
+    memcpy(payload + 8, &qty, 8);
+    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 16}) == PURE_OK && i64_view(&app, 2) == INT64_MIN);
+    pure_app_finish(&app);
+    Outbox o = outbox_of(&app);
+    CHECK(o.count == 1 && o.items[0].size == 8 && !memcmp(o.items[0].payload, &least, 8));
+    pure_app_stop(&app);
+
+    /* Recast by name: a u32 widens to an i64; to and from numbers only where the value fits. */
+    PureField wide[2] = {{"id", PURE_FIELD_I64, 0, 0}, {"n", PURE_FIELD_NUMBER, 0, 0}};
+    PureField narrow[2] = {{"id", PURE_FIELD_NUMBER, 0, 0}, {"n", PURE_FIELD_I64, 0, 0}};
+    PureField small[1] = {{"id", PURE_FIELD_U32, 0, 0}};
+    CHECK(pure_fields_lay_out(wide, 2) == 16 && pure_fields_lay_out(narrow, 2) == 16 && pure_fields_lay_out(small, 1) == 4);
+    unsigned char given[16], *made;
+    size_t size;
+    int64_t id = INT64_C(9007199254740993);
+    double n = 2.5;
+    memcpy(given, &id, 8);
+    memcpy(given + 8, &n, 8);
+    CHECK(pure_send_recast(wide, 2, narrow, 2, (PureSpan){given, 16}, &made, &size) == PURE_OK && size == 16);
+    double read_id;
+    int64_t read_n;
+    memcpy(&read_id, made, 8);
+    memcpy(&read_n, made + 8, 8);
+    CHECK(read_id == 0 && read_n == 0); /* 2^53 + 1 is no number, 2.5 no i64 */
+    free(made);
+    uint32_t u = UINT32_MAX;
+    CHECK(pure_send_recast(small, 1, wide, 2, (PureSpan){(unsigned char *)&u, 4}, &made, &size) == PURE_OK && size == 16);
+    memcpy(&id, made, 8);
+    CHECK(id == UINT32_MAX);
+    free(made);
+    static const unsigned char u32_id[] = {1, PURE_FIELD_U32, 2, 'i', 'd'}, number_id[] = {1, PURE_FIELD_NUMBER, 2, 'i', 'd'};
+    CHECK(pure_module_takes(&module_a, 4, u32_id, sizeof(u32_id)) && !pure_module_takes(&module_a, 4, number_id, sizeof(number_id)));
+
+    /* What mixes i64s and numbers is refused. */
+    const struct { O code[4]; uint32_t count; const char *reason; } refused[] = {
+        {{{C, 0, 1}, {C, 0, 2}, {IADD, 0, 0}, {ST, 1, 0}}, 4, "operand type"},
+        {{IC(1), IC(2), {ADD, 0, 0}, {ST, 1, 0}}, 4, "operand type"},
+        {{IC(1), {ST, 0, 0}}, 2, "operand type"},
+        {{{C, 0, 1}, {ST, 1, 0}}, 2, "operand type"},
+        {{IC(1), IC(2), {ICMP, PURE_NOT_EQUAL + 1, 0}, {ST, 2, 0}}, 4, "operand names no such"},
+        {{IC(1), IC(2), {LT, 0, 0}, {ST, 2, 0}}, 4, "operand type"},
+        {{IC(1), {JZ, 2, 0}}, 2, "operand type"},
+        {{{C, 0, 1}, {NFROM, 0, 0}, {ST, 0, 0}}, 3, "operand type"},
+        {{IC(1), {IFROM, 0, 0}, {ST, 1, 0}}, 3, "operand type"},
+        {{{C, 0, 1}, {LOCAL_S, 3u << 8, 0}}, 2, "operand type"},
+        {{IC(1), {LOCAL_S, LOCAL(0, -1), 0}}, 2, "operand type"},
+    };
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        static const S nums[] = {{"n", 0}};
+        static const T others[] = {{"i", PURE_STATE_I64, 0}, {"b", PURE_STATE_BOOL, 0}};
+        static const I inputs[] = {KEY("go", "KeyG")};
+        H handler = {1, 0, refused[k].count};
+        Spec bad = {nums, 1, inputs, 1, NULL, 0, &handler, 1, refused[k].code, refused[k].count, NULL, 0, others, 2, NULL, 0,
+                    NULL, 0, NULL, 0, NULL, 0};
+        if (load(bad, &module_b) != PURE_INVALID || !strstr(error, refused[k].reason)) {
+            fprintf(stderr, "i64 refusal %zu: expected '%s', got '%s'\n", k, refused[k].reason, error);
+            abort();
+        }
+    }
+    /* A fold's value is a number or an i64 as its kind says; count and first take no i64. */
+    O sum_number[] = {{FOLD, FOLDING(PURE_FOLD_SUM | PURE_FOLD_INTEGER, KI_ITEMS, 3), 0}, {ROW, KI_ITEMS, 0},
+                      {IG, ITEM(KI_ITEMS, 1), 0}, {C, 1, 1}};
+    O sum_i64[] = {{FOLD, FOLDING(PURE_FOLD_SUM, KI_ITEMS, 3), 0}, {ROW, KI_ITEMS, 0}, {IG, ITEM(KI_ITEMS, 0), 0}, {C, 1, 1}};
+    O count_i64[] = {{FOLD, FOLDING(PURE_FOLD_COUNT | PURE_FOLD_INTEGER, KI_ITEMS, 1), 0}, {C, 1, 1}};
+    V as_i64 = {"v", 0, 4 | I64_VIEW}, as_number = {"v", 0, 4}, as_count = {"v", 0, 2};
+    Spec bad = spec;
+    bad.h = NULL, bad.nh = 0, bad.tv = NULL, bad.ntv = 0, bad.nv = 1;
+    bad.o = sum_number, bad.no = 4, bad.v = &as_i64;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "fold block must leave an i64 and a bool"));
+    bad.o = sum_i64, bad.v = &as_number;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "fold block must leave a number and a bool"));
+    bad.o = count_i64, bad.no = 2, bad.v = &as_count;
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand names no such"));
+
+    /* Replaced: a number, a bool and an i64 carry over each other where the value fits, else take the default. */
+    static const S was_nums[] = {{"x", 5}, {"y", 2.5}};
+    static const T was_others[] = {{"w", PURE_STATE_I64, 7}, {"v", PURE_STATE_I64, 0}, {"rows", 3, 0}};
+    static const RF was_fields[] = {{"a", 0, 0}};
+    static const R was_records[] = {{"Row", was_fields, 1}};
+    static const S now_nums[] = {{"w", 3}};
+    static const T now_others[] = {{"x", PURE_STATE_I64, (uint32_t)-1}, {"y", PURE_STATE_I64, (uint32_t)-2},
+                                   {"v", PURE_STATE_BOOL, 0}, {"rows", 3, 0}};
+    static const RF now_fields[] = {{"a", 3, 9}};
+    static const R now_records[] = {{"Row", now_fields, 1}};
+    Spec was = {was_nums, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, was_others, 3, NULL, 0, NULL, 0, was_records, 1, NULL, 0};
+    Spec now = {now_nums, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, now_others, 4, NULL, 0, NULL, 0, now_records, 1, NULL, 0};
+    CHECK(load(was, &module_a) == PURE_OK && load(now, &module_b) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && app.values[2].i64 == 7);
+    app.values[3].i64 = INT64_C(9007199254740993);
+    static const double rows[] = {3, 2.5, -0.0, 1e300};
+    for (size_t k = 0; k < LEN(rows); ++k) CHECK(pure_list_insert(app.lists[4], k, (PureCell[]){{.num = rows[k]}}, NULL) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
+    /* now: w (a number), x, y (i64s), v (a bool), rows of i64s */
+    CHECK(app.values[0].num == 7 && app.values[1].i64 == 5 && app.values[2].i64 == -2 && app.values[3].num == 0);
+    static const int64_t migrated[] = {3, 9, 0, 9};
+    for (size_t k = 0; k < LEN(migrated); ++k) CHECK(pure_list_get(app.lists[4], k, 0).i64 == migrated[k]);
+    app.values[3].num = 1; /* v true: an i64 1 when it goes back */
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK);
+    CHECK(app.values[0].num == 5 && app.values[1].num == -2 && app.values[2].i64 == 7 && app.values[3].i64 == 1);
+    for (size_t k = 0; k < LEN(migrated); ++k) CHECK(pure_list_get(app.lists[4], k, 0).num == (double)migrated[k]);
+    pure_app_stop(&app);
+
+    /* Stored: random adds, drops and asks, restarting now and then, as in memory; extremes logged and imaged. */
+    static const char *const none[] = {""};
+    unsigned long checkpoints = pure_save_test_checkpoints;
+    for (uint32_t seed = 1; seed <= 3; ++seed) stored_equivalence(keyed_i64_spec(code), none, 1, seed * 0x2545f491u);
+    printf("{\"integers\":{\"cases\":%zu,\"refused\":%zu,\"checkpoints\":%lu}}\n", LEN(cases), LEN(refused) + 3,
+           pure_save_test_checkpoints - checkpoints);
 }
 
 /* A timer's tick sees the time the host set; floor and a floored modulo
@@ -4866,6 +5164,7 @@ int main(void) {
     send_recast();
     output_meaning();
     bools();
+    integers();
     memory_budget();
     fold_mutations();
     pointing();

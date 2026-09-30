@@ -49,7 +49,7 @@ enum { INNER_SIZE = sizeof(Node) + FANOUT * sizeof(Node *) + sizeof(Guide) };
 /* Where a leaf keeps each field's cells, and what an item stores. */
 typedef struct {
     unsigned fields, texts;
-    uint8_t text_fields[16];
+    uint8_t kinds[16];      /* each field's (PURE_CELL_...) */
     uint8_t text_field[16]; /* the text fields, in order */
     uint32_t column[16];    /* where each field's cells start in a leaf */
     size_t leaf_size;
@@ -127,17 +127,20 @@ static unsigned child_at(const Node *node, size_t at) {
     return (unsigned)(base - before) + (*base <= at);
 }
 static double *numbers(const Layout *l, const Node *leaf, unsigned f) { return (double *)((char *)leaf + l->column[f]); }
+static int64_t *integers(const Layout *l, const Node *leaf, unsigned f) { return (int64_t *)((char *)leaf + l->column[f]); }
 static PureSpan *texts(const Layout *l, const Node *leaf, unsigned f) { return (PureSpan *)((char *)leaf + l->column[f]); }
 
 static PureCell cell_at(const Layout *l, const Node *leaf, unsigned i, unsigned f) {
-    if (!l->text_fields[f]) return (PureCell){.num = numbers(l, leaf, f)[i]};
+    if (l->kinds[f] == PURE_CELL_INTEGER) return (PureCell){.i64 = integers(l, leaf, f)[i]};
+    if (!pure_cell_text(l->kinds[f])) return (PureCell){.num = numbers(l, leaf, f)[i]};
     PureSpan text = texts(l, leaf, f)[i];
     return (PureCell){.text = (unsigned char *)text.data, .size = text.size};
 }
 
 static void put_cells(const Layout *l, Node *leaf, unsigned i, const PureCell *cells) {
     for (unsigned f = 0; f < l->fields; ++f)
-        if (l->text_fields[f]) texts(l, leaf, f)[i] = (PureSpan){cells[f].text, cells[f].size};
+        if (pure_cell_text(l->kinds[f])) texts(l, leaf, f)[i] = (PureSpan){cells[f].text, cells[f].size};
+        else if (l->kinds[f] == PURE_CELL_INTEGER) integers(l, leaf, f)[i] = cells[f].i64;
         else numbers(l, leaf, f)[i] = cells[f].num;
 }
 
@@ -149,7 +152,7 @@ static void move_items(const Layout *l, Node *to, unsigned at, const Node *from,
         return;
     }
     for (unsigned f = 0; f < l->fields; ++f) {
-        size_t width = l->text_fields[f] ? sizeof(PureSpan) : sizeof(double);
+        size_t width = pure_cell_text(l->kinds[f]) ? sizeof(PureSpan) : 8;
         memmove((char *)to + l->column[f] + at * width, (const char *)from + l->column[f] + start * width, count * width);
     }
 }
@@ -293,7 +296,7 @@ static void drop_node(PureList *list, Node *node) {
 /* ---- The stored form: each field in order, a number as its binary64 bits
  * (little-endian), a text as a u32le length and its bytes. */
 
-static size_t cell_bytes(const Layout *l, unsigned field, PureCell cell) { return l->text_fields[field] ? 4 + cell.size : 8; }
+static size_t cell_bytes(const Layout *l, unsigned field, PureCell cell) { return pure_cell_text(l->kinds[field]) ? 4 + cell.size : 8; }
 
 static size_t cells_bytes(const Layout *l, const PureCell *cells) {
     size_t size = l->number_bytes;
@@ -556,7 +559,7 @@ static void take_out(PureList *list, Step *path, unsigned depth, unsigned within
 
 /* ---- The list */
 
-PureList *pure_list_new(unsigned fields, const uint8_t *text_fields) {
+PureList *pure_list_new(unsigned fields, const uint8_t *kinds) {
     if (fields > 16) return NULL;
     PureList *list = calloc(1, sizeof(*list));
     if (!list) return NULL;
@@ -564,10 +567,10 @@ PureList *pure_list_new(unsigned fields, const uint8_t *text_fields) {
     l->fields = fields;
     size_t at = sizeof(Node);
     for (unsigned f = 0; f < fields; ++f) {
-        l->text_fields[f] = text_fields[f]; /* 1 text (UTF-8), 2 bytes */
+        l->kinds[f] = kinds[f];
         l->column[f] = (uint32_t)at;
-        at += FANOUT * (l->text_fields[f] ? sizeof(PureSpan) : sizeof(double));
-        if (l->text_fields[f]) l->text_field[l->texts++] = (uint8_t)f;
+        at += FANOUT * (pure_cell_text(kinds[f]) ? sizeof(PureSpan) : 8);
+        if (pure_cell_text(kinds[f])) l->text_field[l->texts++] = (uint8_t)f;
         else l->number_bytes += 8;
     }
     l->leaf_size = at;
@@ -588,7 +591,7 @@ static bool rekey(PureList *list, Node **place) {
 
 PureResult pure_list_keyed(PureList *list, int field) {
     Layout *l = &list->layout;
-    int key = field >= 0 && (unsigned)field < l->fields && !l->text_fields[field] ? field : -1;
+    int key = field >= 0 && (unsigned)field < l->fields && l->kinds[field] == PURE_CELL_NUMBER ? field : -1;
     if (key == l->key) return PURE_OK;
     l->key = key;
     if (list->root && !rekey(list, &list->root)) {
@@ -674,37 +677,69 @@ static bool log_change(PureUndo *undo, Entry entry) {
 
 /* A cell the list can keep: a text's bytes copied (NULL when empty). */
 static bool own_cell(const PureList *list, unsigned field, PureCell from, PureCell *to) {
-    *to = (PureCell){.num = list->layout.text_fields[field] ? 0 : from.num};
-    if (!list->layout.text_fields[field] || !from.size) return true;
+    bool text = pure_cell_text(list->layout.kinds[field]);
+    *to = (PureCell){.i64 = text ? 0 : from.i64}; /* a number's or an integer's bits */
+    if (!text || !from.size) return true;
     if (!(to->text = new_text(list, from.text, from.size))) return false;
     to->size = from.size;
     return true;
 }
 
 static unsigned char *encode_cell(const Layout *l, unsigned field, PureCell cell, unsigned char *out) {
-    uint64_t bits = cell.size;
-    unsigned width = 4;
-    if (!l->text_fields[field]) { memcpy(&bits, &cell.num, sizeof(bits)); width = 8; }
+    bool text = pure_cell_text(l->kinds[field]);
+    uint64_t bits = text ? cell.size : (uint64_t)cell.i64; /* a number's bits, or an integer's */
+    unsigned width = text ? 4 : 8;
     for (unsigned i = 0; i < width; ++i) *out++ = (unsigned char)(bits >> (8 * i));
-    if (l->text_fields[field] && cell.size) { memcpy(out, cell.text, cell.size); out += cell.size; }
+    if (text && cell.size) { memcpy(out, cell.text, cell.size); out += cell.size; }
     return out;
 }
 
+bool pure_cell_fits(uint8_t kind, PureCell cell) {
+    return kind == PURE_CELL_INTEGER || (kind == PURE_CELL_BOOL ? cell.num == 0 || cell.num == 1 : isfinite(cell.num));
+}
+
+bool pure_cell_as(uint8_t from, uint8_t to, PureCell *cell) {
+    if (from == to) return true;
+    if (pure_cell_text(from) || pure_cell_text(to)) return false;
+    if (to == PURE_CELL_INTEGER) { /* a whole number in range: -2^63 is, 2^63 is not */
+        double v = cell->num;
+        if (!(v >= -9223372036854775808.0 && v < 9223372036854775808.0) || v != floor(v)) return false;
+        cell->i64 = (int64_t)v;
+        return true;
+    }
+    if (from == PURE_CELL_INTEGER) {
+        if (cell->i64 > INT64_C(9007199254740992) || cell->i64 < -INT64_C(9007199254740992)) return false;
+        cell->num = (double)cell->i64;
+    }
+    if (to == PURE_CELL_BOOL) {
+        if (cell->num != 0 && cell->num != 1) return false;
+        cell->num = cell->num == 1; /* -0 is false as 0 is */
+    }
+    return true;
+}
+
+/* Whether a number cell holds what its kind may: a finite number, a bool 0 or 1. */
+static bool fits(const Layout *l, unsigned field, double value) {
+    return pure_cell_fits(l->kinds[field], (PureCell){.num = value});
+}
+
 /* A stored cell of field at *at in bytes (a text's bytes borrowed from
- * them): false when it is cut short, not finite or not UTF-8. */
+ * them): false when it is cut short, not finite (not 0 or 1 for a bool) or
+ * not UTF-8. */
 static bool decode_cell(const Layout *l, unsigned field, const unsigned char *bytes, size_t size, size_t *at,
                         PureCell *cell) {
-    size_t width = l->text_fields[field] ? 4 : 8;
+    bool text = pure_cell_text(l->kinds[field]);
+    size_t width = text ? 4 : 8;
     if (size - *at < width) return false;
     uint64_t bits = 0;
     for (size_t i = 0; i < width; ++i) bits |= (uint64_t)bytes[*at + i] << (8 * i);
     *at += width;
     *cell = (PureCell){0};
-    if (!l->text_fields[field]) {
-        memcpy(&cell->num, &bits, sizeof(bits));
-        return isfinite(cell->num);
+    if (!text) {
+        cell->i64 = (int64_t)bits;
+        return l->kinds[field] == PURE_CELL_INTEGER || fits(l, field, cell->num);
     }
-    if (bits > size - *at || (l->text_fields[field] == 1 && !pure_utf8_valid((PureSpan){bytes + *at, (size_t)bits})))
+    if (bits > size - *at || (l->kinds[field] == PURE_CELL_TEXT && !pure_utf8_valid((PureSpan){bytes + *at, (size_t)bits})))
         return false;
     *cell = (PureCell){.text = (unsigned char *)bytes + *at, .size = (size_t)bits};
     *at += (size_t)bits;
@@ -716,9 +751,10 @@ static bool decode_cell(const Layout *l, unsigned field, const unsigned char *by
  * item's fields, for a set the u8 field and its cell. A record is written
  * compact (kinds 4-6): the position as a varint (LEB128), a number as the
  * varint 2 * zigzag(n) when it is an integer n below 2^53 in size (not -0),
- * else 1 and its binary64 bits (8 bytes, little-endian), a text as a varint
- * length and its bytes. Records stored before (kinds 1-3, a list's tree
- * value "PLS2") had a u32le position and cells in stored form. */
+ * else 1 and its binary64 bits (8 bytes, little-endian), an integer as the
+ * varint zigzag(n), a text as a varint length and its bytes. Records stored
+ * before (kinds 1-3, a list's tree value "PLS2") had a u32le position and
+ * cells in stored form. */
 
 enum { FIXED_INSERT = 1, FIXED_REMOVE = 2, FIXED_SET = 3, RECORD_INSERT = 4, RECORD_REMOVE = 5, RECORD_SET = 6,
        FIXED_HEAD = 5, RECORD_HEAD = 6, JOURNAL_KEPT = 1 << 20 };
@@ -740,20 +776,23 @@ static bool get_varint(const unsigned char *bytes, size_t size, size_t *at, uint
 }
 
 /* A cell in compact form (the most it takes: compact_bound). */
-static size_t compact_bound(const Layout *l, unsigned field, PureCell cell) { return l->text_fields[field] ? 5 + cell.size : 9; }
+static size_t compact_bound(const Layout *l, unsigned field, PureCell cell) {
+    return pure_cell_text(l->kinds[field]) ? 5 + cell.size : 10;
+}
+
+static uint64_t zigzag(int64_t n) { return (uint64_t)n << 1 ^ (n < 0 ? UINT64_MAX : 0); }
+static int64_t unzigzag(uint64_t z) { return z & 1 ? -(int64_t)(z >> 1) - 1 : (int64_t)(z >> 1); }
 
 static unsigned char *put_compact(const Layout *l, unsigned field, PureCell cell, unsigned char *out) {
-    if (l->text_fields[field]) {
+    if (l->kinds[field] == PURE_CELL_INTEGER) return put_varint(out, zigzag(cell.i64));
+    if (pure_cell_text(l->kinds[field])) {
         out = put_varint(out, cell.size);
         if (cell.size) memcpy(out, cell.text, cell.size);
         return out + cell.size;
     }
     double v = cell.num;
-    if (fabs(v) < 9007199254740992.0 && v == (double)(int64_t)v && !(v == 0 && signbit(v))) {
-        int64_t n = (int64_t)v;
-        uint64_t zigzag = (uint64_t)n << 1 ^ (n < 0 ? UINT64_MAX : 0);
-        return put_varint(out, zigzag << 1);
-    }
+    if (fabs(v) < 9007199254740992.0 && v == (double)(int64_t)v && !(v == 0 && signbit(v)))
+        return put_varint(out, zigzag((int64_t)v) << 1);
     uint64_t bits;
     memcpy(&bits, &v, sizeof(bits));
     *out++ = 1;
@@ -766,26 +805,28 @@ static bool get_compact(const Layout *l, unsigned field, const unsigned char *by
     uint64_t value;
     *cell = (PureCell){0};
     if (!get_varint(bytes, size, at, &value)) return false;
-    if (l->text_fields[field]) {
-        if (value > size - *at || (l->text_fields[field] == 1 && !pure_utf8_valid((PureSpan){bytes + *at, (size_t)value})))
+    if (l->kinds[field] == PURE_CELL_INTEGER) {
+        cell->i64 = unzigzag(value);
+        return true;
+    }
+    if (pure_cell_text(l->kinds[field])) {
+        if (value > size - *at || (l->kinds[field] == PURE_CELL_TEXT && !pure_utf8_valid((PureSpan){bytes + *at, (size_t)value})))
             return false;
         *cell = (PureCell){.text = (unsigned char *)bytes + *at, .size = (size_t)value};
         *at += (size_t)value;
         return true;
     }
     if (!(value & 1)) { /* an integer */
-        uint64_t zigzag = value >> 1;
-        if (zigzag >= UINT64_C(1) << 54) return false;
-        int64_t n = zigzag & 1 ? -(int64_t)(zigzag >> 1) - 1 : (int64_t)(zigzag >> 1);
-        cell->num = (double)n;
-        return true;
+        if (value >> 1 >= UINT64_C(1) << 54) return false;
+        cell->num = (double)unzigzag(value >> 1);
+        return fits(l, field, cell->num);
     }
     if (value != 1 || size - *at < 8) return false;
     uint64_t bits = 0;
     for (unsigned i = 0; i < 8; ++i) bits |= (uint64_t)bytes[*at + i] << (8 * i);
     *at += 8;
     memcpy(&cell->num, &bits, sizeof(bits));
-    return isfinite(cell->num);
+    return fits(l, field, cell->num);
 }
 
 /* Room for size more bytes at the journal's end, or NULL without memory. */
@@ -1029,7 +1070,8 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
         list->journal_size += (size_t)(put_compact(l, field, copy, end) - record);
     }
     list->bytes += cell_bytes(l, field, copy) - cell_bytes(l, field, old);
-    if (l->text_fields[field]) texts(l, leaf, field)[within] = (PureSpan){copy.text, copy.size};
+    if (pure_cell_text(l->kinds[field])) texts(l, leaf, field)[within] = (PureSpan){copy.text, copy.size};
+    else if (l->kinds[field] == PURE_CELL_INTEGER) integers(l, leaf, field)[within] = copy.i64;
     else numbers(l, leaf, field)[within] = copy.num;
     if (!undo) let_go_text(list, old.text);
     if (keyed) sum_path(list, path, depth);
@@ -1046,7 +1088,8 @@ PureCell pure_list_get(const PureList *list, size_t at, unsigned field) {
 static void open_run(const Layout *l, const Node *leaf, PureRun *run) {
     run->count = leaf->count;
     for (unsigned f = 0; f < l->fields; ++f)
-        if (l->text_fields[f]) run->column[f].texts = texts(l, leaf, f);
+        if (pure_cell_text(l->kinds[f])) run->column[f].texts = texts(l, leaf, f);
+        else if (l->kinds[f] == PURE_CELL_INTEGER) run->column[f].integers = integers(l, leaf, f);
         else run->column[f].numbers = numbers(l, leaf, f);
 }
 
@@ -1095,10 +1138,11 @@ bool pure_list_next(const PureList *list, PureRun *run) {
     return true;
 }
 
-/* How two cells of a field order: numbers by value (-0 and +0 are one key),
- * texts by their bytes. */
+/* How two cells of a field order: numbers and integers by value (-0 and +0
+ * are one key), texts by their bytes. */
 static int order(const Layout *l, unsigned field, PureCell a, PureCell b) {
-    if (!l->text_fields[field]) return (a.num > b.num) - (a.num < b.num);
+    if (l->kinds[field] == PURE_CELL_INTEGER) return (a.i64 > b.i64) - (a.i64 < b.i64);
+    if (!pure_cell_text(l->kinds[field])) return (a.num > b.num) - (a.num < b.num);
     size_t shorter = a.size < b.size ? a.size : b.size;
     int bytes = shorter ? memcmp(a.text, b.text, shorter) : 0;
     return bytes ? (bytes > 0) - (bytes < 0) : (a.size > b.size) - (a.size < b.size);
@@ -1202,7 +1246,7 @@ PURE_COLD PureResult pure_list_sorted(const PureList *list, unsigned field, Pure
     PureResult result = PURE_OK;
     for (size_t i = 1; i < list->count && result == PURE_OK; ++i)
         if (!order(l, field, ref_cell(l, items[at[i - 1]], field), ref_cell(l, items[at[i]], field))) result = PURE_CONFLICT;
-    PureList *sorted = result == PURE_OK ? pure_list_new(l->fields, l->text_fields) : NULL;
+    PureList *sorted = result == PURE_OK ? pure_list_new(l->fields, l->kinds) : NULL;
     if (result == PURE_OK && !sorted) result = PURE_ALLOCATION;
     for (size_t i = 0; result == PURE_OK && i < list->count; ++i) {
         PureCell cells[16];
@@ -1249,11 +1293,13 @@ void pure_undo_rollback(PureUndo *undo, size_t mark) {
             continue;
         }
         list->bytes += cell_bytes(l, e->field, e->old) - cell_bytes(l, e->field, cell_at(l, leaf, within, e->field));
-        if (l->text_fields[e->field]) {
+        if (pure_cell_text(l->kinds[e->field])) {
             PureSpan *text = &texts(l, leaf, e->field)[within];
             free_text(text->data);
             *text = (PureSpan){e->old.text, e->old.size};
-        } else
+        } else if (l->kinds[e->field] == PURE_CELL_INTEGER)
+            integers(l, leaf, e->field)[within] = e->old.i64;
+        else
             numbers(l, leaf, e->field)[within] = e->old.num;
         sum_path(list, path, depth);
         ++list->version;

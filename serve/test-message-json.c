@@ -1,7 +1,8 @@
 /* JSON numbers are read as strtod reads them, bit for bit: in the forms a
  * client writes (a program's shortest digits, fixed decimals, exponents), at
  * the edges of the exact path (2^53, 10^22) and past them, and refused when
- * not finite or not JSON. A bool is true or false, nothing else. */
+ * not finite or not JSON. A bool is true or false, nothing else; an i64 an
+ * integer's digits, exact in its range. */
 #include "message-json.h"
 #include <math.h>
 #include <stdint.h>
@@ -52,6 +53,24 @@ int main(void) {
         CHECK(!pure_json_fixed(&truth, (const unsigned char *)not_bools[i], strlen(not_bools[i]), prefix) && prefix[1] == 0);
     double number;
     CHECK(!read_number("true", &number) && !read_number("false", &number));
+    /* An i64 is an integer's digits, exactly, in its range. */
+    static const PureField whole = {.type = PURE_FIELD_I64, .offset = 0};
+    static const struct { const char *text; int64_t value; } integers[] = {
+        {"0", 0}, {"-0", 0}, {"9007199254740993", INT64_C(9007199254740993)}, {"9223372036854775807", INT64_MAX},
+        {"-9223372036854775808", INT64_MIN}, {"-1", -1}};
+    for (size_t i = 0; i < sizeof(integers) / sizeof(*integers); ++i) {
+        unsigned char bytes[8];
+        int64_t value;
+        CHECK(pure_json_fixed(&whole, (const unsigned char *)integers[i].text, strlen(integers[i].text), bytes));
+        memcpy(&value, bytes, 8);
+        CHECK(value == integers[i].value);
+    }
+    static const char *const not_integers[] = {"9223372036854775808", "-9223372036854775809", "1.0", "1e3", "+1", "01", "\"1\"",
+                                               "", "-", "1.5", "true", "99999999999999999999"};
+    for (size_t i = 0; i < sizeof(not_integers) / sizeof(*not_integers); ++i) {
+        unsigned char bytes[8];
+        CHECK(!pure_json_fixed(&whole, (const unsigned char *)not_integers[i], strlen(not_integers[i]), bytes));
+    }
     uint64_t seed = 0x6a736f6eu;
     size_t read = 0;
     for (unsigned i = 0; i < 400000; ++i) {

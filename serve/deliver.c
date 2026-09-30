@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "deliver.h"
+#include <inttypes.h>
 #include "wait.h"
 #include "seal.h"
 #include "message-json.h"
@@ -151,6 +152,9 @@ static bool encode(const PureWire *w, PureSpan payload, Text *t) {
             put(t, digits, (size_t)snprintf(digits, sizeof(digits), "%u", (unsigned)read_u32(payload.data + field->offset)));
         } else if (field->type == PURE_FIELD_BOOL) {
             put(t, payload.data[field->offset] ? "true" : "false", payload.data[field->offset] ? 4 : 5);
+        } else if (field->type == PURE_FIELD_I64) { /* every digit */
+            uint64_t bits = read_u32(payload.data + field->offset) | (uint64_t)read_u32(payload.data + field->offset + 4) << 32;
+            put(t, digits, (size_t)snprintf(digits, sizeof(digits), "%" PRId64, (int64_t)bits));
         } else if (field->type == PURE_FIELD_NUMBER) {
             uint64_t bits = read_u32(payload.data + field->offset) | (uint64_t)read_u32(payload.data + field->offset + 4) << 32;
             double value;
@@ -428,10 +432,11 @@ static void drop_connection(PureWire *w) {
     pthread_mutex_unlock(&w->lock);
 }
 
-/* A fault a Pure receiver answers when its app refused the message. */
+/* A fault a Pure receiver answers when its app refused the message: any
+ * but memory (its budget: it may take the message later). */
 static bool refusal(const char *error) {
-    static const char *const faults[] = {"divide", "non_finite", "clamp", "limit", "not_found", "encoding", "exists"};
-    for (size_t i = 0; i < sizeof(faults) / sizeof(*faults); ++i) if (!strcmp(error, faults[i])) return true;
+    for (unsigned f = PURE_FAULT_DIVIDE; f < PURE_FAULT_COUNT; ++f)
+        if (f != PURE_FAULT_MEMORY && !strcmp(error, pure_fault_name((PureFault)f))) return true;
     return false;
 }
 

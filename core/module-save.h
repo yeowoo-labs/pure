@@ -74,14 +74,12 @@ uint32_t pure_fields_lay_out(PureField *fields, uint32_t count);
 PureResult pure_send_recast(const PureField *from, uint32_t from_count, const PureField *to, uint32_t to_count,
                             PureSpan payload, unsigned char **out, size_t *size);
 
-/* A record field's kind as a stored list names it: 0 a number, 1 a text, 3
- * a bool (2 is a runtime list's bytes); a list holds a bool as a number. */
-enum { PURE_RECORD_BOOL = 3 };
+/* A record field's kind in a list, as a stored list names it too (PURE_CELL_...). */
 uint8_t pure_record_kind(const PureModule *, uint32_t field);
 /* A list with record's fields, taking from `from` (its fields' names and
- * kinds) each field of the same name and kind, or a number and a bool from
- * each other (0 and 1 are false and true; a bool's other numbers take the
- * default), and giving the others their defaults (module.c). */
+ * kinds) each field of the same name and kind, or a number, a bool and an
+ * i64 from each other when the value fits (pure_cell_as), and giving the
+ * others their defaults (module.c). */
 PureResult pure_list_migrate(PureList **out, const PureList *from, const char *const *names,
                              const uint8_t *kinds, unsigned count, const PureModule *m, uint32_t record);
 #endif

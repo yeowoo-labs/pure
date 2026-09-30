@@ -2,6 +2,7 @@
 #include "module-save.h"
 #include "log.h"
 #include "module-text.h"
+#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,10 +13,10 @@ enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 
        HANDLER_BYTES = 12, OP_BYTES = 16 };
 /* T_FIELD and T_ITEM stand for the type of the message or record field
  * named, T_KEY for the type of the named keyed list's key, T_LOCAL for what
- * the named local holds, T_STATE for the type of the number or bool state
- * named. */
+ * the named local holds, T_STATE for the type of the number, bool or i64
+ * state named. */
 enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8, T_LOCAL = 9,
-       T_BOOL = 10, T_STATE = 11 };
+       T_BOOL = 10, T_STATE = 11, T_I64 = 12 };
 enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUMENTS };
 /* Where an opcode may appear. */
 /* IN_ARGUMENTS: fields read where nothing is done with them (a view's arguments, a message's fields in a fold). */
@@ -27,16 +28,16 @@ enum { READ = IN_VIEW | IN_HANDLER };
  * the type), a list and one of its record's fields, a message field, the
  * collection, a constant, a unit, the column's row, a branch target, a stack
  * depth, a fold, a relation, a keyed list, an output, the row of the column
- * a fold runs in, a number or a bool state (A_VALUE), or whether the value
- * is a bool (A_BOOL: 0 or 1). */
-enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_BOOL + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
-       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL, A_VALUE, A_BOOL };
+ * a fold runs in, a number, bool or i64 state (A_VALUE), or the value's type
+ * (A_TYPE: 0 a number, 1 a bool, 2 an i64). */
+enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
+       A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL, A_VALUE, A_TYPE };
 /* A fold's block is verified as a column that leaves one bool (count, first)
- * or a number and whether to include it (a bool), a table's filter as a
- * column that leaves a bool: these stand for a view type. A walk's block
- * (EACH) is verified as its handler's code that may read the item it runs
- * for (WALK). */
-enum { FOLD_ONE = 100, FOLD_TWO, FILTER, WALK };
+ * or a value and whether to include it (a bool): a number (FOLD_TWO) or an
+ * i64 (FOLD_I64). A table's filter is verified as a column that leaves a
+ * bool: these stand for a view type. A walk's block (EACH) is verified as
+ * its handler's code that may read the item it runs for (WALK). */
+enum { FOLD_ONE = 100, FOLD_TWO, FOLD_I64, FILTER, WALK };
 /* The text or list an opcode works on: its cursor and index operands belong
  * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_OPERAND:
  * it pushes a position in its operand's text or list. O_ARG: the argument.
@@ -50,9 +51,10 @@ static const unsigned char magic[8] = {'P','U','R','E','M','O','D','6'};
 #define NUMS(pops) {pops, {T_NUM, T_NUM, T_NUM}, T_NUM, READ, A_NONE, O_ANY}
 #define COMPARE {2, {T_NUM, T_NUM}, T_BOOL, READ, A_NONE, O_ANY}
 #define LOGIC(pops) {pops, {T_BOOL, T_BOOL}, T_BOOL, READ, A_NONE, O_ANY}
+#define I64S(pops) {pops, {T_I64, T_I64}, T_I64, READ, A_NONE, O_ANY}
 #define STATE(type) A_STATE + PURE_STATE_##type
 static const struct { unsigned char pops, in[3], out; unsigned short where; unsigned char arg, of; } signature[PURE_OP_COUNT] = {
-    [PURE_OP_CONST] = {0, {0}, T_NUM, READ, A_BOOL, O_ANY}, [PURE_OP_ADD] = NUMS(2), [PURE_OP_SUB] = NUMS(2),
+    [PURE_OP_CONST] = {0, {0}, T_NUM, READ, A_TYPE, O_ANY}, [PURE_OP_ADD] = NUMS(2), [PURE_OP_SUB] = NUMS(2),
     [PURE_OP_MUL] = NUMS(2), [PURE_OP_DIV] = NUMS(2), [PURE_OP_NEG] = NUMS(1), [PURE_OP_LT] = COMPARE,
     [PURE_OP_LE] = COMPARE, [PURE_OP_GT] = COMPARE, [PURE_OP_GE] = COMPARE, [PURE_OP_EQ] = COMPARE,
     [PURE_OP_NE] = COMPARE, [PURE_OP_AND] = LOGIC(2), [PURE_OP_OR] = LOGIC(2), [PURE_OP_NOT] = LOGIC(1),
@@ -72,7 +74,7 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_TEXT_CONST] = {0, {0}, T_TEXT, READ, A_CONSTANT, O_ANY},
     [PURE_OP_TEXT_LOAD] = {0, {0}, T_TEXT, READ, STATE(TEXT), O_ANY},
     [PURE_OP_TEXT_INPUT] = {0, {0}, T_TEXT, IN_TEXT, A_NONE, O_ANY},
-    [PURE_OP_NUM_TEXT] = {1, {T_NUM}, T_TEXT, READ, A_BOOL, O_ANY},
+    [PURE_OP_NUM_TEXT] = {1, {T_NUM}, T_TEXT, READ, A_TYPE, O_ANY},
     [PURE_OP_CONCAT] = {2, {T_TEXT, T_TEXT}, T_TEXT, READ, A_NONE, O_ANY},
     [PURE_OP_CHARS] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
     [PURE_OP_LINES] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
@@ -118,10 +120,16 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_LOCAL_LOAD] = {0, {0}, T_LOCAL, IN_LOCALS, A_LOCAL, O_ANY},
     [PURE_OP_LOCAL_STORE] = {1, {T_LOCAL}, 0, IN_HANDLER, A_LOCAL, O_ANY},
     [PURE_OP_FLOOR] = NUMS(1), [PURE_OP_MOD] = NUMS(2),
+    [PURE_OP_I64_ADD] = I64S(2), [PURE_OP_I64_SUB] = I64S(2), [PURE_OP_I64_MUL] = I64S(2), [PURE_OP_I64_DIV] = I64S(2),
+    [PURE_OP_I64_MOD] = I64S(2), [PURE_OP_I64_NEG] = I64S(1), [PURE_OP_I64_MIN] = I64S(2), [PURE_OP_I64_MAX] = I64S(2),
+    [PURE_OP_I64_COMPARE] = {2, {T_I64, T_I64}, T_BOOL, READ, A_RELATION, O_ANY},
+    [PURE_OP_I64_FROM] = {1, {T_NUM}, T_I64, READ, A_NONE, O_ANY},
+    [PURE_OP_NUM_FROM] = {1, {T_I64}, T_NUM, READ, A_NONE, O_ANY},
 };
 #undef NUMS
 #undef COMPARE
 #undef LOGIC
+#undef I64S
 #undef STATE
 
 static uint32_t read16(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
@@ -148,6 +156,19 @@ static void write_double(unsigned char *p, double value) {
     write32(p + 4, (uint32_t)(bits >> 32));
 }
 
+static int64_t read_i64(const unsigned char *p) { return (int64_t)(read32(p) | (uint64_t)read32(p + 4) << 32); }
+
+static void write_i64(unsigned char *p, int64_t value) {
+    write32(p, (uint32_t)(uint64_t)value);
+    write32(p + 4, (uint32_t)((uint64_t)value >> 32));
+}
+
+const char *pure_fault_name(PureFault fault) {
+    static const char *const names[PURE_FAULT_COUNT] = {"none", "divide", "non_finite", "clamp", "limit", "not_found",
+                                                        "encoding", "exists", "memory", "overflow"};
+    return fault < PURE_FAULT_COUNT ? names[fault] : "none";
+}
+
 /* A bool's value: 0 (not -0) or 1. */
 static bool canonical_bool(double value) { return value == 1 || (value == 0 && !signbit(value)); }
 
@@ -166,8 +187,8 @@ uint32_t pure_fields_lay_out(PureField *fields, uint32_t count) {
     return prefix;
 }
 
-/* A field's value in a payload: a number, or bytes (of the payload). */
-typedef struct { double num; PureSpan bytes; } FieldValue;
+/* A field's value in a payload: a number (a u32's, a bool's) or an i64, or bytes (of the payload). */
+typedef struct { union { double num; int64_t i64; }; PureSpan bytes; } FieldValue;
 
 /* Each field's value in payload, laid out by fields (their offsets set):
  * false when the payload is not so laid out. */
@@ -182,6 +203,7 @@ static bool read_fields(const PureField *fields, uint32_t count, PureSpan payloa
         values[f] = (FieldValue){0};
         if (field->type == PURE_FIELD_U32) values[f].num = read32(payload.data + field->offset);
         else if (field->type == PURE_FIELD_NUMBER) values[f].num = read_double(payload.data + field->offset);
+        else if (field->type == PURE_FIELD_I64) values[f].i64 = read_i64(payload.data + field->offset);
         else if (field->type == PURE_FIELD_BOOL) {
             if (payload.data[field->offset] > 1) return false;
             values[f].num = payload.data[field->offset];
@@ -193,6 +215,11 @@ static bool read_fields(const PureField *fields, uint32_t count, PureSpan payloa
         } else return false; /* rows: an output sends none */
     }
     return at == payload.size;
+}
+
+/* A fixed field's value as a list cell's kind (a u32 is a number). */
+static uint8_t field_kind(uint8_t type) {
+    return type == PURE_FIELD_BOOL ? PURE_CELL_BOOL : type == PURE_FIELD_I64 ? PURE_CELL_INTEGER : PURE_CELL_NUMBER;
 }
 
 PureResult pure_send_recast(const PureField *from, uint32_t from_count, const PureField *to, uint32_t to_count,
@@ -210,13 +237,13 @@ PureResult pure_send_recast(const PureField *from, uint32_t from_count, const Pu
         while (f < from_count && strcmp(from[f].name, field->name)) ++f;
         bool value = pure_field_fixed(field->type);
         if (f < from_count && value && pure_field_fixed(from[f].type)) {
-            /* A number, a u32 or a bool: the value when the field can hold it
-             * (a bool 0 or 1), as a state's is kept. */
-            double v = was[f].num;
-            bool fits = field->type == PURE_FIELD_NUMBER ? true
-                      : field->type == PURE_FIELD_U32 ? v >= 0 && v <= UINT32_MAX && v == (double)(uint32_t)v
-                                                      : v == 0 || v == 1;
-            now[g].num = fits ? v : 0;
+            /* A number, a u32, a bool or an i64: the value when the field can
+             * hold it (pure_cell_as; a u32 a whole number in its range), as a
+             * state's is kept; else 0. */
+            PureCell cell = {.i64 = was[f].i64};
+            bool fits = pure_cell_as(field_kind(from[f].type), field_kind(field->type), &cell) &&
+                        (field->type != PURE_FIELD_U32 || (cell.num >= 0 && cell.num <= UINT32_MAX && cell.num == floor(cell.num)));
+            now[g].i64 = fits ? cell.i64 : 0;
         } else if (f < from_count && !value && (from[f].type == PURE_FIELD_BYTES || from[f].type == PURE_FIELD_TEXT)) {
             bool fits = field->type == PURE_FIELD_BYTES || from[f].type == PURE_FIELD_TEXT || pure_utf8_valid(was[f].bytes);
             if (fits) now[g].bytes = was[f].bytes;
@@ -235,6 +262,7 @@ PureResult pure_send_recast(const PureField *from, uint32_t from_count, const Pu
         unsigned char *place = field->offset == PURE_FIELD_REST ? made + at : made + field->offset;
         if (field->type == PURE_FIELD_U32) write32(place, (uint32_t)now[g].num);
         else if (field->type == PURE_FIELD_NUMBER) write_double(place, now[g].num);
+        else if (field->type == PURE_FIELD_I64) write_i64(place, now[g].i64);
         else if (field->type == PURE_FIELD_BOOL) *place = (unsigned char)now[g].num;
         else {
             if (field->offset != PURE_FIELD_REST) write32(place, (uint32_t)now[g].bytes.size);
@@ -303,13 +331,26 @@ static uint32_t list_of(uint32_t arg) { return arg & 0xFFFF; }
 static uint32_t item_field(uint32_t arg) { return arg >> 16; }
 
 static unsigned char field_type(const PureModule *m, uint32_t list, uint32_t field) {
-    uint32_t f = m->record[m->state_ref[list]].first + field;
-    return m->record_field_text[f] ? T_TEXT : m->record_field_bool[f] ? T_BOOL : T_NUM;
+    static const unsigned char types[] = {[PURE_RECORD_NUMBER] = T_NUM, [PURE_RECORD_TEXT] = T_TEXT,
+                                          [PURE_RECORD_BOOL] = T_BOOL, [PURE_RECORD_I64] = T_I64};
+    return types[m->record_field_type[m->record[m->state_ref[list]].first + field]];
 }
 
 /* The stack type of a message field's value (a u32 is a number). */
 static unsigned char message_type(uint8_t type) {
-    return type == PURE_FIELD_TEXT ? T_TEXT : type == PURE_FIELD_BYTES ? T_BYTES : type == PURE_FIELD_BOOL ? T_BOOL : T_NUM;
+    return type == PURE_FIELD_TEXT ? T_TEXT : type == PURE_FIELD_BYTES ? T_BYTES : type == PURE_FIELD_BOOL ? T_BOOL :
+           type == PURE_FIELD_I64 ? T_I64 : T_NUM;
+}
+
+/* The stack type of a number, bool or i64 state's value. */
+static unsigned char state_type(const PureModule *m, uint32_t state) {
+    return m->state_type[state] == PURE_STATE_BOOL ? T_BOOL : m->state_type[state] == PURE_STATE_I64 ? T_I64 : T_NUM;
+}
+
+/* What a local holds (its argument's bits 8-15): a number, an index, a bool or an i64. */
+static unsigned char local_type(uint32_t arg) {
+    static const unsigned char types[] = {T_NUM, T_INDEX, T_BOOL, T_I64};
+    return types[arg >> 8 & 3];
 }
 
 PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg, const PureInputShape *shape, int row,
@@ -324,17 +365,20 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_ROW: return (int)arg == row;
     case A_OUTER: return outer >= 0 && (int)arg == outer;
     case A_FOLD: case A_EACH: { /* a slice's list is keyed by a number */
-        uint32_t list = arg >> 8 & 0xFF, flags = arg & 0xFF;
+        uint32_t list = arg >> 8 & 0xFF, flags = arg & 0xFF, how = flags & PURE_FOLD_KIND;
         bool sliced = kind == A_FOLD ? flags & PURE_FOLD_SLICED : flags & PURE_EACH_SLICED;
-        return (kind == A_FOLD ? (flags & 0x7F) <= PURE_FOLD_DISTINCT : flags <= PURE_EACH_SLICED) &&
-               state_of(m, list, PURE_STATE_LIST) && arg >> 16 &&
-               (!sliced || (m->state_key[list] && field_type(m, list, m->state_key[list] - 1u) == T_NUM));
+        /* An i64's fold sums, keeps the most or least or counts the different values. */
+        bool valued = how != PURE_FOLD_COUNT && how != PURE_FOLD_FIRST;
+        unsigned char key = state_of(m, list, PURE_STATE_LIST) && m->state_key[list] ?
+                            field_type(m, list, m->state_key[list] - 1u) : 0;
+        return (kind == A_FOLD ? how <= PURE_FOLD_DISTINCT && (valued || !(flags & PURE_FOLD_INTEGER)) : flags <= PURE_EACH_SLICED) &&
+               state_of(m, list, PURE_STATE_LIST) && arg >> 16 && (!sliced || key == T_NUM || key == T_I64);
     }
-    case A_LOCAL: /* a slot, and a number, an index of a list or a bool */
-        return (arg & 0xFF) < PURE_MODULE_LOCALS && (arg >> 8 & 0xFF) <= 2 &&
+    case A_LOCAL: /* a slot, and a number, an index of a list, a bool or an i64 */
+        return (arg & 0xFF) < PURE_MODULE_LOCALS && (arg >> 8 & 0xFF) <= 3 &&
                ((arg >> 8 & 0xFF) == 1 ? state_of(m, arg >> 16, PURE_STATE_LIST) : !(arg >> 16));
-    case A_VALUE: return state_of(m, arg, PURE_STATE_NUM) || state_of(m, arg, PURE_STATE_BOOL);
-    case A_BOOL: return arg <= 1;
+    case A_VALUE: return state_of(m, arg, PURE_STATE_NUM) || state_of(m, arg, PURE_STATE_BOOL) || state_of(m, arg, PURE_STATE_I64);
+    case A_TYPE: return arg <= 2;
     case A_RELATION: return arg <= PURE_NOT_EQUAL;
     case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
     case A_OUTPUT: return arg < m->inputs && m->input[arg].kind == PURE_KIND_OUTPUT;
@@ -371,7 +415,7 @@ PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int vie
 PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, int view, int row, int outer,
                                          uint32_t event, bool locals, uint32_t *at, unsigned char *target) {
 #define REFUSE(why) do { *at = pc; return why; } while (0)
-    bool handler = view < 0 || view == WALK, folding = view == FOLD_ONE || view == FOLD_TWO;
+    bool handler = view < 0 || view == WALK, folding = view == FOLD_ONE || view == FOLD_TWO || view == FOLD_I64;
     if (!handler && !block.length) return "empty view";
     /* A handler's message or text; a view's arguments, or the message of the handler a fold is in. */
     int input = event_input(event);
@@ -422,9 +466,10 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             REFUSE("message operation outside a message handler");
         }
         uint32_t arg = op->arg;
-        bool truth = op->op == PURE_OP_CONST && arg;
+        /* A constant: a finite number, a bool +0 or 1, any i64 (arg says which). */
+        bool constant = op->op == PURE_OP_CONST, truth = constant && arg == 1, integer = constant && arg == 2;
         if ((kind == A_NONE && arg) ||
-            (truth ? !canonical_bool(op->value) : op->op == PURE_OP_CONST ? !isfinite(op->value) : op->value != 0))
+            (truth ? !canonical_bool(op->value) : integer ? false : constant ? !isfinite(op->value) : op->integer != 0))
             REFUSE("non-canonical operand");
         if (!names_arg(m, kind, arg, shape, row, outer)) REFUSE("operand names no such state, field, constant or unit");
         /* A keyed list places its items by key, and an item's key stays. */
@@ -454,12 +499,13 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             if (kind == A_FOLD && (folding || view == FILTER))
                 REFUSE(view == FILTER ? "fold inside a filter" : "fold inside a fold");
             if (skip > block.length - i - 1) REFUSE(kind == A_FOLD ? "fold block outside its block" : "each block outside its block");
-            unsigned how = arg & 0x7F;
+            unsigned how = arg & PURE_FOLD_KIND;
             /* A fold in a walk reads the walk's item as a fold in a column reads its row. */
             const char *why = kind == A_EACH ? verify_block(m, (PureBlock){pc + 1, skip}, WALK, (int)(arg >> 8 & 0xFF), -1,
                                                             event, locals, &inner)
                                              : verify_block(m, (PureBlock){pc + 1, skip},
-                                                            how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? FOLD_ONE : FOLD_TWO,
+                                                            how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? FOLD_ONE :
+                                                            arg & PURE_FOLD_INTEGER ? FOLD_I64 : FOLD_TWO,
                                                             (int)(arg >> 8 & 0xFF), row, event, locals, &inner);
             if (why) { *at = inner; return why; }
             for (uint32_t k = i + 1; k <= i + skip; ++k) {
@@ -485,16 +531,17 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         } else if (need[0] == T_KEY) {
             need[0] = field_type(m, arg, m->state_key[arg] - 1u);
         } else if (need[0] == T_LOCAL) {
-            need[0] = (arg >> 8 & 0xFF) == 1 ? T_INDEX : (arg >> 8 & 0xFF) == 2 ? T_BOOL : T_NUM;
+            need[0] = local_type(arg);
         } else if (need[0] == T_STATE) {
-            need[0] = m->state_type[arg] == PURE_STATE_BOOL ? T_BOOL : T_NUM;
+            need[0] = state_type(m, arg);
         } else if (op->op == PURE_OP_NUM_TEXT && arg) {
-            need[0] = T_BOOL;
+            need[0] = arg == 1 ? T_BOOL : T_I64;
         } else if ((op->op == PURE_OP_EQ || op->op == PURE_OP_NE) && height >= 2 && types[height - 1] == T_BOOL &&
                    types[height - 2] == T_BOOL) {
             need[0] = need[1] = T_BOOL; /* two bools compare as two numbers do */
         } else if ((kind == A_FOLD && arg & PURE_FOLD_SLICED) || (kind == A_EACH && arg & PURE_EACH_SLICED)) {
-            need[0] = need[1] = T_NUM; /* a slice's low and high keys */
+            uint32_t list = arg >> 8 & 0xFF;
+            need[0] = need[1] = field_type(m, list, m->state_key[list] - 1u); /* a slice's low and high keys */
             pops = 2;
         }
         if (height < (int)pops) REFUSE("stack underflow");
@@ -512,16 +559,18 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
                 REFUSE(type == T_CURSOR ? "cursor of another text" : "index of another list");
         }
         unsigned char out = signature[op->op].out;
-        if (kind == A_FOLD && (arg & 0x7F) == PURE_FOLD_FIRST) { /* an index of its list */
+        if (kind == A_FOLD && (arg & PURE_FOLD_KIND) == PURE_FOLD_FIRST) { /* an index of its list */
             out = T_INDEX;
             of = O_ARG;
             owner = arg >> 8 & 0xFF;
-        }
+        } else if (kind == A_FOLD && arg & PURE_FOLD_INTEGER && (arg & PURE_FOLD_KIND) != PURE_FOLD_DISTINCT)
+            out = T_I64; /* an i64's sum, most or least */
         if (out == T_FIELD) out = message_type(m->field[shape->field_start + arg].type);
         if (out == T_ITEM) out = field_type(m, list_of(arg), item_field(arg));
-        if (out == T_LOCAL) out = (arg >> 8 & 0xFF) == 1 ? T_INDEX : (arg >> 8 & 0xFF) == 2 ? T_BOOL : T_NUM;
-        if (out == T_STATE) out = m->state_type[arg] == PURE_STATE_BOOL ? T_BOOL : T_NUM;
+        if (out == T_LOCAL) out = local_type(arg);
+        if (out == T_STATE) out = state_type(m, arg);
         if (truth) out = T_BOOL;
+        if (integer) out = T_I64;
         if (out) {
             if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
             owners[height] = (unsigned char)(out != T_CURSOR && out != T_INDEX ? 0 : of == O_OPERAND ? owners[height] : owner);
@@ -552,7 +601,9 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
     if (view == FOLD_ONE) return height != 1 || types[0] != T_BOOL ? "fold block must leave one bool" : NULL;
     if (view == FOLD_TWO)
         return height != 2 || types[0] != T_NUM || types[1] != T_BOOL ? "fold block must leave a number and a bool" : NULL;
-    unsigned char result = view == PURE_VIEW_TEXT ? T_TEXT : view == PURE_VIEW_BOOL ? T_BOOL : T_NUM;
+    if (view == FOLD_I64)
+        return height != 2 || types[0] != T_I64 || types[1] != T_BOOL ? "fold block must leave an i64 and a bool" : NULL;
+    unsigned char result = view == PURE_VIEW_TEXT ? T_TEXT : view == PURE_VIEW_BOOL ? T_BOOL : view == PURE_VIEW_I64 ? T_I64 : T_NUM;
     if (!handler ? height != 1 || types[0] != result : height != 0)
         return !handler ? "view must leave one value of its type" : "handler must leave no value";
     return NULL;
@@ -570,21 +621,27 @@ PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, 
 }
 
 /* Whether an instruction has a form that works on the items of a run at
- * once: numbers and indexes, with no branch and no text. */
+ * once: numbers, bools and indexes, with no branch, no text and no i64. */
 PURE_COLD static bool has_lanes(const PureModule *m, const PureOp *op, int input) {
     switch (op->op) {
     case PURE_OP_FIELD: { /* a number or bool the message or the arguments give, the same for every item */
         uint8_t type = input >= 0 ? m->field[m->input[input].field_start + op->arg].type : 0;
         return type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER || type == PURE_FIELD_BOOL;
     }
-    case PURE_OP_CONST: case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_NEG:
+    case PURE_OP_CONST: return op->arg != 2;
+    case PURE_OP_LOAD: return m->state_type[op->arg] != PURE_STATE_I64;
+    case PURE_OP_LOCAL_LOAD: return local_type(op->arg) != T_I64;
+    case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_NEG:
     case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE:
     case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_NOT: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_CLAMP:
-    case PURE_OP_FLOOR: case PURE_OP_MOD: case PURE_OP_LOAD: case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_LOAD:
+    case PURE_OP_FLOOR: case PURE_OP_MOD: case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_LOAD:
     case PURE_OP_INDEX_MOVE: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_INDEX_NUM:
-    case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_PICK: case PURE_OP_SLIDE: case PURE_OP_LOCAL_LOAD:
-        return true;
-    case PURE_OP_ITEM_GET: return field_type(m, list_of(op->arg), item_field(op->arg)) != T_TEXT;
+    case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_PICK: case PURE_OP_SLIDE:
+        return true; /* no i64 comes from the others, so PICK and SLIDE move none */
+    case PURE_OP_ITEM_GET: {
+        unsigned char type = field_type(m, list_of(op->arg), item_field(op->arg));
+        return type == T_NUM || type == T_BOOL;
+    }
     case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: return field_type(m, op->arg, m->state_key[op->arg] - 1u) == T_NUM;
     default: return false;
     }
@@ -602,7 +659,7 @@ PURE_COLD static void plan_folds(PureModule *m, PureBlock block, int input) {
     for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
         PureOp *op = &m->code[pc];
         if (op->op != PURE_OP_FOLD) continue;
-        op->plan = block_has_lanes(m, (PureBlock){pc + 1, op->arg >> 16}, input);
+        op->plan = !(op->arg & PURE_FOLD_INTEGER) && block_has_lanes(m, (PureBlock){pc + 1, op->arg >> 16}, input);
         pc += op->arg >> 16;
     }
 }
@@ -620,7 +677,7 @@ PURE_COLD static unsigned arity(uint8_t op) {
     case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_FIELD: case PURE_OP_LOCAL_LOAD:
         return 0;
     case PURE_OP_ITEM_GET: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: case PURE_OP_NEG: case PURE_OP_NOT:
-    case PURE_OP_FLOOR: case PURE_OP_INDEX_NUM:
+    case PURE_OP_FLOOR: case PURE_OP_INDEX_NUM: case PURE_OP_I64_NEG: case PURE_OP_I64_FROM: case PURE_OP_NUM_FROM:
         return 1;
     case PURE_OP_CLAMP: return 3;
     default: return 2;
@@ -979,10 +1036,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     if (constant_bytes) memcpy(out->constant_data, p + size - constant_bytes, constant_bytes);
     for (uint32_t i = 0; i < out->states; ++i, at += STATE_BYTES) {
         out->state_type[i] = (uint8_t)read32(at + 4);
-        if (read32(at + 4) > PURE_STATE_BOOL) REFUSE("state type", i);
-        /* A number's or a bool's value is its 8 bytes; others have flags: a
-         * mark (cursor), a keyed list's key field + 1, or a list of a message's rows. */
-        bool value = out->state_type[i] == PURE_STATE_NUM || out->state_type[i] == PURE_STATE_BOOL;
+        if (read32(at + 4) > PURE_STATE_I64) REFUSE("state type", i);
+        /* A number's, a bool's or an i64's value is its 8 bytes; others have flags:
+         * a mark (cursor), a keyed list's key field + 1, or a list of a message's rows. */
+        bool value = out->state_type[i] == PURE_STATE_NUM || out->state_type[i] == PURE_STATE_BOOL ||
+                     out->state_type[i] == PURE_STATE_I64;
         uint32_t flags = value ? 0 : read32(at + 12);
         bool cursor = out->state_type[i] == PURE_STATE_CURSOR, list = out->state_type[i] == PURE_STATE_LIST;
         bool rows = list && flags == PURE_LIST_ROWS;
@@ -990,7 +1048,9 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if (!name_at(text, strings, read32(at), rows ? NAME_PATH : NAME_IDENTIFIER, out->state_names[i]) ||
             (rows && !strchr(out->state_names[i], '.')))
             REFUSE("state name", i);
-        if (value) {
+        if (out->state_type[i] == PURE_STATE_I64) {
+            out->initial[i].i64 = (int64_t)(read32(at + 8) | (uint64_t)read32(at + 12) << 32);
+        } else if (value) {
             out->initial[i].num = read_double(at + 8);
             if (!isfinite(out->initial[i].num)) REFUSE("non-finite initial value", i);
             if (out->state_type[i] == PURE_STATE_BOOL && !canonical_bool(out->initial[i].num)) REFUSE("bool initial value", i);
@@ -1050,7 +1110,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             field->type = (uint8_t)type;
             field->rows = (uint16_t)(type >> 8); /* a rows field's list state */
             if (!name_at(text, strings, read32(entry), NAME_PATH, field->name) || field->type < PURE_FIELD_U32 ||
-                field->type > PURE_FIELD_BOOL || (field->type != PURE_FIELD_ROWS && type >> 8) || type >> 24)
+                field->type > PURE_FIELD_I64 || (field->type != PURE_FIELD_ROWS && type >> 8) || type >> 24)
                 REFUSE("message field", next_field + f);
             /* Rows fill the list named by the input's name and the field's path; an output sends none. */
             if (field->type == PURE_FIELD_ROWS) {
@@ -1094,17 +1154,19 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             REFUSE("record", i);
         for (uint32_t f = record->first; f < record->first + record->count; ++f) {
             const unsigned char *entry = fields_at + (size_t)f * RECORD_FIELD_BYTES;
-            uint32_t type = read32(entry + 4); /* 0 a number, 1 a text, 2 a bool */
-            out->record_field_text[f] = type == 1;
-            out->record_field_bool[f] = type == 2;
-            if (!name_at(text, strings, read32(entry), NAME_IDENTIFIER, out->record_field_names[f]) || type > 2)
+            uint32_t type = read32(entry + 4); /* PureRecordType */
+            out->record_field_type[f] = (uint8_t)type;
+            if (!name_at(text, strings, read32(entry), NAME_IDENTIFIER, out->record_field_names[f]) || type > PURE_RECORD_I64)
                 REFUSE("record field", f);
             for (uint32_t k = record->first; k < f; ++k)
                 if (!strcmp(out->record_field_names[k], out->record_field_names[f])) REFUSE("duplicate record field", f);
-            out->record_field_default[f].num = type == 1 ? read32(entry + 8) : read_double(entry + 8);
+            /* A default: a text's constant, an i64's 8 bytes, a number (a bool's +0 or 1). */
+            if (type == PURE_RECORD_TEXT) out->record_field_default[f].num = read32(entry + 8);
+            else if (type == PURE_RECORD_I64) out->record_field_default[f].i64 = (int64_t)(read32(entry + 8) | (uint64_t)read32(entry + 12) << 32);
+            else out->record_field_default[f].num = read_double(entry + 8);
             double given = out->record_field_default[f].num;
-            if (type == 1 ? read32(entry + 12) || read32(entry + 8) >= out->constants
-                          : !isfinite(given) || (type == 2 && !canonical_bool(given)))
+            if (type == PURE_RECORD_TEXT ? read32(entry + 12) || read32(entry + 8) >= out->constants
+                : type != PURE_RECORD_I64 && (!isfinite(given) || (type == PURE_RECORD_BOOL && !canonical_bool(given))))
                 REFUSE("record field default", f);
         }
         next_record_field += record->count;
@@ -1116,7 +1178,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             (out->state_type[i] == PURE_STATE_CURSOR && !state_of(out, out->state_ref[i], PURE_STATE_TEXT)) ||
             (out->state_type[i] == PURE_STATE_LIST &&
              (out->state_ref[i] >= out->records || out->state_key[i] > out->record[out->state_ref[i]].count ||
-              (out->state_key[i] && out->record_field_bool[out->record[out->state_ref[i]].first + out->state_key[i] - 1u]))) ||
+              (out->state_key[i] &&
+               out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_BOOL))) ||
             (out->state_type[i] == PURE_STATE_INDEX && !state_of(out, out->state_ref[i], PURE_STATE_LIST)))
             REFUSE("state reference", i);
     /* A table names its list in place of code; its columns follow it. */
@@ -1126,7 +1189,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         out->view_table[i] = (uint16_t)read16(at + 6);
         out->view_code[i] = (PureBlock){read32(at + 8), read32(at + 12)};
         uint32_t table = out->view_table[i];
-        if (at[4] > PURE_VIEW_BOOL || (at[5] && at[4] != PURE_VIEW_TABLE) ||
+        if (at[4] > PURE_VIEW_I64 || (at[5] && at[4] != PURE_VIEW_TABLE) ||
             (table && (table > i || out->view_type[table - 1] != PURE_VIEW_TABLE || at[4] == PURE_VIEW_TABLE)))
             REFUSE("view type", i);
         /* A table names its list in start, or, filtered, in the byte after its
@@ -1273,7 +1336,7 @@ static int named_fields(const unsigned char *bytes, size_t size, PureField *fiel
     for (unsigned f = 0; f < count; ++f) {
         size_t length = size - at >= 2 ? bytes[at + 1] : 0;
         if (size - at < 2 || !length || length >= PURE_MODULE_NAME || size - at < 2 + length || !bytes[at] ||
-            bytes[at] == PURE_FIELD_ROWS || bytes[at] > PURE_FIELD_BOOL)
+            bytes[at] == PURE_FIELD_ROWS || bytes[at] > PURE_FIELD_I64)
             return -1;
         fields[f] = (PureField){.type = bytes[at]};
         memcpy(fields[f].name, bytes + at + 2, length);
@@ -1296,7 +1359,7 @@ bool pure_module_takes(const PureModule *m, uint32_t input, const unsigned char 
         while (f < s->field_count && strcmp(m->field[s->field_start + f].name, sent[k].name)) ++f;
         if (f == s->field_count) return false; /* its value would be dropped */
         uint8_t type = m->field[s->field_start + f].type, from = sent[k].type;
-        if (type != from && !(type == PURE_FIELD_NUMBER && from == PURE_FIELD_U32) &&
+        if (type != from && !((type == PURE_FIELD_NUMBER || type == PURE_FIELD_I64) && from == PURE_FIELD_U32) &&
             !(type == PURE_FIELD_BYTES && from == PURE_FIELD_TEXT))
             return false;
     }
@@ -1346,6 +1409,12 @@ static double minimum(double a, double b) { return a < b || (a == b && signbit(a
 static double maximum(double a, double b) { return a > b || (a == b && !signbit(a)) ? a : b; }
 
 typedef struct { union { double num; int64_t i64; }; PureBytes bytes; } Slot;
+
+/* Whether two values that order as order (below zero: the first below) are related as a relation says (PureRelation). */
+static bool related(uint32_t relation, int order) {
+    return relation == PURE_LESS ? order < 0 : relation == PURE_LESS_EQUAL ? order <= 0 : relation == PURE_GREATER ? order > 0 :
+           relation == PURE_GREATER_EQUAL ? order >= 0 : relation == PURE_EQUAL ? order == 0 : order != 0;
+}
 /* A walk (EACH): the list, the item it runs for, where it ends (items the
  * walk removes move it), and whether that item left. */
 typedef struct { uint32_t list; size_t at, end; bool removed; } Walk;
@@ -1359,7 +1428,7 @@ typedef struct {
     size_t row;   /* the row a column is evaluated for (in a fold, the fold's item) */
     size_t outer; /* in a fold, the row of the column it runs in */
     Walk *walk;   /* the walk the code runs in, or NULL */
-    double *locals; /* the event's locals (a handler's, and what runs in it), or NULL */
+    PureValue *locals; /* the event's locals (a handler's, and what runs in it), or NULL */
     bool arguments; /* FIELD reads the arguments given for a view, not the message */
     bool modified, exists;
     uint32_t (*spans)[2]; /* a message's variable fields: start and size in the payload */
@@ -1485,7 +1554,7 @@ static void move_indices(const PureModule *m, PureValue *values, uint32_t list, 
 }
 
 static bool text_field(const PureModule *m, uint32_t list, uint32_t field) {
-    return m->record_field_text[m->record[m->state_ref[list]].first + field];
+    return m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_TEXT;
 }
 
 /* Append bytes to the arena as a value of it. */
@@ -1521,6 +1590,7 @@ static PureResult send(PureApp *app, uint32_t output, const Slot *fields, const 
         const PureField *field = &m->field[shape->field_start + f];
         if (field->type == PURE_FIELD_U32) write32(payload + field->offset, (uint32_t)fields[f].num);
         else if (field->type == PURE_FIELD_BOOL) payload[field->offset] = fields[f].num != 0;
+        else if (field->type == PURE_FIELD_I64) write_i64(payload + field->offset, fields[f].i64);
         else if (field->type == PURE_FIELD_NUMBER) {
             uint64_t bits;
             memcpy(&bits, &fields[f].num, 8);
@@ -1692,7 +1762,7 @@ static bool run_lanes(const PureModule *m, const PureValue *values, PureBlock bl
         }
         case PURE_OP_INDEX_LOAD: stack[sp++] = (Lanes){NULL, values[arg].num, false, m->state_ref[arg]}; continue;
         case PURE_OP_ROW: stack[sp++] = (Lanes){NULL, 0, true, (uint16_t)arg}; continue;
-        case PURE_OP_LOCAL_LOAD: stack[sp++] = (Lanes){NULL, ev->locals[arg & 0xFF], false, (uint16_t)(arg >> 16)}; continue;
+        case PURE_OP_LOCAL_LOAD: stack[sp++] = (Lanes){NULL, ev->locals[arg & 0xFF].num, false, (uint16_t)(arg >> 16)}; continue;
         case PURE_OP_OUTER_ROW: stack[sp++] = (Lanes){NULL, (double)ev->outer, false, (uint16_t)arg}; continue;
         case PURE_OP_LIST_COUNT: stack[sp++] = (Lanes){NULL, (double)pure_list_count(app->lists[arg]), false, 0}; continue;
         case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: {
@@ -1833,22 +1903,28 @@ static bool run_lanes(const PureModule *m, const PureValue *values, PureBlock bl
 }
 
 /* The values a distinct fold has seen: open addressing over their bits (-0
- * as 0), UINT64_MAX free (no finite number's bits). */
-typedef struct { uint64_t *keys; size_t capacity, count; } Seen;
+ * as 0), UINT64_MAX free (no finite number's bits; an i64's -1, whose
+ * being seen is marked apart). */
+typedef struct { uint64_t *keys; size_t capacity, count; bool marked; } Seen;
 
-/* A fold's running value: what count, sum, max, min, first or distinct has so far. */
-typedef struct { unsigned how; double total; bool any, done; Seen seen; } Fold;
+/* A fold's running value: what count, sum, max, min, first or distinct has
+ * so far, over numbers (total) or i64s (whole; a sum past the range
+ * overflows and ends the fold). */
+typedef struct { unsigned how; bool integer, overflow; double total; int64_t whole; bool any, done; Seen seen; } Fold;
 
 static size_t seen_slot(uint64_t bits, size_t capacity) {
     bits ^= bits >> 33, bits *= 0xff51afd7ed558ccdu, bits ^= bits >> 33;
     return (size_t)bits & (capacity - 1);
 }
 
-/* Whether value is new to the set (added); false without memory too (*full). */
-static bool seen_new(Seen *seen, double value, bool *full) {
-    uint64_t bits;
-    value = value == 0 ? 0 : value;
-    memcpy(&bits, &value, sizeof(bits));
+/* Whether a value's bits are new to the set (added); false without memory too (*full). */
+static bool seen_bits(Seen *seen, uint64_t bits, bool *full) {
+    if (bits == UINT64_MAX) { /* the free slots' mark: an i64's -1, kept aside */
+        if (seen->marked) return false;
+        seen->marked = true;
+        ++seen->count;
+        return true;
+    }
     if (2 * (seen->count + 1) > seen->capacity) { /* half the slots free */
         size_t capacity = seen->capacity ? 2 * seen->capacity : 64;
         uint64_t *keys = malloc(capacity * sizeof(*keys));
@@ -1872,9 +1948,16 @@ static bool seen_new(Seen *seen, double value, bool *full) {
     return true;
 }
 
+static bool seen_new(Seen *seen, double value, bool *full) {
+    uint64_t bits;
+    value = value == 0 ? 0 : value;
+    memcpy(&bits, &value, sizeof(bits));
+    return seen_bits(seen, bits, full);
+}
+
 /* One item: its value, and whether it counts (for count and first, the
  * value is). false without memory (a distinct fold's set). */
-static bool fold_in(Fold *fold, size_t row, double value, double counts) {
+static bool fold_in(Fold *fold, size_t row, PureValue value, double counts) {
     if (counts == 0) return true;
     unsigned how = fold->how;
     if (how == PURE_FOLD_FIRST) {
@@ -1884,12 +1967,22 @@ static bool fold_in(Fold *fold, size_t row, double value, double counts) {
     }
     if (how == PURE_FOLD_DISTINCT) {
         bool full = false;
-        fold->total += seen_new(&fold->seen, value, &full);
+        fold->total += fold->integer ? seen_bits(&fold->seen, (uint64_t)value.i64, &full) : seen_new(&fold->seen, value.num, &full);
         fold->any = true;
         return !full;
     }
-    fold->total = how == PURE_FOLD_COUNT ? fold->total + 1 : how == PURE_FOLD_SUM ? fold->total + value :
-                  !fold->any ? value : how == PURE_FOLD_MAX ? maximum(fold->total, value) : minimum(fold->total, value);
+    if (fold->integer) { /* an i64's sum, most or least */
+        int64_t v = value.i64;
+        if (how == PURE_FOLD_SUM) {
+            if (__builtin_add_overflow(fold->whole, v, &fold->whole)) fold->overflow = fold->done = true;
+        } else if (!fold->any || (how == PURE_FOLD_MAX ? v > fold->whole : v < fold->whole))
+            fold->whole = v;
+        fold->any = true;
+        return true;
+    }
+    double number = value.num;
+    fold->total = how == PURE_FOLD_COUNT ? fold->total + 1 : how == PURE_FOLD_SUM ? fold->total + number :
+                  !fold->any ? number : how == PURE_FOLD_MAX ? maximum(fold->total, number) : minimum(fold->total, number);
     fold->any = true;
     return true;
 }
@@ -1905,7 +1998,7 @@ static PureResult fold_rows(const PureModule *m, PureValue *values, PureBlock in
         PureResult status = run(m, values, inner, per, out);
         per->arena->used = mark;
         if (status != PURE_OK) return status;
-        if (!fold_in(fold, row, out[0].num, one ? out[0].num : out[1].num)) return PURE_ALLOCATION;
+        if (!fold_in(fold, row, (PureValue){.i64 = out[0].i64}, one ? out[0].num : out[1].num)) return PURE_ALLOCATION;
     }
     return PURE_OK;
 }
@@ -1950,16 +2043,17 @@ static PureResult fold_runs(const PureModule *m, PureValue *values, PureBlock in
             fold->any = any;
         } else
             for (unsigned i = first; i < last && !fold->done; ++i)
-                if (!fold_in(fold, items.start + i, v[i], c[i])) return PURE_ALLOCATION;
+                if (!fold_in(fold, items.start + i, (PureValue){.num = v[i]}, c[i])) return PURE_ALLOCATION;
     }
     return PURE_OK;
 }
 
 /* The positions of the items whose keys are from low up to before high. */
-static void slice_of(const PureList *list, unsigned key, double low, double high, size_t *from, size_t *to) {
+/* The items whose keys are from low up to before high (numbers or i64s, as the key is). */
+static void slice_of(const PureList *list, unsigned key, Slot low, Slot high, size_t *from, size_t *to) {
     bool found;
-    *from = pure_list_seek(list, key, (PureCell){.num = low}, &found);
-    *to = pure_list_seek(list, key, (PureCell){.num = high}, &found);
+    *from = pure_list_seek(list, key, (PureCell){.i64 = low.i64}, &found);
+    *to = pure_list_seek(list, key, (PureCell){.i64 = high.i64}, &found);
     if (*to < *from) *to = *from;
 }
 
@@ -2104,7 +2198,7 @@ static Group *group_of(struct PurePass *pass, double key, unsigned how, bool add
     }
     size_t at = group_slot(order_bits(key), pass->capacity);
     while (pass->groups[at].used) at = (at + 1) & (pass->capacity - 1);
-    pass->groups[at] = (Group){key, {how, 0, false, false, {0}}, true};
+    pass->groups[at] = (Group){key, {.how = how}, true};
     ++pass->count;
     return &pass->groups[at];
 }
@@ -2128,7 +2222,7 @@ static bool group_pass(const PureModule *m, PureValue *values, PureBlock inner, 
             if (c[i] == 0) continue;
             Group *group = group_of(pass, keys[i], how, true);
             if (!group) return false;
-            if (!group->fold.done && !fold_in(&group->fold, items.start + i, v[i], c[i])) return false;
+            if (!group->fold.done && !fold_in(&group->fold, items.start + i, (PureValue){.num = v[i]}, c[i])) return false;
         }
     }
     return true;
@@ -2225,8 +2319,8 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
         uint32_t arg = op->arg;
         Slot *top = sp ? &stack[sp - 1] : stack;
         switch (op->op) {
-        case PURE_OP_CONST: stack[sp++].num = op->value; continue;
-        case PURE_OP_LOAD: stack[sp++].i64 = values[arg].i64; continue; /* the bits, a number's or a bool's */
+        case PURE_OP_CONST: stack[sp++].i64 = op->integer; continue; /* the bits: a number's, a bool's or an i64's */
+        case PURE_OP_LOAD: stack[sp++].i64 = values[arg].i64; continue;
         case PURE_OP_DT: stack[sp++].num = ev->dt; continue;
         case PURE_OP_NOW: stack[sp++].num = app->now; continue;
         case PURE_OP_FLOOR: top->num = floor(top->num); continue;
@@ -2247,6 +2341,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             if (field->type == PURE_FIELD_U32) stack[sp++].num = read32(given + field->offset);
             else if (field->type == PURE_FIELD_NUMBER) stack[sp++].num = read_double(given + field->offset);
             else if (field->type == PURE_FIELD_BOOL) stack[sp++].num = given[field->offset];
+            else if (field->type == PURE_FIELD_I64) stack[sp++].i64 = read_i64(given + field->offset);
             else stack[sp++].bytes = (PureBytes){ev->arguments ? FROM_ARGUMENTS : FROM_PAYLOAD, 0, {0, 0}, ev->spans[arg][0],
                                                  ev->spans[arg][1]};
             continue;
@@ -2286,7 +2381,8 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
         case PURE_OP_TEXT_INPUT: stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, 0, app->payload.size}; continue;
         case PURE_OP_NUM_TEXT: {
             char digits[32];
-            size_t length = arg ? (size_t)snprintf(digits, sizeof(digits), "%s", top->num ? "true" : "false")
+            size_t length = arg == 2 ? (size_t)snprintf(digits, sizeof(digits), "%" PRId64, top->i64)
+                          : arg ? (size_t)snprintf(digits, sizeof(digits), "%s", top->num ? "true" : "false")
                                 : pure_format_number(top->num, digits);
             if ((status = keep_bytes(arena, digits, length, &top->bytes)) != PURE_OK) return status;
             continue;
@@ -2325,10 +2421,10 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             stack[sp++].bytes.owner = (uint16_t)arg;
             continue;
         case PURE_OP_LOCAL_LOAD:
-            stack[sp].num = ev->locals[arg & 0xFF];
+            stack[sp].i64 = ev->locals[arg & 0xFF].i64; /* the bits: a number's, an index's, a bool's or an i64's */
             stack[sp++].bytes.owner = (uint16_t)(arg >> 16); /* an index's list */
             continue;
-        case PURE_OP_LOCAL_STORE: ev->locals[arg & 0xFF] = stack[--sp].num; continue;
+        case PURE_OP_LOCAL_STORE: ev->locals[arg & 0xFF].i64 = stack[--sp].i64; continue;
         case PURE_OP_CUR_MOVE: case PURE_OP_INDEX_MOVE: {
             double count = stack[--sp].num;
             Slot *at = &stack[sp - 1];
@@ -2449,7 +2545,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             if (at >= pure_list_count(app->lists[list])) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
             PureCell cell = pure_list_get(app->lists[list], at, field);
             /* A text is copied: the item may change or go before the value is used. */
-            if (!text_field(m, list, field)) top->num = cell.num;
+            if (!text_field(m, list, field)) top->i64 = cell.i64; /* the bits: a number's, a bool's or an i64's */
             else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) return status;
             continue;
         }
@@ -2483,12 +2579,12 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             PureBlock inner = {pc, arg >> 16};
             PureList *list = app->lists[arg >> 8 & 0xFF];
             pc += inner.length;
-            Fold fold = {arg & 0x7F, 0, false, false, {0}};
+            Fold fold = {.how = arg & PURE_FOLD_KIND, .integer = arg & PURE_FOLD_INTEGER};
             Event per = *ev;
             per.outer = ev->row;
             size_t from = 0, to = pure_list_count(list);
             if (arg & PURE_FOLD_SLICED) { /* the items with keys from low up to before high */
-                double high = stack[--sp].num, low = stack[--sp].num;
+                Slot high = stack[--sp], low = stack[--sp];
                 slice_of(list, m->state_key[arg >> 8 & 0xFF] - 1u, low, high, &from, &to);
             }
             if (!op->shape || !fold_shaped(m, values, op, list, &per, &fold)) {
@@ -2499,12 +2595,14 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
                 free(fold.seen.keys);
                 if (status != PURE_OK) return status;
             }
+            if (fold.overflow) { kind = PURE_FAULT_OVERFLOW; goto failed; }
             if (!fold.any && (fold.how == PURE_FOLD_MAX || fold.how == PURE_FOLD_MIN || fold.how == PURE_FOLD_FIRST)) {
                 kind = PURE_FAULT_NOT_FOUND;
                 goto failed;
             }
-            if (!isfinite(fold.total)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
-            stack[sp].num = fold.total;
+            if (fold.integer && fold.how != PURE_FOLD_DISTINCT) stack[sp].i64 = fold.whole;
+            else if (!isfinite(fold.total)) { kind = PURE_FAULT_NON_FINITE; goto failed; }
+            else stack[sp].num = fold.total;
             stack[sp++].bytes.owner = (uint16_t)(arg >> 8 & 0xFF); /* first: the list the index is in */
             continue;
         }
@@ -2517,7 +2615,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             Event per = *ev;
             per.walk = &walk;
             if (arg & PURE_EACH_SLICED) { /* the items with keys from low up to before high */
-                double high = stack[--sp].num, low = stack[--sp].num;
+                Slot high = stack[--sp], low = stack[--sp];
                 slice_of(app->lists[walk.list], m->state_key[walk.list] - 1u, low, high, &walk.at, &walk.end);
             } else if (op->range) /* a where that bounds the key: only the items in bounds */
                 range_bounds(m, values, &m->range[op->range - 1], app->lists[walk.list], m->state_key[walk.list] - 1u, &per,
@@ -2547,9 +2645,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             int order = shorter ? memcmp(a.data, b.data, shorter) : 0;
             if (!order) order = (a.size > b.size) - (a.size < b.size);
             arena->used = mark;
-            stack[sp - 1].num = arg == PURE_LESS ? order < 0 : arg == PURE_LESS_EQUAL ? order <= 0 :
-                                arg == PURE_GREATER ? order > 0 : arg == PURE_GREATER_EQUAL ? order >= 0 :
-                                arg == PURE_EQUAL ? order == 0 : order != 0;
+            stack[sp - 1].num = related(arg, order);
             continue;
         }
         case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: {
@@ -2573,6 +2669,52 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
         }
         case PURE_OP_PICK: stack[sp] = stack[sp - 1 - arg]; ++sp; continue;
         case PURE_OP_SLIDE: stack[sp - 1 - arg] = stack[sp - 1]; sp -= arg; continue;
+        /* i64s: exact, and failing as OVERFLOW past their range */
+        case PURE_OP_I64_ADD: case PURE_OP_I64_SUB: case PURE_OP_I64_MUL: {
+            int64_t b = stack[--sp].i64, a = stack[sp - 1].i64, r;
+            bool over = op->op == PURE_OP_I64_ADD ? __builtin_add_overflow(a, b, &r) :
+                        op->op == PURE_OP_I64_SUB ? __builtin_sub_overflow(a, b, &r) : __builtin_mul_overflow(a, b, &r);
+            if (over) { kind = PURE_FAULT_OVERFLOW; goto failed; }
+            stack[sp - 1].i64 = r;
+            continue;
+        }
+        case PURE_OP_I64_DIV: case PURE_OP_I64_MOD: { /* floored: the remainder takes the divisor's sign */
+            int64_t b = stack[--sp].i64, a = stack[sp - 1].i64;
+            if (b == 0) { kind = PURE_FAULT_DIVIDE; goto failed; }
+            if (b == -1) { /* the least i64 over -1 is past the range; any remainder by -1 is 0 */
+                if (op->op == PURE_OP_I64_DIV && a == INT64_MIN) { kind = PURE_FAULT_OVERFLOW; goto failed; }
+                stack[sp - 1].i64 = op->op == PURE_OP_I64_DIV ? -a : 0;
+                continue;
+            }
+            int64_t q = a / b, r = a % b;
+            if (r != 0 && (r < 0) != (b < 0)) { --q; r += b; }
+            stack[sp - 1].i64 = op->op == PURE_OP_I64_DIV ? q : r;
+            continue;
+        }
+        case PURE_OP_I64_NEG:
+            if (top->i64 == INT64_MIN) { kind = PURE_FAULT_OVERFLOW; goto failed; }
+            top->i64 = -top->i64;
+            continue;
+        case PURE_OP_I64_MIN: case PURE_OP_I64_MAX: {
+            int64_t b = stack[--sp].i64, a = stack[sp - 1].i64;
+            stack[sp - 1].i64 = (op->op == PURE_OP_I64_MIN ? b < a : b > a) ? b : a;
+            continue;
+        }
+        case PURE_OP_I64_COMPARE: {
+            int64_t b = stack[--sp].i64, a = stack[sp - 1].i64;
+            stack[sp - 1].num = related(arg, (a > b) - (a < b));
+            continue;
+        }
+        case PURE_OP_I64_FROM: case PURE_OP_NUM_FROM: { /* a whole number in range; an i64 within 2^53 */
+            PureCell cell = {.i64 = top->i64};
+            bool to_i64 = op->op == PURE_OP_I64_FROM;
+            if (!pure_cell_as(to_i64 ? PURE_CELL_NUMBER : PURE_CELL_INTEGER, to_i64 ? PURE_CELL_INTEGER : PURE_CELL_NUMBER, &cell)) {
+                kind = PURE_FAULT_LIMIT;
+                goto failed;
+            }
+            top->i64 = cell.i64;
+            continue;
+        }
         default: break;
         }
         double b = stack[--sp].num, a = stack[sp - 1].num, value;
@@ -2623,7 +2765,10 @@ PURE_COLD static PureResult new_text(PureDraft **out, const PureModule *m, uint3
 }
 
 PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record) {
-    return pure_list_new(m->record[record].count, m->record_field_text + m->record[record].first);
+    const PureRecord *r = &m->record[record];
+    uint8_t kinds[PURE_RECORD_FIELDS];
+    for (unsigned f = 0; f < r->count; ++f) kinds[f] = pure_record_kind(m, r->first + f);
+    return pure_list_new(r->count, kinds);
 }
 
 /* Where key is in the pending index: its slot, or the empty one it would take. */
@@ -2944,8 +3089,7 @@ size_t pure_app_state_bytes(const PureApp *app) {
  * holding more than before, fails. */
 static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     const PureModule *m = app->module;
-    PureValue pending[PURE_MODULE_STATES];
-    double locals[PURE_MODULE_LOCALS] = {0};
+    PureValue pending[PURE_MODULE_STATES], locals[PURE_MODULE_LOCALS] = {{0}};
     ev->locals = locals;
     size_t held = app->memory ? pure_app_state_bytes(app) : 0;
     Mark mark;
@@ -3387,6 +3531,13 @@ bool pure_app_view(PureApp *app, uint32_t view, double *out) {
     return true;
 }
 
+bool pure_app_view_i64(PureApp *app, uint32_t view, int64_t *out) {
+    Slot slot;
+    if (view_of(app, view, false, 0, PURE_VIEW_I64, &slot) != PURE_OK) return false;
+    *out = slot.i64;
+    return true;
+}
+
 PureResult pure_app_view_text(PureApp *app, uint32_t view, bool (*visit)(void *, PureSpan), void *context) {
     Slot slot;
     PureResult result = view_of(app, view, false, 0, PURE_VIEW_TEXT, &slot);
@@ -3404,6 +3555,13 @@ bool pure_app_cell(PureApp *app, uint32_t column, size_t row, double *out) {
     Slot slot;
     if (view_of(app, column, true, row, PURE_VIEW_NUM, &slot) != PURE_OK) return false;
     *out = slot.num;
+    return true;
+}
+
+bool pure_app_cell_i64(PureApp *app, uint32_t column, size_t row, int64_t *out) {
+    Slot slot;
+    if (view_of(app, column, true, row, PURE_VIEW_I64, &slot) != PURE_OK) return false;
+    *out = slot.i64;
     return true;
 }
 
@@ -3504,12 +3662,14 @@ void pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
 }
 
 uint8_t pure_record_kind(const PureModule *m, uint32_t field) {
-    return m->record_field_bool[field] ? PURE_RECORD_BOOL : m->record_field_text[field];
+    static const uint8_t kinds[] = {[PURE_RECORD_NUMBER] = PURE_CELL_NUMBER, [PURE_RECORD_TEXT] = PURE_CELL_TEXT,
+                                    [PURE_RECORD_BOOL] = PURE_CELL_BOOL, [PURE_RECORD_I64] = PURE_CELL_INTEGER};
+    return kinds[m->record_field_type[field]];
 }
 
-/* A number and a bool carry over each other; texts only to texts. */
+/* A number, a bool and an i64 carry over each other (when the value fits); texts only to texts. */
 static bool kinds_carry(uint8_t from, uint8_t to) {
-    return from == to || ((from == 0 || from == PURE_RECORD_BOOL) && (to == 0 || to == PURE_RECORD_BOOL));
+    return from == to || (!pure_cell_text(from) && !pure_cell_text(to));
 }
 
 /* A list with record's fields: each takes the field of `from` with the same
@@ -3530,13 +3690,12 @@ PURE_COLD PureResult pure_list_migrate(PureList **out, const PureList *from, con
         PureCell cells[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < r->count; ++f) {
             uint32_t field = r->first + f, constant = (uint32_t)m->record_field_default[field].num;
-            cells[f] = source[f] >= 0 ? pure_list_get(from, at, (unsigned)source[f]) :
-                       m->record_field_text[field] ?
-                           (PureCell){.text = (unsigned char *)m->constant_data + m->constant_offset[constant],
-                                      .size = m->constant_length[constant]} :
-                           (PureCell){.i64 = m->record_field_default[field].i64};
-            if (m->record_field_bool[field])
-                cells[f] = (PureCell){.num = pure_as_bool(cells[f].num, m->record_field_default[field].num)};
+            PureCell given = source[f] >= 0 ? pure_list_get(from, at, (unsigned)source[f]) : (PureCell){0};
+            if (source[f] >= 0 && pure_cell_as(kinds[source[f]], pure_record_kind(m, field), &given)) cells[f] = given;
+            else if (m->record_field_type[field] == PURE_RECORD_TEXT)
+                cells[f] = (PureCell){.text = (unsigned char *)m->constant_data + m->constant_offset[constant],
+                                      .size = m->constant_length[constant]};
+            else cells[f] = (PureCell){.i64 = m->record_field_default[field].i64}; /* a number's, a bool's or an i64's bits */
         }
         result = pure_list_insert(*out, at, cells, NULL);
     }
@@ -3698,10 +3857,10 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
                  (app->outbox = pure_runtime_list_new(PURE_LIST_OUTBOX)) ? PURE_OK : PURE_ALLOCATION;
     for (uint32_t i = 0; i < module->states; ++i) {
         int previous = old ? pure_module_state(old, module->state_names[i]) : -1;
-        /* A number and a bool carry over each other: 0 and 1 are false and true (a bool's other numbers start anew). */
+        /* A number, a bool and an i64 carry over each other when the value fits (pure_cell_as), else start anew. */
         uint8_t was = previous >= 0 ? old->state_type[previous] : 0, now = module->state_type[i];
-        bool truth = (was == PURE_STATE_NUM && now == PURE_STATE_BOOL) || (was == PURE_STATE_BOOL && now == PURE_STATE_NUM);
-        kept[i] = previous >= 0 && (was == now || truth) ? previous : -1;
+        bool valued = pure_value_kind(was) != 0xFF && pure_value_kind(now) != 0xFF;
+        kept[i] = previous >= 0 && (was == now || valued) ? previous : -1;
         if (kept[i] >= 0) saved[i] = app->saved[kept[i]];
         if (module->state_type[i] == PURE_STATE_TEXT) {
             if (kept[i] >= 0) texts[i] = app->texts[kept[i]];
@@ -3722,8 +3881,11 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
                 result = pure_save_open_list(app, module, i, &lists[i], &list_drafts[i], &listed[i]);
                 rewrite[i] = result == PURE_OK && listed[i].rewrite;
             } else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
+        } else if (kept[i] >= 0 && valued) {
+            PureCell cell = {.i64 = app->values[kept[i]].i64};
+            values[i] = pure_cell_as(pure_value_kind(was), pure_value_kind(now), &cell) ? (PureValue){.i64 = cell.i64}
+                                                                                     : module->initial[i];
         } else values[i] = kept[i] >= 0 ? app->values[kept[i]] : module->initial[i];
-        if (module->state_type[i] == PURE_STATE_BOOL) values[i].num = pure_as_bool(values[i].num, module->initial[i].num);
     }
     /* A keyed list keeps its items in key order: one that was not keyed, or
      * keyed by another field, is put in order and its indices follow their

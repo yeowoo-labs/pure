@@ -525,15 +525,12 @@ static void answer(Connection *c, PureOutcome result) {
     if (!result.body.size) release_ticket(c);
 }
 
-static const char *const fault_names[] = {"none", "divide", "non_finite", "clamp", "limit", "not_found", "encoding",
-                                          "exists", "memory"};
-
 /* An app route's answer: a view's value, or what an event replied. A failed
  * event names its fault: 404 not_found, 409 exists, 503 memory (the app's
  * budget: again later), 422 for the others; a view without a value is 404
  * no_value. */
 static void answer_app(Connection *c, PureOutcome result, bool view, PureFault fault, const char *type) {
-    const char *named = fault != PURE_FAULT_NONE ? fault_names[fault] : NULL;
+    const char *named = fault != PURE_FAULT_NONE ? pure_fault_name(fault) : NULL;
     if (result.status == PURE_OK) {
         struct iovec extent = {(void *)result.body.data, result.body.size};
         respond_typed(c, 200, "OK", "none", 0, type ? type : "application/octet-stream", &extent,
@@ -1225,6 +1222,12 @@ static void put_number(Output *o, double value) {
     put_bytes(o, digits, pure_format_number(value, digits));
 }
 
+/* An i64's every digit (a JSON number too: a reader keeping binary64s loses those past 2^53). */
+static void put_integer(Output *o, int64_t value) {
+    char digits[24];
+    put_bytes(o, digits, (size_t)snprintf(digits, sizeof(digits), "%" PRId64, value));
+}
+
 /* A view's arguments from a query's name=value pairs (values %XX decoded;
  * from and count page a table): a payload of their input's shape, the
  * fixed fields in its prefix, the texts and bytes after it in order, each's
@@ -1303,7 +1306,12 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
     PureResult status = PURE_OK;
     double value;
     if (m->view_type[view] == PURE_VIEW_TABLE && !(o.bytes = malloc(o.capacity = 1024))) return PURE_ALLOCATION;
-    if (m->view_type[view] == PURE_VIEW_NUM || m->view_type[view] == PURE_VIEW_BOOL) {
+    if (m->view_type[view] == PURE_VIEW_I64) {
+        int64_t integer;
+        *type = "text/plain; charset=utf-8";
+        if (!pure_app_view_i64(app, view, &integer)) status = PURE_NOT_FOUND;
+        else put_integer(&o, integer);
+    } else if (m->view_type[view] == PURE_VIEW_NUM || m->view_type[view] == PURE_VIEW_BOOL) {
         *type = "text/plain; charset=utf-8";
         if (!pure_app_view(app, view, &value)) status = PURE_NOT_FOUND;
         else if (m->view_type[view] == PURE_VIEW_BOOL) put_bytes(&o, value ? "true" : "false", value ? 4 : 5);
@@ -1343,6 +1351,12 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
             for (unsigned k = 0; k < count; ++k) {
                 put_bytes(&o, columns[k].key + !k, columns[k].length - !k);
                 uint8_t kind = m->view_type[columns[k].view];
+                if (kind == PURE_VIEW_I64) {
+                    int64_t integer;
+                    if (!pure_app_cell_i64(app, columns[k].view, row, &integer)) put_bytes(&o, "null", 4);
+                    else put_integer(&o, integer);
+                    continue;
+                }
                 if (kind == PURE_VIEW_NUM || kind == PURE_VIEW_BOOL) {
                     if (!pure_app_cell(app, columns[k].view, row, &value)) put_bytes(&o, "null", 4);
                     else if (kind == PURE_VIEW_BOOL) put_bytes(&o, value ? "true" : "false", value ? 4 : 5);
@@ -1858,8 +1872,7 @@ static bool same_states(const PureModule *a, const PureModule *b) {
             a->record[i].count != b->record[i].count)
             return false;
     for (uint32_t i = 0; i < a->record_fields; ++i)
-        if (strcmp(a->record_field_names[i], b->record_field_names[i]) || a->record_field_text[i] != b->record_field_text[i] ||
-            a->record_field_bool[i] != b->record_field_bool[i])
+        if (strcmp(a->record_field_names[i], b->record_field_names[i]) || a->record_field_type[i] != b->record_field_type[i])
             return false;
     for (uint32_t i = 0; i < a->collections; ++i)
         if (strcmp(a->collection_names[i], b->collection_names[i])) return false;

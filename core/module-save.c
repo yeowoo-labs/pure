@@ -242,7 +242,7 @@ static int read_outputs(const unsigned char *at, size_t size, SentShape *shapes,
         for (unsigned f = 0; f < fields; ++f) {
             size_t named = size - k >= 2 ? at[k + 1] : 0;
             if (size - k < 2 || !named || named >= PURE_MODULE_NAME || size - k < 2 + named || !at[k] ||
-                at[k] == PURE_FIELD_ROWS || at[k] > PURE_FIELD_BOOL) /* an output sends no rows */
+                at[k] == PURE_FIELD_ROWS || at[k] > PURE_FIELD_I64) /* an output sends no rows */
                 return -1;
             if (shapes) {
                 shapes[t].fields[f] = (PureField){.type = at[k]};
@@ -445,9 +445,9 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         if (result == PURE_OK && pure_draft_revision(*legacy) && pure_draft_size(*legacy))
             result = read_whole(*legacy, &bytes, &size);
     }
-    /* The stored record: its fields' kinds and names. */
+    /* The stored record: its fields' kinds (PURE_CELL_...: a record's, no runtime bytes) and names. */
     char names[PURE_RECORD_FIELDS][PURE_MODULE_NAME] = {{0}};
-    uint8_t text[PURE_RECORD_FIELDS] = {0};
+    uint8_t kinds[PURE_RECORD_FIELDS] = {0};
     unsigned count = 0;
     size_t at = 0, items = 0;
     uint64_t holds = 0;
@@ -458,7 +458,7 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         count = ok ? bytes[4] : 0;
         at = 5;
         for (unsigned f = 0; ok && f < count; ++f) {
-            ok = named(bytes, size, &at, 0, &text[f], names[f]) && (text[f] <= 1 || text[f] == PURE_RECORD_BOOL);
+            ok = named(bytes, size, &at, 0, &kinds[f], names[f]) && kinds[f] <= PURE_CELL_INTEGER && kinds[f] != PURE_CELL_BYTES;
             for (unsigned k = 0; k < f; ++k) ok = ok && strcmp(names[k], names[f]);
         }
         if (ok && image) { /* the save it holds, then its items */
@@ -474,9 +474,7 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     }
     PureList *from = NULL;
     if (result == PURE_OK && stored) {
-        uint8_t layout[PURE_RECORD_FIELDS]; /* a bool is a number as lists go */
-        for (unsigned f = 0; f < count; ++f) layout[f] = text[f] == PURE_RECORD_BOOL ? 0 : text[f];
-        from = pure_list_new(count, layout);
+        from = pure_list_new(count, kinds);
         result = from ? pure_list_read(from, bytes + at, items) : PURE_ALLOCATION;
         if (result == PURE_OK && !image) result = pure_list_replay(from, bytes + at + items, size - at - items);
     }
@@ -495,7 +493,7 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     }
     bool same = stored && count == r->count;
     for (unsigned f = 0; same && f < count; ++f)
-        same = text[f] == pure_record_kind(m, r->first + f) && !strcmp(names[f], m->record_field_names[r->first + f]);
+        same = kinds[f] == pure_record_kind(m, r->first + f) && !strcmp(names[f], m->record_field_names[r->first + f]);
     if (result == PURE_OK && same && image) {
         *out = from;
         saved->image = holds;
@@ -509,8 +507,12 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         if (same) {
             *out = from;
             from = NULL;
-        } else if (from) result = pure_list_migrate(out, from, field_names, text, count, m, record);
-        else if (!(*out = pure_list_new(r->count, m->record_field_text + r->first))) result = PURE_ALLOCATION;
+        } else if (from) result = pure_list_migrate(out, from, field_names, kinds, count, m, record);
+        else {
+            uint8_t own[PURE_RECORD_FIELDS];
+            for (unsigned f = 0; f < r->count; ++f) own[f] = pure_record_kind(m, r->first + f);
+            if (!(*out = pure_list_new(r->count, own))) result = PURE_ALLOCATION;
+        }
     }
     pure_list_free(from);
     if (result != PURE_OK) {
@@ -669,20 +671,14 @@ void pure_app_checkpointed(PureApp *app, PureCheckpoint *c, PureResult result) {
 }
 
 static bool scalar(uint8_t type) {
-    return type == PURE_STATE_NUM || type == PURE_STATE_BOOL || type == PURE_STATE_CURSOR || type == PURE_STATE_INDEX;
+    return type == PURE_STATE_NUM || type == PURE_STATE_BOOL || type == PURE_STATE_I64 || type == PURE_STATE_CURSOR ||
+           type == PURE_STATE_INDEX;
 }
 
-/* A number's or a bool's (each is stored as the other may be read: 0 and 1 are false and true). */
-static bool valued(uint8_t type) { return type == PURE_STATE_NUM || type == PURE_STATE_BOOL; }
-
-/* A stored value still fits its state: a cursor on a character boundary of
- * its text, an index on an item of its list (or 0), a finite number, a bool
- * 0 or 1. */
+/* A stored position still fits its state: a cursor on a character boundary
+ * of its text, an index on an item of its list (or 0). */
 PURE_COLD static bool fits(const PureModule *m, PureDraft *const *texts, PureList *const *lists, uint32_t state, double value) {
-    if (!isfinite(value)) return false;
-    if (m->state_type[state] == PURE_STATE_NUM) return true;
-    if (m->state_type[state] == PURE_STATE_BOOL) return value == 0 || value == 1;
-    if (value < 0 || value != floor(value)) return false;
+    if (!isfinite(value) || value < 0 || value != floor(value)) return false;
     if (m->state_type[state] == PURE_STATE_INDEX) {
         size_t count = pure_list_count(lists[m->state_ref[state]]);
         return value <= (count ? (double)(count - 1) : 0);
@@ -737,13 +733,14 @@ PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, Pu
         uint64_t bits = 0;
         for (unsigned b = 0; b < 8; ++b) bits |= (uint64_t)bytes[at + b] << (8 * b);
         at += 8;
-        double value;
-        memcpy(&value, &bits, sizeof(value));
         int state = pure_module_state(m, name);
-        if (state >= 0 && kept[state] < 0 && scalar(type) &&
-            (m->state_type[state] == type || (valued(type) && valued(m->state_type[state]))) &&
-            fits(m, texts, lists, (uint32_t)state, value))
-            values[state].num = m->state_type[state] == PURE_STATE_BOOL ? pure_as_bool(value, 0) : value;
+        if (state < 0 || kept[state] >= 0 || !scalar(type)) continue;
+        /* A number, a bool or an i64, each as the state's type holds it when it fits (pure_cell_as); a position where it fits. */
+        uint8_t from = pure_value_kind(type), to = pure_value_kind(m->state_type[state]);
+        PureCell cell = {.i64 = (int64_t)bits};
+        if (from != 0xFF && to != 0xFF ? pure_cell_fits(from, cell) && pure_cell_as(from, to, &cell)
+                                       : m->state_type[state] == type && fits(m, texts, lists, (uint32_t)state, cell.num))
+            values[state].i64 = cell.i64;
     }
     free(bytes);
     return ok ? PURE_OK : PURE_STORE_ERROR;

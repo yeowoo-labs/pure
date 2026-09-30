@@ -16,9 +16,9 @@
 #endif
 
 /* Runtime-owned lists of records for the module executor. An item is one
- * cell per field: a number, or text bytes the list owns. Every change made
- * during an event is logged; a failed event undoes the log in reverse and a
- * successful one frees what it replaced. */
+ * cell per field: a number, an integer, or text bytes the list owns. Every
+ * change made during an event is logged; a failed event undoes the log in
+ * reverse and a successful one frees what it replaced. */
 typedef struct { union { double num; int64_t i64; }; unsigned char *text; size_t size; } PureCell;
 typedef struct PureList PureList;
 /* An event's list changes; a removed item's cells wait in cells. */
@@ -36,7 +36,7 @@ typedef struct { void *entries; size_t count, capacity; } PureRetired;
 typedef struct {
     size_t start;
     unsigned count;
-    union { const double *numbers; const PureSpan *texts; } column[16];
+    union { const double *numbers; const int64_t *integers; const PureSpan *texts; } column[16];
     /* Where the run is in the list's tree, for the next one. */
     const void *path[16];
     uint8_t taken[16];
@@ -46,9 +46,22 @@ typedef struct {
 /* A list holds up to PURE_LIST_ITEMS items, a run up to PURE_LIST_RUN. */
 enum { PURE_LIST_ITEMS = 1 << 24, PURE_LIST_RUN = 32 };
 
-/* text_fields: a field's kind, 0 a number, 1 a text (UTF-8, checked when
- * read), 2 bytes (any: a runtime list's). */
-PureList *pure_list_new(unsigned fields, const uint8_t *text_fields);
+/* A field's kind: a number, a text (UTF-8, checked when read), bytes (any: a
+ * runtime list's), a bool (a number 0 or 1, kept as a number is) or an
+ * integer (an int64_t, ordered as one). A stored list's header names its
+ * fields by these kinds. */
+enum { PURE_CELL_NUMBER = 0, PURE_CELL_TEXT = 1, PURE_CELL_BYTES = 2, PURE_CELL_BOOL = 3, PURE_CELL_INTEGER = 4 };
+static inline bool pure_cell_text(uint8_t kind) { return kind == PURE_CELL_TEXT || kind == PURE_CELL_BYTES; }
+/* Whether a number, bool or integer cell holds what its kind may: a finite
+ * number, a bool 0 or 1 (either zero), any integer. */
+bool pure_cell_fits(uint8_t kind, PureCell cell);
+/* A number, a bool or an integer as another of them holds it (a module
+ * replaced, a stored value read by another module, a waiting send recast):
+ * true with *cell made the other when it fits (a bool from 0 or 1, either
+ * zero false; a number from an integer within 2^53; an integer from a
+ * whole number in its range), else false. Texts only as themselves. */
+bool pure_cell_as(uint8_t from, uint8_t to, PureCell *cell);
+PureList *pure_list_new(unsigned fields, const uint8_t *kinds);
 void pure_list_free(PureList *);
 /* Let every item go (retired where a shared copy may read it). */
 void pure_list_clear(PureList *);
@@ -97,8 +110,8 @@ PureCell pure_list_get(const PureList *, size_t at, unsigned field);
 bool pure_list_run(const PureList *, size_t at, PureRun *);
 bool pure_list_next(const PureList *, PureRun *);
 /* In a list ordered by field (a keyed list): the first position whose item's
- * field does not order below key (numbers by value, texts by bytes), and
- * whether that item's field is key. */
+ * field does not order below key (numbers and integers by value, texts by
+ * bytes), and whether that item's field is key. */
 size_t pure_list_seek(const PureList *, unsigned field, PureCell key, bool *found);
 /* The field a keyed list keeps its items in order of: when it is a number
  * field, seek by it reads each level's keys from one node (field -1, or a
@@ -110,7 +123,8 @@ PureResult pure_list_keyed(PureList *, int field);
  * same key (nothing is made). */
 PureResult pure_list_sorted(const PureList *, unsigned field, PureList **out, size_t *moved);
 /* The stored form of items: each item's fields in order, a number as its
- * binary64 bits (little-endian), a text as a u32le length and its bytes.
+ * binary64 bits and an integer as its two's complement (8 bytes,
+ * little-endian), a text as a u32le length and its bytes.
  * pure_list_size is the bytes of all the items so stored, and
  * pure_list_encode writes them to out. */
 size_t pure_list_size(const PureList *);
