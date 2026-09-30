@@ -2711,6 +2711,7 @@ static PureResult let_sends_go(PureApp *app, uint32_t output, uint64_t through) 
         PureResult removed = pure_list_remove(app->outbox, i, &app->undo);
         if (removed != PURE_OK) return removed;
         --app->sent_saved;
+        ++app->sends_gone;
         app->links_changed = true;
     }
     return PURE_OK;
@@ -2957,7 +2958,7 @@ PureResult pure_app_message_fields(PureApp *app, uint32_t input, const char *key
 }
 
 /* The outbox's item at: its output (the module's, by name), number and payload. */
-static bool sent_at(const PureApp *app, size_t at, uint32_t *output, uint64_t *seq, PureSpan *payload) {
+bool pure_app_sent(const PureApp *app, size_t at, uint32_t *output, uint64_t *seq, PureSpan *payload) {
     PureCell name = pure_list_get(app->outbox, at, 0), bytes = pure_list_get(app->outbox, at, 2);
     const PureModule *m = app->module;
     uint32_t i = 0;
@@ -2973,16 +2974,7 @@ void pure_app_outbox(const PureApp *app, PureSentVisit visit, void *context) {
         uint32_t output;
         uint64_t seq;
         PureSpan payload;
-        if (sent_at(app, i, &output, &seq, &payload) && !visit(context, output, seq, payload)) return;
-    }
-}
-
-void pure_app_outbox_newest(const PureApp *app, PureSentVisit visit, void *context) {
-    for (size_t i = app->sent_saved; i-- > 0;) {
-        uint32_t output;
-        uint64_t seq;
-        PureSpan payload;
-        if (sent_at(app, i, &output, &seq, &payload) && !visit(context, output, seq, payload)) return;
+        if (pure_app_sent(app, i, &output, &seq, &payload) && !visit(context, output, seq, payload)) return;
     }
 }
 

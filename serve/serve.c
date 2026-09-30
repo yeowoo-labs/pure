@@ -206,6 +206,11 @@ typedef struct {
     unsigned link_count;
     uint32_t link_output[PURE_MODULE_INPUTS];
     uint64_t link_trimmed[PURE_MODULE_INPUTS];
+    /* Each outlet's place in the outbox, wires first: its sends before it
+     * are queued (feed_outlets); and the app's sends_gone when they were
+     * last moved back. How often an outlet's window was full. */
+    size_t outlet_from[2 * PURE_MODULE_INPUTS];
+    uint64_t gone_seen, windows_full;
     struct Writer *writer; /* the thread writing the app's checkpoints, once one was due */
     uint64_t checkpoints;  /* images it wrote */
 } Executor;
@@ -1509,59 +1514,56 @@ static void publish(Executor *ex) {
     if (ex->surface) surface_changed(ex->surface);
 }
 
-/* The saved sends of wired outputs not queued yet go to their wires, in
- * order; a wire that cannot take one takes the rest at a later save. The
- * outbox is looked at newest first, only as far back as the new sends go,
- * however many older ones wait for their receivers. */
-typedef struct { uint32_t wire; uint64_t seq; PureSpan payload; } Fresh;
-typedef struct { Executor *executor; Fresh *fresh; size_t count, capacity; uint64_t done; bool failed; } Queueing;
+/* An output's outlets: its wires first, then its links. Each holds a
+ * window of the output's saved sends, WINDOW_SENDS and --window bytes past
+ * what its receiver has (at least one): the outbox keeps the rest, and the
+ * outlet takes them as its receiver takes what it holds. */
+enum { WINDOW_SENDS = 65536 };
+static size_t window_bytes = 4u << 20;
 
-/* An output's outlet: its wires first, then its links. */
 static uint32_t outlet_output(Executor *ex, unsigned i) {
     return i < ex->wire_count ? pure_wire_output(ex->wires[i]) : ex->link_output[i - ex->wire_count];
 }
-static uint64_t outlet_queued(Executor *ex, unsigned i) {
-    return i < ex->wire_count ? pure_wire_queued(ex->wires[i]) : pure_link_queued(ex->links[i - ex->wire_count]);
-}
 
-static bool find_fresh(void *context, uint32_t output, uint64_t seq, PureSpan payload) {
-    Queueing *q = context;
-    Executor *ex = q->executor;
+/* The saved sends not yet queued go to their outlets, in order, as far as
+ * each window goes; an outlet that cannot take one takes it later. Each
+ * outlet looks on from its place in the outbox, moved back by the sends
+ * that left the outbox since (they may have been before it), so the sends
+ * it queued before are not looked at again, however many wait. */
+static void feed_outlets(Executor *ex) {
     unsigned outlets = ex->wire_count + ex->link_count;
+    uint64_t gone = ex->app.sends_gone - ex->gone_seen;
+    ex->gone_seen = ex->app.sends_gone;
     for (unsigned i = 0; i < outlets; ++i) {
-        if (outlet_output(ex, i) != output || (q->done >> i & 1)) continue;
-        if (seq <= outlet_queued(ex, i)) {
-            q->done |= UINT64_C(1) << i; /* older ones were queued before */
-            break;
+        PureWire *wire = i < ex->wire_count ? ex->wires[i] : NULL;
+        PureLink *link = wire ? NULL : ex->links[i - ex->wire_count];
+        uint32_t output = outlet_output(ex, i);
+        uint64_t queued = wire ? pure_wire_queued(wire) : pure_link_queued(link),
+                 delivered = wire ? pure_wire_delivered(wire) : pure_link_delivered(link);
+        size_t held = wire ? pure_wire_held(wire) : pure_link_held(link), at = ex->outlet_from[i];
+        at = at > gone ? at - (size_t)gone : 0;
+        for (; at < ex->app.sent_saved; ++at) {
+            uint32_t of;
+            uint64_t seq;
+            PureSpan payload;
+            if (!pure_app_sent(&ex->app, at, &of, &seq, &payload) || of != output || seq <= queued) continue;
+            if (queued > delivered && (queued - delivered >= WINDOW_SENDS || held + payload.size > window_bytes)) {
+                ++ex->windows_full;
+                break;
+            }
+            if (wire ? !pure_wire_queue(wire, seq, payload) : !pure_link_queue(link, seq, payload.data, payload.size))
+                break;
+            queued = seq;
+            held += payload.size;
         }
-        if (q->count == q->capacity) {
-            size_t capacity = q->capacity ? 2 * q->capacity : 64;
-            Fresh *grown = realloc(q->fresh, capacity * sizeof(*grown));
-            if (!grown) { q->failed = true; return false; }
-            q->fresh = grown;
-            q->capacity = capacity;
-        }
-        q->fresh[q->count++] = (Fresh){i, seq, payload};
-        break;
+        ex->outlet_from[i] = at;
     }
-    return q->done != (outlets >= 64 ? UINT64_MAX : (UINT64_C(1) << outlets) - 1);
 }
 
 static void after_save(Executor *ex) {
     publish(ex);
     checkpoint_round(ex);
-    if (!ex->wire_count && !ex->link_count) return;
-    Queueing q = {.executor = ex};
-    pure_app_outbox_newest(&ex->app, find_fresh, &q);
-    bool blocked[2 * PURE_MODULE_INPUTS] = {false};
-    for (size_t k = q.failed ? 0 : q.count; k-- > 0;) {
-        const Fresh *f = &q.fresh[k];
-        if (blocked[f->wire]) continue;
-        blocked[f->wire] = f->wire < ex->wire_count ? !pure_wire_queue(ex->wires[f->wire], f->seq, f->payload)
-                                                    : !pure_link_queue(ex->links[f->wire - ex->wire_count], f->seq,
-                                                                       f->payload.data, f->payload.size);
-    }
-    free(q.fresh);
+    feed_outlets(ex);
 }
 
 enum { ANSWER_WAIT_MS = 100 };
@@ -1607,6 +1609,7 @@ static bool take_deliveries(Executor *ex) {
         pure_app_trim(&ex->app, ex->link_output[i], stored);
         ex->link_trimmed[i] = stored;
     }
+    feed_outlets(ex); /* their windows moved on */
     return answered;
 }
 
@@ -2630,6 +2633,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--link-idle-ms") && number(argv[i + 1], 86400000, &value) && value) link_idle_ms = value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
         else if (!strcmp(argv[i], "--memory") && number(argv[i + 1], SIZE_MAX, &value) && value) memory_budget = (size_t)value;
+        else if (!strcmp(argv[i], "--window") && number(argv[i + 1], SIZE_MAX, &value) && value) window_bytes = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
         else if (!strcmp(argv[i], "--threads") && !strcmp(argv[i + 1], "auto")) threads = 0;
         else if (!strcmp(argv[i], "--threads") && number(argv[i + 1], 256, &value) && value) threads = (unsigned)value;
@@ -2751,7 +2755,8 @@ int main(int argc, char **argv) {
     pure_link_listener_close(link_listener, &heard); /* after the owner, which tells it what it stored */
     size_t active = 0, retained = 0;
     uint64_t accepted = 0, requests = 0, bursts = owner.executor.bursts, events = owner.executor.burst_events, expired = 0,
-             ticks = owner.executor.ticks, shown = 0, checkpoints = 0, memory_refused = owner.executor.memory_refused;
+             ticks = owner.executor.ticks, shown = 0, checkpoints = 0, memory_refused = owner.executor.memory_refused,
+             windows_full = owner.executor.windows_full;
     for (unsigned i = 0; i < threads; ++i) {
         shown += hosts[i].shown;
         active += hosts[i].active;
@@ -2801,12 +2806,13 @@ int main(int argc, char **argv) {
             ",\"listener_deliveries\":%" PRIu64 ",\"listener_woken\":%" PRIu64 ",\"listener_remembered\":%" PRIu64
             ",\"listener_swept\":%" PRIu64 ",\"listener_active\":%" PRIu64 ",\"listener_keyed\":%" PRIu64
             ",\"listener_secrets\":%" PRIu64 ",\"listener_epochs\":%" PRIu64 ",\"listener_refused\":%" PRIu64
-            ",\"state_bytes\":%zu,\"memory_refused\":%" PRIu64 "}\n",
+            ",\"state_bytes\":%zu,\"memory_refused\":%" PRIu64 ",\"windows_full\":%" PRIu64 "}\n",
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
             owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
             sent.refused, heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept,
-            heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused);
+            heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused,
+            windows_full);
     free(hosts);
     free(thread);
     return 0;
@@ -2815,12 +2821,14 @@ usage:
           "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=URL ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
           "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] "
-          "[--surface LIBRARY [-- ARGUMENTS]]\n"
+          "[--window 4194304] [--surface LIBRARY [-- ARGUMENTS]]\n"
           "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
           "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"
           "  --send OUTPUT=http[s]://host:port/path: to anything else, over HTTP\n"
           "  --senders FILE: more senders the --link-port takes, a line each: NAME KEY\n"
           "  --memory BYTES: what the app's states may hold (lists' items, texts, sends not yet stored): an event\n"
-          "      past it is refused, 503 memory (docs/design/013-memory-budget.md)\n", stderr);
+          "      past it is refused, 503 memory (docs/design/013-memory-budget.md)\n"
+          "  --window BYTES: what each --send holds of its sends beyond what its receiver has (and 65,536 sends);\n"
+          "      the outbox keeps the rest\n", stderr);
     return 2;
 }

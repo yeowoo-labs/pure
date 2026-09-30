@@ -37,6 +37,9 @@ bool pure_wire_queue(PureWire *, uint64_t seq, PureSpan payload);
 uint64_t pure_wire_queued(const PureWire *);
 /* The last number delivered; any thread. */
 uint64_t pure_wire_delivered(PureWire *);
+/* The bytes of the sends queued and not yet delivered (their JSON, and the
+ * payloads kept for answers); any thread. */
+size_t pure_wire_held(PureWire *);
 /* Deliver on a thread of the wire's own, calling notify after each delivery. */
 bool pure_wire_start(PureWire *, void (*notify)(void *), void *context);
 /* Stop (a delivery under way is finished or abandoned) and free. */

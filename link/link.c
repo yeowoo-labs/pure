@@ -210,6 +210,13 @@ uint64_t pure_link_delivered(PureLink *l) {
     return stored;
 }
 
+size_t pure_link_held(PureLink *l) {
+    pthread_mutex_lock(&l->lock);
+    size_t held = pure_link_sender_held(l->sender);
+    pthread_mutex_unlock(&l->lock);
+    return held;
+}
+
 static void take_answers(PureLink *l, uint64_t now) {
     for (unsigned rounds = 0, n = TAKE; rounds < 4 && n == TAKE; ++rounds) {
         n = (unsigned)take_datagrams(l->fd, l->taking);

@@ -35,6 +35,7 @@ struct PureWire {
     pthread_mutex_t lock;
     pthread_cond_t changed;
     Pending *queue; /* the sends to deliver, in order, from head */
+    size_t held;    /* their bytes */
     size_t head, count, capacity;
     uint64_t queued, delivered, attempts, deliveries;
     unsigned batch; /* how many a request may carry, as the receiver said (X-Pure-Batch); 0: one */
@@ -269,6 +270,13 @@ uint64_t pure_wire_delivered(PureWire *w) {
     return delivered;
 }
 
+size_t pure_wire_held(PureWire *w) {
+    pthread_mutex_lock(&w->lock);
+    size_t held = w->held;
+    pthread_mutex_unlock(&w->lock);
+    return held;
+}
+
 void pure_wire_counts(PureWire *w, uint64_t *delivered, uint64_t *attempts) {
     pthread_mutex_lock(&w->lock);
     *delivered = w->deliveries;
@@ -312,6 +320,7 @@ bool pure_wire_queue(PureWire *w, uint64_t seq, PureSpan payload) {
     if (sent && payload.size) memcpy(sent, payload.data, payload.size);
     w->queue[w->head + w->count++] = (Pending){t.bytes, t.size, seq, sent, payload.size};
     w->queued = seq;
+    w->held += t.size + (sent ? payload.size : 0);
     pthread_cond_signal(&w->changed);
     pthread_mutex_unlock(&w->lock);
     return true;
@@ -717,8 +726,10 @@ static void *deliver(void *context) {
         }
         if (outcome == DELIVERED) {
             for (unsigned i = 0; i < count; ++i) {
-                free(w->queue[w->head + i].body);
-                free(w->queue[w->head + i].sent);
+                const Pending *p = &w->queue[w->head + i];
+                w->held -= p->size + (p->sent ? p->sent_size : 0);
+                free(p->body);
+                free(p->sent);
             }
             w->head += count;
             w->count -= count;

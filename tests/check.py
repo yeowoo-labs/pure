@@ -1213,6 +1213,110 @@ def server_memory(aup, pure, work):
     return {'sends_held': accepted, 'receiver_refused': stats['b']['memory_refused'],
             'link_resent': stats['a']['link_resent']}
 
+
+WINDOW_SENDER = """state n = 0
+input buy = message {
+  item: text
+  count: u32
+}
+output ordered = message {
+  item: text
+  count: u32
+  to: {
+    city: text
+  }
+}
+output copied = message {
+  item: text
+  count: u32
+  to: {
+    city: text
+  }
+}
+on buy {
+  n = n + 1
+  send ordered { item: buy.item, count: buy.count, to: { city: "Seoul" } }
+  send copied { item: buy.item, count: buy.count, to: { city: "Busan" } }
+}
+view sent = n
+"""
+
+
+def server_windows(aup, pure, work):
+    """Each --send holds a window of its sends (--window bytes past what its
+    receiver has), not the whole outbox (docs/design/013-memory-budget.md,
+    step 2). A sender's two outputs, one linked (pure://) and one over HTTP,
+    both receivers down: 300 buys wait, each outlet holding some 2,000
+    bytes of them. When the receivers come up, the outlets take the rest
+    from the outbox as their receivers store what they hold, and each
+    receiver applies all 300, once each."""
+    import select
+    import socket
+    import time
+    sender_module, receiver_module = work / 'window-sender.pmod', work / 'window-receiver.pmod'
+    for module, text in ((sender_module, WINDOW_SENDER), (receiver_module, LINK_RECEIVER)):
+        source = module.with_suffix('.aup')
+        source.write_text(text)
+        compile_module(aup, source, module)
+
+    def free_port(kind=socket.SOCK_STREAM):
+        with socket.socket(socket.AF_INET, kind) as probe:
+            probe.bind(('127.0.0.1', 0))
+            return probe.getsockname()[1]
+
+    def start(args, port):
+        process = subprocess.Popen([str(a) for a in args] + ['--port', str(port)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        line = process.stdout.readline() if ready else b''
+        assert line, f'host did not start: {process.stderr.read(2000) if process.poll() is not None else ""}'
+        return process, json.loads(line)
+
+    def stop(process):
+        process.terminate()
+        _, error = process.communicate(timeout=30)
+        assert process.returncode == 0, error[-1000:]
+        return [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')][-1]
+
+    def number(port, view):
+        return int(http(port, 'GET', f'/views/{view}')[3])
+
+    keys = {}
+    for name in ('sender', 'receiver'):
+        process, info = start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'window-key',
+                               '--key', work / f'window-{name}.key'], 0)
+        keys[name] = info['public_key']
+        stop(process)
+    port_a, port_b, port_c, link_port = free_port(), free_port(), free_port(), free_port(socket.SOCK_DGRAM)
+    sender = start([pure / 'build/pure-serve', '--module', sender_module, '--store', work / 'window-a',
+                    '--key', work / 'window-sender.key', '--window', 2000,
+                    '--send', f'ordered=pure://127.0.0.1:{link_port}/order', '--seal', f'ordered={keys["receiver"]}',
+                    '--send', f'copied=http://127.0.0.1:{port_c}/inputs/order'], port_a)[0]
+    receivers, stats, total = [], {}, 0
+    try:
+        for i in range(300):
+            count = i % 50 + 1
+            assert post(port_a, '/inputs/buy', {'item': f'i{i:03}', 'count': count})[0] == 200
+            total += count
+        time.sleep(0.5)
+        receivers.append(start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'window-b',
+                                '--key', work / 'window-receiver.key', '--link-port', link_port,
+                                '--sender', f'window-sender.ordered={keys["sender"]}'], port_b)[0])
+        receivers.append(start([pure / 'build/pure-serve', '--module', receiver_module, '--store', work / 'window-c'],
+                               port_c)[0])
+        deadline = time.time() + 60
+        while (number(port_b, 'count') < 300 or number(port_c, 'count') < 300) and time.time() < deadline:
+            time.sleep(0.05)
+        for port in (port_b, port_c):
+            assert number(port, 'count') == 300 and number(port, 'total') == total, (port, number(port, 'count'))
+    finally:
+        for name, process in zip(('b', 'c'), receivers):
+            stats[name] = stop(process)
+        stats['a'] = stop(sender)
+    assert stats['a']['windows_full'] >= 1, stats['a']
+    return {'windows_full': stats['a']['windows_full'], 'wire_deliveries': stats['a']['delivered'],
+            'link_records': stats['a']['link_records']}
+
 def server_links_independent(aup, pure, work):
     """A receiver written from docs/design/012-link-protocol.md alone, in
     Python with the cryptography package and no code of link/: a Pure node
@@ -2918,6 +3022,7 @@ def main():
         report['server_links_udp_lossy'] = server_links_udp_lossy(aup, pure, work)
         report['server_links_refused'] = server_links_refused(aup, pure, work)
         report['server_memory'] = server_memory(aup, pure, work)
+        report['server_windows'] = server_windows(aup, pure, work)
         report['server_links_independent'] = server_links_independent(aup, pure, work)
         report['server_links_moved'] = server_links_moved(aup, pure, work)
         report['server_webhook'] = server_webhook(aup, pure, work)

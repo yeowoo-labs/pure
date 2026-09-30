@@ -251,7 +251,7 @@ struct PureLinkSender {
     /* Their bytes, one after another as queued (a record's never cut by the
      * ring's end): taken back in order as they are stored. */
     unsigned char *ring;
-    size_t ring_capacity;
+    size_t ring_capacity, held; /* held: the bytes of the records, together */
     uint64_t queued, stored; /* the last queued; saved by the receiver */
     uint64_t run, next_pn, in_run;
     PureAead *out, *in; /* made once the receiver's key is known */
@@ -461,6 +461,7 @@ bool pure_link_sender_queue(PureLinkSender *l, uint64_t seq, const unsigned char
     if (!ok) return false;
     *record_at(l, l->count++) = r;
     l->queued = seq;
+    l->held += size;
     return true;
 }
 
@@ -699,6 +700,7 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
             Record *r = record_at(l, 0);
             for (uint32_t i = 0; i < r->parts; ++i) l->received -= part_of(r, i)->state == RECEIVED;
             free(r->more); /* its bytes go back with the ring's head */
+            l->held -= r->size;
             l->head = (l->head + 1) & (l->capacity - 1);
             --l->count;
         }
@@ -1189,6 +1191,8 @@ void pure_link_sender_epochs(PureLinkSender *l, uint64_t every_ns, uint64_t byte
 size_t pure_link_sender_datagram(const PureLinkSender *l) { return l->datagram; }
 
 uint64_t pure_link_sender_stored(const PureLinkSender *l) { return l->stored; }
+
+size_t pure_link_sender_held(const PureLinkSender *l) { return l->held; }
 
 void pure_link_sender_counts(const PureLinkSender *l, PureLinkCounts *out) {
     *out = l->counts;

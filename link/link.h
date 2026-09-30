@@ -22,6 +22,8 @@ bool pure_link_queue(PureLink *, uint64_t seq, const unsigned char *bytes, size_
 uint64_t pure_link_queued(PureLink *);
 /* The last number the receiver saved; any thread. */
 uint64_t pure_link_delivered(PureLink *);
+/* The bytes of the sends queued and not yet saved; any thread. */
+size_t pure_link_held(PureLink *);
 /* Packets go in bursts with UDP GSO where the system has it (at first);
  * off, each in a call of its own: for a path whose queues take a burst as
  * one packet (netem does). Before pure_link_start. */

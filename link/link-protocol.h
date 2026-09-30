@@ -196,6 +196,8 @@ void pure_link_sender_epochs(PureLinkSender *, uint64_t every_ns, uint64_t bytes
 /* The last number queued; the last the receiver stored. */
 uint64_t pure_link_sender_queued(const PureLinkSender *);
 uint64_t pure_link_sender_stored(const PureLinkSender *);
+/* The bytes of the sends queued and not yet stored. */
+size_t pure_link_sender_held(const PureLinkSender *);
 void pure_link_sender_counts(const PureLinkSender *, PureLinkCounts *);
 void pure_link_sender_free(PureLinkSender *);
 

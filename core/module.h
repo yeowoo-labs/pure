@@ -340,6 +340,7 @@ typedef struct {
      * outputs a module dropped. */
     PureList *outbox;
     size_t sent_saved, durable_sent_saved, durable_outbox;
+    uint64_t sends_gone; /* how many ever left it: a host's places in it move back at most that many */
     uint64_t last_sent[PURE_MODULE_INPUTS], saved_sent[PURE_MODULE_INPUTS];
     struct PureCarried { char name[PURE_MODULE_NAME]; uint64_t last; } *carried;
     unsigned carried_count;
@@ -438,8 +439,9 @@ PureResult pure_app_replace(PureApp *, const PureModule *);
  * and trims what its receiver has saved; a receiver applies each once. */
 typedef bool (*PureSentVisit)(void *context, uint32_t output, uint64_t seq, PureSpan payload);
 void pure_app_outbox(const PureApp *, PureSentVisit visit, void *context);
-/* The same, newest first (a host looking only for what is new stops early). */
-void pure_app_outbox_newest(const PureApp *, PureSentVisit visit, void *context);
+/* The saved send at a place in the outbox (0 the oldest, below sent_saved);
+ * false when its output is not the module's. */
+bool pure_app_sent(const PureApp *, size_t at, uint32_t *output, uint64_t *seq, PureSpan *payload);
 /* Forget output's saved sends numbered up to through (saved with the next save). */
 void pure_app_trim(PureApp *, uint32_t output, uint64_t through);
 /* Deliver a message event from source (a sender's name, 1 to 64 printable
