@@ -130,9 +130,9 @@ static double *numbers(const Layout *l, const Node *leaf, unsigned f) { return (
 static PureSpan *texts(const Layout *l, const Node *leaf, unsigned f) { return (PureSpan *)((char *)leaf + l->column[f]); }
 
 static PureCell cell_at(const Layout *l, const Node *leaf, unsigned i, unsigned f) {
-    if (!l->text_fields[f]) return (PureCell){numbers(l, leaf, f)[i], NULL, 0};
+    if (!l->text_fields[f]) return (PureCell){.num = numbers(l, leaf, f)[i]};
     PureSpan text = texts(l, leaf, f)[i];
-    return (PureCell){0, (unsigned char *)text.data, text.size};
+    return (PureCell){.text = (unsigned char *)text.data, .size = text.size};
 }
 
 static void put_cells(const Layout *l, Node *leaf, unsigned i, const PureCell *cells) {
@@ -706,7 +706,7 @@ static bool decode_cell(const Layout *l, unsigned field, const unsigned char *by
     }
     if (bits > size - *at || (l->text_fields[field] == 1 && !pure_utf8_valid((PureSpan){bytes + *at, (size_t)bits})))
         return false;
-    *cell = (PureCell){0, (unsigned char *)bytes + *at, (size_t)bits};
+    *cell = (PureCell){.text = (unsigned char *)bytes + *at, .size = (size_t)bits};
     *at += (size_t)bits;
     return true;
 }
@@ -769,7 +769,7 @@ static bool get_compact(const Layout *l, unsigned field, const unsigned char *by
     if (l->text_fields[field]) {
         if (value > size - *at || (l->text_fields[field] == 1 && !pure_utf8_valid((PureSpan){bytes + *at, (size_t)value})))
             return false;
-        *cell = (PureCell){0, (unsigned char *)bytes + *at, (size_t)value};
+        *cell = (PureCell){.text = (unsigned char *)bytes + *at, .size = (size_t)value};
         *at += (size_t)value;
         return true;
     }

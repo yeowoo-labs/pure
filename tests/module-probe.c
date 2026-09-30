@@ -103,7 +103,7 @@ int main(int argc, char **argv) {
     printf("{\"inputs\":%d,\"ranged\":%u,\"states\":{", argc - 2, ranged);
     for (uint32_t s = 0, shown = 0; s < modules[0].states; ++s)
         if (modules[0].state_type[s] == PURE_STATE_NUM || modules[0].state_type[s] == PURE_STATE_INDEX)
-            printf("%s\"%s\":%.17g", shown++ ? "," : "", modules[0].state_names[s], apps[0].values[s]);
+            printf("%s\"%s\":%.17g", shown++ ? "," : "", modules[0].state_names[s], apps[0].values[s].num);
     printf("}}\n");
     for (int k = 0; k < 2; ++k) {
         pure_app_stop(&apps[k]);

@@ -43,7 +43,7 @@ PureList *pure_runtime_list_new(uint32_t place);
 /* Open the stored numbers, cursors and indices, and put each stored one of the
  * same name and kind that still fits into values, for the states of m that
  * kept marks as new (-1); texts and lists are m's. */
-PureResult pure_save_open_values(PureApp *, const PureModule *m, double *values, const int *kept,
+PureResult pure_save_open_values(PureApp *, const PureModule *m, PureValue *values, const int *kept,
                                  PureDraft *const *texts, PureList *const *lists);
 /* The stored links of a starting app (module.h, PureApp), after its runtime
  * lists. The sends left in the outbox of an output whose fields changed are
@@ -56,7 +56,7 @@ PureResult pure_save_open_values(PureApp *, const PureModule *m, double *values,
 PureResult pure_save_open_links(PureApp *, const PureModule *m, bool *heard_moved, bool *sent_moved);
 /* Publish the documents and every state changed since the last save
  * (values are the states' numbers); revisions are the documents'. */
-PureResult pure_save_commit(PureApp *, const double *values, void *const *documents, size_t document_count,
+PureResult pure_save_commit(PureApp *, const PureValue *values, void *const *documents, size_t document_count,
                             int64_t *revisions);
 
 /* A message's fields laid out as load lays them: in order, the fixed ones

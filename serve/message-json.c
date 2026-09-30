@@ -349,7 +349,7 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
         for (unsigned k = 0; k < record->count; ++k) {
             uint32_t at_field = record->first + k;
             if (m->record_field_text[at_field]) {
-                uint32_t constant = (uint32_t)m->record_field_default[at_field];
+                uint32_t constant = (uint32_t)m->record_field_default[at_field].num;
                 PureSpan text = given[k] ? texts[k]
                                          : (PureSpan){m->constant_data + m->constant_offset[constant], m->constant_length[constant]};
                 if (!rows_room(b, 4 + text.size)) return "memory";
@@ -357,7 +357,7 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
                 if (text.size) memcpy(b->rows + b->rows_size + 4, text.data, text.size);
                 b->rows_size += 4 + text.size;
             } else {
-                double value = given[k] ? numbers[k] : m->record_field_default[at_field];
+                double value = given[k] ? numbers[k] : m->record_field_default[at_field].num;
                 uint64_t bits;
                 memcpy(&bits, &value, 8);
                 if (!rows_room(b, 8)) return "memory";

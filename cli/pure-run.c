@@ -98,8 +98,8 @@ static void show(PureApp *app, const char *failure) {
             pure_draft_read(app->texts[i], 0, pure_draft_size(app->texts[i]), json_span, NULL);
             putchar('"');
         } else if (m->state_type[i] == PURE_STATE_LIST) show_list(m, app->lists[i], &m->record[m->state_ref[i]]);
-        else if (m->state_type[i] == PURE_STATE_BOOL) printf("%s", app->values[i] ? "true" : "false");
-        else printf("%.17g", app->values[i]);
+        else if (m->state_type[i] == PURE_STATE_BOOL) printf("%s", app->values[i].num ? "true" : "false");
+        else printf("%.17g", app->values[i].num);
     }
     printf("},\"views\":{");
     bool first = true;

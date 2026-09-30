@@ -696,7 +696,7 @@ PURE_COLD static bool fits(const PureModule *m, PureDraft *const *texts, PureLis
     return pure_draft_read(text, at, 1, gather, &w) == PURE_OK && (byte & 0xC0) != 0x80;
 }
 
-static size_t encode_values(const PureModule *m, const double *values, unsigned char *out) {
+static size_t encode_values(const PureModule *m, const PureValue *values, unsigned char *out) {
     size_t at = 4;
     memcpy(out, values_magic, 4);
     for (uint32_t i = 0; i < m->states; ++i) {
@@ -715,7 +715,7 @@ static size_t encode_values(const PureModule *m, const double *values, unsigned 
 
 enum { VALUES_BYTES = 4 + PURE_MODULE_STATES * (2 + PURE_MODULE_NAME + 8) };
 
-PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, double *values, const int *kept,
+PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, PureValue *values, const int *kept,
                                  PureDraft *const *texts, PureList *const *lists) {
     bool scalars = false, fresh = false;
     for (uint32_t i = 0; i < m->states; ++i)
@@ -743,7 +743,7 @@ PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, do
         if (state >= 0 && kept[state] < 0 && scalar(type) &&
             (m->state_type[state] == type || (valued(type) && valued(m->state_type[state]))) &&
             fits(m, texts, lists, (uint32_t)state, value))
-            values[state] = m->state_type[state] == PURE_STATE_BOOL ? pure_as_bool(value, 0) : value;
+            values[state].num = m->state_type[state] == PURE_STATE_BOOL ? pure_as_bool(value, 0) : value;
     }
     free(bytes);
     return ok ? PURE_OK : PURE_STORE_ERROR;
@@ -1002,7 +1002,7 @@ static unsigned char *list_changes(const PureApp *app, size_t *size) {
     return payload;
 }
 
-PureResult pure_save_commit(PureApp *app, const double *values, void *const *documents, size_t document_count,
+PureResult pure_save_commit(PureApp *app, const PureValue *values, void *const *documents, size_t document_count,
                             int64_t *revisions) {
     if (!pure_save_enabled(app)) {
         /* Without a host that saves together, a save has one document at most. */

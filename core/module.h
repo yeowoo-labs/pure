@@ -115,6 +115,11 @@ typedef enum {
     PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4,
     PURE_STATE_BOOL = 5
 } PureStateType;
+/* A value's 8 bytes: a number (a bool's 0 or 1, a cursor's or an index's
+ * position too), or an integer. What a value is its state's or field's type
+ * says, and the verifier keeps to it: moves copy the bytes, and only what
+ * computes reads them as one or the other. */
+typedef union { double num; int64_t i64; } PureValue;
 /* A cursor that stays before text inserted at it (a mark); other cursors go
  * after it (a caret). A list of a message's rows (its state's flags hold
  * PURE_LIST_ROWS beside the key byte; its name is the field's path): a
@@ -142,7 +147,7 @@ typedef enum {
  * pass over its list (shape: its PureShape + 1), and a fold or a walk whose
  * test bounds a keyed list's key reads only the items in bounds (range: its
  * PureRange + 1). */
-typedef struct { double value; uint32_t arg; uint8_t op, plan, shape, range; } PureOp;
+typedef struct { union { double value; int64_t integer; }; uint32_t arg; uint8_t op, plan, shape, range; } PureOp;
 typedef struct { uint32_t start, length; } PureBlock;
 typedef struct { uint32_t event; PureBlock code; } PureHandler;
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint16_t rows; uint32_t offset; } PureField;
@@ -194,7 +199,7 @@ typedef struct {
     uint8_t state_key[PURE_MODULE_STATES];
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
-    double initial[PURE_MODULE_STATES];
+    PureValue initial[PURE_MODULE_STATES];
     uint8_t view_type[PURE_MODULE_VIEWS];
     uint16_t view_table[PURE_MODULE_VIEWS]; /* a column's table view + 1, or 0 */
     uint16_t view_list[PURE_MODULE_VIEWS];  /* the list of a table or column */
@@ -218,7 +223,7 @@ typedef struct {
     char record_field_names[PURE_MODULE_RECORD_FIELDS][PURE_MODULE_NAME];
     uint8_t record_field_text[PURE_MODULE_RECORD_FIELDS];
     uint8_t record_field_bool[PURE_MODULE_RECORD_FIELDS]; /* a bool: a number field (0 or 1) as lists go */
-    double record_field_default[PURE_MODULE_RECORD_FIELDS]; /* number (a bool's 0 or 1), or text constant index */
+    PureValue record_field_default[PURE_MODULE_RECORD_FIELDS]; /* a number (a bool's 0 or 1), or a text constant's index */
 } PureModule;
 
 /* Decode and verify into out, which must be zeroed (a static one is) or hold
@@ -313,7 +318,7 @@ enum { PURE_LIST_HEARD = PURE_MODULE_STATES, PURE_LIST_OUTBOX, PURE_LISTS_STORED
 typedef struct {
     const PureModule *module;
     PureData data;
-    double values[PURE_MODULE_STATES]; /* numbers, cursor byte positions and list indices */
+    PureValue values[PURE_MODULE_STATES]; /* numbers, bools, cursor byte positions and list indices */
     PureDraft *texts[PURE_MODULE_STATES];
     PureList *lists[PURE_MODULE_STATES];
     PureUndo undo; /* list changes of the current event */
@@ -337,7 +342,7 @@ typedef struct {
     /* Events since the last save: what a failed save returns to, and the
      * documents messages opened (held until the save). */
     bool deferred, open;
-    double durable_values[PURE_MODULE_STATES];
+    PureValue durable_values[PURE_MODULE_STATES];
     PureVersion durable_texts[PURE_MODULE_STATES];
     size_t durable_lists[PURE_MODULE_STATES]; /* each stored list's journal length */
     uint64_t durable_ticks, durable_events;

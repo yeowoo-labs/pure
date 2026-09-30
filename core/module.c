@@ -991,9 +991,9 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             (rows && !strchr(out->state_names[i], '.')))
             REFUSE("state name", i);
         if (value) {
-            out->initial[i] = read_double(at + 8);
-            if (!isfinite(out->initial[i])) REFUSE("non-finite initial value", i);
-            if (out->state_type[i] == PURE_STATE_BOOL && !canonical_bool(out->initial[i])) REFUSE("bool initial value", i);
+            out->initial[i].num = read_double(at + 8);
+            if (!isfinite(out->initial[i].num)) REFUSE("non-finite initial value", i);
+            if (out->state_type[i] == PURE_STATE_BOOL && !canonical_bool(out->initial[i].num)) REFUSE("bool initial value", i);
         } else {
             if ((flags && !(cursor && flags == PURE_CURSOR_STAYS) && !(list && flags <= PURE_RECORD_FIELDS) && !rows) ||
                 read32(at + 8) > UINT16_MAX) REFUSE("state reference", i);
@@ -1101,9 +1101,10 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                 REFUSE("record field", f);
             for (uint32_t k = record->first; k < f; ++k)
                 if (!strcmp(out->record_field_names[k], out->record_field_names[f])) REFUSE("duplicate record field", f);
-            out->record_field_default[f] = type == 1 ? read32(entry + 8) : read_double(entry + 8);
+            out->record_field_default[f].num = type == 1 ? read32(entry + 8) : read_double(entry + 8);
+            double given = out->record_field_default[f].num;
             if (type == 1 ? read32(entry + 12) || read32(entry + 8) >= out->constants
-                          : !isfinite(out->record_field_default[f]) || (type == 2 && !canonical_bool(out->record_field_default[f])))
+                          : !isfinite(given) || (type == 2 && !canonical_bool(given)))
                 REFUSE("record field default", f);
         }
         next_record_field += record->count;
@@ -1344,7 +1345,7 @@ int pure_module_column(const PureModule *m, uint32_t table, const char *name) {
 static double minimum(double a, double b) { return a < b || (a == b && signbit(a)) ? a : b; }
 static double maximum(double a, double b) { return a > b || (a == b && !signbit(a)) ? a : b; }
 
-typedef struct { double num; PureBytes bytes; } Slot;
+typedef struct { union { double num; int64_t i64; }; PureBytes bytes; } Slot;
 /* A walk (EACH): the list, the item it runs for, where it ends (items the
  * walk removes move it), and whether that item left. */
 typedef struct { uint32_t list; size_t at, end; bool removed; } Walk;
@@ -1453,32 +1454,32 @@ static PureBytes text_of(const PureApp *app, uint32_t state) {
     return (PureBytes){FROM_TEXT, (uint16_t)state, version, 0, version.bytes};
 }
 
-static void move_cursors(const PureModule *m, double *values, uint32_t text, size_t at,
+static void move_cursors(const PureModule *m, PureValue *values, uint32_t text, size_t at,
                          size_t removed, size_t inserted) {
     for (uint32_t c = 0; c < m->states; ++c) {
         if (m->state_type[c] != PURE_STATE_CURSOR || m->state_ref[c] != text) continue;
-        double position = values[c];
+        double position = values[c].num;
         if (removed) {
             if (position >= at + removed) position -= (double)removed;
             else if (position > at) position = (double)at;
         } else if (position > at || (position == at && !(m->state_flags[c] & PURE_CURSOR_STAYS)))
             position += (double)inserted;
-        values[c] = position;
+        values[c].num = position;
     }
 }
 
 /* Indices follow their item across an insert or remove; an index whose item
  * was removed names the next item (or the last, or 0 in an empty list). */
-static void move_indices(const PureModule *m, double *values, uint32_t list, size_t count,
+static void move_indices(const PureModule *m, PureValue *values, uint32_t list, size_t count,
                          size_t at, bool inserted) {
     double last = count ? (double)(count - 1) : 0;
     for (uint32_t i = 0; i < m->states; ++i) {
         if (m->state_type[i] != PURE_STATE_INDEX || m->state_ref[i] != list) continue;
         if (inserted) {
-            if (count > 1 && values[i] >= (double)at) ++values[i];
+            if (count > 1 && values[i].num >= (double)at) ++values[i].num;
         } else {
-            if (values[i] > (double)at) --values[i];
-            values[i] = minimum(values[i], last);
+            if (values[i].num > (double)at) --values[i].num;
+            values[i].num = minimum(values[i].num, last);
         }
     }
 }
@@ -1550,7 +1551,7 @@ static PureUndo *undo_for(PureApp *app, uint32_t list) {
                ? NULL : &app->undo;
 }
 
-static PureResult run(const PureModule *m, double *values, PureBlock block, Event *ev, Slot *result);
+static PureResult run(const PureModule *m, PureValue *values, PureBlock block, Event *ev, Slot *result);
 
 /* ---- Folds and filters a leaf at a time ------------------------------
  * A block whose instructions all have lane forms (has_lanes) runs for a run
@@ -1656,7 +1657,7 @@ static bool lanes_op(uint8_t op, const double *a, size_t sa, const double *b, si
  * result holds what it leaves (lanes may point into store, a row of lanes
  * per stack depth, or into the list's leaf). false when run would fault for
  * some item. */
-static bool run_lanes(const PureModule *m, const double *values, PureBlock block, const Event *ev, const PureRun *items,
+static bool run_lanes(const PureModule *m, const PureValue *values, PureBlock block, const Event *ev, const PureRun *items,
                       Lanes *result, double (*store)[PURE_LIST_RUN], Memo *memo, const PureShape *shape) {
     PureApp *app = ev->app;
     Lanes stack[PURE_MODULE_STACK];
@@ -1680,7 +1681,7 @@ static bool run_lanes(const PureModule *m, const double *values, PureBlock block
         }
         switch (op->op) {
         case PURE_OP_CONST: stack[sp++] = (Lanes){NULL, op->value, false, 0}; continue;
-        case PURE_OP_LOAD: stack[sp++] = (Lanes){NULL, values[arg], false, 0}; continue;
+        case PURE_OP_LOAD: stack[sp++] = (Lanes){NULL, values[arg].num, false, 0}; continue;
         case PURE_OP_FIELD: {
             const PureField *field = &m->field[ev->shape->field_start + arg];
             const unsigned char *given = ev->arguments ? app->arguments.data : app->payload.data;
@@ -1689,7 +1690,7 @@ static bool run_lanes(const PureModule *m, const double *values, PureBlock block
             stack[sp++] = (Lanes){NULL, value, false, 0};
             continue;
         }
-        case PURE_OP_INDEX_LOAD: stack[sp++] = (Lanes){NULL, values[arg], false, m->state_ref[arg]}; continue;
+        case PURE_OP_INDEX_LOAD: stack[sp++] = (Lanes){NULL, values[arg].num, false, m->state_ref[arg]}; continue;
         case PURE_OP_ROW: stack[sp++] = (Lanes){NULL, 0, true, (uint16_t)arg}; continue;
         case PURE_OP_LOCAL_LOAD: stack[sp++] = (Lanes){NULL, ev->locals[arg & 0xFF], false, (uint16_t)(arg >> 16)}; continue;
         case PURE_OP_OUTER_ROW: stack[sp++] = (Lanes){NULL, (double)ev->outer, false, (uint16_t)arg}; continue;
@@ -1743,7 +1744,7 @@ static bool run_lanes(const PureModule *m, const double *values, PureBlock block
             if (uniform(top)) {
                 double value;
                 if (!recalled(memo, pc - block.start, &value)) {
-                    size_t at = pure_list_seek(keyed, key, (PureCell){top->value, NULL, 0}, &found);
+                    size_t at = pure_list_seek(keyed, key, (PureCell){.num = top->value}, &found);
                     if (find && !found) return false;
                     remember(memo, pc - block.start, value = find ? (double)at : found);
                 }
@@ -1752,7 +1753,7 @@ static bool run_lanes(const PureModule *m, const double *values, PureBlock block
             }
             const double *keys = lanes_of(top, scratch[0], items);
             for (unsigned i = 0; i < n; ++i) {
-                size_t at = pure_list_seek(keyed, key, (PureCell){keys[i], NULL, 0}, &found);
+                size_t at = pure_list_seek(keyed, key, (PureCell){.num = keys[i]}, &found);
                 if (find && !found) return false;
                 out[i] = find ? (double)at : found;
             }
@@ -1894,7 +1895,7 @@ static bool fold_in(Fold *fold, size_t row, double value, double counts) {
 }
 
 /* The fold's block for its items from first to last, one at a time. */
-static PureResult fold_rows(const PureModule *m, double *values, PureBlock inner, Event *per, size_t first,
+static PureResult fold_rows(const PureModule *m, PureValue *values, PureBlock inner, Event *per, size_t first,
                             size_t last, Fold *fold) {
     bool one = fold->how == PURE_FOLD_COUNT || fold->how == PURE_FOLD_FIRST;
     for (size_t row = first; row < last && !fold->done; ++row) {
@@ -1912,7 +1913,7 @@ static PureResult fold_rows(const PureModule *m, double *values, PureBlock inner
 /* The fold's block a leaf of its list at a time; a run where an item would
  * fault goes item by item. The items join the fold in order, so a sum adds
  * as it would one at a time. */
-static PureResult fold_runs(const PureModule *m, double *values, PureBlock inner, const PureList *list, Event *per,
+static PureResult fold_runs(const PureModule *m, PureValue *values, PureBlock inner, const PureList *list, Event *per,
                             Fold *fold, size_t from, size_t to) {
     double store[PURE_MODULE_STACK][PURE_LIST_RUN], scratch[2][PURE_LIST_RUN];
     bool one = fold->how == PURE_FOLD_COUNT || fold->how == PURE_FOLD_FIRST;
@@ -1957,15 +1958,15 @@ static PureResult fold_runs(const PureModule *m, double *values, PureBlock inner
 /* The positions of the items whose keys are from low up to before high. */
 static void slice_of(const PureList *list, unsigned key, double low, double high, size_t *from, size_t *to) {
     bool found;
-    *from = pure_list_seek(list, key, (PureCell){low, NULL, 0}, &found);
-    *to = pure_list_seek(list, key, (PureCell){high, NULL, 0}, &found);
+    *from = pure_list_seek(list, key, (PureCell){.num = low}, &found);
+    *to = pure_list_seek(list, key, (PureCell){.num = high}, &found);
     if (*to < *from) *to = *from;
 }
 
 /* The positions of the items whose keys a range allows: its bounds run
  * alone, then found by key. false when a bound faults: the test then runs
  * for every item, as written (and faults as it would). */
-static bool range_bounds(const PureModule *m, double *values, const PureRange *range, const PureList *list, unsigned key,
+static bool range_bounds(const PureModule *m, PureValue *values, const PureRange *range, const PureList *list, unsigned key,
                          Event *ev, size_t *from, size_t *to) {
     PureApp *app = ev->app;
     PureFault fault = app->fault;
@@ -1982,7 +1983,7 @@ static bool range_bounds(const PureModule *m, double *values, const PureRange *r
         ev->arena->used = mark;
         if (!ok) break;
         bool found;
-        size_t at = pure_list_seek(list, key, (PureCell){bound.num, NULL, 0}, &found);
+        size_t at = pure_list_seek(list, key, (PureCell){.num = bound.num}, &found);
         at += (relation == PURE_OP_GT || relation == PURE_OP_LE) && found; /* past the key itself */
         if (side) *to = at < *to ? at : *to;
         else *from = at;
@@ -2109,7 +2110,7 @@ static Group *group_of(struct PurePass *pass, double key, unsigned how, bool add
 }
 
 /* Every group's fold in one pass over the list, a leaf at a time. */
-static bool group_pass(const PureModule *m, double *values, PureBlock inner, const PureShape *shape, unsigned how,
+static bool group_pass(const PureModule *m, PureValue *values, PureBlock inner, const PureShape *shape, unsigned how,
                        const PureList *list, Event *per, struct PurePass *pass) {
     double store[PURE_MODULE_STACK][PURE_LIST_RUN], scratch[2][PURE_LIST_RUN];
     bool one = how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST;
@@ -2175,7 +2176,7 @@ static size_t ranked(const struct PurePass *pass, uint8_t relation, double key) 
 }
 
 /* A shaped fold from its list's pass: false leaves it to run as written. */
-static bool fold_shaped(const PureModule *m, double *values, const PureOp *op, const PureList *list, Event *per,
+static bool fold_shaped(const PureModule *m, PureValue *values, const PureOp *op, const PureList *list, Event *per,
                         Fold *fold) {
     PureApp *app = per->app;
     const PureShape *shape = &m->shape[op->shape - 1];
@@ -2211,7 +2212,7 @@ static bool fold_shaped(const PureModule *m, double *values, const PureOp *op, c
     return true;
 }
 
-static PureResult run(const PureModule *m, double *values, PureBlock block, Event *ev, Slot *result) {
+static PureResult run(const PureModule *m, PureValue *values, PureBlock block, Event *ev, Slot *result) {
     Slot stack[PURE_MODULE_STACK];
     size_t sp = 0;
     PureApp *app = ev->app;
@@ -2225,11 +2226,11 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         Slot *top = sp ? &stack[sp - 1] : stack;
         switch (op->op) {
         case PURE_OP_CONST: stack[sp++].num = op->value; continue;
-        case PURE_OP_LOAD: stack[sp++].num = values[arg]; continue;
+        case PURE_OP_LOAD: stack[sp++].i64 = values[arg].i64; continue; /* the bits, a number's or a bool's */
         case PURE_OP_DT: stack[sp++].num = ev->dt; continue;
         case PURE_OP_NOW: stack[sp++].num = app->now; continue;
         case PURE_OP_FLOOR: top->num = floor(top->num); continue;
-        case PURE_OP_STORE: case PURE_OP_CUR_STORE: values[arg] = stack[--sp].num; continue;
+        case PURE_OP_STORE: case PURE_OP_CUR_STORE: values[arg].i64 = stack[--sp].i64; continue;
         case PURE_OP_JZ: if (stack[--sp].num == 0) pc = arg; continue;
         case PURE_OP_JMP: pc = arg; continue;
         case PURE_OP_NEG: top->num = -top->num; continue;
@@ -2307,7 +2308,7 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
         }
         /* Positions: a cursor or an index, with the text or list it is in. */
         case PURE_OP_CUR_LOAD: case PURE_OP_INDEX_LOAD:
-            stack[sp].num = values[arg];
+            stack[sp].num = values[arg].num;
             stack[sp++].bytes.owner = m->state_ref[arg];
             continue;
         case PURE_OP_CUR_START: case PURE_OP_CUR_END: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
@@ -2360,7 +2361,7 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             if (status != PURE_OK) goto refused;
             if (op->op == PURE_OP_TEXT_SET) {
                 for (uint32_t c = 0; c < m->states; ++c)
-                    if (m->state_type[c] == PURE_STATE_CURSOR && m->state_ref[c] == arg) values[c] = 0;
+                    if (m->state_type[c] == PURE_STATE_CURSOR && m->state_ref[c] == arg) values[c].num = 0;
             } else move_cursors(m, values, arg, at, 0, span.size);
             continue;
         }
@@ -2417,7 +2418,7 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
                 PureSpan span = {0};
                 if (text_field(m, arg, f) && (status = contiguous(app, arena, stack[base + f].bytes, &span)) != PURE_OK)
                     return status;
-                cells[f] = (PureCell){stack[base + f].num, (unsigned char *)span.data, span.size};
+                cells[f] = (PureCell){.i64 = stack[base + f].i64, .text = (unsigned char *)span.data, .size = span.size};
             }
             if (m->state_key[arg]) { /* a keyed list places the item by its key */
                 bool found;
@@ -2460,7 +2461,8 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             status = text_field(m, list, field) ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
             if (status == PURE_OK)
                 status = pure_list_set(app->lists[list], at, field,
-                                       (PureCell){value.num, (unsigned char *)span.data, span.size}, undo_for(app, list));
+                                       (PureCell){.i64 = value.i64, .text = (unsigned char *)span.data, .size = span.size},
+                                       undo_for(app, list));
             arena->used = mark;
             if (status != PURE_OK) goto refused;
             continue;
@@ -2472,7 +2474,7 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
                 kind = PURE_FAULT_NOT_FOUND;
                 goto failed;
             }
-            values[arg] = position;
+            values[arg].num = position;
             continue;
         }
         case PURE_OP_FOLD: {
@@ -2554,11 +2556,11 @@ static PureResult run(const PureModule *m, double *values, PureBlock block, Even
             /* A keyed list's item by key, found by halving: FIND gives its index, HAS whether it is there. */
             unsigned key = m->state_key[arg] - 1u;
             size_t mark = arena->used;
-            PureCell cell = {top->num, NULL, 0};
+            PureCell cell = {.i64 = top->i64};
             if (text_field(m, arg, key)) {
                 PureSpan span;
                 if ((status = contiguous(app, arena, top->bytes, &span)) != PURE_OK) return status;
-                cell = (PureCell){0, (unsigned char *)span.data, span.size};
+                cell = (PureCell){.text = (unsigned char *)span.data, .size = span.size};
             }
             bool found;
             size_t at = pure_list_seek(app->lists[arg], key, cell, &found);
@@ -2760,7 +2762,7 @@ struct PureSnapshot {
     unsigned refs;
     const PureModule *module;
     uint64_t changes, epoch;
-    double values[PURE_MODULE_STATES];
+    PureValue values[PURE_MODULE_STATES];
     PureDraft *texts[PURE_MODULE_STATES];
     PureList *lists[PURE_MODULE_STATES];
     PureList *runtime[PURE_LISTS_STORED - PURE_LIST_HEARD]; /* only in a checkpoint's of one */
@@ -2942,7 +2944,8 @@ size_t pure_app_state_bytes(const PureApp *app) {
  * holding more than before, fails. */
 static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     const PureModule *m = app->module;
-    double pending[PURE_MODULE_STATES], locals[PURE_MODULE_LOCALS] = {0};
+    PureValue pending[PURE_MODULE_STATES];
+    double locals[PURE_MODULE_LOCALS] = {0};
     ev->locals = locals;
     size_t held = app->memory ? pure_app_state_bytes(app) : 0;
     Mark mark;
@@ -3019,7 +3022,7 @@ PureResult pure_app_point(PureApp *app, uint32_t state, size_t position) {
     open_burst(app); /* what a failed save returns to */
     app->fault = PURE_FAULT_NONE;
     app->fault_pc = UINT32_MAX;
-    app->values[state] = (double)position;
+    app->values[state].num = (double)position;
     ++app->events;
     ++app->changes;
     return app->deferred ? PURE_OK : pure_app_save(app);
@@ -3255,7 +3258,7 @@ static bool argue(const PureApp *app, uint32_t view, Event *ev) {
 }
 
 static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
-    double values[PURE_MODULE_STATES];
+    PureValue values[PURE_MODULE_STATES];
     memcpy(values, app->values, sizeof(values));
     app->view_arena.used = 0;
     Event ev = {.app = app, .arena = &app->view_arena, .row = row};
@@ -3315,7 +3318,7 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
         if (!argue(app, table, &ev)) return NULL;
         size_t from = 0, to = pure_list_count(list);
         if (m->view_range[table]) /* items out of the range fail the filter: they are not read */
-            range_bounds(m, (double *)app->values, &m->range[m->view_range[table] - 1], list,
+            range_bounds(m, app->values, &m->range[m->view_range[table] - 1], list,
                          m->state_key[m->view_list[table]] - 1u, &ev, &from, &to);
         for (bool more = from < to && pure_list_run(list, from, &run); more && run.start < to; more = pure_list_next(list, &run)) {
             Lanes keep;
@@ -3526,14 +3529,14 @@ PURE_COLD PureResult pure_list_migrate(PureList **out, const PureList *from, con
     for (size_t at = 0; result == PURE_OK && at < pure_list_count(from); ++at) {
         PureCell cells[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < r->count; ++f) {
-            uint32_t field = r->first + f, constant = (uint32_t)m->record_field_default[field];
+            uint32_t field = r->first + f, constant = (uint32_t)m->record_field_default[field].num;
             cells[f] = source[f] >= 0 ? pure_list_get(from, at, (unsigned)source[f]) :
                        m->record_field_text[field] ?
-                           (PureCell){0, (unsigned char *)m->constant_data + m->constant_offset[constant],
-                                      m->constant_length[constant]} :
-                           (PureCell){m->record_field_default[field], NULL, 0};
+                           (PureCell){.text = (unsigned char *)m->constant_data + m->constant_offset[constant],
+                                      .size = m->constant_length[constant]} :
+                           (PureCell){.i64 = m->record_field_default[field].i64};
             if (m->record_field_bool[field])
-                cells[f] = (PureCell){pure_as_bool(cells[f].num, m->record_field_default[field]), NULL, 0};
+                cells[f] = (PureCell){.num = pure_as_bool(cells[f].num, m->record_field_default[field].num)};
         }
         result = pure_list_insert(*out, at, cells, NULL);
     }
@@ -3673,7 +3676,7 @@ PURE_COLD static PureResult remap_outputs(PureApp *app, const PureModule *old, c
 PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) {
     const PureModule *old = app->module;
     bool stored = pure_save_enabled(app);
-    double values[PURE_MODULE_STATES] = {0};
+    PureValue values[PURE_MODULE_STATES] = {0};
     PureDraft *texts[PURE_MODULE_STATES] = {0}, *list_drafts[PURE_MODULE_STATES] = {0};
     PureList *lists[PURE_MODULE_STATES] = {0};
     PureVersion saved[PURE_MODULE_STATES] = {{0, 0}};
@@ -3720,7 +3723,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
                 rewrite[i] = result == PURE_OK && listed[i].rewrite;
             } else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
         } else values[i] = kept[i] >= 0 ? app->values[kept[i]] : module->initial[i];
-        if (module->state_type[i] == PURE_STATE_BOOL) values[i] = pure_as_bool(values[i], module->initial[i]);
+        if (module->state_type[i] == PURE_STATE_BOOL) values[i].num = pure_as_bool(values[i].num, module->initial[i].num);
     }
     /* A keyed list keeps its items in key order: one that was not keyed, or
      * keyed by another field, is put in order and its indices follow their
@@ -3747,7 +3750,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         if (module->state_type[i] != PURE_STATE_CURSOR && module->state_type[i] != PURE_STATE_INDEX) continue;
         uint32_t owner = module->state_ref[i];
         bool same = kept[i] >= 0 && kept[owner] >= 0 && old->state_ref[kept[i]] == (unsigned)kept[owner];
-        values[i] = same ? app->values[kept[i]] : 0;
+        values[i] = same ? app->values[kept[i]] : (PureValue){0};
     }
     if (result == PURE_OK && stored) result = pure_save_open_values(app, module, values, kept, texts, lists);
     /* Outputs keep their sends and numbers by name. */
@@ -3762,8 +3765,8 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     sent.rewrite = sent.rewrite || (sent_moved && lists_stored);
     for (uint32_t i = 0; i < module->states; ++i) {
         uint32_t list = module->state_ref[i];
-        if (module->state_type[i] == PURE_STATE_INDEX && moved[list] && values[i] < (double)pure_list_count(lists[list]))
-            values[i] = (double)moved[list][(size_t)values[i]];
+        if (module->state_type[i] == PURE_STATE_INDEX && moved[list] && values[i].num < (double)pure_list_count(lists[list]))
+            values[i].num = (double)moved[list][(size_t)values[i].num];
     }
     for (uint32_t i = 0; i < module->states; ++i) free(moved[i]);
     if (!old) pure_save_close_start(app);

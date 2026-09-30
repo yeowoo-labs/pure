@@ -19,7 +19,7 @@
  * cell per field: a number, or text bytes the list owns. Every change made
  * during an event is logged; a failed event undoes the log in reverse and a
  * successful one frees what it replaced. */
-typedef struct { double num; unsigned char *text; size_t size; } PureCell;
+typedef struct { union { double num; int64_t i64; }; unsigned char *text; size_t size; } PureCell;
 typedef struct PureList PureList;
 /* An event's list changes; a removed item's cells wait in cells. */
 typedef struct {

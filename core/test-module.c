@@ -240,14 +240,14 @@ static void behaviour(void) {
     double value;
     CHECK(pure_app_view(&app, 1, &value) && value == 40);
     for (int i = 0; i < 25; ++i) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
-    CHECK(app.values[0] == 25 && pure_app_view(&app, 1, &value) && value == 200);
+    CHECK(app.values[0].num == 25 && pure_app_view(&app, 1, &value) && value == 200);
     CHECK(pure_app_input(&app, 0, PURE_EDGE_UP) == PURE_OK && app.events == 26);
     /* if / else with forward JZ and JMP */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1] == 4);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1] == 5);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1] == 6);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1] == 0);
-    CHECK(pure_app_frame(&app) == PURE_OK && app.values[1] == 1.0 / 60.0 && app.ticks == 1);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 4);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 5);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 6);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 0);
+    CHECK(pure_app_frame(&app) == PURE_OK && app.values[1].num == 1.0 / 60.0 && app.ticks == 1);
     CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_INVALID);
     CHECK(pure_module_input(&module_a, "move") == 1 && pure_module_view(&module_a, "width") == 1 &&
           pure_module_state(&module_a, "missing") == -1);
@@ -260,9 +260,9 @@ static void behaviour(void) {
     static const O no_code[1];
     CHECK(load((Spec){next_states, 2, no_inputs, 0, no_views, 0, no_handlers, 0, no_code, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, &module_b) == PURE_OK);
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
-    CHECK(app.module == &module_b && app.values[0] == 7 && app.values[1] == 25);
+    CHECK(app.module == &module_b && app.values[0].num == 7 && app.values[1].num == 25);
     CHECK(pure_app_replace(&app, &module_a) == PURE_OK);
-    CHECK(app.values[0] == 25 && app.values[1] == 3);
+    CHECK(app.values[0].num == 25 && app.values[1].num == 3);
     pure_app_stop(&app);
 }
 
@@ -286,7 +286,7 @@ static void faults(void) {
     const PureFault expected[] = {PURE_FAULT_DIVIDE, PURE_FAULT_NON_FINITE, PURE_FAULT_CLAMP};
     for (uint32_t i = 0; i < 3; ++i) {
         CHECK(pure_app_input(&app, i, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == expected[i]);
-        CHECK(app.values[0] == 1 && app.values[1] == 2 && app.events == 0);
+        CHECK(app.values[0].num == 1 && app.values[1].num == 2 && app.events == 0);
     }
     /* A later handler of the same event does not run after a fault. */
     CHECK(app.fault_pc == 17);
@@ -403,7 +403,7 @@ static void mutations(void) {
             if (e % 3 == 0) pure_app_frame(&app);
             else pure_app_input(&app, e % 4, e & 1 ? PURE_EDGE_UP : PURE_EDGE_DOWN);
             for (uint32_t v = 0; v < module_a.views; ++v) { double value; pure_app_view(&app, v, &value); }
-            for (uint32_t s = 0; s < module_a.states; ++s) CHECK(isfinite(app.values[s]));
+            for (uint32_t s = 0; s < module_a.states; ++s) CHECK(isfinite(app.values[s].num));
         }
         pure_app_stop(&app);
     }
@@ -592,7 +592,7 @@ static void messages(void) {
 
     CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_NOT_FOUND && app.revision == 0);
     CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 0, 0, "hello")) == PURE_OK);
-    CHECK(app.revision == 1 && replied(&app, "hello") && app.values[0] == 1);
+    CHECK(app.revision == 1 && replied(&app, "hello") && app.values[0].num == 1);
     CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_OK && app.revision == 1 && replied(&app, "hello"));
     /* stale base conflicts before bounds; bounds fail as limit; nothing changes */
     CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 99, 0, "x")) == PURE_CONFLICT && app.revision == 1);
@@ -602,12 +602,12 @@ static void messages(void) {
     CHECK(pure_app_message(&app, 1, "doc", -1, edit_payload(buffer, 0, 0, "x")) == PURE_INVALID);
     CHECK(pure_app_message(&app, 1, "bad/key", 1, edit_payload(buffer, 0, 0, "x")) == PURE_INVALID);
     CHECK(pure_app_message(&app, 4, "doc", 1, (PureSpan){0}) == PURE_INVALID);
-    CHECK(memory.docs[0].revision == 1 && memory.docs[0].size == 5 && app.values[0] == 1);
+    CHECK(memory.docs[0].revision == 1 && memory.docs[0].size == 5 && app.values[0].num == 1);
     /* A busy commit changes neither the document nor the states. */
     memory.busy = true;
     CHECK(pure_app_message(&app, 1, "doc", 1, edit_payload(buffer, 5, 0, "!")) == PURE_BUSY);
     memory.busy = false;
-    CHECK(memory.docs[0].size == 5 && app.values[0] == 1 && app.events == 2);
+    CHECK(memory.docs[0].size == 5 && app.values[0].num == 1 && app.events == 2);
     /* The size limit of the data host fails as limit. */
     memory.limit = 6;
     CHECK(pure_app_message(&app, 1, "doc", 1, edit_payload(buffer, 5, 0, "!!")) == PURE_LIMIT);
@@ -618,9 +618,9 @@ static void messages(void) {
     CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_OK && replied(&app, ">> hello"));
     /* require: an edit that would exceed 8 bytes changes nothing */
     CHECK(pure_app_message(&app, 3, "doc", 2, edit_payload(buffer, 8, 0, "!")) == PURE_LIMIT);
-    CHECK(memory.docs[0].size == 8 && app.values[0] == 1);
+    CHECK(memory.docs[0].size == 8 && app.values[0].num == 1);
     CHECK(pure_app_message(&app, 3, "doc", 2, edit_payload(buffer, 0, 3, "")) == PURE_OK && app.revision == 3);
-    CHECK(app.values[0] == 2);
+    CHECK(app.values[0].num == 2);
     /* Another key is its own document. */
     CHECK(pure_app_message(&app, 1, "other", 0, edit_payload(buffer, 0, 0, "abc")) == PURE_OK && app.revision == 1);
     pure_app_stop(&app);
@@ -702,7 +702,7 @@ static void message_mutations(void) {
                 }
             } else pure_app_input(&app, input, e & 1 ? PURE_EDGE_UP : PURE_EDGE_DOWN);
             pure_app_frame(&app);
-            for (uint32_t s = 0; s < module_b.states; ++s) CHECK(isfinite(app.values[s]));
+            for (uint32_t s = 0; s < module_b.states; ++s) CHECK(isfinite(app.values[s].num));
         }
         pure_app_stop(&app);
         CHECK(memory.opened == memory.closed);
@@ -799,41 +799,41 @@ static void texts(void) {
     if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
-    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80" "a\nbc") && app.values[2] == 0);
+    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80" "a\nbc") && app.values[2].num == 0);
     for (int i = 0; i < 6; ++i) CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK);
-    CHECK(app.values[2] == 7);                               /* stops at the end */
+    CHECK(app.values[2].num == 7);                               /* stops at the end */
     CHECK(number_view(&app, 0) == 5 && number_view(&app, 2) == 2 && !strcmp(view_text(&app, 3), "bc"));
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 4);   /* up keeps column 2 */
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 4);   /* up keeps column 2 */
     const char *han = "\xed\x95\x9c";
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)han, 3}) == PURE_OK);
-    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80" "a\xed\x95\x9c\nbc") && app.values[2] == 7 && app.values[0] == 1);
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 4);   /* back over 3 bytes */
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 3);
+    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80" "a\xed\x95\x9c\nbc") && app.values[2].num == 7 && app.values[0].num == 1);
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 4);   /* back over 3 bytes */
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 3);
     CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80\nbc"));
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);   /* stops at the start */
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);   /* nothing before */
-    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 4);   /* down to column 0 */
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);   /* stops at the start */
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);   /* nothing before */
+    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 4);   /* down to column 0 */
     /* A failing event restores the text, the cursor and the states. */
     CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
-    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80\nbc") && app.values[2] == 4 && app.values[0] == 1);
+    CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80\nbc") && app.values[2].num == 4 && app.values[0].num == 1);
     CHECK(!strcmp(view_text(&app, 4), "\xeb\xa9\x94\xeb\xaa\xa8 \xc2\xb7 4\xec\x9e\x90"));
     CHECK(!strcmp(view_text(&app, 5), "0.3333333333333333"));
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xff", 1}) == PURE_INVALID);
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xed\xa0\x80", 3}) == PURE_INVALID); /* surrogate */
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xf0\x9f\x98\x80", 4}) == PURE_OK);
-    CHECK(app.values[2] == 8 && number_view(&app, 1) == 3);   /* offset in characters */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 4);  /* back over the emoji */
-    CHECK(pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);
+    CHECK(app.values[2].num == 8 && number_view(&app, 1) == 3);   /* offset in characters */
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 4);  /* back over the emoji */
+    CHECK(pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);
     /* Replacement keeps the text and its cursor by name. */
     static const S fresh[] = {{"fresh", 7}};
     static const T kept[] = {{"note", 1, 0}, {"at", 2, 1}};
     static const char *const other[] = {"ignored"};
     Spec next = {fresh, 1, inputs, 0, number_views, 0, handlers, 0, code, 0, NULL, 0, kept, 2, other, 1, text_views, 0, NULL, 0, NULL, 0};
     CHECK(load(next, &module_b) == PURE_OK);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 3);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 3);
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
-    CHECK(app.values[0] == 7 && app.values[2] == 3 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\n\xf0\x9f\x98\x80" "bc"));
+    CHECK(app.values[0].num == 7 && app.values[2].num == 3 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\n\xf0\x9f\x98\x80" "bc"));
     pure_app_stop(&app);
 
     /* Verification of text operations. */
@@ -902,8 +902,8 @@ static void text_mutations(void) {
             for (uint32_t s = 0; s < module_b.states; ++s) {
                 if (module_b.state_type[s] == PURE_STATE_CURSOR) {
                     PureDraft *text = app.texts[module_b.state_ref[s]];
-                    size_t length = pure_draft_size(text), at = (size_t)app.values[s];
-                    CHECK(app.values[s] >= 0 && at <= length && app.values[s] == (double)at);
+                    size_t length = pure_draft_size(text), at = (size_t)app.values[s].num;
+                    CHECK(app.values[s].num >= 0 && at <= length && app.values[s].num == (double)at);
                     if (at < length) { /* never inside a multi-byte character */
                         Text t = {{0}, 0};
                         pure_draft_read(text, at, 1, text_span, &t);
@@ -919,7 +919,7 @@ static void text_mutations(void) {
                              pure_utf8_complete(utf8);
                     }
                     CHECK(ok);
-                } else CHECK(isfinite(app.values[s]));
+                } else CHECK(isfinite(app.values[s].num));
             }
         }
         pure_app_stop(&app);
@@ -1113,7 +1113,7 @@ static void list_trees(void) {
                 size_t at = model.count ? next_random(&seed) % (model.count + 1) : 0;
                 ModelItem item = {(double)(next_random(&seed) % 100000) - 50000, "", next_random(&seed) % 11};
                 for (size_t k = 0; k < item.size; ++k) item.text[k] = (char)('a' + next_random(&seed) % 26);
-                PureCell cells[2] = {{item.key, NULL, 0}, {0, (unsigned char *)item.text, item.size}};
+                PureCell cells[2] = {{.num = item.key}, {.text = (unsigned char *)item.text, .size = item.size}};
                 CHECK(pure_list_insert(list, at, cells, &undo) == PURE_OK);
                 model_insert(&model, at, item);
             } else if (roll < grow + 25) {
@@ -1125,13 +1125,13 @@ static void list_trees(void) {
                 size_t at = next_random(&seed) % model.count;
                 if (next_random(&seed) % 2) {
                     double key = (double)(next_random(&seed) % 1000);
-                    CHECK(pure_list_set(list, at, 0, (PureCell){key, NULL, 0}, &undo) == PURE_OK);
+                    CHECK(pure_list_set(list, at, 0, (PureCell){.num = key}, &undo) == PURE_OK);
                     model.items[at].key = key;
                 } else {
                     ModelItem *item = &model.items[at];
                     item->size = next_random(&seed) % 11;
                     for (size_t k = 0; k < item->size; ++k) item->text[k] = (char)('A' + next_random(&seed) % 26);
-                    CHECK(pure_list_set(list, at, 1, (PureCell){0, (unsigned char *)item->text, item->size}, &undo) == PURE_OK);
+                    CHECK(pure_list_set(list, at, 1, (PureCell){.text = (unsigned char *)item->text, .size = item->size}, &undo) == PURE_OK);
                 }
             }
         }
@@ -1216,8 +1216,8 @@ static void list_trees(void) {
     CHECK(numbers && read_back);
     pure_list_journal(numbers, true);
     for (size_t k = 0; k < sizeof(edges) / sizeof(*edges); ++k) {
-        CHECK(pure_list_insert(numbers, k, (PureCell[]){{edges[k], NULL, 0}}, NULL) == PURE_OK);
-        CHECK(pure_list_set(numbers, k, 0, (PureCell){edges[k], NULL, 0}, NULL) == PURE_OK);
+        CHECK(pure_list_insert(numbers, k, (PureCell[]){{.num = edges[k]}}, NULL) == PURE_OK);
+        CHECK(pure_list_set(numbers, k, 0, (PureCell){.num = edges[k]}, NULL) == PURE_OK);
     }
     PureSpan edge_records = pure_list_changes(numbers);
     CHECK(edge_records.size < sizeof(edges) / sizeof(*edges) * 2 * 14 && pure_list_replay(read_back, edge_records.data, edge_records.size) == PURE_OK);
@@ -1251,7 +1251,7 @@ static void list_trees(void) {
         }
         double key = (double)(next_random(&seed) % 20000);
         bool found;
-        size_t at = pure_list_seek(keyed, 0, (PureCell){key, NULL, 0}, &found);
+        size_t at = pure_list_seek(keyed, 0, (PureCell){.num = key}, &found);
         size_t low = 0, high = keys.count;
         while (low < high) {
             size_t middle = (low + high) / 2;
@@ -1260,7 +1260,7 @@ static void list_trees(void) {
         }
         CHECK(at == low && found == (low < keys.count && keys.items[low].key == key));
         if (!found) {
-            PureCell cells[2] = {{key, NULL, 0}, {0, (unsigned char *)"k", 1}};
+            PureCell cells[2] = {{.num = key}, {.text = (unsigned char *)"k", .size = 1}};
             if (round % 7 == 0) { /* an insert undone first: the guides as they were */
                 PureUndo undone_insert = {0};
                 CHECK(pure_list_insert(keyed, at, cells, &undone_insert) == PURE_OK);
@@ -1331,31 +1331,31 @@ static void lists(void) {
     CHECK(app.fault == PURE_FAULT_NONE);                                                /* views leave faults alone */
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"b", 1}) == PURE_OK);
-    CHECK(pure_list_count(app.lists[1]) == 2 && app.values[2] == 1 && app.values[0] == 2);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);   /* stops at the first */
+    CHECK(pure_list_count(app.lists[1]) == 2 && app.values[2].num == 1 && app.values[0].num == 2);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);   /* stops at the first */
     /* Inserting before the current item: the index follows it. */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 1);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 1);
     CHECK(!strcmp(item_title(&app, 1, 0), "new") && !strcmp(view_text(&app, 3), "a"));
     CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && number_view(&app, 2) == 1);
     CHECK(pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK && !strcmp(view_text(&app, 3), "ax"));
-    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 2);
-    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 2);   /* stops at the last */
+    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 2);
+    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 2);   /* stops at the last */
     /* Removing the last item: the index moves to the new last. */
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 1 && pure_list_count(app.lists[1]) == 2);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 1 && pure_list_count(app.lists[1]) == 2);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);
     /* Removing the current item: the index names the next. */
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 0 && !strcmp(view_text(&app, 3), "ax"));
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0 && !strcmp(view_text(&app, 3), "ax"));
     /* A failing event undoes a set, a remove and an append. */
     CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
     CHECK(pure_list_count(app.lists[1]) == 1 && !strcmp(item_title(&app, 1, 0), "ax") &&
-          pure_list_get(app.lists[1], 0, 1).num == 1 && app.values[2] == 0 && app.values[0] == 2);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 0 && app.values[2] == 0);
+          pure_list_get(app.lists[1], 0, 1).num == 1 && app.values[2].num == 0 && app.values[0].num == 2);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 0 && app.values[2].num == 0);
     CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_NOT_FOUND && app.fault == PURE_FAULT_NOT_FOUND);
     CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_NOT_FOUND);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 1 && app.values[2] == 0);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 1 && app.values[2].num == 0);
     for (int i = 0; i < 3; ++i) CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xea\xb0\x80", 3}) == PURE_OK);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 2);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 2);
     CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK);
 
     /* Replacement keeps the list by name. The same record keeps the list
@@ -1366,13 +1366,13 @@ static void lists(void) {
                  text_views, 0, records, 1, NULL, 0};
     CHECK(load(same, &module_b) == PURE_OK);
     const PureList *before = app.lists[1];
-    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.lists[1] == before && app.values[2] == 2);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.lists[1] == before && app.values[2].num == 2);
     static const RF changed_fields[] = {{"done", 0, 0}, {"note", 1, 1}, {"title", 0, 7}, {"rank", 0, 5}};
     static const R changed[] = {{"task", changed_fields, 4}};
     Spec next = same;
     next.r = changed;
     CHECK(load(next, &module_a) == PURE_OK);
-    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && pure_list_count(app.lists[1]) == 4 && app.values[2] == 2);
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && pure_list_count(app.lists[1]) == 4 && app.values[2].num == 2);
     PureCell cell = pure_list_get(app.lists[1], 2, 0);
     CHECK(cell.num == 1);                                           /* done kept by name */
     cell = pure_list_get(app.lists[1], 2, 1);
@@ -1466,8 +1466,8 @@ static void list_mutations(void) {
             for (uint32_t s = 0; s < module_b.states; ++s) {
                 if (module_b.state_type[s] == PURE_STATE_INDEX) {
                     size_t count = pure_list_count(app.lists[module_b.state_ref[s]]);
-                    CHECK(app.values[s] == floor(app.values[s]) && app.values[s] >= 0 &&
-                          app.values[s] <= (count ? (double)(count - 1) : 0));
+                    CHECK(app.values[s].num == floor(app.values[s].num) && app.values[s].num >= 0 &&
+                          app.values[s].num <= (count ? (double)(count - 1) : 0));
                 } else if (module_b.state_type[s] == PURE_STATE_LIST) {
                     const PureRecord *record = &module_b.record[module_b.state_ref[s]];
                     for (size_t at = 0; at < pure_list_count(app.lists[s]); ++at)
@@ -1477,7 +1477,7 @@ static void list_mutations(void) {
                                 CHECK(pure_utf8_valid((PureSpan){cell.text, cell.size}));
                             else CHECK(isfinite(cell.num));
                         }
-                } else if (module_b.state_type[s] == PURE_STATE_NUM) CHECK(isfinite(app.values[s]));
+                } else if (module_b.state_type[s] == PURE_STATE_NUM) CHECK(isfinite(app.values[s].num));
             }
         }
         pure_app_stop(&app);
@@ -1709,7 +1709,7 @@ static void same_states(const PureApp *a, const PureApp *b) {
                     PureCell x = pure_list_get(a->lists[i], at, f), y = pure_list_get(b->lists[i], at, f);
                     CHECK(!memcmp(&x.num, &y.num, sizeof(x.num)) && x.size == y.size && (!x.size || !memcmp(x.text, y.text, x.size)));
                 }
-        } else CHECK(!memcmp(&a->values[i], &b->values[i], sizeof(double)));
+        } else CHECK(!memcmp(&a->values[i].num, &b->values[i].num, sizeof(double)));
     }
 }
 
@@ -1768,9 +1768,9 @@ static const O crash_code[] = {
 static const H crash_handlers[] = {{1, 0, 12}};
 
 static unsigned consistent(const PureApp *app) {
-    unsigned n = (unsigned)app->values[0];
-    CHECK(app->values[0] == n && pure_draft_size(app->texts[NOTE]) == n && app->values[2] == n);
-    CHECK(pure_list_count(app->lists[TASKS]) == n && app->values[4] == (n ? n - 1 : 0));
+    unsigned n = (unsigned)app->values[0].num;
+    CHECK(app->values[0].num == n && pure_draft_size(app->texts[NOTE]) == n && app->values[2].num == n);
+    CHECK(pure_list_count(app->lists[TASKS]) == n && app->values[4].num == (n ? n - 1 : 0));
     for (unsigned k = 0; k < n; ++k) CHECK(pure_list_get(app->lists[TASKS], k, 1).num == k + 1);
     return n;
 }
@@ -1876,15 +1876,15 @@ static void uncertain_numbers(void) {
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
     fail_stage = PURE_BEFORE_DIR_SYNC;
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_UNCERTAIN && app.uncertain && app.values[0] == 0);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_UNCERTAIN && app.uncertain && app.values[0].num == 0);
     fail_stage = -1;
     CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_CONFLICT && !pure_list_count(app.lists[1]));
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 1 &&
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 1 &&
           !pure_list_count(app.lists[1]));
     CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_list_get(app.lists[1], 0, 0).num == 1);
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 1 &&
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 1 &&
           pure_list_count(app.lists[1]) == 1 && pure_list_get(app.lists[1], 0, 0).num == 1);
     pure_app_stop(&app);
     remove_store(path);
@@ -1903,15 +1903,15 @@ static void stored_frames(void) {
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
     for (int i = 0; i < 5; ++i) CHECK(pure_app_frame(&app) == PURE_OK);
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 0);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 0);
     for (int i = 0; i < 3; ++i) CHECK(pure_app_frame(&app) == PURE_OK);
     CHECK(pure_app_save(&app) == PURE_OK);
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 3);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 3);
     for (int i = 0; i < 2; ++i) CHECK(pure_app_frame(&app) == PURE_OK);
     CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 5);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 5);
     pure_app_stop(&app);
     remove_store(path);
 }
@@ -1930,13 +1930,13 @@ static void stored_messages(void) {
     unsigned char buffer[64];
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
     CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 0, 0, "hello")) == PURE_OK && app.revision == 1);
-    CHECK(app.values[0] == 1);
-    CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 0, 0, "x")) == PURE_CONFLICT && app.values[0] == 1);
+    CHECK(app.values[0].num == 1);
+    CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 0, 0, "x")) == PURE_CONFLICT && app.values[0].num == 1);
     /* An edit past the size guard fails: neither the document nor the count moves. */
-    CHECK(pure_app_message(&app, 3, "doc", 1, edit_payload(buffer, 5, 0, "-world")) == PURE_LIMIT && app.values[0] == 1);
-    CHECK(pure_app_message(&app, 3, "doc", 1, edit_payload(buffer, 5, 0, "!")) == PURE_OK && app.values[0] == 2);
+    CHECK(pure_app_message(&app, 3, "doc", 1, edit_payload(buffer, 5, 0, "-world")) == PURE_LIMIT && app.values[0].num == 1);
+    CHECK(pure_app_message(&app, 3, "doc", 1, edit_payload(buffer, 5, 0, "!")) == PURE_OK && app.values[0].num == 2);
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 2);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 2);
     CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_OK && app.revision == 2 && replied(&app, "hello!"));
     pure_app_stop(&app);
     /* Documents stay documents: the app's states are not among the keys. */
@@ -1968,7 +1968,7 @@ static void stored_migration(void) {
         PureCell note = pure_list_get(app.lists[TASKS], 1, 1), title = pure_list_get(app.lists[TASKS], 1, 2);
         CHECK(pure_list_get(app.lists[TASKS], 1, 0).num == 2 && pure_list_get(app.lists[TASKS], 1, 3).num == 5);
         CHECK(note.size == 1 && note.text[0] == 'x' && title.size == 1 && title.text[0] == 'x');
-        CHECK(app.values[0] == 2 && app.values[4] == 1 && pure_draft_size(app.texts[NOTE]) == 2);
+        CHECK(app.values[0].num == 2 && app.values[4].num == 1 && pure_draft_size(app.texts[NOTE]) == 2);
         pure_app_stop(&app);
     }
     /* Back to the first record by replacing the module; the next save stores it. */
@@ -1998,7 +1998,7 @@ static void stored_migration(void) {
     CHECK(pure_draft_splice(values, 0, pure_draft_size(values), (PureSpan){record, at}) == PURE_OK);
     CHECK(pure_draft_commit(values, &revision) == PURE_OK);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(app.values[0] == 9 && app.values[2] == 0 && app.values[4] == 0);
+    CHECK(app.values[0].num == 9 && app.values[2].num == 0 && app.values[4].num == 0);
     pure_app_stop(&app);
     /* Damaged stored lists (their images) and texts are refused, not replaced. */
     char image[128];
@@ -2019,7 +2019,7 @@ static void stored_migration(void) {
     CHECK(pure_draft_splice(draft, 0, 1, (PureSpan){0}) == PURE_OK && pure_draft_commit(draft, &revision) == PURE_OK);
     pure_draft_close(draft);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_list_count(app.lists[TASKS]) == 3 && pure_draft_size(app.texts[NOTE]) == 3 && app.values[0] == 9);
+    CHECK(pure_list_count(app.lists[TASKS]) == 3 && pure_draft_size(app.texts[NOTE]) == 3 && app.values[0].num == 9);
     pure_app_stop(&app);
     pure_draft_close(values);
     remove_store(path);
@@ -2150,10 +2150,10 @@ static void deferred_messages(void) {
         snprintf(key, sizeof(key), "k%d", i);
         CHECK(pure_app_message(&app, 1, key, 0, edit_payload(buffer, 0, 0, "ab")) == PURE_OK && app.revision == 1);
     }
-    CHECK(app.values[0] == 3 && app.pending_count == 3 && app.open);
+    CHECK(app.values[0].num == 3 && app.pending_count == 3 && app.open);
     /* The same key again: the burst is saved first, then this edit joins a new one. */
     CHECK(pure_app_message(&app, 1, "k0", 1, edit_payload(buffer, 2, 0, "c")) == PURE_OK && app.revision == 2);
-    CHECK(app.pending_count == 1 && app.values[0] == 4);
+    CHECK(app.pending_count == 1 && app.values[0].num == 4);
     CHECK(pure_app_message(&app, 1, "k1", 0, edit_payload(buffer, 0, 0, "x")) == PURE_CONFLICT);
     CHECK(pure_app_save(&app) == PURE_OK && !app.open && !app.pending_count);
     for (int i = 0; i < PURE_APP_PENDING + 1; ++i) {
@@ -2162,7 +2162,7 @@ static void deferred_messages(void) {
         CHECK(app.pending_count == (i < PURE_APP_PENDING ? (unsigned)i + 1 : 1)); /* full: saved on the way */
     }
     pure_app_stop(&app);           /* the last edit was never saved */
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0] == 4 + PURE_APP_PENDING);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 4 + PURE_APP_PENDING);
     CHECK(pure_app_message(&app, 0, "k0", -1, (PureSpan){0}) == PURE_OK && app.revision == 2 && replied(&app, "abc"));
     snprintf(key, sizeof(key), "m%d", PURE_APP_PENDING);
     CHECK(pure_app_message(&app, 0, key, -1, (PureSpan){0}) == PURE_NOT_FOUND);
@@ -2234,12 +2234,12 @@ static void marks(void) {
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"x", 1}) == PURE_OK);
-    CHECK(!strcmp(state_text(&app, 0), "xab") && app.values[1] == 1 && app.values[2] == 0); /* the mark stayed */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2] == 1);
+    CHECK(!strcmp(state_text(&app, 0), "xab") && app.values[1].num == 1 && app.values[2].num == 0); /* the mark stayed */
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 1);
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"yz", 2}) == PURE_OK);
-    CHECK(!strcmp(state_text(&app, 0), "xyzab") && app.values[1] == 3 && app.values[2] == 1);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[1] == 2 && app.values[2] == 1);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[1] == 1 && app.values[2] == 1); /* gathered */
+    CHECK(!strcmp(state_text(&app, 0), "xyzab") && app.values[1].num == 3 && app.values[2].num == 1);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 2 && app.values[2].num == 1);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 1 && app.values[2].num == 1); /* gathered */
     pure_app_stop(&app);
     /* A flag only on a cursor, and only this one. */
     static const T wrong_flag[] = {{"note", 1, 0}, {"at", 2 | 2 << 8, 0}, {"mark", MARK, 0}};
@@ -2666,9 +2666,9 @@ static void lane_folds(void) {
         for (size_t i = 0; i < l_items + m_items; ++i) {
             bool in_l = i < l_items;
             double flag = roll(&g, 2);
-            PureCell cells_[4] = {{in_l ? 2.0 * (double)i : values[roll(&g, LEN(values))], NULL, 0},
-                                  {values[roll(&g, LEN(values))], NULL, 0},
-                                  {in_l ? values[roll(&g, LEN(values))] : flag, NULL, 0}, {flag, NULL, 0}};
+            PureCell cells_[4] = {{.num = in_l ? 2.0 * (double)i : values[roll(&g, LEN(values))]},
+                                  {.num = values[roll(&g, LEN(values))]},
+                                  {.num = in_l ? values[roll(&g, LEN(values))] : flag}, {.num = flag}};
             PureList *list_a = a.lists[in_l ? LANE_L : LANE_M], *list_b = b.lists[in_l ? LANE_L : LANE_M];
             CHECK(pure_list_insert(list_a, pure_list_count(list_a), cells_, NULL) == PURE_OK &&
                   pure_list_insert(list_b, pure_list_count(list_b), cells_, NULL) == PURE_OK);
@@ -2774,7 +2774,7 @@ typedef struct { StockItem stock[64]; size_t stocked; double log[4096][2]; size_
 static bool same_shop(const PureApp *app, const Shop *shop) {
     const PureList *stock = app->lists[W_STOCK], *log = app->lists[W_LOG];
     if (pure_list_count(stock) != shop->stocked || pure_list_count(log) != shop->logged ||
-        pure_list_count(app->lists[W_LINES]) || app->values[W_N] != shop->n || app->values[W_SUM] != shop->sum)
+        pure_list_count(app->lists[W_LINES]) || app->values[W_N].num != shop->n || app->values[W_SUM].num != shop->sum)
         return false;
     for (size_t i = 0; i < shop->stocked; ++i)
         if (pure_list_get(stock, i, 0).num != shop->stock[i].item || pure_list_get(stock, i, 1).num != shop->stock[i].left)
@@ -3058,7 +3058,7 @@ static void view_arguments(void) {
         }
     }
     put32(four, 2);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){four, 4}) == PURE_OK && app.values[A_N] == 10);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){four, 4}) == PURE_OK && app.values[A_N].num == 10);
     pure_app_stop(&app);
 
     /* What arguments may not be. */
@@ -3134,7 +3134,7 @@ static void locals(void) {
         double total = 1, below = 0;
         for (size_t i = 0; i < count; ++i) total += items[i];
         for (size_t i = 0; i < count; ++i) below += items[i] < total;
-        CHECK(app.values[L_N] == below && app.values[L_M] == total + items[count - 1]);
+        CHECK(app.values[L_N].num == below && app.values[L_M].num == total + items[count - 1]);
     }
     pure_app_stop(&app);
 
@@ -3250,8 +3250,8 @@ static void ranges(void) {
         double key = (double)(next_random(&seed) % 5);
         for (size_t i = 0, items = next_random(&seed) % 400; i < items; ++i) {
             key += 1 + next_random(&seed) % 3;
-            PureCell cells[3] = {{key, NULL, 0}, {(double)(next_random(&seed) % 9) - 3, NULL, 0},
-                                 {(double)(next_random(&seed) % 7) - 3, NULL, 0}};
+            PureCell cells[3] = {{.num = key}, {.num = (double)(next_random(&seed) % 9) - 3},
+                                 {.num = (double)(next_random(&seed) % 7) - 3}};
             CHECK(pure_list_insert(a.lists[R_L], i, cells, NULL) == PURE_OK && pure_list_insert(b.lists[R_L], i, cells, NULL) == PURE_OK);
         }
         for (unsigned step = 0; step < 12; ++step) {
@@ -3354,16 +3354,16 @@ static void pointing(void) {
     CHECK(pure_app_point(&app, 2, 0) == PURE_NOT_FOUND); /* nothing to point at */
     for (int i = 0; i < 3; ++i) CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
     uint64_t events = app.events;
-    CHECK(app.values[2] == 2 && pure_app_point(&app, 2, 0) == PURE_OK && app.values[2] == 0 && app.events == events + 1);
-    CHECK(pure_app_point(&app, 2, 3) == PURE_NOT_FOUND && app.values[2] == 0);
+    CHECK(app.values[2].num == 2 && pure_app_point(&app, 2, 0) == PURE_OK && app.values[2].num == 0 && app.events == events + 1);
+    CHECK(pure_app_point(&app, 2, 3) == PURE_NOT_FOUND && app.values[2].num == 0);
     CHECK(pure_app_point(&app, 0, 1) == PURE_INVALID && pure_app_point(&app, 1, 1) == PURE_INVALID); /* a number, a list */
     CHECK(pure_app_point(&app, 2, 1) == PURE_OK);
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[2] == 1);
-    CHECK(pure_app_defer(&app, true) && pure_app_point(&app, 2, 2) == PURE_OK && app.open && app.values[2] == 2);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[2].num == 1);
+    CHECK(pure_app_defer(&app, true) && pure_app_point(&app, 2, 2) == PURE_OK && app.open && app.values[2].num == 2);
     CHECK(pure_app_save(&app) == PURE_OK);
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[2] == 2);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[2].num == 2);
     pure_app_stop(&app);
     remove_store(path);
 }
@@ -3442,23 +3442,23 @@ static void keyed(void) {
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     for (const char *const *word = (const char *const[]){"m", "b", "z", "a", NULL}; *word; ++word)
         CHECK(type_text(&app, 0, *word) == PURE_OK);
-    CHECK(!strcmp(names_of(&app, PEOPLE), "a,b,m,z") && app.values[K_AT] == 0 && !strcmp(view_text(&app, 5), "a"));
+    CHECK(!strcmp(names_of(&app, PEOPLE), "a,b,m,z") && app.values[K_AT].num == 0 && !strcmp(view_text(&app, 5), "a"));
     /* A key once: the add fails, and so does an event whose second add repeats its first. */
     CHECK(type_text(&app, 0, "b") == PURE_CONFLICT && app.fault == PURE_FAULT_EXISTS);
-    CHECK(type_text(&app, 8, "c") == PURE_CONFLICT && !strcmp(names_of(&app, PEOPLE), "a,b,m,z") && app.values[K_AT] == 0);
-    CHECK(type_text(&app, 1, "z") == PURE_OK && app.values[K_AT] == 3 && !strcmp(view_text(&app, 5), "z"));
-    CHECK(type_text(&app, 1, "q") == PURE_NOT_FOUND && app.fault == PURE_FAULT_NOT_FOUND && app.values[K_AT] == 3);
-    CHECK(type_text(&app, 2, "m") == PURE_OK && app.values[K_FOUND] == 1);
-    CHECK(type_text(&app, 2, "c") == PURE_OK && app.values[K_FOUND] == 0);
+    CHECK(type_text(&app, 8, "c") == PURE_CONFLICT && !strcmp(names_of(&app, PEOPLE), "a,b,m,z") && app.values[K_AT].num == 0);
+    CHECK(type_text(&app, 1, "z") == PURE_OK && app.values[K_AT].num == 3 && !strcmp(view_text(&app, 5), "z"));
+    CHECK(type_text(&app, 1, "q") == PURE_NOT_FOUND && app.fault == PURE_FAULT_NOT_FOUND && app.values[K_AT].num == 3);
+    CHECK(type_text(&app, 2, "m") == PURE_OK && app.values[K_FOUND].num == 1);
+    CHECK(type_text(&app, 2, "c") == PURE_OK && app.values[K_FOUND].num == 0);
     CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && pure_list_get(app.lists[PEOPLE], 3, 1).num == 1);
     CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && !strcmp(names_of(&app, PEOPLE), "a,b,m"));
-    CHECK(app.values[K_AT] == 2 && number_view(&app, 2) == 0 && number_view(&app, 3) == 0);  /* "m": not bob, not before m */
+    CHECK(app.values[K_AT].num == 2 && number_view(&app, 2) == 0 && number_view(&app, 3) == 0);  /* "m": not bob, not before m */
     CHECK(type_text(&app, 1, "b") == PURE_OK && number_view(&app, 2) == 0 && number_view(&app, 3) == 1);
     CHECK(type_text(&app, 0, "bob") == PURE_OK && number_view(&app, 2) == 1 && number_view(&app, 3) == 1);
     /* Bytes order texts: a text before the longer ones it begins, UTF-8 after ASCII, the empty text first. */
     CHECK(type_text(&app, 0, "\xea\xb0\x80") == PURE_OK && type_text(&app, 0, "ab") == PURE_OK);
     CHECK(type_text(&app, 0, "") == PURE_OK && type_text(&app, 0, "") == PURE_CONFLICT);
-    CHECK(!strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,m,\xea\xb0\x80") && app.values[K_AT] == 0);
+    CHECK(!strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,m,\xea\xb0\x80") && app.values[K_AT].num == 0);
     /* Numbers order by value, and -0 is the key 0. */
     CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK);
     CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_CONFLICT && number_view(&app, 4) == 2);
@@ -3468,11 +3468,11 @@ static void keyed(void) {
     /* Replacing: unkeyed, the list stays as it is and takes appends at its end. */
     CHECK(load(keyed_spec(unkeyed_states, unkeyed_code, LEN(unkeyed_code), unkeyed_handlers, 1), &module_b) == PURE_OK);
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK && type_text(&app, 0, "c") == PURE_OK);
-    CHECK(!strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,m,\xea\xb0\x80,c") && app.values[K_AT] == 7);
+    CHECK(!strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,m,\xea\xb0\x80,c") && app.values[K_AT].num == 7);
     CHECK(pure_app_point(&app, K_AT, 6) == PURE_OK);                     /* at the Korean name */
     /* Keyed again: put in order, the index following its item. */
     CHECK(pure_app_replace(&app, &module_a) == PURE_OK && !strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,c,m,\xea\xb0\x80"));
-    CHECK(app.values[K_AT] == 7 && !strcmp(view_text(&app, 5), "\xea\xb0\x80"));
+    CHECK(app.values[K_AT].num == 7 && !strcmp(view_text(&app, 5), "\xea\xb0\x80"));
     /* Two items with one key cannot become keyed: the app keeps its module and items. */
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK && type_text(&app, 0, "a") == PURE_OK);
     CHECK(pure_app_replace(&app, &module_a) == PURE_CONFLICT && app.module == &module_b && pure_list_count(app.lists[PEOPLE]) == 9);
@@ -3487,7 +3487,7 @@ static void keyed(void) {
     pure_app_stop(&app);
     for (int round = 0; round < 2; ++round) {
         CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-        CHECK(!strcmp(names_of(&app, PEOPLE), "b,m,z") && app.values[K_AT] == 0);
+        CHECK(!strcmp(names_of(&app, PEOPLE), "b,m,z") && app.values[K_AT].num == 0);
         pure_app_stop(&app);
     }
     CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && type_text(&app, 0, "m") == PURE_OK);
@@ -3562,8 +3562,8 @@ static void keyed_mutations(void) {
             for (uint32_t s = 0; s < module_b.states; ++s) {
                 if (module_b.state_type[s] == PURE_STATE_INDEX) {
                     size_t count = pure_list_count(app.lists[module_b.state_ref[s]]);
-                    CHECK(app.values[s] == floor(app.values[s]) && app.values[s] >= 0 &&
-                          app.values[s] <= (count ? (double)(count - 1) : 0));
+                    CHECK(app.values[s].num == floor(app.values[s].num) && app.values[s].num >= 0 &&
+                          app.values[s].num <= (count ? (double)(count - 1) : 0));
                 }
                 if (module_b.state_type[s] != PURE_STATE_LIST || !module_b.state_key[s]) continue;
                 unsigned key = module_b.state_key[s] - 1u;
@@ -3615,7 +3615,7 @@ static void describe(PureApp *app, Shown *s) {
                     else show(s, "%g", cell.num);
                     show(s, f + 1 < r->count ? "," : ";", 0);
                 }
-        } else show(s, "%g", app->values[i]);
+        } else show(s, "%g", app->values[i].num);
         show(s, "|", 0);
     }
     for (uint32_t v = 0; v < m->views; ++v) {
@@ -3888,7 +3888,7 @@ static void message_fields(void) {
     memcpy(payload + 16, "\xea\xb0\x80\xeb\x82\x98" "xyz", 9);
     size = 25;
     CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, size}) == PURE_OK);
-    CHECK(app.values[0] == 5.5 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\xeb\x82\x98") && replied(&app, "xyz"));
+    CHECK(app.values[0].num == 5.5 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\xeb\x82\x98") && replied(&app, "xyz"));
     pure_app_finish(&app);
     /* Empty variable fields. */
     title_size = 0;
@@ -3909,7 +3909,7 @@ static void message_fields(void) {
     memcpy(payload + 4, &points, 8);
     CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_INVALID && app.fault == PURE_FAULT_NON_FINITE);
     CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 15}) == PURE_LIMIT);
-    CHECK(app.values[0] == 5.5 && !*state_text(&app, 1)); /* failed messages changed nothing */
+    CHECK(app.values[0].num == 5.5 && !*state_text(&app, 1)); /* failed messages changed nothing */
     pure_app_stop(&app);
     /* A text field is text and a bytes field bytes. */
     static const O text_as_bytes[] = {{FIELD, 0, 0}, {LEN_, 0, 0}, {ST, 0, 0}};
@@ -3935,7 +3935,7 @@ static void message_fields(void) {
     size = 16 + sizeof(body) - 1;
     uint32_t placed[8] = {16 + 23, 6, 0, 0, 16 + 9, 3, 0, 0};
     CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_OK);
-    CHECK(app.values[0] == 5.5 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\xeb\x82\x98") && replied(&app, "xyz"));
+    CHECK(app.values[0].num == 5.5 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\xeb\x82\x98") && replied(&app, "xyz"));
     pure_app_finish(&app);
     /* A field that starts or ends past the payload, or a title that is not UTF-8 there. */
     placed[0] = (uint32_t)size + 1;
@@ -3947,7 +3947,7 @@ static void message_fields(void) {
     placed[1] = 2;
     CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_INVALID &&
           app.fault == PURE_FAULT_ENCODING);
-    CHECK(app.values[0] == 5.5);
+    CHECK(app.values[0].num == 5.5);
     pure_app_stop(&app);
 
     /* Fields in groups: a name is a path of identifiers (user.name), and
@@ -4059,18 +4059,18 @@ static void links(void) {
     CHECK(pure_app_start(&a, &module_a, (PureData){0}) == PURE_OK && pure_app_start(&b, &module_b, (PureData){0}) == PURE_OK);
     CHECK(buy(&a, 0, "pen", 2) == PURE_OK && buy(&a, 1, "ink", 3) == PURE_LIMIT);
     Outbox o = outbox_of(&a);
-    CHECK(o.count == 1 && o.items[0].output == 2 && o.items[0].seq == 1 && o.items[0].size == 15 && a.values[0] == 1);
+    CHECK(o.count == 1 && o.items[0].output == 2 && o.items[0].seq == 1 && o.items[0].size == 15 && a.values[0].num == 1);
     PureSpan sent = {o.items[0].payload, o.items[0].size};
-    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent, NULL) == PURE_OK && !b.duplicate && b.values[0] == 2 &&
+    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent, NULL) == PURE_OK && !b.duplicate && b.values[0].num == 2 &&
           !strcmp(state_text(&b, 1), "pen"));
     pure_app_finish(&b);
-    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent, NULL) == PURE_OK && b.duplicate && b.values[0] == 2);
-    CHECK(deliver(&b, "other", 1, "cup", 5) == PURE_OK && !b.duplicate && b.values[0] == 7);
-    CHECK(deliver(&b, "orders.ordered", 3, "hat", 1) == PURE_OK && b.values[0] == 8); /* numbers may skip */
-    CHECK(deliver(&b, "orders.ordered", 2, "old", 1) == PURE_OK && b.duplicate && b.values[0] == 8);
+    CHECK(pure_app_deliver(&b, 0, "orders.ordered", 1, sent, NULL) == PURE_OK && b.duplicate && b.values[0].num == 2);
+    CHECK(deliver(&b, "other", 1, "cup", 5) == PURE_OK && !b.duplicate && b.values[0].num == 7);
+    CHECK(deliver(&b, "orders.ordered", 3, "hat", 1) == PURE_OK && b.values[0].num == 8); /* numbers may skip */
+    CHECK(deliver(&b, "orders.ordered", 2, "old", 1) == PURE_OK && b.duplicate && b.values[0].num == 8);
     /* Refused (count 100): delivered all the same, never applied again. */
-    CHECK(deliver(&b, "other", 2, "big", 100) == PURE_LIMIT && b.values[0] == 7 + 1);
-    CHECK(deliver(&b, "other", 2, "big", 1) == PURE_OK && b.duplicate && b.values[0] == 8);
+    CHECK(deliver(&b, "other", 2, "big", 100) == PURE_LIMIT && b.values[0].num == 7 + 1);
+    CHECK(deliver(&b, "other", 2, "big", 1) == PURE_OK && b.duplicate && b.values[0].num == 8);
     /* Bad deliveries change nothing. */
     CHECK(deliver(&b, "", 4, "x", 1) == PURE_INVALID && deliver(&b, "a b", 4, "x", 1) == PURE_INVALID);
     CHECK(deliver(&b, "other", 0, "x", 1) == PURE_INVALID && pure_app_deliver(&a, 2, "s", 1, sent, NULL) == PURE_INVALID);
@@ -4093,7 +4093,7 @@ static void links(void) {
     pure_app_stop(&a);
     CHECK(pure_app_start(&a, &module_a, pure_tree_data(path_a)) == PURE_OK);
     o = outbox_of(&a);
-    CHECK(o.count == 2 && o.items[0].seq == 1 && o.items[1].seq == 2 && a.values[0] == 2);
+    CHECK(o.count == 2 && o.items[0].seq == 1 && o.items[1].seq == 2 && a.values[0].num == 2);
     CHECK(pure_app_defer(&a, true));
     for (int i = 0; i < 3; ++i) CHECK(buy(&a, 0, "box", 1) == PURE_OK);
     CHECK(outbox_of(&a).count == 2 && pure_app_save(&a) == PURE_OK);
@@ -4105,7 +4105,7 @@ static void links(void) {
     CHECK(pure_app_save(&a) == PURE_STORE_ERROR);
     fail_stage = -1;
     o = outbox_of(&a);
-    CHECK(o.count == 5 && o.items[0].seq == 1 && a.values[0] == 5);         /* the trim and the send undone */
+    CHECK(o.count == 5 && o.items[0].seq == 1 && a.values[0].num == 5);         /* the trim and the send undone */
     CHECK(buy(&a, 0, "next", 1) == PURE_OK && pure_app_save(&a) == PURE_OK);
     o = outbox_of(&a);
     CHECK(o.count == 6 && o.items[5].seq == 6);                              /* numbered on from 5 */
@@ -4118,15 +4118,15 @@ static void links(void) {
     /* The receiver: heard numbers stay heard after a restart; a refused one too. */
     CHECK(deliver(&b, "orders.ordered", 1, "pen", 2) == PURE_OK && deliver(&b, "x", 1, "big", 100) == PURE_LIMIT);
     pure_app_stop(&b);
-    CHECK(pure_app_start(&b, &module_b, pure_tree_data(path_b)) == PURE_OK && b.values[0] == 2);
-    CHECK(deliver(&b, "orders.ordered", 1, "pen", 2) == PURE_OK && b.duplicate && b.values[0] == 2);
+    CHECK(pure_app_start(&b, &module_b, pure_tree_data(path_b)) == PURE_OK && b.values[0].num == 2);
+    CHECK(deliver(&b, "orders.ordered", 1, "pen", 2) == PURE_OK && b.duplicate && b.values[0].num == 2);
     CHECK(deliver(&b, "x", 1, "big", 1) == PURE_OK && b.duplicate);
     /* A save that fails forgets what it heard. */
-    CHECK(pure_app_defer(&b, true) && deliver(&b, "orders.ordered", 2, "ink", 3) == PURE_OK && b.values[0] == 5);
+    CHECK(pure_app_defer(&b, true) && deliver(&b, "orders.ordered", 2, "ink", 3) == PURE_OK && b.values[0].num == 5);
     fail_stage = PURE_AFTER_HEADER;
-    CHECK(pure_app_save(&b) == PURE_STORE_ERROR && b.values[0] == 2);
+    CHECK(pure_app_save(&b) == PURE_STORE_ERROR && b.values[0].num == 2);
     fail_stage = -1;
-    CHECK(deliver(&b, "orders.ordered", 2, "ink", 3) == PURE_OK && !b.duplicate && b.values[0] == 5);
+    CHECK(deliver(&b, "orders.ordered", 2, "ink", 3) == PURE_OK && !b.duplicate && b.values[0].num == 5);
     CHECK(pure_app_save(&b) == PURE_OK);
     pure_app_stop(&b);
     /* Links stored before the heard list kept its numbers: a start moves them
@@ -4281,9 +4281,9 @@ static void links(void) {
         CHECK(pure_app_start(&a, &module_a, pure_tree_data(path_a)) == PURE_OK);
         CHECK(pure_app_start(&b, &module_b, pure_tree_data(path_b)) == PURE_OK);
         o = outbox_of(&a);
-        CHECK(o.count == (size_t)a.values[0] && (!o.count || o.items[o.count - 1].seq == o.count));
+        CHECK(o.count == (size_t)a.values[0].num && (!o.count || o.items[o.count - 1].seq == o.count));
         heard = pure_app_heard(&b, "orders.ordered");
-        CHECK(b.values[0] == (double)heard);
+        CHECK(b.values[0].num == (double)heard);
         kept[0] = (size_t)heard;
         kept[1] = o.count;
         pure_app_stop(&a);
@@ -4566,24 +4566,24 @@ static void bools(void) {
     CHECK(module_a.state_type[B_ON] == PURE_STATE_BOOL && module_a.view_type[0] == PURE_VIEW_BOOL &&
           module_a.input[4].prefix == 9 && module_a.input[B_TOLD].prefix == 10);
     PureApp app;
-    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && app.values[B_ON] == 1 && app.values[B_OFF] == 0);
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && app.values[B_ON].num == 1 && app.values[B_OFF].num == 0);
     CHECK(number_view(&app, 0) == 1 && number_view(&app, 1) == 0 && number_view(&app, 2) == 0 && number_view(&app, 3) == 0);
     CHECK(!strcmp(view_text(&app, 4), "true1"));
     for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
-    CHECK(app.values[B_N] == 3 && number_view(&app, 1) == 1 && number_view(&app, 3) == 1);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_LIMIT && app.values[B_OFF] == 0); /* require failed: undone */
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && app.values[B_ON] == 0 && !strcmp(view_text(&app, 4), "false1"));
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[B_N] == 3 && number_view(&app, 2) == 1);
+    CHECK(app.values[B_N].num == 3 && number_view(&app, 1) == 1 && number_view(&app, 3) == 1);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_LIMIT && app.values[B_OFF].num == 0); /* require failed: undone */
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && app.values[B_ON].num == 0 && !strcmp(view_text(&app, 4), "false1"));
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[B_N].num == 3 && number_view(&app, 2) == 1);
     /* A message's bool is a byte, 0 or 1; any other byte fails the message. */
     unsigned char payload[9] = {1};
     double five = 5;
     memcpy(payload + 1, &five, 8);
-    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 9}) == PURE_OK && app.values[B_ON] == 1 && app.values[B_N] == 5);
+    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 9}) == PURE_OK && app.values[B_ON].num == 1 && app.values[B_N].num == 5);
     pure_app_finish(&app);
     payload[0] = 2;
     five = 6;
     memcpy(payload + 1, &five, 8);
-    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 9}) == PURE_LIMIT && app.values[B_N] == 5);
+    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 9}) == PURE_LIMIT && app.values[B_N].num == 5);
     pure_app_finish(&app);
     /* A send holds its bools as bytes. */
     CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK);
@@ -4631,10 +4631,10 @@ static void bools(void) {
     Spec swapped = {swapped_nums, 1, bool_inputs, LEN(bool_inputs), NULL, 0, NULL, 0, NULL, 0, NULL, 0, swapped_states, 2,
                     NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(swapped, &module_b) == PURE_OK);
-    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.values[0] == 1 && app.values[1] == 0 && app.values[2] == 0);
-    app.values[0] = -0.0; /* on, a number: -0 is 0 */
-    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && app.values[B_N] == 0 && app.values[B_ON] == 0 &&
-          !signbit(app.values[B_ON]) && app.values[B_OFF] == 0);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.values[0].num == 1 && app.values[1].num == 0 && app.values[2].num == 0);
+    app.values[0].num = -0.0; /* on, a number: -0 is 0 */
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && app.values[B_N].num == 0 && app.values[B_ON].num == 0 &&
+          !signbit(app.values[B_ON].num) && app.values[B_OFF].num == 0);
     pure_app_stop(&app);
 
     /* What mixes bools and numbers is refused. */
@@ -4737,7 +4737,7 @@ static void bools(void) {
     for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
     pure_app_stop(&app);
     for (int round = 0; round < 2; ++round) { /* migrated, then stored as migrated */
-        CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && app.values[0] == 0);
+        CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && app.values[0].num == 0);
         CHECK(pure_list_count(app.lists[TASKS]) == 3 && pure_list_get(app.lists[TASKS], 0, 1).num == 1 &&
               pure_list_get(app.lists[TASKS], 1, 1).num == 0 && pure_list_get(app.lists[TASKS], 2, 1).num == 0);
         pure_app_stop(&app);
@@ -4771,10 +4771,10 @@ static void timers(void) {
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     app.now = 1700000123456.0;
-    CHECK(pure_app_tick(&app, 0) == PURE_OK && app.values[0] == 1700000123456.0 &&
-          app.values[1] == (double)(1700000123 % 60) && app.values[2] == 1);
+    CHECK(pure_app_tick(&app, 0) == PURE_OK && app.values[0].num == 1700000123456.0 &&
+          app.values[1].num == (double)(1700000123 % 60) && app.values[2].num == 1);
     CHECK(pure_app_tick(&app, 1) == PURE_INVALID && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_INVALID);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[3] == 2 - 20);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[3].num == 2 - 20);
     /* A zero takes the divisor's sign too. */
     static const O zeros[] = {{C, 0, -6}, {C, 0, 3}, {MOD, 0, 0}, {ST, 0, 0}, {C, 0, 6}, {C, 0, -3}, {MOD, 0, 0}, {ST, 1, 0}};
     static const H zero_handler[] = {{3, 0, 8}};
@@ -4783,7 +4783,7 @@ static void timers(void) {
     CHECK(load(signs, &module_b) == PURE_OK);
     PureApp zero;
     CHECK(pure_app_start(&zero, &module_b, (PureData){0}) == PURE_OK && pure_app_input(&zero, 1, PURE_EDGE_DOWN) == PURE_OK);
-    CHECK(zero.values[0] == 0 && !signbit(zero.values[0]) && zero.values[1] == 0 && signbit(zero.values[1]));
+    CHECK(zero.values[0].num == 0 && !signbit(zero.values[0].num) && zero.values[1].num == 0 && signbit(zero.values[1].num));
     pure_app_stop(&zero);
     CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
     pure_app_stop(&app);
