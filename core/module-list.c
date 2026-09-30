@@ -69,8 +69,9 @@ struct PureList {
     uint64_t id, version; /* which list, and a number every change moves on */
     uint64_t shares;      /* the last copy's epoch: a node or text made before it is shared */
     PureRetired *retired; /* where shared nodes and texts go when the list lets them go */
-    Node *spare[2];       /* inner nodes and leaves let go that no copy read, kept for the next ones (linked by first) */
-    unsigned spares[2];
+    Node **spare[2];      /* inner nodes and leaves let go that no copy reads, kept for the next ones */
+    unsigned spares[2], spare_room[2];
+    unsigned needed[2];   /* inner nodes and leaves it made lately: halved each time the retired come back */
     unsigned refs;        /* a shared copy's references */
     bool copy;            /* a shared copy: it owns none of its nodes or texts */
 };
@@ -88,7 +89,14 @@ typedef struct {
         size_t cells; /* REMOVED: where the item's cells start in the log's cells */
     };
 } Entry;
-typedef struct { void *pointer; bool text; } Retired;
+/* A node or text let go while a copy may read it, and what the copies and
+ * the lists ask of it (so neither reads it again). */
+typedef struct {
+    void *pointer;
+    uint64_t made;  /* the share count it was made at */
+    uint32_t size;  /* a node's */
+    bool text, leaf;
+} Retired;
 
 static uint64_t lists_made;
 
@@ -160,7 +168,8 @@ static bool shared_text(const PureList *list, const unsigned char *text) { retur
 static bool shared_node(const PureList *list, const Node *node) { return node->made < list->shares; }
 static void free_text(const unsigned char *text) { if (text) free((uint64_t *)text - 1); }
 
-/* Kept until the copies that may read it are gone (pure_retired_free). */
+/* Kept until the copies that may read it are gone (pure_retired_free), or
+ * then taken back (pure_retired_reuse). */
 static void retire(PureList *list, void *pointer, bool text) {
     PureRetired *retired = list->retired;
     if (retired->count == retired->capacity) {
@@ -170,7 +179,10 @@ static void retire(PureList *list, void *pointer, bool text) {
         retired->entries = grown;
         retired->capacity = capacity;
     }
-    ((Retired *)retired->entries)[retired->count++] = (Retired){pointer, text};
+    const Node *node = text ? NULL : pointer;
+    ((Retired *)retired->entries)[retired->count++] =
+        text ? (Retired){pointer, ((const uint64_t *)pointer)[-1], 0, true, false}
+             : (Retired){pointer, node->made, node->leaf ? (uint32_t)list->layout.leaf_size : INNER_SIZE, false, node->leaf};
 }
 
 /* The list no longer has text: free it, or retire it while a copy may read it. */
@@ -195,10 +207,6 @@ void pure_retired_free(PureRetired *retired) {
     *retired = (PureRetired){0};
 }
 
-static uint64_t made_at(const Retired *r) {
-    return r->text ? ((const uint64_t *)r->pointer)[-1] : ((const Node *)r->pointer)->made;
-}
-
 /* Room for more entries in retired; false when memory runs out. */
 static bool retired_room(PureRetired *retired, size_t more) {
     if (retired->count + more <= retired->capacity) return true;
@@ -213,24 +221,58 @@ static bool retired_room(PureRetired *retired, size_t more) {
 void pure_retired_pass(PureRetired *from, uint64_t epoch, PureRetired *kept, PureRetired *gone) {
     Retired *entries = from->entries;
     size_t keeping = 0;
-    for (size_t i = 0; kept && i < from->count; ++i) keeping += made_at(&entries[i]) < epoch;
+    for (size_t i = 0; kept && i < from->count; ++i) keeping += entries[i].made < epoch;
     bool room = (!keeping || retired_room(kept, keeping)) &&
                 (!gone || keeping == from->count || retired_room(gone, from->count - keeping));
     for (size_t i = 0; i < from->count; ++i) {
-        PureRetired *to = kept && made_at(&entries[i]) < epoch ? kept : gone;
+        PureRetired *to = kept && entries[i].made < epoch ? kept : gone;
         if (room && to) ((Retired *)to->entries)[to->count++] = entries[i];
         /* else kept for good rather than freed while read (memory ran out) */
     }
-    free(entries);
-    *from = (PureRetired){0};
+    from->count = 0; /* its room stays, for what is retired next */
+}
+
+/* Keep node for the list's next of its kind; false when it keeps enough
+ * already (or has no room for more). */
+static bool keep_spare(PureList *list, Node *node, bool leaf, unsigned enough) {
+    if (list->spares[leaf] >= enough) return false;
+    if (list->spares[leaf] == list->spare_room[leaf]) {
+        unsigned room = list->spare_room[leaf] ? 2 * list->spare_room[leaf] : SPARE_NODES;
+        Node **grown = realloc(list->spare[leaf], room * sizeof(*grown));
+        if (!grown) return false;
+        list->spare[leaf] = grown;
+        list->spare_room[leaf] = room;
+    }
+    list->spare[leaf][list->spares[leaf]++] = node;
+    return true;
+}
+
+void pure_retired_reuse(PureRetired *returned, PureList *const *lists, unsigned count) {
+    Retired *entries = returned->entries;
+    for (size_t i = 0; i < returned->count; ++i) {
+        const Retired *r = &entries[i];
+        if (r->text) {
+            free_text(r->pointer);
+            continue;
+        }
+        bool kept = false; /* by a list of its size, as many as it made lately (at least a few) */
+        for (unsigned l = 0; l < count && !kept; ++l) {
+            PureList *list = lists[l];
+            kept = list && (!r->leaf || list->layout.leaf_size == r->size) &&
+                   keep_spare(list, r->pointer, r->leaf, list->needed[r->leaf] > SPARE_NODES ? list->needed[r->leaf] : SPARE_NODES);
+        }
+        if (!kept) free(r->pointer);
+    }
+    for (unsigned l = 0; l < count; ++l)
+        if (lists[l]) lists[l]->needed[0] /= 2, lists[l]->needed[1] /= 2;
+    returned->count = 0;
 }
 
 static Node *new_node(PureList *list, bool leaf) {
-    Node *node = list->spare[leaf];
-    if (node) {
-        list->spare[leaf] = (Node *)node->first;
-        --list->spares[leaf];
-    } else if (!(node = malloc(leaf ? list->layout.leaf_size : INNER_SIZE)))
+    Node *node;
+    ++list->needed[leaf];
+    if (list->spares[leaf]) node = list->spare[leaf][--list->spares[leaf]];
+    else if (!(node = malloc(leaf ? list->layout.leaf_size : INNER_SIZE)))
         return NULL;
     node->made = list->shares;
     node->count = 0;
@@ -245,12 +287,7 @@ static Node *new_node(PureList *list, bool leaf) {
  * retired while a copy may read it, else kept for the next or freed. */
 static void drop_node(PureList *list, Node *node) {
     if (shared_node(list, node)) retire(list, node, false);
-    else if (list->spares[node->leaf] < SPARE_NODES) {
-        node->first = list->spare[node->leaf];
-        list->spare[node->leaf] = node;
-        ++list->spares[node->leaf];
-    } else
-        free(node);
+    else if (!keep_spare(list, node, node->leaf, SPARE_NODES)) free(node);
 }
 
 /* ---- The stored form: each field in order, a number as its binary64 bits
@@ -580,12 +617,10 @@ void pure_list_free(PureList *list) {
     } else {
         free(list->journal);
         let_go_tree(list, list->root);
-        for (unsigned kind = 0; kind < 2; ++kind)
-            while (list->spare[kind]) {
-                Node *next = (Node *)list->spare[kind]->first;
-                free(list->spare[kind]);
-                list->spare[kind] = next;
-            }
+        for (unsigned kind = 0; kind < 2; ++kind) {
+            while (list->spares[kind]) free(list->spare[kind][--list->spares[kind]]);
+            free(list->spare[kind]);
+        }
     }
     free(list);
 }

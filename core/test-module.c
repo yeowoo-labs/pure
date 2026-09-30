@@ -1041,6 +1041,35 @@ static PureList *stored_list(const Grown *stored, size_t items) {
     return list;
 }
 
+/* A node no copy reads any more comes back to its list (pure_retired_reuse):
+ * the next node the list makes is that one, and a copy still held reads
+ * what it shared. */
+static void retired_come_back(void) {
+    static const uint8_t numbers[1] = {0};
+    PureList *list = pure_list_new(1, numbers);
+    CHECK(list);
+    for (unsigned i = 0; i < 8; ++i) CHECK(pure_list_insert(list, i, &(PureCell){.num = i}, NULL) == PURE_OK);
+    PureRetired retired[2] = {{0}};
+    PureRun run;
+    PureList *older = pure_list_share(list, &retired[0], 1);
+    CHECK(older && pure_list_run(list, 0, &run));
+    const void *first = run.path[run.depth]; /* the one leaf, which the copy reads */
+    CHECK(pure_list_set(list, 0, 0, (PureCell){.num = 100}, NULL) == PURE_OK); /* the list copies it */
+    CHECK(pure_list_run(list, 0, &run) && run.path[run.depth] != first);
+    PureList *newer = pure_list_share(list, &retired[1], 2);
+    CHECK(newer);
+    pure_list_free(older); /* no copy reads the first leaf now: it comes back */
+    pure_retired_reuse(&retired[0], &list, 1);
+    CHECK(pure_list_set(list, 1, 0, (PureCell){.num = 101}, NULL) == PURE_OK); /* a copy of the second, made of it */
+    CHECK(pure_list_run(list, 0, &run) && run.path[run.depth] == first);
+    CHECK(pure_list_get(list, 0, 0).num == 100 && pure_list_get(list, 1, 0).num == 101);
+    CHECK(pure_list_get(newer, 0, 0).num == 100 && pure_list_get(newer, 1, 0).num == 1);
+    pure_list_free(newer);
+    pure_list_free(list);
+    pure_retired_free(&retired[0]);
+    pure_retired_free(&retired[1]);
+}
+
 static void list_trees(void) {
     static const uint8_t text_fields[2] = {0, 1};
     uint32_t seed = 0x5eed1234u;
@@ -1054,7 +1083,8 @@ static void list_trees(void) {
     PureUndo undo = {0};
     Model model = {0}, before = {0};
     /* Up to four shares at a time, each with what it shared and the items
-     * and nodes retired while it was the newest. */
+     * and nodes retired while it was the newest: when the oldest goes, no
+     * copy reads those, and the list makes its next nodes of them. */
     enum { SHARES = 4 };
     PureList *copies[SHARES];
     Model shared[SHARES] = {{0}};
@@ -1137,7 +1167,7 @@ static void list_trees(void) {
             if (held == SHARES) {
                 CHECK(same_items(copies[first], &shared[first]));
                 pure_list_free(copies[first]);
-                pure_retired_free(&retired[first]);
+                pure_retired_reuse(&retired[first], &list, 1);
                 first = (first + 1) % SHARES;
                 --held;
             }
@@ -4520,6 +4550,7 @@ int main(void) {
     marks();
     text_mutations();
     lists();
+    retired_come_back();
     list_trees();
     folds();
     filters();

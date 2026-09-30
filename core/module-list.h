@@ -69,8 +69,15 @@ PureList *pure_list_share(PureList *, PureRetired *retired, uint64_t epoch);
 void pure_list_mark(PureList *, uint64_t epoch);
 /* Of what was retired, what a copy of epoch may still read (made before
  * it) goes to kept (none when kept is NULL), and the rest to gone, for
- * pure_retired_free (later, and where it pleases): from is left empty. */
+ * pure_retired_reuse or pure_retired_free (later, and where it pleases):
+ * from is left empty, with its room (pure_retired_free lets that go). */
 void pure_retired_pass(PureRetired *from, uint64_t epoch, PureRetired *kept, PureRetired *gone);
+/* What was retired and no copy reads any more, on the lists' thread: each
+ * node goes back to a list of its size, to be made again, as many as the
+ * list made lately (at least a few: what it made counts half again at each
+ * return); the rest and the texts are freed. returned is left empty, with
+ * its room. */
+void pure_retired_reuse(PureRetired *returned, PureList *const *lists, unsigned count);
 void pure_list_hold(PureList *copy);
 /* Whether copy shares list's items as they are now. */
 bool pure_list_current(const PureList *copy, const PureList *list);

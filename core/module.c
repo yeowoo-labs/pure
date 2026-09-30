@@ -2702,14 +2702,17 @@ bool pure_app_defer(PureApp *app, bool deferred) {
  * or text the app lets go while a snapshot is its newest may be read by that
  * snapshot and by older ones made after it was: it goes with that snapshot,
  * and when that one goes, to the newest older one still held that may read
- * it (made after it was), or back to the system. So a snapshot held for long
- * keeps what it shares, the states as they were then, and nothing made
- * since. The links and retired lists move under the register's lock, a spin
- * (none holds it long; what is freed is freed outside it). */
+ * it (made after it was), or back to the app, whose lists make their next
+ * nodes of it (what they do not need goes back to the system). So a
+ * snapshot held for long keeps what it shares, the states as they were
+ * then, and nothing made since. The links and retired lists move under the
+ * register's lock, a spin (none holds it long; what is freed is freed
+ * outside it). */
 typedef struct {
-    unsigned refs;  /* the snapshots not yet freed */
+    unsigned refs;        /* the snapshots not yet freed */
     bool locked;
-    uint64_t epoch; /* snapshots made */
+    uint64_t epoch;       /* snapshots made */
+    PureRetired returned; /* what no snapshot reads any more, for the app's lists (pure_retired_reuse) */
 } Register;
 
 struct PureSnapshot {
@@ -2739,24 +2742,25 @@ const PureList *pure_snapshot_list(const PureSnapshot *snapshot, uint32_t state)
 void pure_snapshot_release(PureSnapshot *snapshot) {
     if (!snapshot || __atomic_sub_fetch(&snapshot->refs, 1, __ATOMIC_ACQ_REL)) return;
     Register *all = snapshot->all;
-    PureRetired gone = {0};
     if (all) { /* out of the links: what the one before may read goes to it (still linked, so still there) */
         lock_register(all);
         PureSnapshot *older = snapshot->older;
         if (older) older->newer = snapshot->newer;
         if (snapshot->newer) snapshot->newer->older = older;
-        pure_retired_pass(&snapshot->retired, older ? older->epoch : 0, older ? &older->retired : NULL, &gone);
+        pure_retired_pass(&snapshot->retired, older ? older->epoch : 0, older ? &older->retired : NULL, &all->returned);
         unlock_register(all);
-    } else
-        gone = snapshot->retired;
-    pure_retired_free(&gone);
+    }
+    pure_retired_free(&snapshot->retired); /* what it had when never linked, else its room */
     for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
         pure_draft_close(snapshot->texts[i]);
         pure_list_free(snapshot->lists[i]);
     }
     for (unsigned r = 0; r < PURE_LISTS_STORED - PURE_LIST_HEARD; ++r) pure_list_free(snapshot->runtime[r]);
     free(snapshot);
-    if (all && !__atomic_sub_fetch(&all->refs, 1, __ATOMIC_ACQ_REL)) free(all);
+    if (all && !__atomic_sub_fetch(&all->refs, 1, __ATOMIC_ACQ_REL)) {
+        pure_retired_free(&all->returned); /* the app is gone: no list takes it back */
+        free(all);
+    }
 }
 
 void pure_app_stop(PureApp *app) {
@@ -2775,8 +2779,8 @@ void pure_app_stop(PureApp *app) {
         pure_retired_pass(&app->retired, UINT64_MAX, &app->snapshot->retired, NULL);
         unlock_register(app->snapshot->all);
         pure_snapshot_release(app->snapshot);
-    } else
-        pure_retired_free(&app->retired);
+    }
+    pure_retired_free(&app->retired);
     pure_draft_close(app->stored_values);
     free(app->carried);
     pure_draft_close(app->stored_links);
@@ -3363,6 +3367,31 @@ PureResult pure_app_cell_text(PureApp *app, uint32_t column, size_t row, bool (*
 
 PureSnapshot *pure_app_snapshot(PureApp *app) { return pure_save_snapshot(app, UINT32_MAX); }
 
+/* What no snapshot reads any more back to the app's lists, to make their
+ * next nodes of (a list copies each node it changes once a snapshot shares
+ * it: made of these, it asks the system for none). The register keeps the
+ * room for the next. */
+static void reuse_returned(PureApp *app, Register *all) {
+    lock_register(all);
+    PureRetired returned = all->returned;
+    all->returned = (PureRetired){0};
+    unlock_register(all);
+    if (returned.count) {
+        PureList *lists[PURE_MODULE_STATES + 2];
+        unsigned count = 0;
+        for (uint32_t i = 0; i < app->module->states; ++i)
+            if (app->lists[i]) lists[count++] = app->lists[i];
+        lists[count++] = app->outbox;
+        lists[count++] = app->heard;
+        pure_retired_reuse(&returned, lists, count);
+    }
+    lock_register(all);
+    bool kept = !all->returned.entries; /* none came back meanwhile: the room stays for the next */
+    if (kept) all->returned = returned;
+    unlock_register(all);
+    if (!kept) pure_retired_free(&returned);
+}
+
 PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
     if (app->open || app->reading) return NULL;
     const PureModule *m = app->module;
@@ -3412,6 +3441,7 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
     if (last) pure_snapshot_release(last);
     else pure_retired_free(&app->retired); /* shared only by a snapshot never made */
     app->snapshot = made;
+    reuse_returned(app, all);
     return made;
 }
 
