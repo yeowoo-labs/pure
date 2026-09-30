@@ -15,7 +15,12 @@ size at the end.
   unheld      the same, no surface
 
     python3 research/experiments/021-memory/run.py [--seconds 30] [--cases outbox,budget,held] [--out FILE]
-        [--label NAME]
+        [--label NAME] [--items 20000] [--stores DIRECTORY]
+
+--items sets how many items held and unheld begin with; --stores puts the
+stores in a directory of the device to measure (a flash card: checkpoints
+then take long, and a snapshot is held that long). Each row gives the peak
+resident memory too (VmHWM).
 
 PURE_SERVE=PATH runs another build's pure-serve (--label names it in the rows).
 """
@@ -87,10 +92,10 @@ def start(args):
     return process, json.loads(line)['port']
 
 
-def rss_kib(pid):
+def rss_kib(pid, field='VmRSS:'):
     with open(f'/proc/{pid}/status') as status:
         for line in status:
-            if line.startswith('VmRSS:'):
+            if line.startswith(field):
                 return int(line.split()[1])
     return 0
 
@@ -121,8 +126,8 @@ def post_all(port, bodies, stop, counts, index, refused):
     connection.close()
 
 
-def run_case(case, work, seconds, clients=4):
-    store = work / f'store-{case}'
+def run_case(case, work, seconds, clients=4, stores=None):
+    store = (stores or work) / f'store-{case}-{os.getpid()}'
     args = [SERVE, '--store', store, '--threads', '2']
     note = 'n' * NOTE
     if case in ('outbox', 'budget', 'link-down', 'wire-down'):
@@ -183,31 +188,35 @@ def run_case(case, work, seconds, clients=4):
         stop.set()
         for t in threads:
             t.join()
-        rss_end = rss_kib(process.pid)
+        rss_end, rss_peak = rss_kib(process.pid), rss_kib(process.pid, 'VmHWM:')
     finally:
         process.send_signal(signal.SIGTERM)
         _, error = process.communicate(timeout=60)
     stats = [json.loads(line) for line in error.decode().splitlines() if line.startswith('{"active"')]
     posted = sum(counts)
     return {'case': case, 'seconds': seconds, 'posted': posted, 'refused': sum(refused), 'rss_began_kib': rss_began,
-            'rss_end_kib': rss_end,
+            'rss_end_kib': rss_end, 'rss_peak_kib': rss_peak, 'items': SEEDED,
             'rss_per_post_bytes': round((rss_end - rss_began) * 1024 / posted, 1) if posted else None,
             'store_bytes': store_bytes(store), 'samples': samples[::4] + [samples[-1]],
             'stats': stats[-1] if stats else None}
 
 
 def main():
+    global SEEDED
     parser = argparse.ArgumentParser()
     parser.add_argument('--seconds', type=int, default=30)
     parser.add_argument('--cases', default='outbox,budget,link-down,wire-down,unheld,held')
     parser.add_argument('--out', type=Path, default=None)
     parser.add_argument('--label', default=None, help='the build, named in each row')
+    parser.add_argument('--items', type=int, default=SEEDED)
+    parser.add_argument('--stores', type=Path, default=None)
     args = parser.parse_args()
+    SEEDED = args.items
     with tempfile.TemporaryDirectory(prefix='pure-memory-') as directory:
         work = Path(directory)
         build(work)
         for case in args.cases.split(','):
-            row = run_case(case, work, args.seconds)
+            row = run_case(case, work, args.seconds, stores=args.stores)
             if args.label:
                 row = {'label': args.label, **row}
             line = json.dumps(row)
