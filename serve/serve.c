@@ -2759,8 +2759,11 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (*public_key) printf("{\"port\":%u,\"threads\":%u,\"public_key\":\"%s\"}\n", port, threads, public_key);
-    else printf("{\"port\":%u,\"threads\":%u}\n", port, threads);
+    /* Its name too: its sends' sources are NAME.OUTPUT, which a receiver's --sender must name. */
+    printf("{\"port\":%u,\"threads\":%u,\"name\":\"", port, threads);
+    for (const char *c = name; *c; ++c) printf(*c == '"' || *c == '\\' ? "\\%c" : "%c", *c);
+    if (*public_key) printf("\",\"public_key\":\"%s\"}\n", public_key);
+    else printf("\"}\n");
     fflush(stdout);
     /* A surface reads the owner's snapshots and gives it events. */
     if (surface_path && !owned) { fputs("--surface needs an app with states\n", stderr); return 2; }
@@ -2855,6 +2858,8 @@ usage:
           "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"
           "  --send OUTPUT=http[s]://host:port/path: to anything else, over HTTP\n"
           "  --senders FILE: more senders the --link-port takes, a line each: NAME KEY\n"
+          "  --name NAME: the node's name, its sends' sources being NAME.OUTPUT (the module file's name without\n"
+          "      .pmod unless given; the first line out says it)\n"
           "  --memory BYTES: what the app's states may hold (lists' items, texts, sends not yet stored): an event\n"
           "      past it is refused, 503 memory (docs/design/013-memory-budget.md)\n"
           "  --window BYTES: what each --send holds of its sends beyond what its receiver has (and 65,536 sends);\n"
