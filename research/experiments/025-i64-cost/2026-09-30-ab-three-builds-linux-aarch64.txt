@@ -1,0 +1,16 @@
+== 9a03e72 -> 600f576  17:03:17 up 1 day, 20:15,  3 users,  load average: 0.86, 2.07, 1.85
+{"query": "per_branch", "before_ms": 5.347, "after_ms": 5.354, "change_pct": 0.13, "rounds_after_slower": 7, "rounds": 12}
+{"query": "in_credit", "before_ms": 0.856, "after_ms": 0.896, "change_pct": 4.71, "rounds_after_slower": 11, "rounds": 12}
+{"query": "large", "before_ms": 0.383, "after_ms": 0.371, "change_pct": -3.05, "rounds_after_slower": 3, "rounds": 12}
+{"query": "ranks", "before_ms": 6.759, "after_ms": 6.866, "change_pct": 1.58, "rounds_after_slower": 12, "rounds": 12}
+== 600f576 -> fc65d66  17:04:02 up 1 day, 20:16,  3 users,  load average: 1.61, 2.10, 1.87
+{"query": "per_branch", "before_ms": 5.341, "after_ms": 5.342, "change_pct": 0.02, "rounds_after_slower": 5, "rounds": 12}
+{"query": "in_credit", "before_ms": 0.906, "after_ms": 0.848, "change_pct": -6.45, "rounds_after_slower": 1, "rounds": 12}
+{"query": "large", "before_ms": 0.374, "after_ms": 0.374, "change_pct": -0.04, "rounds_after_slower": 6, "rounds": 12}
+{"query": "ranks", "before_ms": 6.938, "after_ms": 6.855, "change_pct": -1.21, "rounds_after_slower": 0, "rounds": 12}
+== 9a03e72 -> fc65d66  17:04:46 up 1 day, 20:17,  3 users,  load average: 1.55, 2.02, 1.86
+{"query": "per_branch", "before_ms": 5.226, "after_ms": 5.32, "change_pct": 1.82, "rounds_after_slower": 12, "rounds": 12}
+{"query": "in_credit", "before_ms": 0.838, "after_ms": 0.844, "change_pct": 0.73, "rounds_after_slower": 6, "rounds": 12}
+{"query": "large", "before_ms": 0.371, "after_ms": 0.377, "change_pct": 1.65, "rounds_after_slower": 11, "rounds": 12}
+{"query": "ranks", "before_ms": 6.7, "after_ms": 6.89, "change_pct": 2.84, "rounds_after_slower": 11, "rounds": 12}
+== end  17:05:29 up 1 day, 20:17,  3 users,  load average: 1.77, 2.03, 1.87

@@ -1,0 +1,6 @@
+ 17:01:12 up 1 day, 20:13,  3 users,  load average: 1.96, 2.72, 1.99
+{"query": "per_branch", "before_ms": 5.204, "after_ms": 5.284, "change_pct": 1.55, "rounds_after_slower": 10, "rounds": 12}
+{"query": "in_credit", "before_ms": 0.812, "after_ms": 0.811, "change_pct": -0.13, "rounds_after_slower": 6, "rounds": 12}
+{"query": "large", "before_ms": 0.366, "after_ms": 0.371, "change_pct": 1.44, "rounds_after_slower": 9, "rounds": 12}
+{"query": "ranks", "before_ms": 6.589, "after_ms": 6.772, "change_pct": 2.76, "rounds_after_slower": 11, "rounds": 12}
+ 17:01:55 up 1 day, 20:14,  3 users,  load average: 1.74, 2.57, 1.98
