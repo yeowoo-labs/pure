@@ -709,9 +709,27 @@ static void put_u64(unsigned char *p, uint64_t v) { for (unsigned i = 0; i < 8; 
 static uint32_t get_u32(const unsigned char *p) { return p[0] | p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint64_t get_u64(const unsigned char *p) { return get_u32(p) | (uint64_t)get_u32(p + 4) << 32; }
 
+static int hex_value(char c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+/* %XX decoded in place (never longer): the length after, or -1 for a bad escape. */
+static long percent_decoded(char *text, size_t length) {
+    size_t o = 0;
+    for (size_t i = 0; i < length; ++i) {
+        if (text[i] != '%') { text[o++] = text[i]; continue; }
+        int high = i + 2 < length ? hex_value(text[i + 1]) : -1, low = high >= 0 ? hex_value(text[i + 2]) : -1;
+        if (low < 0) return -1;
+        text[o++] = (char)(high << 4 | low);
+        i += 2;
+    }
+    return (long)o;
+}
+
 /* What an app route names in the module, with a message's fixed fields
- * taken from the query into c->fields. NULL, or the error to answer (404
- * for a name the module lacks, 400 otherwise). */
+ * taken from the query (%XX decoded, as a view's arguments are) into
+ * c->fields. NULL, or the error to answer (404 for a name the module lacks,
+ * 400 otherwise). */
 static const char *resolve(const Host *host, Connection *c, char *query, Route *route, int *status) {
     const PureModule *m = host->module;
     *status = 404;
@@ -786,8 +804,10 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
             uint32_t f = 0;
             while (f < (message ? shape->field_count : 0) && strcmp(m->field[shape->field_start + f].name, pair)) ++f;
             const PureField *field = message && f < shape->field_count ? &m->field[shape->field_start + f] : NULL;
+            long length = percent_decoded(value, strlen(value)); /* as a view's arguments are */
             if (!field || c->given[f] || (field->type != PURE_FIELD_U32 && field->type != PURE_FIELD_NUMBER) ||
-                !pure_json_fixed(field, (const unsigned char *)value, strlen(value), c->fields)) return "query";
+                length < 0 || !pure_json_fixed(field, (const unsigned char *)value, (size_t)length, c->fields))
+                return "query";
             c->given[f] = true;
         }
         pair = end ? end + 1 : NULL;
@@ -1205,26 +1225,6 @@ static void put_number(Output *o, double value) {
     put_bytes(o, digits, pure_format_number(value, digits));
 }
 
-/* A view's value: a number in Pure's shortest form or a text, as text; a
- * table as {"rows":N,"from":F,"items":[{column: value}...]} for the rows
- * asked, each cell computed only for them (a cell without a value is null). */
-static int hex_value(char c) {
-    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
-}
-
-/* %XX decoded in place (never longer): the length after, or -1 for a bad escape. */
-static long percent_decoded(char *text, size_t length) {
-    size_t o = 0;
-    for (size_t i = 0; i < length; ++i) {
-        if (text[i] != '%') { text[o++] = text[i]; continue; }
-        int high = i + 2 < length ? hex_value(text[i + 1]) : -1, low = high >= 0 ? hex_value(text[i + 2]) : -1;
-        if (low < 0) return -1;
-        text[o++] = (char)(high << 4 | low);
-        i += 2;
-    }
-    return (long)o;
-}
-
 /* A view's arguments from a query's name=value pairs (values %XX decoded;
  * from and count page a table): a payload of their input's shape, the
  * fixed fields in its prefix, the texts and bytes after it in order, each's
@@ -1290,6 +1290,9 @@ static PureResult show_view(PureApp *app, const Route *route, size_t available, 
     return status;
 }
 
+/* A view's value: a number in Pure's shortest form or a text, as text; a
+ * table as {"rows":N,"from":F,"items":[{column: value}...]} for the rows
+ * asked, each cell computed only for them (a cell without a value is null). */
 static PureResult show_given(PureApp *app, const Route *route, size_t available, Applied *answer) {
     const PureModule *m = app->module;
     uint32_t view = route->target;
