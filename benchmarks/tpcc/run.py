@@ -20,7 +20,7 @@ WAL), both kept in --directory. Then:
    that commits those waiting together (as pure-serve does), on a copy of
    the database checked the same way: after the same transactions, every
    row equal to the other SQLite's. --sqlite-pragmas are run on each of
-   SQLite's connections (TUNED unless given), its tables made with pages
+   SQLite's connections (tuned's unless given), its tables made with pages
    of --sqlite-page-size bytes. Each run reports its CPU a transaction
    (Pure's server's, and the share of a core its owner thread took), its
    memory (Pure's server's resident, SQLite's peak), and the bytes a
@@ -72,9 +72,12 @@ CREATE TABLE history (h_c_w_id INTEGER, h_c_d_id INTEGER, h_c_id INTEGER, h_w_id
 
 ORDERS = 10000000  # an order's key is its district's times this, plus its number
 
-# SQLite as a careful engineer runs it (docs/research/106): the database mapped, a page cache large enough for it,
-# a savepoint's journal in memory. '' is SQLite's defaults, as research 092 ran it.
-TUNED = 'PRAGMA mmap_size=1073741824; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY;'
+
+def tuned(page_size):
+    """SQLite as a careful engineer runs it (docs/research/106): the database mapped, a page cache large enough for
+    it, a savepoint's journal in memory, a checkpoint each 40 MB of WAL (its default is each 1,000 pages)."""
+    return ('PRAGMA mmap_size=1073741824; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY; '
+            f'PRAGMA wal_autocheckpoint={40960000 // page_size};')
 
 
 def district_of(key):
@@ -311,12 +314,14 @@ def main():
     parser.add_argument('--sync', default='full', choices=('full', 'normal', 'off'))
     parser.add_argument('--sqlite-group', default='', help="SQLite's terminals committing together, a run each")
     parser.add_argument('--sqlite-page-size', type=int, default=4096, help="SQLite's page size (its default)")
-    parser.add_argument('--sqlite-pragmas', default=TUNED, help="run on each of SQLite's connections (SQLITE_PRAGMAS)")
+    parser.add_argument('--sqlite-pragmas', help="run on each of SQLite's connections (SQLITE_PRAGMAS; tuned's unless "
+                        "given, '' for SQLite's defaults, as research 092 ran it)")
     args = parser.parse_args()
     work = Path(tempfile.mkdtemp(prefix='pure-tpcc-'))
     place = Path(tempfile.mkdtemp(prefix='pure-tpcc-', dir=args.directory))
     pure = None
-    sqlite_env = {**os.environ, 'SQLITE_PRAGMAS': args.sqlite_pragmas}
+    pragmas = tuned(args.sqlite_page_size) if args.sqlite_pragmas is None else args.sqlite_pragmas
+    sqlite_env = {**os.environ, 'SQLITE_PRAGMAS': pragmas}
     kinds = ('new_order', 'payment', 'order_status', 'delivery', 'stock_level')
     try:
         module = work / 'tpcc.pmod'
