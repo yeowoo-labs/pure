@@ -17,11 +17,11 @@ their own (`aup query`), verified when registered and shown from snapshots. Fold
 fold in a table's column is answered for every row from one pass over its list, so on pgbench's tables of 100,000
 accounts a group-by, a join and a correlated rank run 3–420x faster than on SQLite, and faster than SQLite given a
 DBA's indexes but for one count, with no index declared. TPC-C's five transactions, written as one aup app, leave
-SQLite's state row for row from the same inputs, with one warehouse or four, and run 3.2–3.5x faster than a tuned
-SQLite in RAM (36,567 against 10,357 a second, HTTP and JSON included) and 4–11x faster on an SD card than SQLite
+SQLite's state row for row from the same inputs, with one warehouse or four, and run 3.5–4x faster than a tuned
+SQLite in RAM (40,976 against 10,164 a second, HTTP and JSON included) and 4–11x faster on an SD card than SQLite
 tuned for the card and committing in groups as Pure does, both answering once the commit is on the device: SQLite
 writes whole pages, 8–18x the bytes a transaction ([092](docs/research/092-tpcc.md),
-[106](docs/research/106-tpcc-conditions-first.md)). Measurements against axum and drogon on a Raspberry Pi 5
+[106](docs/research/106-tpcc-conditions-first.md), [107](docs/research/107-snapshot-nodes-reused.md)). Measurements against axum and drogon on a Raspberry Pi 5
 are in [075](docs/research/075-http-host-against-axum.md), [077](docs/research/077-apps-as-http-services.md),
 [080](docs/research/080-snapshot-reads.md), [081](docs/research/081-tail-records.md),
 [082](docs/research/082-json-in-place.md), [083](docs/research/083-delivery-over-http.md),
