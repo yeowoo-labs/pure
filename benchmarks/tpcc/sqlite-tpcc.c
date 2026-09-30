@@ -3,17 +3,26 @@
  * (benchmarks/tpcc/run.py builds the database: TPC-C's tables with their
  * composite primary keys, WITHOUT ROWID, and TPC-C's initial rows):
  *
- *     sqlite-tpcc DATABASE WAREHOUSES THREADS SECONDS full|normal|off [SEED [TRANSACTIONS]]
+ *     sqlite-tpcc DATABASE WAREHOUSES THREADS SECONDS full|normal|off [SEED [TRANSACTIONS]] [group]
  *
  * THREADS terminals, each with its own connection and a home warehouse,
  * run the mix of clause 5.2.3 with the inputs of clause 2 for SECONDS, each
  * transaction BEGIN IMMEDIATE ... COMMIT (WAL, synchronous as given).
+ * With group, as pure-serve does: the terminals hand their writing
+ * transactions to one writer, which runs those waiting as one transaction,
+ * each in a SAVEPOINT (a failed one rolled back to it alone), and commits
+ * them with one sync; each terminal is answered after it. Order-Status and
+ * Stock-Level are read on the terminal's own connection from the last
+ * commit, as pure-serve shows views from the last save (docs/research/106).
  * Departures as in tpcc.aup: customers by number, no texts carried along,
  * a customer's last order kept in c_last_order, Delivery a district a
  * transaction. With TRANSACTIONS each terminal stops after that many; the
- * inputs are drawn in tpcc-load's order. Prints one JSON line as tpcc-load
- * does. */
+ * inputs are drawn in tpcc-load's order. SQLITE_PRAGMAS, when set, is run on
+ * each connection after its own (mmap_size, cache_size). Prints one JSON line
+ * as tpcc-load does, with the CPU seconds of the run, the peak resident
+ * memory and the bytes written to storage (/proc/self/io). */
 #include <pthread.h>
+#include <semaphore.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -21,13 +30,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
 
 enum { BUCKETS = 64 * 16, KINDS = 5 };
 enum { NEW_ORDER, PAYMENT, ORDER_STATUS, DELIVERY, STOCK_LEVEL };
 static const char *const names[KINDS] = {"new_order", "payment", "order_status", "delivery", "stock_level"};
 
-static const char *database, *synchronous;
+static const char *database, *synchronous, *pragmas;
 static int warehouses;
 static double seconds;
 static uint64_t seed, each;
@@ -104,11 +114,14 @@ typedef struct {
 } Terminal;
 
 static void open_terminal(Terminal *t) {
-    char pragmas[128];
+    char own[128];
     if (sqlite3_open(database, &t->db) != SQLITE_OK) { fprintf(stderr, "%s\n", sqlite3_errmsg(t->db)); exit(1); }
     sqlite3_busy_timeout(t->db, 60000);
-    snprintf(pragmas, sizeof(pragmas), "PRAGMA journal_mode=WAL; PRAGMA synchronous=%s;", synchronous);
-    if (sqlite3_exec(t->db, pragmas, NULL, NULL, NULL) != SQLITE_OK) { fprintf(stderr, "%s\n", sqlite3_errmsg(t->db)); exit(1); }
+    snprintf(own, sizeof(own), "PRAGMA journal_mode=WAL; PRAGMA synchronous=%s;", synchronous);
+    if (sqlite3_exec(t->db, own, NULL, NULL, NULL) != SQLITE_OK || sqlite3_exec(t->db, pragmas, NULL, NULL, NULL) != SQLITE_OK) {
+        fprintf(stderr, "%s\n", sqlite3_errmsg(t->db));
+        exit(1);
+    }
     sqlite3 *db = t->db;
     t->begin = prepare(db, "BEGIN IMMEDIATE");
     t->begin_read = prepare(db, "BEGIN");
@@ -192,15 +205,11 @@ static bool read_only(Terminal *t, int kind, int w, int d, uint64_t *r) {
     return ok;
 }
 
-/* One transaction of kind; false when it failed (an unused item's New-Order is undone and counts in undone). */
-static bool transact(Terminal *t, int kind, int w, int d, uint64_t *r) {
+/* One transaction of kind, in the transaction the caller began; false when it failed. An unused item's
+ * New-Order sets *undo: the caller rolls it back, and it counts in undone. */
+static bool body(Terminal *t, int kind, int w, int d, uint64_t *r, bool *undo) {
     bool row;
-    if (kind == ORDER_STATUS || kind == STOCK_LEVEL) {
-        if (!RUN(t->begin_read)) return false;
-        bool ok = read_only(t, kind, w, d, r);
-        return RUN(t->commit) && ok;
-    }
-    if (!RUN(t->begin)) return false;
+    if (kind == ORDER_STATUS || kind == STOCK_LEVEL) return read_only(t, kind, w, d, r);
     bool ok = true;
     if (kind == NEW_ORDER) {
         int c = nurand(r, 1023, 1, 3000, 259), count = uniform(r, 5, 15), local = 1;
@@ -226,8 +235,8 @@ static bool transact(Terminal *t, int kind, int w, int d, uint64_t *r) {
             sqlite3_bind_int(s, 1, item);
             if (!step(s, &row) || !row) { /* an unused item: the order is undone */
                 sqlite3_reset(s);
-                RUN(t->rollback);
                 if (unused) ++undone;
+                *undo = unused;
                 return unused;
             }
             double price = sqlite3_column_double(s, 0);
@@ -331,9 +340,81 @@ static bool transact(Terminal *t, int kind, int w, int d, uint64_t *r) {
             ok = ok && RUN(s);
         }
     }
-    if (ok && RUN(t->commit)) return true;
+    return ok;
+}
+
+/* One transaction of kind, begun and committed (or rolled back) here; false when it failed. */
+static bool transact(Terminal *t, int kind, int w, int d, uint64_t *r) {
+    bool reading = kind == ORDER_STATUS || kind == STOCK_LEVEL, undo = false;
+    if (!RUN(reading ? t->begin_read : t->begin)) return false;
+    bool ok = body(t, kind, w, d, r, &undo);
+    if (reading) return RUN(t->commit) && ok;
+    if (ok && !undo && RUN(t->commit)) return true;
     RUN(t->rollback);
-    return false;
+    return ok && undo;
+}
+
+/* group: the terminals' transactions, waiting for the writer. */
+typedef struct Request {
+    int kind, w, d;
+    uint64_t *random;
+    bool ok;
+    sem_t answered; /* the terminal alone is woken */
+    struct Request *next;
+} Request;
+static bool grouped, stopping;
+static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t queued = PTHREAD_COND_INITIALIZER;
+static Request *queue_head, **queue_tail = &queue_head;
+static uint64_t batches, batched;
+
+static void *writer(void *unused) {
+    (void)unused;
+    Terminal t;
+    open_terminal(&t);
+    sqlite3_stmt *mark = prepare(t.db, "SAVEPOINT one"), *keep = prepare(t.db, "RELEASE one"),
+                 *back = prepare(t.db, "ROLLBACK TO one");
+    for (;;) {
+        pthread_mutex_lock(&queue_lock);
+        while (!queue_head && !stopping) pthread_cond_wait(&queued, &queue_lock);
+        Request *batch = queue_head;
+        queue_head = NULL, queue_tail = &queue_head;
+        pthread_mutex_unlock(&queue_lock);
+        if (!batch) break;
+        bool begun = RUN(t.begin);
+        uint64_t count = 0;
+        for (Request *q = batch; q; q = q->next, ++count) {
+            bool undo = false;
+            q->ok = begun && RUN(mark) && body(&t, q->kind, q->w, q->d, q->random, &undo);
+            if (begun && (!q->ok || undo)) RUN(back);
+            if (begun) RUN(keep);
+        }
+        bool committed = begun && RUN(t.commit);
+        if (begun && !committed) RUN(t.rollback);
+        for (Request *q = batch, *next; q; q = next) {
+            next = q->next; /* q is the terminal's, gone once answered */
+            q->ok = q->ok && committed;
+            sem_post(&q->answered);
+        }
+        ++batches, batched += count;
+    }
+    sqlite3_finalize(mark), sqlite3_finalize(keep), sqlite3_finalize(back);
+    for (sqlite3_stmt *s; (s = sqlite3_next_stmt(t.db, NULL));) sqlite3_finalize(s);
+    sqlite3_close(t.db);
+    return NULL;
+}
+
+/* A writing transaction the writer runs with the others waiting then; true once committed. */
+static bool handed(int kind, int w, int d, uint64_t *random) {
+    Request q = {kind, w, d, random, false, .next = NULL};
+    sem_init(&q.answered, 0, 0);
+    pthread_mutex_lock(&queue_lock);
+    *queue_tail = &q, queue_tail = &q.next;
+    pthread_cond_signal(&queued);
+    pthread_mutex_unlock(&queue_lock);
+    while (sem_wait(&q.answered)) {} /* EINTR */
+    sem_destroy(&q.answered);
+    return q.ok;
 }
 
 static void *terminal(void *argument) {
@@ -347,7 +428,8 @@ static void *terminal(void *argument) {
         int d = uniform(&random, 1, 10), roll = uniform(&random, 1, 100);
         int kind = roll <= 45 ? NEW_ORDER : roll <= 88 ? PAYMENT : roll <= 92 ? ORDER_STATUS : roll <= 96 ? DELIVERY : STOCK_LEVEL;
         uint64_t started = now_us();
-        bool ok = transact(&t, kind, home, d, &random);
+        bool ok = grouped && kind != ORDER_STATUS && kind != STOCK_LEVEL ? handed(kind, home, d, &random)
+                                                                        : transact(&t, kind, home, d, &random);
         ++done[kind];
         if (!ok) ++failed[kind];
         ++histogram[kind][bucket(now_us() - started)];
@@ -357,9 +439,30 @@ static void *terminal(void *argument) {
     return NULL;
 }
 
+/* This process's CPU seconds, all its threads. */
+static double cpu_seconds(void) {
+    struct rusage u;
+    getrusage(RUSAGE_SELF, &u);
+    return (double)(u.ru_utime.tv_sec + u.ru_stime.tv_sec) + (double)(u.ru_utime.tv_usec + u.ru_stime.tv_usec) / 1e6;
+}
+
+/* A field of a /proc/self file (VmHWM of status, in KiB; write_bytes of io), or 0. */
+static long long proc_field(const char *file, const char *name) {
+    FILE *f = fopen(file, "r");
+    char line[256];
+    long long value = 0;
+    size_t length = strlen(name);
+    while (f && fgets(line, sizeof(line), f))
+        if (!strncmp(line, name, length) && line[length] == ':') value = atoll(line + length + 1);
+    if (f) fclose(f);
+    return value;
+}
+
 int main(int argc, char **argv) {
+    grouped = argc > 6 && !strcmp(argv[argc - 1], "group");
+    argc -= grouped;
     if (argc < 6) {
-        fputs("sqlite-tpcc DATABASE WAREHOUSES THREADS SECONDS full|normal|off [SEED [TRANSACTIONS]]\n", stderr);
+        fputs("sqlite-tpcc DATABASE WAREHOUSES THREADS SECONDS full|normal|off [SEED [TRANSACTIONS]] [group]\n", stderr);
         return 2;
     }
     database = argv[1];
@@ -369,21 +472,39 @@ int main(int argc, char **argv) {
     synchronous = argv[5];
     seed = argc > 6 ? strtoull(argv[6], NULL, 10) : 1;
     each = argc > 7 ? strtoull(argv[7], NULL, 10) : UINT64_MAX;
-    pthread_t *thread = calloc((size_t)threads, sizeof(*thread));
+    pragmas = getenv("SQLITE_PRAGMAS") ? getenv("SQLITE_PRAGMAS") : "";
+    for (const char *c = pragmas; *c; ++c)
+        if (*c == '"' || *c == '\\' || (unsigned char)*c < ' ') { fputs("SQLITE_PRAGMAS: no quotes\n", stderr); return 2; }
+    pthread_t *thread = calloc((size_t)threads, sizeof(*thread)), writing;
+    if (grouped) pthread_create(&writing, NULL, writer, NULL);
+    double cpu = cpu_seconds();
+    long long written = proc_field("/proc/self/io", "write_bytes");
     uint64_t start = now_us();
     for (int i = 0; i < threads; ++i) pthread_create(&thread[i], NULL, terminal, (void *)(uintptr_t)i);
     for (int i = 0; i < threads; ++i) pthread_join(thread[i], NULL);
     double elapsed = (double)(now_us() - start) / 1e6;
+    if (grouped) {
+        pthread_mutex_lock(&queue_lock);
+        stopping = true;
+        pthread_cond_signal(&queued);
+        pthread_mutex_unlock(&queue_lock);
+        pthread_join(writing, NULL);
+    }
+    cpu = cpu_seconds() - cpu;
+    written = proc_field("/proc/self/io", "write_bytes") - written;
     uint64_t total = 0;
     for (int k = 0; k < KINDS; ++k) total += done[k];
-    printf("{\"system\":\"sqlite %s\",\"synchronous\":\"%s\",\"warehouses\":%d,\"terminals\":%d,\"transactions_per_second\":%.0f,"
-           "\"new_orders_per_minute\":%.0f,\"undone_new_orders\":%llu",
-           sqlite3_libversion(), synchronous, warehouses, threads, (double)total / elapsed,
-           (double)(done[NEW_ORDER] - undone) * 60 / elapsed, (unsigned long long)undone);
+    printf("{\"system\":\"sqlite %s%s\",\"synchronous\":\"%s\",\"pragmas\":\"%s\",\"warehouses\":%d,\"terminals\":%d,"
+           "\"transactions_per_second\":%.0f,\"batches\":%llu,\"batched\":%llu,\"new_orders_per_minute\":%.0f,"
+           "\"undone_new_orders\":%llu",
+           sqlite3_libversion(), grouped ? ", grouped" : "", synchronous, pragmas, warehouses, threads, (double)total / elapsed,
+           (unsigned long long)batches, (unsigned long long)batched, (double)(done[NEW_ORDER] - undone) * 60 / elapsed,
+           (unsigned long long)undone);
     for (int k = 0; k < KINDS; ++k)
         printf(",\"%s\":{\"done\":%llu,\"failed\":%llu,\"p50_us\":%llu,\"p99_us\":%llu}", names[k], (unsigned long long)done[k],
                (unsigned long long)failed[k], (unsigned long long)percentile(histogram[k], done[k], 0.5),
                (unsigned long long)percentile(histogram[k], done[k], 0.99));
-    puts("}");
+    printf(",\"cpu_seconds\":%.3f,\"peak_resident_kib\":%lld,\"written_bytes\":%lld}\n", cpu,
+           proc_field("/proc/self/status", "VmHWM"), written);
     return 0;
 }

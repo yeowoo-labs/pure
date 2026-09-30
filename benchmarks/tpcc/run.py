@@ -15,8 +15,19 @@ WAL), both kept in --directory. Then:
    --terminals connections (tpcc-load on core 3, the server on cores 0-2),
    SQLite's from each count of --sqlite-threads threads, each with its own
    connection, on cores 0-2, synchronous --sync (FULL syncs each commit
-   before it is answered, as Pure does).
+   before it is answered, as Pure does). With --sqlite-group, SQLite again
+   from each count of terminals handing their transactions to one writer
+   that commits those waiting together (as pure-serve does), on a copy of
+   the database checked the same way: after the same transactions, every
+   row equal to the other SQLite's. --sqlite-pragmas are run on each of
+   SQLite's connections (TUNED unless given), its tables made with pages
+   of --sqlite-page-size bytes. Each run reports its CPU a transaction
+   (Pure's server's, and the share of a core its owner thread took), its
+   memory (Pure's server's resident, SQLite's peak), and the bytes a
+   transaction had written: by the process, and to the device holding
+   --directory.
 3. The consistency conditions of clause 3.3.2 on both after each run, each side read from one snapshot.
+4. At the end, the bytes Pure's states held after its runs (it is stopped before SQLite's), and the files of both.
 
 Prints one JSON line a step.
 """
@@ -61,6 +72,10 @@ CREATE TABLE history (h_c_w_id INTEGER, h_c_d_id INTEGER, h_c_id INTEGER, h_w_id
 
 ORDERS = 10000000  # an order's key is its district's times this, plus its number
 
+# SQLite as a careful engineer runs it (docs/research/106): the database mapped, a page cache large enough for it,
+# a savepoint's journal in memory. '' is SQLite's defaults, as research 092 ran it.
+TUNED = 'PRAGMA mmap_size=1073741824; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY;'
+
 
 def district_of(key):
     """A district key's warehouse and district number."""
@@ -87,9 +102,9 @@ def sqlite_rows(tables):
     yield 'order_line', [(*order(k // 16), k % 16, *rest) for k, *rest in tables['lines']]
 
 
-def load_sqlite(path, tables):
+def load_sqlite(path, tables, page_size):
     db = sqlite3.connect(str(path))
-    db.executescript('PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;' + SCHEMA)
+    db.executescript(f'PRAGMA page_size={page_size}; PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;' + SCHEMA)
     with db:
         for table, rows in sqlite_rows(tables):
             db.executemany(f'INSERT INTO {table} VALUES ({", ".join("?" * len(rows[0]))})', rows)
@@ -138,10 +153,30 @@ class Pure:
                 return round(int(line.split()[1]) / 1024, 1)
         return None
 
+    def threads_cpu(self):
+        """The CPU seconds of the server's threads by name (its owner is pure-owner)."""
+        seconds = {}
+        for task in Path(f'/proc/{self.process.pid}/task').iterdir():
+            try:
+                name = (task / 'comm').read_text().strip()
+                fields = (task / 'stat').read_text().rsplit(')', 1)[1].split()
+            except OSError:  # gone meanwhile
+                continue
+            seconds[name] = seconds.get(name, 0) + (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+        return seconds
+
+    def written(self):
+        for line in Path(f'/proc/{self.process.pid}/io').read_text().splitlines():
+            if line.startswith('write_bytes:'):
+                return int(line.split()[1])
+        return 0
+
     def stop(self):
+        """The counts the server prints as it stops (state_bytes among them)."""
         self.connection.close()
         self.process.terminate()
-        self.process.communicate(timeout=120)
+        lines = self.process.communicate(timeout=120)[1].decode().strip().splitlines()
+        return json.loads(lines[-1]) if lines and lines[-1].startswith('{') else {}
 
 
 # Each table's rows, times aside, as Pure's queries and SQLite's SELECTs name them (keys packed as tpcc.aup packs them).
@@ -225,10 +260,30 @@ def compare(table, pure_rows, sqlite_rows_):
     return [(p, s) for p, s in zip(pure_rows, sqlite_rows_) if not all(same(x, y) for x, y in zip(p, s))]
 
 
-def consistency(pure, db):
-    """Clause 3.3.2.1-4 on both, each read from one snapshot: the conditions failed (none when consistent)."""
+def device_written(directory):
+    """Bytes written so far to the block device holding directory (None on tmpfs)."""
+    device = os.stat(directory).st_dev
+    stat = Path(f'/sys/dev/block/{os.major(device)}:{os.minor(device)}/stat')
+    return int(stat.read_text().split()[6]) * 512 if stat.exists() else None
+
+
+def per(value, count, scale=1):
+    return None if value is None else round(value / max(count, 1) * scale, 1)
+
+
+def files_mib(place, prefix):
+    """The files named prefix... in place, and those in directories so named (the store is one)."""
+    named = list(place.glob(prefix + '*'))
+    files = [f for p in named for f in ([p] if p.is_file() else p.rglob('*')) if f.is_file()]
+    return round(sum(f.stat().st_size for f in files) / 2**20, 1)
+
+
+def consistency(pure, db, sqlite_only=False):
+    """Clause 3.3.2.1-4 on both (or SQLite's alone), each read from one snapshot: the conditions failed (none when
+    consistent)."""
     failures = []
-    for system, districts in (('pure', asked(pure, 'district_check')), ('sqlite', db.execute(DISTRICTS[1]).fetchall())):
+    sides = [] if sqlite_only else [('pure', asked(pure, 'district_check'))]
+    for system, districts in sides + [('sqlite', db.execute(DISTRICTS[1]).fetchall())]:
         for key, next_order, newest, newest_new, oldest_new, new_orders, ordered, lines, ytd, district_ytd in districts:
             if not same(ytd, district_ytd):
                 failures.append((system, '3.3.2.1', ytd, district_ytd))
@@ -254,10 +309,15 @@ def main():
     parser.add_argument('--threads', default='3', help="pure-serve's --threads")
     parser.add_argument('--sqlite-threads', default='1,4,16', help="SQLite's threads, a run each")
     parser.add_argument('--sync', default='full', choices=('full', 'normal', 'off'))
+    parser.add_argument('--sqlite-group', default='', help="SQLite's terminals committing together, a run each")
+    parser.add_argument('--sqlite-page-size', type=int, default=4096, help="SQLite's page size (its default)")
+    parser.add_argument('--sqlite-pragmas', default=TUNED, help="run on each of SQLite's connections (SQLITE_PRAGMAS)")
     args = parser.parse_args()
     work = Path(tempfile.mkdtemp(prefix='pure-tpcc-'))
     place = Path(tempfile.mkdtemp(prefix='pure-tpcc-', dir=args.directory))
     pure = None
+    sqlite_env = {**os.environ, 'SQLITE_PRAGMAS': args.sqlite_pragmas}
+    kinds = ('new_order', 'payment', 'order_status', 'delivery', 'stock_level')
     try:
         module = work / 'tpcc.pmod'
         subprocess.run([str(args.aup), 'build', str(HERE / 'tpcc.aup'), '-o', str(module)], check=True)
@@ -274,14 +334,18 @@ def main():
         pure_load = time.perf_counter() - began
         database = place / 'tpcc.db'
         began = time.perf_counter()
-        load_sqlite(database, tables)
+        load_sqlite(database, tables, args.sqlite_page_size)
         sqlite_load = time.perf_counter() - began
+        grouped = place / 'tpcc-group.db'
+        if args.sqlite_group:
+            shutil.copyfile(database, grouped)
         counts = {'order_count': len(tables['orders']), 'new_order_count': len(tables['new_orders']),
                   'line_count': len(tables['lines'])}
         assert {v: pure.view(v) for v in counts} == counts
         print(json.dumps({'step': 'load', 'directory': str(args.directory), 'warehouses': args.warehouses, 'rows': rows,
                           'generate_s': round(generated, 2), 'pure_load_s': round(pure_load, 2),
-                          'sqlite_load_s': round(sqlite_load, 2), 'pure_resident_mib': pure.resident_mib(),
+                          'sqlite_load_s': round(sqlite_load, 2), 'sqlite_page_size': args.sqlite_page_size,
+                          'pure_resident_mib': pure.resident_mib(),
                           'sqlite_file_mib': round(database.stat().st_size / 2**20, 1)}), flush=True)
         db = sqlite3.connect(str(database))
         register(pure, args.aup, work, 'district_check', DISTRICTS[0])
@@ -291,39 +355,80 @@ def main():
                  str(args.check)], capture_output=True, text=True, check=True).stdout)
             sqlite_run = json.loads(subprocess.run(
                 [str(work / 'sqlite-tpcc'), str(database), str(args.warehouses), '1', '3600', args.sync, str(args.seed),
-                 str(args.check)], capture_output=True, text=True, check=True).stdout)
-            differing = {}
+                 str(args.check)], capture_output=True, text=True, check=True, env=sqlite_env).stdout)
+            differing, group_differing = {}, {}
+            group_db = None
+            if args.sqlite_group:
+                subprocess.run([str(work / 'sqlite-tpcc'), str(grouped), str(args.warehouses), '1', '3600', args.sync,
+                                str(args.seed), str(args.check), 'group'], capture_output=True, text=True, check=True,
+                               env=sqlite_env)
+                group_db = sqlite3.connect(str(grouped))
             for table, (view, sql) in DUMPS.items():
                 register(pure, args.aup, work, f'dump_{table}', view)
-                found = compare(table, asked(pure, f'dump_{table}'), db.execute(sql).fetchall())
+                expected = db.execute(sql).fetchall()
+                found = compare(table, asked(pure, f'dump_{table}'), expected)
                 if found:
                     differing[table] = [len(found), found[:3]]
-            kinds = ('new_order', 'payment', 'order_status', 'delivery', 'stock_level')
+                found = compare(table, group_db.execute(sql).fetchall(), expected) if group_db else []
+                if found:
+                    group_differing[table] = [len(found), found[:3]]
+            if group_db is not None:
+                group_db.close()
             print(json.dumps({'step': 'same transactions', 'transactions': args.check,
                               'pure': {k: pure_run[k]['done'] for k in kinds},
                               'sqlite': {k: sqlite_run[k]['done'] for k in kinds},
                               'undone_new_orders': [pure_run['undone_new_orders'], sqlite_run['undone_new_orders']],
                               'failed': [sum(pure_run[k]['failed'] for k in kinds),
                                          sum(sqlite_run[k]['failed'] for k in kinds)],
-                              'differing': differing, 'consistency_failures': consistency(pure, db)}), flush=True)
+                              'differing': differing, 'grouped_sqlite_differing': group_differing,
+                              'consistency_failures': consistency(pure, db)}), flush=True)
         for terminals in (int(t) for t in args.terminals.split(',') if t):
-            used = pure.cpu_seconds()
+            os.sync()  # what loading and copying left is not written during a run
+            used, threads_used, written, device = pure.cpu_seconds(), pure.threads_cpu(), pure.written(), \
+                device_written(place)
+            began = time.perf_counter()
             result = json.loads(subprocess.run(
                 ['taskset', '-c', '3', str(work / 'tpcc-load'), str(pure.port), str(terminals), str(args.seconds),
                  str(args.warehouses), str(args.seed + terminals)], capture_output=True, text=True, check=True).stdout)
+            took = time.perf_counter() - began
             used = pure.cpu_seconds() - used
-            done = sum(result[k]['done'] for k in ('new_order', 'payment', 'order_status', 'delivery', 'stock_level'))
+            share = {name: round((seconds - threads_used.get(name, 0)) / took, 2)
+                     for name, seconds in pure.threads_cpu().items() if name in ('pure-owner', 'pure-checkpoint')}
+            done = sum(result[k]['done'] for k in kinds)
+            device = None if device is None else device_written(place) - device
             print(json.dumps({'step': 'run', **result, 'server_threads': args.threads,
-                              'cpu_us_per_transaction': round(used / max(done, 1) * 1e6, 1),
-                              'resident_mib': pure.resident_mib(), 'consistency_failures': consistency(pure, db)}),
-                  flush=True)
-        for threads in (int(t) for t in args.sqlite_threads.split(',') if t):
+                              'cpu_us_per_transaction': per(used, done, 1e6), 'core_shares': share,
+                              'resident_mib': pure.resident_mib(),
+                              'written_bytes_per_transaction': per(pure.written() - written, done),
+                              'device_bytes_per_transaction': per(device, done),
+                              'consistency_failures': consistency(pure, db)}), flush=True)
+        resident = pure.resident_mib()
+        counts, pure = pure.stop(), None  # its checkpoints are not written during SQLite's runs
+        runs = [(database, threads, []) for threads in (int(t) for t in args.sqlite_threads.split(',') if t)]
+        runs += [(grouped, terminals, ['group']) for terminals in (int(t) for t in args.sqlite_group.split(',') if t)]
+        for path, threads, mode in runs:
+            os.sync()
+            device = device_written(place)
             result = json.loads(subprocess.run(
-                ['taskset', '-c', '0-2', str(work / 'sqlite-tpcc'), str(database), str(args.warehouses), str(threads),
-                 str(args.seconds), args.sync, str(args.seed + threads)], capture_output=True, text=True,
-                check=True).stdout)
-            print(json.dumps({'step': 'run', **result, 'consistency_failures': consistency(pure, db)}), flush=True)
+                ['taskset', '-c', '0-2', str(work / 'sqlite-tpcc'), str(path), str(args.warehouses), str(threads),
+                 str(args.seconds), args.sync, str(args.seed + threads), *mode], capture_output=True, text=True,
+                check=True, env=sqlite_env).stdout)
+            device = None if device is None else device_written(place) - device
+            done = sum(result[k]['done'] for k in kinds)
+            checked = sqlite3.connect(str(path))
+            print(json.dumps({'step': 'run', **result, 'cpu_us_per_transaction': per(result['cpu_seconds'], done, 1e6),
+                              'peak_resident_mib': round(result['peak_resident_kib'] / 1024, 1),
+                              'written_bytes_per_transaction': per(result['written_bytes'], done),
+                              'device_bytes_per_transaction': per(device, done),
+                              'consistency_failures': consistency(pure, checked, sqlite_only=True)}), flush=True)
+            checked.close()
         db.close()
+        print(json.dumps({'step': 'end', 'pure_resident_mib': resident,
+                          'pure_state_mib': round(counts.get('state_bytes', 0) / 2**20, 1),
+                          'pure_store_mib': files_mib(place, 'store'), 'sqlite_files_mib': files_mib(place, 'tpcc.db'),
+                          'grouped_sqlite_files_mib': files_mib(place, 'tpcc-group.db'),
+                          'pure_counts': {k: counts.get(k) for k in ('bursts', 'burst_events', 'checkpoints')}}),
+              flush=True)
     finally:
         if pure:
             pure.stop()
