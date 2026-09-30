@@ -242,10 +242,16 @@ def register(pure, aup, work, name, view):
     assert status == 200, (name, status, body[:200])
 
 
-def asked(pure, name):
-    status, body = pure.call('GET', f'/queries/{name}')
-    assert status == 200, (name, status, body[:200])
-    return [tuple(row.values()) for row in json.loads(body)['items']]
+def asked(pure, name, page=200000):
+    """A query's rows, a page at a time: a whole table of W > 1 answered at once outgrows the server's budget."""
+    rows = []
+    while True:
+        status, body = pure.call('GET', f'/queries/{name}?from={len(rows)}&count={page}')
+        assert status == 200, (name, status, body[:200])
+        answer = json.loads(body)
+        rows += [tuple(row.values()) for row in answer['items']]
+        if len(rows) >= answer['rows'] or not answer['items']:
+            return rows
 
 
 def same(a, b):
