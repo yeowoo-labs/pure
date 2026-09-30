@@ -97,6 +97,10 @@ typedef struct {
     PureLinkDone done[64], told[64];
     size_t done_count;
     unsigned fail_every; /* a delivery's save fails every so many (0: never) */
+    /* The app full (its memory budget) for full_ms from when it heard
+     * full_at: it takes nothing meanwhile, and says so. How often it was
+     * handed records meanwhile, and how long after it had room again. */
+    uint64_t full_at, full_ms, full_until, full_tries, full_late;
     bool later_open;     /* the app has an input "later" (as "order") */
 } World;
 
@@ -154,6 +158,13 @@ static bool deliver(void *context, const PureLinkDelivery *d) {
     CHECK(d->input == 3 && !strcmp(d->source, "test.ordered"), "a delivery to input %u from %s", d->input, d->source);
     if (w->done_count == sizeof(w->done) / sizeof(w->done[0])) return false; /* busy: tried again */
     ++w->deliveries;
+    if (w->full_ms && !w->full_until && w->heard >= w->full_at) w->full_until = w->now + w->full_ms * MS;
+    if (w->now < w->full_until) {
+        ++w->full_tries;
+        w->done[w->done_count++] = (PureLinkDone){d->token, w->heard, true, false, true};
+        return true;
+    }
+    if (w->full_until && !w->full_late) w->full_late = w->now - w->full_until + 1;
     bool fail = w->fail_every && w->deliveries % w->fail_every == 0, gap = false;
     uint64_t heard = w->heard;
     const unsigned char *at = d->records;
@@ -175,7 +186,7 @@ static bool deliver(void *context, const PureLinkDelivery *d) {
         w->applied += heard - w->heard;
         w->heard = heard;
     }
-    w->done[w->done_count++] = (PureLinkDone){d->token, w->heard, !fail, gap};
+    w->done[w->done_count++] = (PureLinkDone){d->token, w->heard, !fail, gap, false};
     return true;
 }
 
@@ -201,6 +212,7 @@ typedef struct {
     bool forgetful;    /* the receiver keeps no memo: it starts again knowing no epoch */
     unsigned cuts;     /* the path cut for 3 s so many times, as an epoch begins */
     bool black_hole;   /* larger packets lost from when the path was found to carry them */
+    uint64_t full_at, full_ms; /* the app full for full_ms once it heard full_at (0: never) */
 } Case;
 
 /* Answers to a packet no one should answer: counted, but a LOST (a packet
@@ -265,6 +277,7 @@ typedef struct {
     uint64_t packets, seconds_ms;
     size_t datagram; /* the sender's at the end */
     bool hole;       /* a black hole opened */
+    uint64_t full_tries, full_late; /* the app's, full */
 } Outcome;
 
 /* One who later has both nodes' private keys: the keys of the sender's
@@ -393,7 +406,8 @@ static Outcome run(const Case *c, const char *dir) {
     unlink(memo);
     World w = {.packets = malloc(PACKETS * sizeof(Packet)), .loss = c->loss, .doubled = c->doubled,
                .spread_ms = c->spread_ms, .fail_every = c->fail_every, .replay = c->replay, .tamper = c->tamper,
-               .cuts = c->cuts, .black_hole = c->black_hole, .history = malloc(HISTORY * sizeof(Packet))};
+               .cuts = c->cuts, .black_hole = c->black_hole, .full_at = c->full_at, .full_ms = c->full_ms,
+               .history = malloc(HISTORY * sizeof(Packet))};
     if (!w.packets || !w.history) exit(1);
     char from[8] = "sender0";
     epoch_ms = c->epoch_ms;
@@ -490,7 +504,8 @@ static Outcome run(const Case *c, const char *dir) {
             snprintf(from, sizeof(from), "sender%u", ++w.gen); /* a new process: another address */
         }
     }
-    Outcome o = {.packets = w.sent, .seconds_ms = w.now / MS, .datagram = pure_link_sender_datagram(s), .hole = w.hole};
+    Outcome o = {.packets = w.sent, .seconds_ms = w.now / MS, .datagram = pure_link_sender_datagram(s), .hole = w.hole,
+                 .full_tries = w.full_tries, .full_late = w.full_late};
     pure_link_sender_counts(s, &o.sent);
     pure_link_receiver_counts(r, &o.heard);
     o.sent.packets += sent_before.packets, o.sent.resent += sent_before.resent, o.sent.epochs += sent_before.epochs;
@@ -514,12 +529,13 @@ static Outcome run(const Case *c, const char *dir) {
     unsigned opened_later = later_with_keys(&w, a, b, public_a, public_b, c->name);
     printf("{\"case\":\"%s\",\"records\":%llu,\"virtual_ms\":%llu,\"packets\":%llu,\"resent\":%llu,\"lost\":%llu,"
            "\"deliveries\":%llu,\"woken\":%llu,\"remembered\":%llu,\"swept\":%llu,\"changed\":%llu,\"replayed\":%llu,"
-           "\"attacker_in\":%llu,\"attacker_out\":%llu,\"epochs\":%llu,\"opened_later\":%u}\n",
+           "\"attacker_in\":%llu,\"attacker_out\":%llu,\"epochs\":%llu,\"opened_later\":%u,\"full_tries\":%llu}\n",
            c->name, (unsigned long long)c->records, (unsigned long long)o.seconds_ms, (unsigned long long)o.sent.packets,
            (unsigned long long)o.sent.resent, (unsigned long long)o.sent.lost, (unsigned long long)w.deliveries,
            (unsigned long long)o.heard.woken, (unsigned long long)o.heard.remembered, (unsigned long long)o.heard.swept,
            (unsigned long long)w.bent, (unsigned long long)w.replayed, (unsigned long long)w.attacker_in,
-           (unsigned long long)w.attacker_out, (unsigned long long)o.sent.epochs, opened_later);
+           (unsigned long long)w.attacker_out, (unsigned long long)o.sent.epochs, opened_later,
+           (unsigned long long)w.full_tries);
     pure_link_sender_free(s);
     pure_link_receiver_free(r);
     pure_seal_key_free(a);
@@ -692,7 +708,7 @@ static bool output_deliver(void *context, const PureLinkDelivery *d) {
         at += 4 + size;
     }
     o->heard[d->input] = heard;
-    o->done[o->done_count++] = (PureLinkDone){d->token, heard, true, gap};
+    o->done[o->done_count++] = (PureLinkDone){d->token, heard, true, gap, false};
     return true;
 }
 static bool output_answer(void *context, const unsigned char *packet, size_t size, const unsigned char *to,
@@ -888,7 +904,7 @@ static bool deliver_largest(void *context, const PureLinkDelivery *d) {
     CHECK(same, "largest: a delivery of %u records from %llu, the first %u bytes", d->count,
           (unsigned long long)d->first, size);
     w->heard = same ? 1 : w->heard;
-    w->done[w->done_count++] = (PureLinkDone){d->token, 1, true, false};
+    w->done[w->done_count++] = (PureLinkDone){d->token, 1, true, false, false};
     return true;
 }
 static bool answer_largest(void *context, const unsigned char *packet, size_t size, const unsigned char *to,
@@ -941,8 +957,9 @@ int main(void) {
         return 1;
     }
     /* A clean network: nothing is sent twice. */
-    Case clean = {"clean", 3000, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false, 0, false};
+    Case clean = {"clean", 3000, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false, 0, false, 0, 0};
     Outcome o = run(&clean, dir);
+    uint64_t clean_packets = o.packets;
     CHECK(o.sent.resent == 0 && o.sent.lost == 0, "clean: %llu sent again, %llu lost", (unsigned long long)o.sent.resent,
           (unsigned long long)o.sent.lost);
     /* Loss, packets out of order and doubled, failed saves, a pause long
@@ -950,7 +967,7 @@ int main(void) {
      * starting again: the receiver remembers its secret, so it wakes the
      * sender without an X25519. */
     for (uint64_t s = 1; s <= 4; ++s) {
-        Case rough = {"rough", 3000, s * 7919, 10, 3, 20, 37, 1500, 800, 2200, 300, 0, false, 0, false, 0, false};
+        Case rough = {"rough", 3000, s * 7919, 10, 3, 20, 37, 1500, 800, 2200, 300, 0, false, 0, false, 0, false, 0, 0};
         o = run(&rough, dir);
         CHECK(o.sent.resent > 0 && o.heard.swept >= 1 && o.heard.woken >= 1 && o.heard.remembered >= 1,
               "rough: sent again %llu, swept %llu, woken %llu, remembered %llu", (unsigned long long)o.sent.resent,
@@ -960,36 +977,47 @@ int main(void) {
     /* An attacker on the path: packets changed on the way, and packets of
      * the past sent again, from the sender's address and its own, across the
      * same restarts and pause. */
-    Case changed = {"changed", 1500, 31, 3, 0, 5, 0, 0, 0, 0, 0, 0, true, 0, false, 0, false};
+    Case changed = {"changed", 1500, 31, 3, 0, 5, 0, 0, 0, 0, 0, 0, true, 0, false, 0, false, 0, 0};
     run(&changed, dir);
     for (uint64_t s = 1; s <= 2; ++s) {
-        Case again = {"replayed", 3000, s * 104729, 5, 3, 20, 37, 1500, 800, 2200, 300, 25, false, 0, false, 0, false};
+        Case again = {"replayed", 3000, s * 104729, 5, 3, 20, 37, 1500, 800, 2200, 300, 25, false, 0, false, 0, false, 0, 0};
         run(&again, dir);
     }
     /* Epochs a fifth of a second long (a new one a second, as the receiver
      * accepts), and a receiver that starts again with no memo: it knows no
      * epoch, and the sender begins them again. */
-    Case epochs = {"epochs", 3000, 271, 5, 3, 20, 37, 1500, 800, 2200, 300, 10, false, 200, false, 0, false};
+    Case epochs = {"epochs", 3000, 271, 5, 3, 20, 37, 1500, 800, 2200, 300, 10, false, 200, false, 0, false, 0, 0};
     o = run(&epochs, dir);
     CHECK(o.sent.epochs >= 10, "epochs: %llu begun", (unsigned long long)o.sent.epochs);
-    Case forgetful = {"forgetful", 3000, 409, 5, 3, 20, 37, 0, 800, 0, 0, 0, false, 0, true, 0, false};
+    Case forgetful = {"forgetful", 3000, 409, 5, 3, 20, 37, 0, 800, 0, 0, 0, false, 0, true, 0, false, 0, 0};
     o = run(&forgetful, dir);
     CHECK(o.sent.epochs >= 2, "forgetful: %llu epochs begun (none again)", (unsigned long long)o.sent.epochs);
     /* The path cut for 3 s the moment the sender begins an epoch, three
      * times: the receiver never saw the epoch used, and the sender, hearing
      * nothing, offers another epoch 1 with a new key. The accept of the old
      * offer must not begin it. */
-    Case cut = {"cut", 3000, 919, 0, 0, 20, 37, 0, 0, 0, 0, 0, false, 200, false, 3, false};
+    Case cut = {"cut", 3000, 919, 0, 0, 20, 37, 0, 0, 0, 0, 0, false, 200, false, 3, false, 0, 0};
     o = run(&cut, dir);
     CHECK(o.sent.epochs >= 4 && o.sent.fallbacks == 3, "cut: %llu epochs begun, %llu taken for lost (3 cuts)",
           (unsigned long long)o.sent.epochs, (unsigned long long)o.sent.fallbacks);
     /* A path that carried 1,452-byte packets and then, from the moment the
      * link found it did, carries none larger than 1,200 (a route changed,
      * and no ICMP says so): the link must see it and go back. */
-    Case hole = {"black hole", 3000, 1601, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false, 0, true};
+    Case hole = {"black hole", 3000, 1601, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false, 0, true, 0, 0};
     o = run(&hole, dir);
     CHECK(o.hole && o.datagram == PURE_LINK_DATAGRAM, "black hole: %s, a datagram of %zu at the end",
           o.hole ? "opened" : "never opened", o.datagram);
+    /* The app full for 5 s (its memory budget): it is handed the records
+     * again after pauses of 0.1, 0.2, 0.4 and then 0.5 s, not at every
+     * turn, and within half a second of having room it takes them. The
+     * sender, told the receiver keeps what came, sends none of it again. */
+    Case full = {"full", 3000, 2027, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, false, 0, false, 1000, 5000};
+    o = run(&full, dir);
+    CHECK(o.full_tries >= 9 && o.full_tries <= 14 && o.full_late && o.full_late <= 500 * MS + 10 * MS,
+          "full: handed over %llu times while full, taken %llu ms after", (unsigned long long)o.full_tries,
+          (unsigned long long)(o.full_late / MS));
+    CHECK(o.sent.resent == 0 && o.packets < clean_packets + 200, "full: %llu sent again, %llu packets (clean: %llu)",
+          (unsigned long long)o.sent.resent, (unsigned long long)o.packets, (unsigned long long)clean_packets);
     impostors(dir);
     flood(dir);
     outputs(dir);

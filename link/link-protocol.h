@@ -225,8 +225,11 @@ typedef struct {
     void *context;
 } PureLinkHost;
 /* A delivery's end: heard, the last number heard; stored, its save
- * succeeded (else it is handed over again); gap, it stopped at a gap. */
-typedef struct { void *token; uint64_t heard; bool stored, gap; } PureLinkDone;
+ * succeeded (else it is handed over again); gap, it stopped at a gap; full,
+ * the host has no room for more now (its app's memory budget): what it did
+ * not take is kept, and handed over again after a pause, 100 ms doubling to
+ * half a second while it stays full (its sender told so meanwhile). */
+typedef struct { void *token; uint64_t heard; bool stored, gap, full; } PureLinkDone;
 /* A packet to send to an address a packet came from: whether it went. */
 typedef bool PureLinkSend(void *context, const unsigned char *packet, size_t size, const unsigned char *to,
                           size_t to_size);

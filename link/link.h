@@ -38,7 +38,7 @@ void pure_link_close(PureLink *);
 typedef struct PureLinkListener PureLinkListener;
 PureLinkListener *pure_link_listen(PureLinkReceiver *, unsigned port, char *error, size_t size);
 bool pure_link_serve(PureLinkListener *, char *error, size_t size);
-/* stored: the delivery's save succeeded; gap: it stopped at a gap. */
-void pure_link_done(PureLinkListener *, void *token, uint64_t heard, bool stored, bool gap);
+/* How a delivery went: link-protocol.h's PureLinkDone, with its token. */
+void pure_link_done(PureLinkListener *, PureLinkDone);
 void pure_link_listener_close(PureLinkListener *, PureLinkCounts *counts);
 #endif

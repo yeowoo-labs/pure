@@ -19,7 +19,10 @@ enum { DATAGRAM_MOST = PURE_LINK_DATAGRAM_MOST, BODY_MOST = DATAGRAM_MOST - HEAD
  * at least this much of it fits. */
 enum { PART_LEAST = 64 };
 enum { F_PADDING = 0, F_STREAM = 1, F_RECORD = 2, F_ACK = 3, F_STORED = 4, F_PING = 5, F_RECORDS = 6, F_CHALLENGE = 7,
-       F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, F_LOST = 11, F_REFUSED = 12, STORED_GAP = 1 };
+       F_RESPONSE = 8, F_OFFER = 9, F_ACCEPT = 10, F_LOST = 11, F_REFUSED = 12 };
+/* STORED's flags: what came after a gap was not kept; the app is full (no
+ * room for more now), and what came is kept for when it has room. */
+enum { STORED_GAP = 1, STORED_FULL = 2 };
 /* A packet's first byte is VERSION with the sending side's epoch (mod 16)
  * in its low four bits; OFFER and ACCEPT are an epoch's number (u32) and a
  * public key made for it, and ACCEPT the first bytes of the key it answers
@@ -702,6 +705,7 @@ static void on_stored(PureLinkSender *l, const unsigned char *p, size_t size, ui
         l->stored = heard;
         l->stored_changed = now;
     }
+    if (flags & STORED_FULL) l->stored_changed = now; /* it keeps what came, with no room yet: the wait begins again */
     if ((flags & STORED_GAP) && heard >= l->stored) /* it did not keep what came after a gap: send it again */
         for (size_t k = 0; k < l->count && l->received; ++k) {
             Record *r = record_at(l, k);
@@ -1267,6 +1271,7 @@ typedef struct Stream {
     uint32_t input, shape; /* the host's number for the input; the messages' shape */
     uint64_t heard;              /* the last number heard (stored), once known */
     bool known, out, stored_due, gap, ready;
+    uint64_t pause, waits;       /* while the host is full: the pause, and the time until which it waits */
     /* The line: once the last heard is known, whole records from the one
      * after it on, in order, as a delivery carries them (u32 size, bytes),
      * from line_head: handed over as they are, let go by moving the head.
@@ -1311,6 +1316,9 @@ typedef struct { uint32_t name, next; } Allowed; /* name: where in names (u8 len
  * that often; what they held goes back to the system once TRIM_AFTER have
  * gone, or TRIM_WAIT after any went. */
 static const uint64_t IDLE_FIRST = 30000 * MS, SWEEP_EVERY = 250 * MS, TRIM_WAIT = 10000 * MS;
+/* A full host is handed its records again after these pauses: a STORED
+ * saying it is full comes that often, within the sender's STORED_WAIT. */
+static const uint64_t FULL_FIRST = 100 * MS, FULL_LONGEST = 500 * MS;
 enum { TRIM_AFTER = 1024 };
 
 struct PureLinkReceiver {
@@ -1319,6 +1327,7 @@ struct PureLinkReceiver {
     unsigned char own_public[PURE_SEAL_KEY];
     uint32_t own_id;
     uint64_t idle, swept, trimmed, untrimmed;
+    uint64_t waiting; /* the earliest a stream waits until for a full host (0: none) */
     /* Keys made for a run that then did not open cost a token; tokens come
      * back KEYINGS a second, up to KEYINGS. Under a flood of made-up
      * packets keys are made for that many a second at most, while senders
@@ -2440,7 +2449,7 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
             body[at++] = F_STORED;
             at += put_names(body + at, st->source, st->input_name);
             put64(body + at, st->heard);
-            body[at + 8] = st->gap ? STORED_GAP : 0;
+            body[at + 8] = (st->gap ? STORED_GAP : 0) | (st->pause ? STORED_FULL : 0);
             size_t used = st->held_bytes + (st->line_size - st->line_head);
             size_t credit = used >= HELD_MOST ? 1 : st->mean ? (HELD_MOST - used) / st->mean : CREDIT;
             put32(body + at + 9, (uint32_t)(credit < 1 ? 1 : credit > CREDIT_MOST ? CREDIT_MOST : credit));
@@ -2470,10 +2479,12 @@ static void answer(PureLinkReceiver *s, uint64_t now, PureLinkSend *send, void *
 
 /* What the host said of its deliveries: the saved records let go, and how
  * far they are stored said. */
-static void apply_done(PureLinkReceiver *s, const PureLinkDone *done, size_t count) {
+static void apply_done(PureLinkReceiver *s, const PureLinkDone *done, size_t count, uint64_t now) {
     for (size_t k = 0; k < count; ++k) {
         Stream *st = done[k].token;
         st->out = false;
+        st->pause = !done[k].full ? 0 : !st->pause ? FULL_FIRST : 2 * st->pause < FULL_LONGEST ? 2 * st->pause : FULL_LONGEST;
+        st->waits = st->pause ? now + st->pause : 0;
         mark_ready(s, st);
         if (!done[k].stored) continue; /* not saved: handed over again */
         if (!st->known || done[k].heard > st->heard) st->heard = done[k].heard;
@@ -2496,13 +2507,16 @@ static void apply_done(PureLinkReceiver *s, const PureLinkDone *done, size_t cou
 }
 
 /* The streams ready, each handed over; one the host could not take now is
- * tried again at the next turn. */
-static void hand_over_ready(PureLinkReceiver *s) {
+ * tried again at the next turn, and one it was full for after its pause. */
+static void hand_over_ready(PureLinkReceiver *s, uint64_t now) {
     size_t count = s->ready_count;
+    s->waiting = 0;
     for (size_t k = 0; k < count; ++k) {
         Stream *st = s->ready[k];
         st->ready = false;
-        if (!hand_over(s, st)) mark_ready(s, st);
+        bool waits = now < st->waits;
+        if (waits || !hand_over(s, st)) mark_ready(s, st);
+        if (waits && (!s->waiting || st->waits < s->waiting)) s->waiting = st->waits;
     }
     memmove(s->ready, s->ready + count, (s->ready_count - count) * sizeof(*s->ready));
     s->ready_count -= count;
@@ -2515,8 +2529,8 @@ void pure_link_receiver_turn(PureLinkReceiver *s, const PureLinkDone *done, size
         explicit_bzero(s->ours_private, sizeof(s->ours_private));
         s->ours_ready = false;
     }
-    apply_done(s, done, count);
-    hand_over_ready(s);
+    apply_done(s, done, count, now);
+    hand_over_ready(s, now);
     for (size_t k = 0; k < s->notice_count; ++k)
         if (send(context, s->notices[k].packet, sizeof(s->notices[k].packet), s->notices[k].to, s->notices[k].to_size))
             ++s->counts.packets;
@@ -2530,7 +2544,8 @@ void pure_link_receiver_turn(PureLinkReceiver *s, const PureLinkDone *done, size
 }
 
 uint64_t pure_link_receiver_due(const PureLinkReceiver *s) {
-    return s->active_count || s->ready_count ? s->swept + SWEEP_EVERY : 0;
+    uint64_t due = s->active_count || s->ready_count ? s->swept + SWEEP_EVERY : 0;
+    return s->waiting && s->waiting < due ? s->waiting : due;
 }
 
 void pure_link_receiver_counts(const PureLinkReceiver *s, PureLinkCounts *counts) {

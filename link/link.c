@@ -554,7 +554,7 @@ bool pure_link_serve(PureLinkListener *s, char *error, size_t size) {
     return true;
 }
 
-void pure_link_done(PureLinkListener *s, void *token, uint64_t heard, bool stored, bool gap) {
+void pure_link_done(PureLinkListener *s, PureLinkDone done) {
     pthread_mutex_lock(&s->lock);
     if (s->done_count == s->done_capacity) {
         size_t capacity = s->done_capacity ? 2 * s->done_capacity : 16;
@@ -563,7 +563,7 @@ void pure_link_done(PureLinkListener *s, void *token, uint64_t heard, bool store
         s->done = grown;
         s->done_capacity = capacity;
     }
-    s->done[s->done_count++] = (PureLinkDone){token, heard, stored, gap};
+    s->done[s->done_count++] = done;
     pthread_mutex_unlock(&s->lock);
     wake(s->wake);
 }

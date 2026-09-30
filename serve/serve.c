@@ -1710,7 +1710,8 @@ static void hand_back(void *context, Applied *applied, size_t count) {
         events = events || applied[i].waiter;
         LinkJob *link = applied[i].link;
         if (!link) continue; /* records a link delivered: stored now, or not */
-        pure_link_done(link->listener, link->token, applied[i].heard, applied[i].status == PURE_OK, applied[i].gap);
+        pure_link_done(link->listener, (PureLinkDone){link->token, applied[i].heard, applied[i].status == PURE_OK,
+                                                     applied[i].gap, false});
         free(link->ingress);
         free(link);
     }
