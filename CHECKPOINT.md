@@ -12,7 +12,7 @@
 
 | 영역 | 확인한 것 | 근거 |
 |---|---|---|
-| 앱 표현 | 상태(수, text와 커서·마크, 레코드의 리스트와 키 있는 리스트, 인덱스), 입력(키, text, 필드 있는 메시지, 타이머), 원자적 이벤트 핸들러, 순수 보기(조건식, 표와 걸러진 표, count·sum·max·min·first), `fn`·`use` 라이브러리, text 비교, 시간(`now`, `every`, `floor`, `%`). 로드할 때 타입·스택·합류·커서와 인덱스의 소속을 모두 검증하고 이벤트의 실행량에 상한이 있다 | 008, aup `docs/design/002-dsl-direction.md`, aup `make check`(파이썬 참조 모델 대조, 진단 132건) |
+| 앱 표현 | 상태(수, `bool`, 정확한 64비트 정수 `i64`, text와 커서·마크, 레코드의 리스트와 키 있는 리스트, 인덱스), 입력(키, text, 필드 있는 메시지, 타이머), 원자적 이벤트 핸들러, 순수 보기(조건식, 표와 걸러진 표, count·sum·max·min·first), `fn`·`use` 라이브러리, text 비교, 시간(`now`, `every`, `floor`, `%`). 로드할 때 타입·스택·합류·커서와 인덱스의 소속을 모두 검증하고 이벤트의 실행량에 상한이 있다 | 008, [016](docs/design/016-bool-and-i64.md), aup `docs/design/002-dsl-direction.md`, aup `make check`(파이썬 참조 모델 대조, 진단 223건) |
 | 영속 | 선언한 상태가 곧 영속 상태다. 목록은 이미지와 로그(저장마다 바뀐 기록 한 항목, 재사용하는 할당 구간, 앞 항목의 다이제스트로 이어짐)에, 나머지는 트리 저장소에(커밋당 한 연속 구간과 동기화 한 번). 이벤트 묶음마다 저장 한 번, 이미지는 소유자 밖에서 체크포인트. `kill -9`와 커밋 각 단계의 죽음 뒤 확인 응답한 이벤트가 모두 남는다. 레코드·키가 바뀐 모듈로 바꿔도 데이터가 이름으로 옮겨진다 | [076](docs/research/076-one-sync-commit.md), [081](docs/research/081-tail-records.md), [092](docs/research/092-tpcc.md), 008 상태 영속·교체 |
 | 인터페이스 | 한 명세가 TUI(셀 단위 갱신), CLI, 문장(NUI), 웹 GUI가 된다. 저장하면 실행 중인 앱이 상태를 이어 새 모듈로 바뀐다(`aup watch`, `vega … --watch`) | Vega `docs/design/001-first-component.md`, Vega `make check`(가상 터미널, 헤드리스 Chromium 포함) |
 | HTTP 서비스 | 보기가 GET, 입력이 POST다(JSON 본문과 그 안의 그룹 객체를 제자리에서 읽는다, 라우터 코드 없음). 앱의 `send`는 이벤트와 함께 저장되고, `--send 출력=URL`로 다른 앱이나 HTTP 끝점에 순서대로 묶어 전해지며, 받는 앱은 번호마다 한 번 적용한다(서버를 죽였다 살려도 정확히 한 번). `--seal 출력=공개키`면 받는 노드의 키로 봉인해(HPKE, 전달선마다 세션 하나, 보내는 노드의 키로 인증) 사이의 중계가 읽지도 바꾸지도 못하고, 받는 노드는 `--sender 이름=키`로 보낸 이를 가린다(봉인 전달 462k/s, 봉인 없이 468k/s). 답은 저장 뒤에 나간다. 상태를 가진 앱은 소유자 스레드 하나가 입력을 적용하고, 연결 스레드는 마지막 저장의 스냅숏으로 보기를 답한다(쓰기가 동기화하는 동안에도 읽기는 기다리지 않는다) | 008 HTTP 호스트, [077](docs/research/077-apps-as-http-services.md), [080](docs/research/080-snapshot-reads.md), [082](docs/research/082-json-in-place.md), [083](docs/research/083-delivery-over-http.md), [086](docs/research/086-sealed-sends.md), [088](docs/research/088-sealed-sessions.md) |
@@ -31,7 +31,7 @@
 +9%, 상주 −10%, [107](docs/research/107-snapshot-nodes-reused.md)). 남은 가장 큰 몫은 항목 찾기다. 키로 나눈 소유자는 그다음에 본다. 대신 압축한 파일이 한 주기의 0을 미리 가져 커밋이 새
 블록을 받지 않는다(저장소 커밋 +21%, 저널 커밋 −59%, [085](docs/research/085-cycle-sized-files.md)).
 
-남은 것: macOS 검증, `i64`([016](docs/design/016-bool-and-i64.md)의 2단계. `bool`은 들어갔다), 압축을 없애는 제자리 재사용 저장소(085 다음), 응답을 기다리는 출력의 묶음 전달(083), 앱
+남은 것: macOS 검증, 압축을 없애는 제자리 재사용 저장소(085 다음), 응답을 기다리는 출력의 묶음 전달(083), 앱
 라우트의 인증·TLS(문서 피어의 TLS는 있다), aup·Vega의 배포 묶음, 캐시보다 큰 목록을 찾는 걸음(109: 미리 가져오기로는 줄지
 않았다. 한 사건의 조회를 겹치거나 구조를 바꿔야 한다).
 
