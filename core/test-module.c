@@ -5,6 +5,9 @@
 #include "store.h"
 #include <dirent.h>
 #include <fcntl.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -1056,6 +1059,7 @@ static void list_trees(void) {
     Model shared[SHARES] = {{0}};
     PureRetired retired[SHARES + 1] = {{0}};
     unsigned first = 0, held = 0, splits_seen = 0;
+    uint64_t epoch = 0; /* the copies', one after another */
     size_t largest = 0, events = 0, undone = 0;
     for (unsigned event = 0; event < 6000; ++event) {
         size_t mark = undo.count, journal = pure_list_changes(list).size;
@@ -1137,7 +1141,7 @@ static void list_trees(void) {
                 --held;
             }
             unsigned slot = (first + held) % SHARES;
-            CHECK((copies[slot] = pure_list_share(list, &retired[slot])));
+            CHECK((copies[slot] = pure_list_share(list, &retired[slot], ++epoch)));
             model_copy(&shared[slot], &model);
             ++held;
         }
@@ -1201,7 +1205,7 @@ static void list_trees(void) {
     CHECK(keyed);
     for (unsigned round = 0; round < 40000; ++round) {
         if (round == 20000) {
-            PureList *copy = pure_list_share(keyed, &keyed_retired);
+            PureList *copy = pure_list_share(keyed, &keyed_retired, 1);
             CHECK(copy && pure_list_keyed(keyed, 0) == PURE_OK && same_items(copy, &keys) && same_items(keyed, &keys));
             pure_list_free(copy);
         }
@@ -3675,6 +3679,51 @@ static void snapshots_read(Spec spec, void (*event)(PureApp *, uint32_t *), unsi
     remove_store(path);
 }
 
+/* A snapshot held while the app goes on for long keeps the states as they
+ * were then, and nothing the app makes and lets go after it: holding one
+ * costs the states of its time, however many events and snapshots follow
+ * (it held them all before, each snapshot holding the next). */
+static size_t snapshot_held_growth;
+
+static void snapshot_held(Spec spec, void (*event)(PureApp *, uint32_t *)) {
+    static char was[1 << 16], shown_text[1 << 16];
+    char *path = new_store();
+    PureStore *store;
+    CHECK(load(spec, &module_a) == PURE_OK && pure_store_open(path, &store) == PURE_OK);
+    PureApp app, reader = {0};
+    CHECK(pure_app_start(&app, &module_a, pure_store_data(store)) == PURE_OK);
+    uint32_t seed = 0x401du;
+    for (unsigned step = 0; step < 200; ++step) event(&app, &seed);
+    PureSnapshot *held = pure_app_snapshot(&app);
+    CHECK(held);
+    Shown before = {was, 0, sizeof(was)}, shown = {shown_text, 0, sizeof(shown_text)};
+    describe(&app, &before);
+    size_t used[3] = {0, 0, 0};
+    for (unsigned half = 0; half < 2; ++half) {
+#ifdef __GLIBC__
+        used[half] = mallinfo2().uordblks;
+#endif
+        for (unsigned step = 0; step < 20000; ++step) {
+            event(&app, &seed);
+            pure_snapshot_release(pure_app_snapshot(&app));
+        }
+    }
+#ifdef __GLIBC__
+    used[2] = mallinfo2().uordblks;
+    /* The first half may make the app's own copies of what the held one shares; the second makes none to keep. */
+    snapshot_held_growth = used[2] > used[1] ? used[2] - used[1] : 0;
+    CHECK(snapshot_held_growth < 256 * 1024);
+#endif
+    pure_app_read(&reader, held);
+    describe(&reader, &shown);
+    CHECK(!strcmp(before.text, shown.text));
+    pure_snapshot_release(held);
+    pure_app_stop(&reader);
+    pure_app_stop(&app);
+    pure_store_close(store);
+    remove_store(path);
+}
+
 static void crash_event(PureApp *app, uint32_t *seed) {
     (void)seed;
     CHECK(pure_app_input(app, 0, PURE_EDGE_DOWN) == PURE_OK);
@@ -3688,6 +3737,7 @@ static void snapshots(void) {
     snapshots_kept(keyed, &unkeyed, keyed_event, 3000);
     snapshots_kept(crashing, NULL, crash_event, 300);
     snapshots_read(keyed, keyed_event, 3000);
+    snapshot_held(keyed, keyed_event);
     snapshots_read(crashing, crash_event, 300);
     /* Without stored states (texts only in memory) there is no snapshot. */
     CHECK(load(crashing, &module_a) == PURE_OK);
@@ -3695,7 +3745,8 @@ static void snapshots(void) {
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && !pure_app_snapshot(&app));
     pure_app_stop(&app);
     CHECK(snapshot_retired > 100);
-    printf("{\"snapshots\":6600,\"items_retired\":%zu,\"reads_on_threads\":%zu}\n", snapshot_retired, snapshot_reads);
+    printf("{\"snapshots\":6600,\"items_retired\":%zu,\"reads_on_threads\":%zu,\"held_growth_bytes\":%zu}\n",
+           snapshot_retired, snapshot_reads, snapshot_held_growth);
 }
 
 /* A message of a text, a number, bytes and a u32, in that order: the prefix

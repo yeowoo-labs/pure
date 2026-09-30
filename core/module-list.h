@@ -59,8 +59,18 @@ size_t pure_list_count(const PureList *);
  * freed, since the copy may still read them. The copy is freed with
  * pure_list_free, on any thread, when its last reference goes
  * (pure_list_hold takes one more). Only between events (no change waits to
- * be committed or undone). */
-PureList *pure_list_share(PureList *, PureRetired *retired);
+ * be committed or undone). epoch numbers the copy (as a snapshot of an app
+ * numbers its lists' copies, one number for all of them): a node or text
+ * the list makes after it has the epoch, and a copy of epoch e reads only
+ * what was made before e. */
+PureList *pure_list_share(PureList *, PureRetired *retired, uint64_t epoch);
+/* A copy made before and still current (the list unchanged since) is read
+ * as of epoch too: what the list lets go from now on is retired. */
+void pure_list_mark(PureList *, uint64_t epoch);
+/* Of what was retired, what a copy of epoch may still read (made before
+ * it) goes to kept (none when kept is NULL), and the rest to gone, for
+ * pure_retired_free (later, and where it pleases): from is left empty. */
+void pure_retired_pass(PureRetired *from, uint64_t epoch, PureRetired *kept, PureRetired *gone);
 void pure_list_hold(PureList *copy);
 /* Whether copy shares list's items as they are now. */
 bool pure_list_current(const PureList *copy, const PureList *list);

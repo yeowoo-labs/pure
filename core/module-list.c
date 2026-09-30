@@ -67,7 +67,7 @@ struct PureList {
     unsigned char *journal;
     size_t journal_size, journal_capacity;
     uint64_t id, version; /* which list, and a number every change moves on */
-    uint64_t shares;      /* copies made so far: a node or text made before the last one is shared */
+    uint64_t shares;      /* the last copy's epoch: a node or text made before it is shared */
     PureRetired *retired; /* where shared nodes and texts go when the list lets them go */
     Node *spare[2];       /* inner nodes and leaves let go that no copy read, kept for the next ones (linked by first) */
     unsigned spares[2];
@@ -193,6 +193,36 @@ void pure_retired_free(PureRetired *retired) {
     }
     free(entries);
     *retired = (PureRetired){0};
+}
+
+static uint64_t made_at(const Retired *r) {
+    return r->text ? ((const uint64_t *)r->pointer)[-1] : ((const Node *)r->pointer)->made;
+}
+
+/* Room for more entries in retired; false when memory runs out. */
+static bool retired_room(PureRetired *retired, size_t more) {
+    if (retired->count + more <= retired->capacity) return true;
+    size_t capacity = 2 * retired->capacity > retired->count + more ? 2 * retired->capacity : retired->count + more;
+    Retired *grown = realloc(retired->entries, capacity * sizeof(*grown));
+    if (!grown) return false;
+    retired->entries = grown;
+    retired->capacity = capacity;
+    return true;
+}
+
+void pure_retired_pass(PureRetired *from, uint64_t epoch, PureRetired *kept, PureRetired *gone) {
+    Retired *entries = from->entries;
+    size_t keeping = 0;
+    for (size_t i = 0; kept && i < from->count; ++i) keeping += made_at(&entries[i]) < epoch;
+    bool room = (!keeping || retired_room(kept, keeping)) &&
+                (!gone || keeping == from->count || retired_room(gone, from->count - keeping));
+    for (size_t i = 0; i < from->count; ++i) {
+        PureRetired *to = kept && made_at(&entries[i]) < epoch ? kept : gone;
+        if (room && to) ((Retired *)to->entries)[to->count++] = entries[i];
+        /* else kept for good rather than freed while read (memory ran out) */
+    }
+    free(entries);
+    *from = (PureRetired){0};
 }
 
 static Node *new_node(PureList *list, bool leaf) {
@@ -570,14 +600,18 @@ void pure_list_clear(PureList *list) {
 
 size_t pure_list_count(const PureList *list) { return list->count; }
 
-PureList *pure_list_share(PureList *list, PureRetired *retired) {
+PureList *pure_list_share(PureList *list, PureRetired *retired, uint64_t epoch) {
     PureList *copy = malloc(sizeof(*copy));
     if (!copy) return NULL;
     *copy = (PureList){.layout = list->layout, .root = list->root, .count = list->count, .bytes = list->bytes,
                        .id = list->id, .version = list->version, .refs = 1, .copy = true};
     list->retired = retired;
-    ++list->shares;
+    list->shares = epoch > list->shares ? epoch : list->shares + 1;
     return copy;
+}
+
+void pure_list_mark(PureList *list, uint64_t epoch) {
+    if (list->retired && epoch > list->shares) list->shares = epoch;
 }
 
 void pure_list_hold(PureList *copy) { __atomic_add_fetch(&copy->refs, 1, __ATOMIC_RELAXED); }

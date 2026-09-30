@@ -2544,21 +2544,39 @@ bool pure_app_defer(PureApp *app, bool deferred) {
     return true;
 }
 
-/* ---- Snapshots. Snapshots of one app form a chain from oldest to newest,
- * each holding the next, so they go oldest first. List items the app lets go
- * while a snapshot is its newest may be read by that one and older ones, so
- * they go with it. */
+/* ---- Snapshots. An app's snapshots are numbered as they are made (their
+ * epoch), and the ones still held are linked, oldest to newest, under their
+ * register (which each of them holds, so it outlives the app). A list's node
+ * or text the app lets go while a snapshot is its newest may be read by that
+ * snapshot and by older ones made after it was: it goes with that snapshot,
+ * and when that one goes, to the newest older one still held that may read
+ * it (made after it was), or back to the system. So a snapshot held for long
+ * keeps what it shares, the states as they were then, and nothing made
+ * since. The links and retired lists move under the register's lock, a spin
+ * (none holds it long; what is freed is freed outside it). */
+typedef struct {
+    unsigned refs;  /* the snapshots not yet freed */
+    bool locked;
+    uint64_t epoch; /* snapshots made */
+} Register;
+
 struct PureSnapshot {
     unsigned refs;
     const PureModule *module;
-    uint64_t changes;
+    uint64_t changes, epoch;
     double values[PURE_MODULE_STATES];
     PureDraft *texts[PURE_MODULE_STATES];
     PureList *lists[PURE_MODULE_STATES];
     PureList *runtime[PURE_LISTS_STORED - PURE_LIST_HEARD]; /* only in a checkpoint's of one */
     PureRetired retired;
-    struct PureSnapshot *newer;
+    struct PureSnapshot *older, *newer; /* the held ones beside it */
+    Register *all;
 };
+
+static void lock_register(Register *r) {
+    while (__atomic_test_and_set(&r->locked, __ATOMIC_ACQUIRE)) { /* another thread moves links: a moment */ }
+}
+static void unlock_register(Register *r) { __atomic_clear(&r->locked, __ATOMIC_RELEASE); }
 
 void pure_snapshot_hold(PureSnapshot *snapshot) { __atomic_add_fetch(&snapshot->refs, 1, __ATOMIC_RELAXED); }
 
@@ -2567,17 +2585,26 @@ const PureList *pure_snapshot_list(const PureSnapshot *snapshot, uint32_t state)
 }
 
 void pure_snapshot_release(PureSnapshot *snapshot) {
-    while (snapshot && !__atomic_sub_fetch(&snapshot->refs, 1, __ATOMIC_ACQ_REL)) {
-        PureSnapshot *newer = snapshot->newer;
-        for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
-            pure_draft_close(snapshot->texts[i]);
-            pure_list_free(snapshot->lists[i]);
-        }
-        for (unsigned r = 0; r < PURE_LISTS_STORED - PURE_LIST_HEARD; ++r) pure_list_free(snapshot->runtime[r]);
-        pure_retired_free(&snapshot->retired);
-        free(snapshot);
-        snapshot = newer;
+    if (!snapshot || __atomic_sub_fetch(&snapshot->refs, 1, __ATOMIC_ACQ_REL)) return;
+    Register *all = snapshot->all;
+    PureRetired gone = {0};
+    if (all) { /* out of the links: what the one before may read goes to it (still linked, so still there) */
+        lock_register(all);
+        PureSnapshot *older = snapshot->older;
+        if (older) older->newer = snapshot->newer;
+        if (snapshot->newer) snapshot->newer->older = older;
+        pure_retired_pass(&snapshot->retired, older ? older->epoch : 0, older ? &older->retired : NULL, &gone);
+        unlock_register(all);
+    } else
+        gone = snapshot->retired;
+    pure_retired_free(&gone);
+    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
+        pure_draft_close(snapshot->texts[i]);
+        pure_list_free(snapshot->lists[i]);
     }
+    for (unsigned r = 0; r < PURE_LISTS_STORED - PURE_LIST_HEARD; ++r) pure_list_free(snapshot->runtime[r]);
+    free(snapshot);
+    if (all && !__atomic_sub_fetch(&all->refs, 1, __ATOMIC_ACQ_REL)) free(all);
 }
 
 void pure_app_stop(PureApp *app) {
@@ -2588,9 +2615,11 @@ void pure_app_stop(PureApp *app) {
         pure_list_free(app->lists[i]);
         pure_draft_close(app->list_drafts[i]);
     }
-    /* Items the newest snapshot may still read go when it goes. */
+    /* Items the newest snapshot may still read go with it. */
     if (app->snapshot) {
-        app->snapshot->retired = app->retired;
+        lock_register(app->snapshot->all);
+        pure_retired_pass(&app->retired, UINT64_MAX, &app->snapshot->retired, NULL);
+        unlock_register(app->snapshot->all);
         pure_snapshot_release(app->snapshot);
     } else
         pure_retired_free(&app->retired);
@@ -3149,10 +3178,16 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
     if (app->open || app->reading) return NULL;
     const PureModule *m = app->module;
     PureSnapshot *made = calloc(1, sizeof(*made)), *last = app->snapshot;
-    if (!made) return NULL;
+    Register *all = last ? last->all : calloc(1, sizeof(*all));
+    if (!made || !all) {
+        free(made);
+        if (!last) free(all);
+        return NULL;
+    }
     made->refs = 1;
     made->module = m;
     made->changes = app->changes;
+    made->epoch = all->epoch + 1; /* the app's thread alone makes them */
     memcpy(made->values, app->values, sizeof(made->values));
     bool ok = true;
     for (uint32_t i = 0; i < m->states && ok; ++i) {
@@ -3161,25 +3196,32 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
         if (last && last->lists[i] && pure_list_current(last->lists[i], app->lists[i])) {
             pure_list_hold(last->lists[i]);
             made->lists[i] = last->lists[i];
+            pure_list_mark(app->lists[i], made->epoch);
         } else
-            ok = (made->lists[i] = pure_list_share(app->lists[i], &app->retired)) != NULL;
+            ok = (made->lists[i] = pure_list_share(app->lists[i], &app->retired, made->epoch)) != NULL;
     }
     if (ok && runtime >= PURE_LIST_HEARD && runtime < PURE_LISTS_STORED) {
         PureList *list = runtime == PURE_LIST_HEARD ? app->heard : app->outbox;
-        ok = (made->runtime[runtime - PURE_LIST_HEARD] = pure_list_share(list, &app->retired)) != NULL;
+        ok = (made->runtime[runtime - PURE_LIST_HEARD] = pure_list_share(list, &app->retired, made->epoch)) != NULL;
     }
-    if (!ok) {
+    if (!ok) { /* never linked: it goes alone */
+        if (!last) free(all);
         pure_snapshot_release(made);
         return NULL;
     }
-    made->refs = last ? 3 : 2; /* the app's, the caller's and the last one's */
-    if (last) {
-        last->retired = app->retired;
+    made->refs = 2; /* the app's and the caller's */
+    made->all = all;
+    lock_register(all);
+    all->epoch = made->epoch;
+    ++all->refs;
+    made->older = last;
+    if (last) { /* what the app let go while last was its newest goes with it */
         last->newer = made;
-        pure_snapshot_release(last);
-    } else
-        pure_retired_free(&app->retired); /* shared only by a snapshot never made */
-    app->retired = (PureRetired){0};
+        pure_retired_pass(&app->retired, UINT64_MAX, &last->retired, NULL);
+    }
+    unlock_register(all);
+    if (last) pure_snapshot_release(last);
+    else pure_retired_free(&app->retired); /* shared only by a snapshot never made */
     app->snapshot = made;
     return made;
 }
