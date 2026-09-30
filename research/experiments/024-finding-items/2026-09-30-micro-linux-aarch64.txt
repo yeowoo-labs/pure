@@ -1,0 +1,6 @@
+load average at the start: (3.32470703125, 3.7529296875, 3.55712890625)
+ 100000 before seek: 125.4 ns (x1.69)  seek+3 reads: 339.3 ns (x1.36)  seek+3 reads+3 changes: 433.7 ns (x1.33)  same, a share each 30: 681.5 ns (x1.15)
+ 100000 after  seek: 185.9 ns (x1.10)  seek+3 reads: 270.8 ns (x1.08)  seek+3 reads+3 changes: 360.1 ns (x1.07)  same, a share each 30: 597.2 ns (x1.12)
+ 400000 before seek: 212.6 ns (x1.10)  seek+3 reads: 384.7 ns (x1.02)  seek+3 reads+3 changes: 505.4 ns (x1.12)  same, a share each 30: 855.1 ns (x1.22)
+ 400000 after  seek: 261.8 ns (x1.55)  seek+3 reads: 348.8 ns (x1.63)  seek+3 reads+3 changes: 470.6 ns (x1.18)  same, a share each 30: 801.6 ns (x1.51)
+load average at the end: (3.677734375, 3.7158203125, 3.5546875)

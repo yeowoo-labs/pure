@@ -1,0 +1,21 @@
+--- a/core/module-list.c
++++ b/core/module-list.c
+@@ -1122,12 +1122,17 @@
+             unsigned taken = upper(g->keys + 1, FANOUT - 1, key.num);
+             start += g->before[taken];
+             node = child(node, taken);
++            if (!node->leaf)
++                for (unsigned i = 0; i < FANOUT; i += 8) __builtin_prefetch(guide(node)->keys + i);
+         }
+         const double *keys = numbers(l, node, field);
+-        if (list->count > PREFETCHED) /* leaves past the caches: the leaf's keys fetched at once, not probe by probe */
++        if (true) /* the leaf's keys fetched at once, not probe by probe */
+             for (unsigned i = 0; i < node->count; i += 8) __builtin_prefetch(keys + i);
+         unsigned low = lower(keys, node->count, key.num);
+         *found = low < node->count && keys[low] == key.num;
++        if (*found) /* the item is read next, a field at a time: its cells, a line each, fetched together */
++            for (unsigned f = 0; f < l->fields; ++f)
++                __builtin_prefetch(l->text_fields[f] ? (const void *)&texts(l, node, f)[low] : (const void *)&numbers(l, node, f)[low]);
+         return start + low;
+     }
+     while (!node->leaf) {
