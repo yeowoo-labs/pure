@@ -130,11 +130,16 @@ static double *numbers(const Layout *l, const Node *leaf, unsigned f) { return (
 static int64_t *integers(const Layout *l, const Node *leaf, unsigned f) { return (int64_t *)((char *)leaf + l->column[f]); }
 static PureSpan *texts(const Layout *l, const Node *leaf, unsigned f) { return (PureSpan *)((char *)leaf + l->column[f]); }
 
+/* A number's, bool's or integer's cell is its 8 bytes, read as they are
+ * (whichever it holds; the reader's kind says which). */
 static PureCell cell_at(const Layout *l, const Node *leaf, unsigned i, unsigned f) {
-    if (l->kinds[f] == PURE_CELL_INTEGER) return (PureCell){.i64 = integers(l, leaf, f)[i]};
-    if (!pure_cell_text(l->kinds[f])) return (PureCell){.num = numbers(l, leaf, f)[i]};
-    PureSpan text = texts(l, leaf, f)[i];
-    return (PureCell){.text = (unsigned char *)text.data, .size = text.size};
+    PureCell cell = {0};
+    if (!pure_cell_text(l->kinds[f])) memcpy(&cell.i64, (const char *)leaf + l->column[f] + 8 * (size_t)i, 8);
+    else {
+        PureSpan text = texts(l, leaf, f)[i];
+        cell.text = (unsigned char *)text.data, cell.size = text.size;
+    }
+    return cell;
 }
 
 static void put_cells(const Layout *l, Node *leaf, unsigned i, const PureCell *cells) {

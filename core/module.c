@@ -1956,8 +1956,9 @@ static bool seen_new(Seen *seen, double value, bool *full) {
 }
 
 /* One item: its value, and whether it counts (for count and first, the
- * value is). false without memory (a distinct fold's set). */
-static bool fold_in(Fold *fold, size_t row, PureValue value, double counts) {
+ * value is). false without memory (a distinct fold's set). A fold of i64s
+ * is never planned, so a leaf's lanes (numbers) come here alone. */
+static bool fold_number(Fold *fold, size_t row, double value, double counts) {
     if (counts == 0) return true;
     unsigned how = fold->how;
     if (how == PURE_FOLD_FIRST) {
@@ -1967,22 +1968,32 @@ static bool fold_in(Fold *fold, size_t row, PureValue value, double counts) {
     }
     if (how == PURE_FOLD_DISTINCT) {
         bool full = false;
-        fold->total += fold->integer ? seen_bits(&fold->seen, (uint64_t)value.i64, &full) : seen_new(&fold->seen, value.num, &full);
+        fold->total += seen_new(&fold->seen, value, &full);
         fold->any = true;
         return !full;
     }
-    if (fold->integer) { /* an i64's sum, most or least */
-        int64_t v = value.i64;
-        if (how == PURE_FOLD_SUM) {
-            if (__builtin_add_overflow(fold->whole, v, &fold->whole)) fold->overflow = fold->done = true;
-        } else if (!fold->any || (how == PURE_FOLD_MAX ? v > fold->whole : v < fold->whole))
-            fold->whole = v;
+    fold->total = how == PURE_FOLD_COUNT ? fold->total + 1 : how == PURE_FOLD_SUM ? fold->total + value :
+                  !fold->any ? value : how == PURE_FOLD_MAX ? maximum(fold->total, value) : minimum(fold->total, value);
+    fold->any = true;
+    return true;
+}
+
+/* One item run as written: a number's, or an i64's (a sum past the range
+ * overflows and ends the fold; count and first take no i64). */
+static bool fold_in(Fold *fold, size_t row, PureValue value, double counts) {
+    if (!fold->integer) return fold_number(fold, row, value.num, counts);
+    if (counts == 0) return true;
+    int64_t v = value.i64;
+    if (fold->how == PURE_FOLD_DISTINCT) {
+        bool full = false;
+        fold->total += seen_bits(&fold->seen, (uint64_t)v, &full);
         fold->any = true;
-        return true;
+        return !full;
     }
-    double number = value.num;
-    fold->total = how == PURE_FOLD_COUNT ? fold->total + 1 : how == PURE_FOLD_SUM ? fold->total + number :
-                  !fold->any ? number : how == PURE_FOLD_MAX ? maximum(fold->total, number) : minimum(fold->total, number);
+    if (fold->how == PURE_FOLD_SUM) {
+        if (__builtin_add_overflow(fold->whole, v, &fold->whole)) fold->overflow = fold->done = true;
+    } else if (!fold->any || (fold->how == PURE_FOLD_MAX ? v > fold->whole : v < fold->whole))
+        fold->whole = v;
     fold->any = true;
     return true;
 }
@@ -2043,7 +2054,7 @@ static PureResult fold_runs(const PureModule *m, PureValue *values, PureBlock in
             fold->any = any;
         } else
             for (unsigned i = first; i < last && !fold->done; ++i)
-                if (!fold_in(fold, items.start + i, (PureValue){.num = v[i]}, c[i])) return PURE_ALLOCATION;
+                if (!fold_number(fold, items.start + i, v[i], c[i])) return PURE_ALLOCATION;
     }
     return PURE_OK;
 }
@@ -2222,7 +2233,7 @@ static bool group_pass(const PureModule *m, PureValue *values, PureBlock inner, 
             if (c[i] == 0) continue;
             Group *group = group_of(pass, keys[i], how, true);
             if (!group) return false;
-            if (!group->fold.done && !fold_in(&group->fold, items.start + i, (PureValue){.num = v[i]}, c[i])) return false;
+            if (!group->fold.done && !fold_number(&group->fold, items.start + i, v[i], c[i])) return false;
         }
     }
     return true;
