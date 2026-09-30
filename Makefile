@@ -75,6 +75,15 @@ $(BUILD)/test-module: core/test-module.c $(MODEL) $(STORE) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -DPURE_STORE_TEST core/test-module.c $(MODEL) $(STORE) $(LDFLAGS) -pthread -lm $(LDLIBS) -o $@
 
+# The same, under AddressSanitizer and UndefinedBehaviorSanitizer with leaks
+# counted: snapshots are read and let go on other threads (eebdeea left a
+# race on their register and leaks that the plain build passes).
+$(BUILD)/test-module-sanitized: core/test-module.c $(MODEL) $(STORE) $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -std=c17 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=address,undefined -fno-sanitize-recover=all $(INCLUDES) -DPURE_STORE_TEST core/test-module.c \
+		$(MODEL) $(STORE) $(LDFLAGS) -pthread -lm $(LDLIBS) -o $@
+
 # A link's two sides through a network of the test's own (pure-crypto.so beside it).
 $(BUILD)/test-link: link/test-link.c $(BUILD)/libpure-link.a $(BUILD)/pure-crypto.so $(wildcard link/*.h)
 	@mkdir -p $(BUILD)
@@ -104,11 +113,12 @@ $(BUILD)/test-tree-store: store/test-tree-store.c $(STORE) $(HEADERS)
 # The HTTP host's checks build their apps with aup (the sibling checkout) and
 # compare documents with the earlier document server.
 AUP ?= ../aup
-check: all $(BUILD)/test-module $(BUILD)/test-tree-store $(BUILD)/test-log $(BUILD)/test-link $(BUILD)/test-message-json \
-		$(BUILD)/module-probe $(BUILD)/clock-back.so
+check: all $(BUILD)/test-module $(BUILD)/test-module-sanitized $(BUILD)/test-tree-store $(BUILD)/test-log \
+		$(BUILD)/test-link $(BUILD)/test-message-json $(BUILD)/module-probe $(BUILD)/clock-back.so
 	$(BUILD)/test-tree-store
 	$(BUILD)/test-log
 	$(BUILD)/test-module
+	ASAN_OPTIONS=detect_leaks=1 $(BUILD)/test-module-sanitized > /dev/null
 	$(BUILD)/test-link
 	$(BUILD)/test-message-json
 	$(MAKE) -C $(AUP) build/aup

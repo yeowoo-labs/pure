@@ -2702,6 +2702,8 @@ void pure_app_stop(PureApp *app) {
         pure_list_free(app->lists[i]);
         pure_draft_close(app->list_drafts[i]);
     }
+    pure_list_free(app->outbox); /* the runtime's lists too, before what they let go is handed on */
+    pure_list_free(app->heard);
     /* Items the newest snapshot may still read go with it. */
     if (app->snapshot) {
         lock_register(app->snapshot->all);
@@ -2711,8 +2713,6 @@ void pure_app_stop(PureApp *app) {
     } else
         pure_retired_free(&app->retired);
     pure_draft_close(app->stored_values);
-    pure_list_free(app->outbox);
-    pure_list_free(app->heard);
     free(app->carried);
     pure_draft_close(app->stored_links);
     pure_draft_close(app->stored_seq);
@@ -3337,7 +3337,7 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
     made->all = all;
     lock_register(all);
     all->epoch = made->epoch;
-    ++all->refs;
+    __atomic_add_fetch(&all->refs, 1, __ATOMIC_ACQ_REL); /* a snapshot's last release takes it off outside the lock */
     made->older = last;
     if (last) { /* what the app let go while last was its newest goes with it */
         last->newer = made;

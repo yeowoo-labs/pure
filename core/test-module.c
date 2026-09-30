@@ -2101,7 +2101,7 @@ static void deferred_messages(void) {
     CHECK(load(editor_spec, &module_a) == PURE_OK);
     PureApp app;
     unsigned char buffer[64];
-    char key[8];
+    char key[16];
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&app, true));
     for (int i = 0; i < 3; ++i) {
         snprintf(key, sizeof(key), "k%d", i);
@@ -2137,7 +2137,7 @@ static void pending_keys(void) {
     CHECK(load(editor_spec, &module_a) == PURE_OK);
     PureApp app;
     unsigned char buffer[64];
-    char key[8];
+    char key[16];
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&app, true));
     for (int i = 0; i < 200; ++i) {
         snprintf(key, sizeof(key), "p%d", i);
