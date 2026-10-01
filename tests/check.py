@@ -3031,25 +3031,32 @@ def server_timers(aup, pure, work):
     """A served app's timers tick on the server's clock and its events see
     the time they were applied, on one thread and with an owner; the ticks
     are saved, so a restarted server goes on from them. An app with no state
-    but an output ticks too: its sends are its state (review 004, F4)."""
+    but an output ticks too: its sends are its state (review 004, F4). A
+    window in which the wall clock jumped (a VM's time sync sets it back
+    seconds at a time: research 029) says nothing of the times seen, and is
+    taken again."""
     import time
     module, source = work / 'beat.pmod', work / 'beat.aup'
     source.write_text(BEAT_SOURCE)
     compile_module(aup, source, module)
-    seen = {}
+    seen, jumped = {}, 0
     for threads in (1, 3):
         store = work / f'beat-{threads}'
         beats = 0
         for run_number in range(2):
             host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store, '--threads', threads])
             try:
-                posted = time.time() * 1000
-                assert http(host.port, 'POST', '/inputs/stamp', b'x')[0] == 200
-                time.sleep(0.6)
-                before = time.time() * 1000
-                read = lambda view: float(http(host.port, 'GET', f'/views/{view}')[3])
-                count, last, stamped = read('beats_view'), read('last_view'), read('stamped_view')
-                after = time.time() * 1000 + 1  # the server's clock reads whole milliseconds
+                for _ in range(3):
+                    posted, steady = time.time() * 1000, time.monotonic() * 1000
+                    assert http(host.port, 'POST', '/inputs/stamp', b'x')[0] == 200
+                    time.sleep(0.6)
+                    before = time.time() * 1000
+                    read = lambda view: float(http(host.port, 'GET', f'/views/{view}')[3])
+                    count, last, stamped = read('beats_view'), read('last_view'), read('stamped_view')
+                    after = time.time() * 1000 + 1  # the server's clock reads whole milliseconds
+                    if abs((after - 1 - posted) - (time.monotonic() * 1000 - steady)) < 50:
+                        break
+                    jumped += 1
                 assert count >= beats + 5, (threads, run_number, count, beats)
                 assert before - 1000 < last <= after and posted - 50 <= stamped <= before, (last, stamped, posted, before)
                 beats = count
@@ -3067,6 +3074,7 @@ def server_timers(aup, pure, work):
         stats = host.stop()
     assert stats[0]['ticks'] >= 10, stats
     seen['stateless'] = stats[0]['ticks']
+    seen['windows_the_clock_jumped'] = jumped
     return seen
 
 
