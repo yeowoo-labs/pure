@@ -2227,22 +2227,32 @@ static bool owner_turn(Owner *owner, bool alone, long *due) {
     return more;
 }
 
-/* A worker: the next app in the queue takes its turn; an app whose timer
- * is due joins the queue; with none, it sleeps until the soonest is due.
- * It stops once the host stops and no app waits. */
+/* Apps whose timers are due join the queue (turns.lock held); the soonest
+ * due of the others (UINT64_MAX: none). */
+static uint64_t enqueue_due(uint64_t now) {
+    uint64_t soonest = UINT64_MAX;
+    for (unsigned i = 0; i < app_count; ++i) {
+        Owner *o = &apps[i].owner;
+        if (!apps[i].running || !apps[i].owned || !o->due || o->queued || o->running) continue;
+        if (o->due <= now) {
+            o->due = 0;
+            enqueue(o);
+        } else if (o->due < soonest) soonest = o->due;
+    }
+    return soonest;
+}
+
+/* A worker: the app at the queue's head takes its turns here, one after
+ * another while it has work and no other app waits (it stays on this
+ * worker's core, and no other worker is woken for it); then it goes to the
+ * queue's tail. An app whose timer is due joins the queue; with none, the
+ * worker sleeps until the soonest is due. It stops once the host stops and
+ * no app waits. */
 static void *run_worker(void *context) {
     (void)context;
     pthread_mutex_lock(&turns.lock);
     for (;;) {
-        uint64_t now = now_ms(), soonest = UINT64_MAX;
-        for (unsigned i = 0; i < app_count; ++i) {
-            Owner *o = &apps[i].owner;
-            if (!apps[i].running || !apps[i].owned || !o->due || o->queued || o->running) continue;
-            if (o->due <= now) {
-                o->due = 0;
-                enqueue(o);
-            } else if (o->due < soonest) soonest = o->due;
-        }
+        uint64_t now = now_ms(), soonest = enqueue_due(now);
         Owner *owner = turns.head;
         if (!owner) {
             if (turns.stopping) break;
@@ -2255,18 +2265,30 @@ static void *run_worker(void *context) {
         }
         turns.head = owner->next;
         if (!turns.head) turns.tail = NULL;
+        else pthread_cond_signal(&turns.wake); /* more apps wait: a free worker takes the next */
         owner->queued = false;
         owner->running = true;
-        owner->again = false;
-        bool alone = !turns.head;
-        pthread_mutex_unlock(&turns.lock);
-        long due;
-        bool more = owner_turn(owner, alone, &due);
-        pthread_mutex_lock(&turns.lock);
+        for (;;) {
+            owner->again = false;
+            bool alone = !turns.head;
+            pthread_mutex_unlock(&turns.lock);
+            long due;
+            bool more = owner_turn(owner, alone, &due);
+            pthread_mutex_lock(&turns.lock);
+            ++owner->turns;
+            owner->due = due < 0 ? 0 : now_ms() + (uint64_t)due;
+            if (!more && !owner->again) break;
+            enqueue_due(now_ms());
+            if (turns.head) { /* another app waits: this one to the tail, the head here next */
+                owner->running = false;
+                owner->queued = true;
+                owner->next = NULL;
+                turns.tail->next = owner;
+                turns.tail = owner;
+                break;
+            }
+        }
         owner->running = false;
-        ++owner->turns;
-        owner->due = due < 0 ? 0 : now_ms() + (uint64_t)due;
-        if (more || owner->again) enqueue(owner);
     }
     pthread_cond_broadcast(&turns.wake); /* the other workers stop too */
     pthread_mutex_unlock(&turns.lock);
