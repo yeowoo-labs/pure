@@ -3851,9 +3851,15 @@ twin   {work / 'apps.pmod'}   {work / 'store-a'}
 LINKS_SOURCE = """state n = 0
 input put = message { k: u32 }
 output out = message { k: u32 }
+output here = message { k: u32 }
+output named = message { k: u32 }
+output small = message { k: u32 }
 on put {
   n = n + 1
   send out { k: put.k }
+  send here { k: put.k }
+  send named { k: put.k }
+  send small { k: put.k }
 }
 view count = n
 """
@@ -3875,17 +3881,34 @@ view count = count(g in got where g.k > 0)
 view sum = sum(g.k for g in got)
 view in_order = ordered
 """
+# The same, its input laid out otherwise (a field before k): it takes the sends by name.
+LINKS_NAMED = LINKS_TAKER.replace('input take = message { k: u32 }', 'input take = message {\n  note: text\n  k: u32\n}')
+# The same, and it can let go of what it got (and what it heard stays).
+LINKS_SMALL = LINKS_TAKER + """input clear = message { all: u32 }
+on clear {
+  for g in got {
+    got.remove(g)
+  }
+}
+view held = count(g in got where g.k > 0)
+"""
 
 
 def server_apps_links(aup, pure, work):
-    """Apps of a host send (docs/design/017, stage 2): an app's send= wires
-    its output, its sends' source APP.OUTPUT, sealed with the host's key; an
-    app of another host takes them on that host's one --link-port, named
-    APP/INPUT. Every send arrives once and in order, and the stop line counts
-    the link's packets."""
+    """Apps of a host send (docs/design/017, stage 2). An app's send= wires
+    each output: to an app of another host over a link (its sends' source
+    APP.OUTPUT, sealed with the host's key, taken on that host's one
+    --link-port as APP/INPUT), and to apps of its own host with no socket
+    (send=OUTPUT=APP/INPUT): one taking the same shape, one taking the
+    fields by name, one whose memory budget fills. Every send arrives once
+    and in order, across a kill -9 of the sending host between requests;
+    the full app's sends wait in the sender's outbox until it lets go of
+    what it holds, and none is lost."""
+    import signal
     import socket
     import time
-    for name, text in (('links-src', LINKS_SOURCE), ('links-taker', LINKS_TAKER)):
+    for name, text in (('links-src', LINKS_SOURCE), ('links-taker', LINKS_TAKER), ('links-named', LINKS_NAMED),
+                       ('links-small', LINKS_SMALL)):
         (work / f'{name}.aup').write_text(text)
         compile_module(aup, work / f'{name}.aup', work / f'{name}.pmod')
     serve = pure / 'build/pure-serve'
@@ -3899,27 +3922,54 @@ def server_apps_links(aup, pure, work):
         keys[side] = host.info['public_key']
         host.stop()
     (work / 'links-far.conf').write_text(f"far {work / 'links-taker.pmod'} {work / 'links-far'}\n")
-    (work / 'links-near.conf').write_text(f"src {work / 'links-src.pmod'} {work / 'links-src'} "
-                                          f"send=out=pure://127.0.0.1:{link_port}/far/take seal=out={keys['receiver']}\n")
+    (work / 'links-near.conf').write_text(
+        f"src {work / 'links-src.pmod'} {work / 'links-src'} send=out=pure://127.0.0.1:{link_port}/far/take "
+        f"seal=out={keys['receiver']} send=here=here/take send=named=byname/take send=small=small/take\n"
+        f"here {work / 'links-taker.pmod'} {work / 'links-here'}\n"
+        f"byname {work / 'links-named.pmod'} {work / 'links-byname'}\n"
+        f"small {work / 'links-small.pmod'} {work / 'links-small'} memory=1200\n")
     far = HttpHost([serve, '--apps', work / 'links-far.conf', '--key', work / 'links-receiver.key',
                     '--link-port', link_port, '--sender', f"src.out={keys['sender']}"])
-    near = HttpHost([serve, '--apps', work / 'links-near.conf', '--key', work / 'links-sender.key'])
-    sent = 300
+    near_args = [serve, '--apps', work / 'links-near.conf', '--key', work / 'links-sender.key', '--threads', 2]
+    near = HttpHost(near_args)
+    sent, killed_at = 400, 150
     try:
         for k in range(1, sent + 1):
+            if k == killed_at:  # between requests: every send before it is stored, some not yet handed on
+                near.process.send_signal(signal.SIGKILL)
+                near.process.wait()
+                near = HttpHost(near_args)
             status, why, _, _ = http(near.port, 'POST', f'/src/inputs/put?k={k}')
             assert status == 200, (k, status, why)
+
+        def views(port, app):
+            return [http(port, 'GET', f'/{app}/views/{view}')[3] for view in ('count', 'sum', 'in_order')]
+
+        whole = [str(sent).encode(), str(sent * (sent + 1) // 2).encode(), b'true']
         deadline = time.time() + 30
-        while time.time() < deadline and http(far.port, 'GET', '/far/views/count')[3] != str(sent).encode():
+        while time.time() < deadline and (views(far.port, 'far') != whole or views(near.port, 'here') != whole or
+                                          views(near.port, 'byname') != whole):
             time.sleep(0.05)
-        assert http(far.port, 'GET', '/far/views/count')[3] == str(sent).encode()
-        assert http(far.port, 'GET', '/far/views/sum')[3] == str(sent * (sent + 1) // 2).encode()
-        assert http(far.port, 'GET', '/far/views/in_order')[3] == b'true'
+        assert views(far.port, 'far') == whole, views(far.port, 'far')
+        assert views(near.port, 'here') == whole, views(near.port, 'here')
+        assert views(near.port, 'byname') == whole, views(near.port, 'byname')
+        # The small app is full: it holds some, the rest wait in src's outbox; it lets go, and they come.
+        held = int(http(near.port, 'GET', '/small/views/held')[3])
+        assert 0 < held < sent, held
+        taken = held
+        for _ in range(sent):
+            assert http(near.port, 'POST', '/small/inputs/clear?all=1')[0] == 200
+            time.sleep(0.3)  # a held-back batch goes again after 100 ms
+            now = int(http(near.port, 'GET', '/small/views/held')[3])
+            if not now:
+                break
+            taken += now
+        assert taken == sent and http(near.port, 'GET', '/small/views/in_order')[3] == b'true', taken
     finally:
-        packets = near.stop()[-1]['link_packets']
+        near_stats = near.stop()[-1]
         far.stop()
-    assert packets > 0, packets
-    return {'sent': sent, 'link_packets': packets}
+    assert near_stats['handed'] > 0 and near_stats['link_packets'] > 0, near_stats
+    return {'sent': sent, 'killed_at': killed_at, 'handed': near_stats['handed'], 'small_held': held}
 
 
 def main():

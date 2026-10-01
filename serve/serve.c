@@ -213,10 +213,15 @@ typedef struct {
     unsigned link_count;
     uint32_t link_output[PURE_MODULE_INPUTS];
     uint64_t link_trimmed[PURE_MODULE_INPUTS];
-    /* Each outlet's place in the outbox, wires first: its sends before it
-     * are queued (feed_outlets); and the app's sends_gone when they were
-     * last moved back. How often an outlet's window was full. */
-    size_t outlet_from[2 * PURE_MODULE_INPUTS];
+    /* The owner's: outputs handed to other apps of the host (send=OUTPUT=APP/INPUT), and how far each was trimmed. */
+    struct Local *locals[PURE_MODULE_INPUTS];
+    unsigned local_count;
+    uint64_t local_trimmed[PURE_MODULE_INPUTS], handed;
+    /* Each outlet's place in the outbox, wires first, then links, then
+     * locals: its sends before it are queued (feed_outlets); and the app's
+     * sends_gone when they were last moved back. How often an outlet's
+     * window was full. */
+    size_t outlet_from[3 * PURE_MODULE_INPUTS];
     uint64_t gone_seen, windows_full;
     struct Writer *writer; /* the thread writing the app's checkpoints, once one was due */
     uint64_t checkpoints;  /* images it wrote */
@@ -306,7 +311,7 @@ static void stop_writer(Executor *ex) {
 
 /* A request made ready: its effect, what it names, and the thread that
  * answers it (or, for a surface's event, the waiter it wakes). */
-typedef struct LinkJob { PureLinkListener *listener; void *token; unsigned char *ingress; } LinkJob;
+typedef struct LinkJob { PureLinkListener *listener; void *token; unsigned char *ingress; struct Local *local; } LinkJob;
 typedef struct { Host *host; PureEffect effect; Route route; Waiter *waiter; LinkJob *link; } Job;
 
 /* The owner of an app with states served by several connection threads:
@@ -1644,8 +1649,166 @@ static void publish(Executor *ex) {
 enum { WINDOW_SENDS = 65536 };
 static size_t window_bytes = 4u << 20;
 
+/* An output's sends handed to another app of the host (send=OUTPUT=APP/INPUT,
+ * docs/design/017's stage 2): no socket, seal or packet. The sender's turn
+ * queues its saved sends here (feed_outlets) and hands them, a batch at a
+ * time, to the receiving app's queue as records a link delivers; the
+ * receiver's turn applies them after its last number heard and, its save
+ * over, says what it heard (local_done); the sender's next turn trims its
+ * outbox so far. What the receiver did not store is queued again from the
+ * outbox, after 100 ms when it had no room. */
+enum { LOCAL_RETRY_MS = 100 };
+typedef struct Local {
+    Owner *from, *to;
+    uint32_t output, input; /* the sender's output, the receiver's input */
+    char source[PURE_SOURCE + 1];
+    unsigned char fields[PURE_FIELDS_NAMED]; /* the sender's, when the input takes them by name */
+    size_t fields_size;
+    pthread_mutex_t lock; /* the receiver's turn says what it stored */
+    uint64_t queued, delivered; /* the last number queued, the last the receiver stored */
+    unsigned char *batch; /* queued, not handed over yet: a u32le size and the bytes of each */
+    size_t batch_size, batch_capacity, out_bytes;
+    uint64_t first, out_last; /* the batch's first number; the last of the one handed over */
+    unsigned count;
+    bool out, rewind; /* a batch is with the receiver; it did not store all of one */
+    uint64_t retry;   /* when one it had no room for goes again (the monotonic clock in ms) */
+} Local;
+
+static uint64_t local_queued(Local *l) {
+    pthread_mutex_lock(&l->lock);
+    uint64_t queued = l->queued;
+    pthread_mutex_unlock(&l->lock);
+    return queued;
+}
+
+static uint64_t local_delivered(Local *l) {
+    pthread_mutex_lock(&l->lock);
+    uint64_t delivered = l->delivered;
+    pthread_mutex_unlock(&l->lock);
+    return delivered;
+}
+
+static size_t local_held(Local *l) {
+    pthread_mutex_lock(&l->lock);
+    size_t held = l->batch_size + l->out_bytes;
+    pthread_mutex_unlock(&l->lock);
+    return held;
+}
+
+static bool local_queue(Local *l, uint64_t seq, PureSpan payload) {
+    pthread_mutex_lock(&l->lock);
+    bool room = grow(&l->batch, &l->batch_capacity, l->batch_size + 4 + payload.size, 1);
+    if (room) {
+        put_u32(l->batch + l->batch_size, (uint32_t)payload.size);
+        if (payload.size) memcpy(l->batch + l->batch_size + 4, payload.data, payload.size);
+        if (!l->count) l->first = seq;
+        l->batch_size += 4 + payload.size;
+        ++l->count;
+        l->queued = seq;
+    }
+    pthread_mutex_unlock(&l->lock);
+    return room;
+}
+
+/* The batch queued goes to the receiver, unless one is there or it waits
+ * to try again; as a link's delivery is laid out (link_deliver). */
+static void local_hand(Executor *ex, Local *l, uint64_t now) {
+    pthread_mutex_lock(&l->lock);
+    if (l->out || !l->count || (l->retry && now < l->retry)) {
+        pthread_mutex_unlock(&l->lock);
+        return;
+    }
+    size_t length = strlen(l->source), size = 4 + DELIVERY + l->batch_size + l->fields_size;
+    unsigned char *ingress = malloc(size);
+    LinkJob *link = malloc(sizeof(*link));
+    if (!ingress || !link) {
+        pthread_mutex_unlock(&l->lock);
+        free(ingress);
+        free(link);
+        return;
+    }
+    memset(ingress, 0, 4 + DELIVERY);
+    put_u32(ingress, (uint32_t)l->batch_size | DELIVERED | STORED_RECORDS);
+    put_u64(ingress + 4, l->first);
+    put_u32(ingress + 12, l->count);
+    ingress[16] = (unsigned char)length;
+    memcpy(ingress + 17, l->source, length);
+    memcpy(ingress + 4 + DELIVERY, l->batch, l->batch_size);
+    if (l->fields_size) memcpy(ingress + 4 + DELIVERY + l->batch_size, l->fields, l->fields_size);
+    *link = (LinkJob){.ingress = ingress, .local = l};
+    l->out = true;
+    l->out_bytes = l->batch_size;
+    l->out_last = l->first + l->count - 1;
+    l->batch_size = 0;
+    l->count = 0;
+    l->retry = 0;
+    pthread_mutex_unlock(&l->lock);
+    Job job = {.route = {.kind = ROUTE_INPUT, .target = l->input}, .link = link,
+               .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {ingress, size}}};
+    Owner *to = l->to;
+    pthread_mutex_lock(&to->lock);
+    bool queued = !to->stopping && grow(&to->jobs, &to->capacity, to->count + 1, sizeof(*to->jobs));
+    if (queued) {
+        to->jobs[to->count++] = job;
+        ++to->arrivals;
+        pthread_cond_signal(&to->waiting);
+    }
+    pthread_mutex_unlock(&to->lock);
+    if (queued) {
+        ++ex->handed;
+        schedule(to);
+        return;
+    }
+    free(ingress);
+    free(link);
+    pthread_mutex_lock(&l->lock);
+    l->out = false;
+    l->rewind = true; /* queued again from the outbox */
+    pthread_mutex_unlock(&l->lock);
+}
+
+/* The receiver's turn, its save over: what it heard from the batch. All of
+ * it, and the sender trims so far; else what it did not store is queued
+ * again (after LOCAL_RETRY_MS when it had no room). The sender's turn
+ * comes either way. */
+static void local_done(Local *l, uint64_t heard, bool stored, bool full) {
+    pthread_mutex_lock(&l->lock);
+    l->out = false;
+    l->out_bytes = 0;
+    if (stored && heard > l->delivered) l->delivered = heard;
+    if (!stored || heard < l->out_last) {
+        l->rewind = true;
+        if (full) l->retry = now_ms() + LOCAL_RETRY_MS;
+    }
+    pthread_mutex_unlock(&l->lock);
+    Owner *from = l->from;
+    pthread_mutex_lock(&from->lock);
+    from->delivered = true;
+    pthread_cond_signal(&from->waiting);
+    pthread_mutex_unlock(&from->lock);
+    schedule(from);
+}
+
+/* The milliseconds until a batch an app's local outlet holds back goes again (-1: none waits). */
+static long locals_due(Executor *ex) {
+    long due = -1;
+    uint64_t now = now_ms();
+    for (unsigned i = 0; i < ex->local_count; ++i) {
+        Local *l = ex->locals[i];
+        pthread_mutex_lock(&l->lock);
+        if (l->retry && (l->count || l->rewind)) {
+            long wait = l->retry > now ? (long)(l->retry - now) : 0;
+            if (due < 0 || wait < due) due = wait;
+        }
+        pthread_mutex_unlock(&l->lock);
+    }
+    return due;
+}
+
 static uint32_t outlet_output(Executor *ex, unsigned i) {
-    return i < ex->wire_count ? pure_wire_output(ex->wires[i]) : ex->link_output[i - ex->wire_count];
+    return i < ex->wire_count                 ? pure_wire_output(ex->wires[i])
+           : i < ex->wire_count + ex->link_count ? ex->link_output[i - ex->wire_count]
+                                                 : ex->locals[i - ex->wire_count - ex->link_count]->output;
 }
 
 /* The saved sends not yet queued go to their outlets, in order, as far as
@@ -1654,16 +1817,17 @@ static uint32_t outlet_output(Executor *ex, unsigned i) {
  * that left the outbox since (they may have been before it), so the sends
  * it queued before are not looked at again, however many wait. */
 static void feed_outlets(Executor *ex) {
-    unsigned outlets = ex->wire_count + ex->link_count;
+    unsigned outlets = ex->wire_count + ex->link_count + ex->local_count;
     uint64_t gone = ex->app.sends_gone - ex->gone_seen;
     ex->gone_seen = ex->app.sends_gone;
     for (unsigned i = 0; i < outlets; ++i) {
         PureWire *wire = i < ex->wire_count ? ex->wires[i] : NULL;
-        PureLink *link = wire ? NULL : ex->links[i - ex->wire_count];
+        PureLink *link = !wire && i < ex->wire_count + ex->link_count ? ex->links[i - ex->wire_count] : NULL;
+        Local *local = !wire && !link ? ex->locals[i - ex->wire_count - ex->link_count] : NULL;
         uint32_t output = outlet_output(ex, i);
-        uint64_t queued = wire ? pure_wire_queued(wire) : pure_link_queued(link),
-                 delivered = wire ? pure_wire_delivered(wire) : pure_link_delivered(link);
-        size_t held = wire ? pure_wire_held(wire) : pure_link_held(link), at = ex->outlet_from[i];
+        uint64_t queued = wire ? pure_wire_queued(wire) : link ? pure_link_queued(link) : local_queued(local),
+                 delivered = wire ? pure_wire_delivered(wire) : link ? pure_link_delivered(link) : local_delivered(local);
+        size_t held = wire ? pure_wire_held(wire) : link ? pure_link_held(link) : local_held(local), at = ex->outlet_from[i];
         at = at > gone ? at - (size_t)gone : 0;
         for (; at < ex->app.sent_saved; ++at) {
             uint32_t of;
@@ -1674,13 +1838,16 @@ static void feed_outlets(Executor *ex) {
                 ++ex->windows_full;
                 break;
             }
-            if (wire ? !pure_wire_queue(wire, seq, payload) : !pure_link_queue(link, seq, payload.data, payload.size))
+            if (wire ? !pure_wire_queue(wire, seq, payload)
+                     : link ? !pure_link_queue(link, seq, payload.data, payload.size) : !local_queue(local, seq, payload))
                 break;
             queued = seq;
             held += payload.size;
         }
         ex->outlet_from[i] = at;
     }
+    uint64_t now = ex->local_count ? now_ms() : 0;
+    for (unsigned i = 0; i < ex->local_count; ++i) local_hand(ex, ex->locals[i], now);
 }
 
 static void after_save(Executor *ex) {
@@ -1731,6 +1898,22 @@ static bool take_deliveries(Executor *ex) {
         if (stored <= ex->link_trimmed[i]) continue;
         pure_app_trim(&ex->app, ex->link_output[i], stored);
         ex->link_trimmed[i] = stored;
+    }
+    for (unsigned i = 0; i < ex->local_count; ++i) {
+        Local *l = ex->locals[i];
+        pthread_mutex_lock(&l->lock);
+        if (l->rewind && !l->out) { /* from what it stored, again */
+            l->queued = l->delivered;
+            l->batch_size = 0;
+            l->count = 0;
+            l->rewind = false;
+            ex->outlet_from[ex->wire_count + ex->link_count + i] = 0;
+        }
+        uint64_t stored = l->delivered;
+        pthread_mutex_unlock(&l->lock);
+        if (stored <= ex->local_trimmed[i]) continue;
+        pure_app_trim(&ex->app, l->output, stored);
+        ex->local_trimmed[i] = stored;
     }
     feed_outlets(ex); /* their windows moved on */
     return answered;
@@ -1865,9 +2048,11 @@ static void hand_back(void *context, Applied *applied, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         events = events || applied[i].waiter;
         LinkJob *link = applied[i].link;
-        if (!link) continue; /* records a link delivered: stored now, or not */
-        pure_link_done(link->listener, (PureLinkDone){link->token, applied[i].heard, applied[i].status == PURE_OK,
-                                                     applied[i].gap, applied[i].fault == PURE_FAULT_MEMORY});
+        if (!link) continue; /* records a link (or another app of the host) delivered: stored now, or not */
+        if (link->local) local_done(link->local, applied[i].heard, applied[i].status == PURE_OK, applied[i].fault == PURE_FAULT_MEMORY);
+        else
+            pure_link_done(link->listener, (PureLinkDone){link->token, applied[i].heard, applied[i].status == PURE_OK,
+                                                         applied[i].gap, applied[i].fault == PURE_FAULT_MEMORY});
         free(link->ingress);
         free(link);
     }
@@ -2171,6 +2356,9 @@ static bool owner_turn(Owner *owner, bool alone, long *due) {
     *due = run_timers(ex);
     bool answered = (delivered || ex->answers_wait) && take_deliveries(ex);
     if (ex->answers_wait && (*due < 0 || *due > ANSWER_WAIT_MS)) *due = ANSWER_WAIT_MS;
+    long held_back = ex->local_count ? locals_due(ex) : -1;
+    if (held_back >= 0 && (*due < 0 || held_back < *due)) *due = held_back;
+    if (held_back == 0) feed_outlets(ex); /* its time came */
     pthread_mutex_lock(&owner->lock);
     /* Answers are saved with the requests waiting, or now if none waits. */
     if (answered && !owner->count) {
@@ -2784,7 +2972,7 @@ static bool link_deliver(void *context, const PureLinkDelivery *d) {
     memcpy(ingress + 17, d->source, length);
     memcpy(ingress + 4 + DELIVERY, d->records, d->size);
     if (d->fields_size) memcpy(ingress + 4 + DELIVERY + d->size, d->fields, d->fields_size); /* laid out with those */
-    *link = (LinkJob){link_listener, d->token, ingress};
+    *link = (LinkJob){.listener = link_listener, .token = d->token, .ingress = ingress};
     Job job = {.route = {.kind = ROUTE_INPUT, .target = d->input % PURE_MODULE_INPUTS}, .link = link,
                .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {ingress, size}}};
     pthread_mutex_lock(&owner->lock);
@@ -2814,7 +3002,58 @@ static void wire_delivered(void *context) {
 
 /* --send OUTPUT=URL: that output's saved sends go to url, from NAME.OUTPUT. */
 static unsigned char own_public[PURE_SEAL_KEY]; /* this node's key's public half, when it has one */
-static bool open_wires(Executor *ex, const PureModule *m, const char *const *sends, unsigned count, const char *name) {
+/* send=OUTPUT=APP/INPUT in a host of apps: that output's sends handed to
+ * another app of it (Local), its input taking the output's shape or, by
+ * name, its fields. */
+static bool open_local(App *app, uint32_t output, const char *to, const char *source, char *error, size_t size) {
+    const char *slash = strchr(to, '/');
+    size_t length = slash ? (size_t)(slash - to) : 0;
+    App *receiver = NULL;
+    for (unsigned a = 0; named_apps && slash && a < app_count && !receiver; ++a)
+        if (strlen(apps[a].name) == length && !memcmp(apps[a].name, to, length)) receiver = &apps[a];
+    if (!receiver || !receiver->running || !receiver->owned) {
+        snprintf(error, size, "no running app '%.*s' in this host", (int)length, to);
+        return false;
+    }
+    const PureModule *m = &app->module, *r = &receiver->module;
+    int input = pure_module_input(r, slash + 1);
+    if (input < 0 || r->input[input].kind != PURE_KIND_MESSAGE || r->input[input].keyed) {
+        snprintf(error, size, "%s has no input '%s' taking messages", receiver->name, slash + 1);
+        return false;
+    }
+    Executor *ex = &app->owner.executor;
+    Local *l = calloc(1, sizeof(*l));
+    if (!l) {
+        snprintf(error, size, "no memory");
+        return false;
+    }
+    *l = (Local){.from = &app->owner, .to = &receiver->owner, .output = output, .input = (uint32_t)input};
+    if (pthread_mutex_init(&l->lock, NULL)) {
+        free(l);
+        snprintf(error, size, "no lock");
+        return false;
+    }
+    size_t named = strnlen(source, PURE_SOURCE);
+    memcpy(l->source, source, named);
+    l->source[named] = 0;
+    if (pure_module_shape(r, (uint32_t)input) != pure_module_shape(m, output)) { /* taken by name, or not at all */
+        l->fields_size = pure_module_fields(m, output, l->fields);
+        if (!pure_module_takes(r, (uint32_t)input, l->fields, l->fields_size)) {
+            pthread_mutex_destroy(&l->lock);
+            free(l);
+            snprintf(error, size, "%s's input %s does not take the output's fields", receiver->name, slash + 1);
+            return false;
+        }
+    }
+    ex->locals[ex->local_count++] = l;
+    return true;
+}
+
+static bool open_wires(App *app, const char *name) {
+    Executor *ex = &app->owner.executor;
+    const PureModule *m = &app->module;
+    const char *const *sends = app->sends;
+    unsigned count = app->send_count;
     for (unsigned i = 0; i < count; ++i) {
         const char *equals = strchr(sends[i], '=');
         char output[PURE_MODULE_NAME], source[PURE_SOURCE + 2], error[160];
@@ -2825,7 +3064,25 @@ static bool open_wires(Executor *ex, const PureModule *m, const char *const *sen
         }
         memcpy(output, sends[i], length);
         output[length] = 0;
+        /* An output goes one way: its outbox is trimmed as far as its outlet's receiver stored. */
+        int wired = pure_module_input(m, output);
+        for (unsigned k = 0; wired >= 0 && k < ex->wire_count + ex->link_count + ex->local_count; ++k)
+            if (outlet_output(ex, k) == (uint32_t)wired) {
+                fprintf(stderr, "send=%s: the output is wired already\n", sends[i]);
+                return false;
+            }
         int written = snprintf(source, sizeof(source), "%s.%s", name, output);
+        if (!strstr(equals + 1, "://")) { /* another app of the host: APP/INPUT */
+            int index = pure_module_input(m, output);
+            if (index < 0 || m->input[index].kind != PURE_KIND_OUTPUT) snprintf(error, sizeof(error), "no output '%s'", output);
+            else if (written <= 0 || written > PURE_SOURCE) snprintf(error, sizeof(error), "the name and output are longer than 64 bytes");
+            if (index < 0 || m->input[index].kind != PURE_KIND_OUTPUT || written <= 0 || written > PURE_SOURCE ||
+                !open_local(app, (uint32_t)index, equals + 1, source, error, sizeof(error))) {
+                fprintf(stderr, "send=%s: %s\n", sends[i], error);
+                return false;
+            }
+            continue;
+        }
         if (!strncmp(equals + 1, "pure://", 7)) { /* a link: no connection, sealed with the node's key */
             int index = pure_module_input(m, output);
             if (index < 0 || m->input[index].kind != PURE_KIND_OUTPUT) snprintf(error, sizeof(error), "no output '%s'", output);
@@ -3230,7 +3487,7 @@ int main(int argc, char **argv) {
         App *app = &apps[a];
         Executor *ex = &app->owner.executor;
         if (!app->running || !app->owned) continue;
-        if (open_wires(ex, &app->module, app->sends, app->send_count, named_apps ? app->name : name) &&
+        if (open_wires(app, named_apps ? app->name : name) &&
             wire_replies(ex, &app->module, app->replies, app->reply_count) &&
             wire_seals(ex, &app->module, app->seals, app->seal_count, seal_key ? own_public : NULL))
             continue;
@@ -3238,7 +3495,8 @@ int main(int argc, char **argv) {
         snprintf(app->why, sizeof(app->why), "Its sends are wired wrong (said above)");
         for (unsigned i = 0; i < ex->wire_count; ++i) pure_wire_close(ex->wires[i]);
         for (unsigned i = 0; i < ex->link_count; ++i) pure_link_close(ex->links[i]);
-        ex->wire_count = ex->link_count = 0;
+        for (unsigned i = 0; i < ex->local_count; ++i) free(ex->locals[i]);
+        ex->wire_count = ex->link_count = ex->local_count = 0;
         stop_executor(ex);
         app->running = false;
         --owners;
@@ -3345,7 +3603,7 @@ int main(int argc, char **argv) {
     PureLinkCounts sent = {0}, heard = {0}; /* what links sent, and what the listener took */
     pure_link_listener_close(link_listener, &heard); /* after the owner, which tells it what it stored */
     size_t active = 0, retained = 0, state_bytes = 0;
-    uint64_t moved = 0, accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0, ticks = 0, shown = 0, checkpoints = 0,
+    uint64_t moved = 0, handed = 0, accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0, ticks = 0, shown = 0, checkpoints = 0,
              memory_refused = 0, windows_full = 0, publications = 0, answers = 0, delivered = 0, attempts = 0;
     for (unsigned i = 0; i < threads; ++i) {
         shown += hosts[i].shown;
@@ -3386,6 +3644,12 @@ int main(int argc, char **argv) {
             sent.refused += c.refused;
             pure_link_close(ex->links[i]); /* what was not stored stays in the outbox */
         }
+        for (unsigned i = 0; i < ex->local_count; ++i) {
+            free(ex->locals[i]->batch);
+            pthread_mutex_destroy(&ex->locals[i]->lock);
+            free(ex->locals[i]);
+        }
+        handed += ex->handed;
         state_bytes += pure_app_state_bytes(&ex->app);
         stop_executor(ex);
         checkpoints += ex->checkpoints;
@@ -3413,7 +3677,8 @@ int main(int argc, char **argv) {
             heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused,
             windows_full);
     if (named_apps) { /* what each app did */
-        fprintf(stderr, ",\"workers\":%u,\"moved_home\":%" PRIu64 ",\"apps\":[", owners ? workers : 0, moved);
+        fprintf(stderr, ",\"workers\":%u,\"moved_home\":%" PRIu64 ",\"handed\":%" PRIu64 ",\"apps\":[",
+                owners ? workers : 0, moved, handed);
         for (unsigned a = 0; a < app_count; ++a) {
             const Owner *o = &apps[a].owner;
             fprintf(stderr, "%s{\"name\":", a ? "," : "");
