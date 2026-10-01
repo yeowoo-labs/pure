@@ -3831,15 +3831,21 @@ twin   {work / 'apps.pmod'}   {work / 'store-a'}
         stats = host.stop()[-1]
     by_name = {app['name']: app for app in stats['apps']}
     assert by_name['busy']['busy'] == busy and by_name['a']['events'] > 0 and stats['workers'] == 2, stats['apps']
-    # Restarted: each app's states are back.
-    host = HttpHost([serve, '--apps', manifest])
+    # Restarted, on three connection threads: each app's states are back, and
+    # a connection whose first request is for an app at home on another
+    # thread moves there (and is answered there).
+    host = HttpHost([serve, '--apps', manifest, '--threads', 3])
     try:
-        assert get(host.port, '/a/views/total')[::2] == (200, b'3') and get(host.port, '/b/views/total')[::2] == (200, b'6')
-        assert get(host.port, '/a/views/count')[::2] == (200, b'10') and get(host.port, '/busy/views/total')[::2] == \
-            (200, str(ok).encode())
+        for _ in range(8):
+            assert get(host.port, '/a/views/total')[::2] == (200, b'3') and get(host.port, '/b/views/total')[::2] == (200, b'6')
+            assert get(host.port, '/a/views/count')[::2] == (200, b'10') and get(host.port, '/busy/views/total')[::2] == \
+                (200, str(ok).encode())
+            assert post(host.port, '/tight/inputs/add?step=1') == (200, 'none')
+        assert get(host.port, '/tight/views/total')[::2] == (200, b'8')
     finally:
-        host.stop()
-    return {'apps': len(running), 'stopped': 2, 'flooded': len(flood), 'busy': busy}
+        moved = host.stop()[-1]['moved_home']
+    assert moved > 0, moved
+    return {'apps': len(running), 'stopped': 2, 'flooded': len(flood), 'busy': busy, 'moved_home': moved}
 
 
 def main():

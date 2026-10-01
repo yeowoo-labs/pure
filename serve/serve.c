@@ -113,6 +113,7 @@ typedef struct Connection {
     Phase phase;
     bool readable, writable, keep_alive, put, post;
     bool hung_up; /* the peer closed its side: read until the end, never stop at a short read */
+    bool settled; /* on its app's home thread, or staying here (a host of apps moves it once, at its first request) */
     uint64_t deadline;
     char key[65]; /* the document's key, or the view's or input's name */
     RouteKind route;
@@ -357,11 +358,14 @@ struct App {
     uint64_t work;  /* what an event or a view's evaluation may run */
     bool running;   /* started; else its routes answer 503 stopped, and why says why */
     char why[256];
+    unsigned home;  /* the connection thread its connections move to (a host of apps) */
     Owner owner;
 };
 static App *apps;
 static unsigned app_count;
 static bool named_apps; /* --apps: a route's first segment names its app */
+static Host *all_hosts;  /* the connection threads, for moving a connection to its app's home */
+static bool moved_home(Connection *c, size_t head_size);
 static void schedule(Owner *owner);
 
 struct Host {
@@ -385,7 +389,7 @@ struct Host {
     int epoll, listener;
     uint64_t timeout_ms;
     uint64_t now; /* the monotonic clock in ms, read once a round: deadlines count from it */
-    uint64_t accepted, requests, expired;
+    uint64_t accepted, requests, expired, moved_away;
     Session sessions[SESSIONS];
     uint64_t session_uses;
     /* What the owner hands back to answer (swapped for answering), and the
@@ -394,6 +398,10 @@ struct Host {
     Applied *done, *answering;
     size_t done_count, done_capacity, answering_capacity, pending;
     int wake;
+    /* Connections other threads moved here, their first request's bytes
+     * read already (under lock, woken by wake too). */
+    struct Moved { int fd; bool hung_up; size_t used; char in[HEADER_LIMIT]; } *moved;
+    size_t moved_count, moved_capacity;
 };
 
 /* Grow an array to hold `need` items; false when memory runs out. */
@@ -1109,6 +1117,7 @@ static void drive(Connection *c) {
     for (;;) {
         if (c->phase == READING_HEAD) {
             size_t end = head_end(c);
+            if (end && !c->settled && named_apps && all_hosts && moved_home(c, end)) return;
             if (end) { start_request(c, end); continue; }
             if (c->in_used == HEADER_LIMIT) { refuse(c, 431, "Request Header Fields Too Large", "headers"); continue; }
             if (!c->readable) return;
@@ -2439,43 +2448,115 @@ static bool load_module(App *app, const char *path) {
     return true;
 }
 
+/* A connection on this thread for fd (accepted, or moved here); NULL, fd
+ * closed, when it is full (the peer sees the close) or out of memory. */
+static Connection *adopt(Host *host, int fd) {
+    if (host->active == host->capacity) { close(fd); return NULL; }
+    Connection *c = host->spare;
+    if (c) host->spare = c->next;
+    else if (!(c = malloc(sizeof(*c)))) { close(fd); return NULL; }
+    size_t index = 0;
+    while (host->table[index]) ++index; /* a free index exists: active < capacity */
+    c->host = host;
+    c->index = index;
+    c->fd = fd;
+    c->phase = READING_HEAD;
+    c->readable = c->writable = c->keep_alive = true;
+    c->hung_up = c->settled = false;
+    c->deadline = host->now + host->timeout_ms;
+    c->ticket = (PureTicket){0};
+    c->out = NULL;
+    c->out_count = c->out_at = 0;
+    c->body = NULL;
+    c->opened = 0;
+    c->in_used = 0;
+    struct epoll_event event = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.ptr = c};
+    if (epoll_ctl(host->epoll, EPOLL_CTL_ADD, fd, &event)) {
+        close(fd);
+        c->next = host->spare;
+        host->spare = c;
+        return NULL;
+    }
+    host->table[index] = c;
+    ++host->active;
+    return c;
+}
+
 static void accept_all(Host *host) {
     for (;;) {
         int fd = accept4(host->listener, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (fd < 0) return;
-        if (host->active == host->capacity) { close(fd); continue; } /* full: the peer sees the close */
-        Connection *c = host->spare;
-        if (c) host->spare = c->next;
-        else if (!(c = malloc(sizeof(*c)))) { close(fd); continue; }
-        size_t index = 0;
-        while (host->table[index]) ++index; /* a free index exists: active < capacity */
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-        c->host = host;
-        c->index = index;
-        c->fd = fd;
-        c->phase = READING_HEAD;
-        c->readable = c->writable = c->keep_alive = true;
-        c->hung_up = false;
-        c->deadline = host->now + host->timeout_ms;
-        c->ticket = (PureTicket){0};
-        c->out = NULL;
-        c->out_count = c->out_at = 0;
-        c->body = NULL;
-        c->opened = 0;
-        c->in_used = 0;
-        struct epoll_event event = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.ptr = c};
-        if (epoll_ctl(host->epoll, EPOLL_CTL_ADD, fd, &event)) {
-            close(fd);
-            c->next = host->spare;
-            host->spare = c;
-            continue;
-        }
-        host->table[index] = c;
-        ++host->active;
+        Connection *c = adopt(host, fd);
+        if (!c) continue;
         ++host->accepted;
         drive(c);
     }
+}
+
+/* In a host of apps, a connection's requests go to its app's home thread,
+ * so an app's requests meet its owner from one thread, as they would from
+ * a process of its own: each thread's round hands an owner all its
+ * requests at once, and a turn hands its answers back to one thread. A
+ * connection moves there once, at its first request (its head read, no
+ * ticket taken): the thread gets its descriptor and the bytes read, and
+ * reads the request again. Whether it moved. */
+static bool moved_home(Connection *c, size_t head_size) {
+    c->settled = true;
+    const char *path = memchr(c->in, ' ', head_size);
+    if (!path || *++path != '/') return false;
+    const char *end = path + 1;
+    while (end < c->in + head_size && *end != '/' && *end != ' ' && *end != '?') ++end;
+    size_t length = (size_t)(end - path - 1);
+    App *app = NULL;
+    for (unsigned i = 0; i < app_count && !app; ++i)
+        if (strlen(apps[i].name) == length && !memcmp(apps[i].name, path + 1, length)) app = &apps[i];
+    Host *home = app ? &all_hosts[app->home] : NULL;
+    if (!home || home == c->host) return false;
+    pthread_mutex_lock(&home->lock);
+    bool room = grow(&home->moved, &home->moved_capacity, home->moved_count + 1, sizeof(*home->moved));
+    if (room) {
+        struct Moved *m = &home->moved[home->moved_count++];
+        m->fd = c->fd;
+        m->hung_up = c->hung_up;
+        m->used = c->in_used;
+        memcpy(m->in, c->in, c->in_used);
+    }
+    pthread_mutex_unlock(&home->lock);
+    if (!room) return false;
+    uint64_t one = 1;
+    if (write(home->wake, &one, sizeof(one)) != sizeof(one)) abort();
+    Host *host = c->host; /* here it is gone, its descriptor open there */
+    epoll_ctl(host->epoll, EPOLL_CTL_DEL, c->fd, NULL);
+    c->phase = CLOSED;
+    host->table[c->index] = NULL;
+    c->next = host->closed;
+    host->closed = c;
+    --host->active;
+    ++host->moved_away;
+    return true;
+}
+
+/* The connections moved here: each read again from its bytes. */
+static void take_moved(Host *host) {
+    pthread_mutex_lock(&host->lock);
+    size_t count = host->moved_count;
+    struct Moved *moved = count ? malloc(count * sizeof(*moved)) : NULL;
+    if (moved) memcpy(moved, host->moved, count * sizeof(*moved));
+    else count = 0;
+    host->moved_count = 0;
+    pthread_mutex_unlock(&host->lock);
+    for (size_t i = 0; i < count; ++i) {
+        Connection *c = adopt(host, moved[i].fd);
+        if (!c) continue;
+        c->settled = true;
+        c->hung_up = moved[i].hung_up;
+        c->in_used = moved[i].used;
+        memcpy(c->in, moved[i].in, moved[i].used);
+        drive(c);
+    }
+    free(moved);
 }
 
 
@@ -2582,7 +2663,11 @@ static void *run_shard(void *context) {
         for (int e = 0; e < ready; ++e) {
             Connection *c = events[e].data.ptr;
             if (!c) { accept_all(host); continue; }
-            if (events[e].data.ptr == &host->wake) { answer_handed(host); continue; }
+            if (events[e].data.ptr == &host->wake) {
+                answer_handed(host);
+                take_moved(host);
+                continue;
+            }
             if (c->phase == CLOSED) continue;
             if (events[e].events & EPOLLERR) { close_connection(c); continue; }
             if (events[e].events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP)) c->readable = true;
@@ -2647,6 +2732,8 @@ static void stop_shard(Host *host) {
     free(host->done);
     free(host->answering);
     free(host->views);
+    for (size_t i = 0; i < host->moved_count; ++i) close(host->moved[i].fd);
+    free(host->moved);
 }
 
 /* The input a link's stream goes to: one taking messages (not keyed) of the
@@ -3071,6 +3158,8 @@ int main(int argc, char **argv) {
     Host *hosts = calloc(threads, sizeof(*hosts));
     pthread_t *thread = calloc(threads, sizeof(*thread));
     if (!hosts || !thread || pure_cond_monotonic(&turns.wake)) return 1;
+    all_hosts = hosts;
+    for (unsigned a = 0; a < app_count; ++a) apps[a].home = a % threads; /* each app's connections meet on one thread */
     /* Each app's store, and its owner: an app that cannot start stops alone
      * (in a host of apps; the one app of a host stops the host). Two apps
      * never share a store. */
@@ -3209,10 +3298,11 @@ int main(int argc, char **argv) {
     PureLinkCounts sent = {0}, heard = {0}; /* what links sent, and what the listener took */
     pure_link_listener_close(link_listener, &heard); /* after the owner, which tells it what it stored */
     size_t active = 0, retained = 0, state_bytes = 0;
-    uint64_t accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0, ticks = 0, shown = 0, checkpoints = 0,
+    uint64_t moved = 0, accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0, ticks = 0, shown = 0, checkpoints = 0,
              memory_refused = 0, windows_full = 0, publications = 0, answers = 0, delivered = 0, attempts = 0;
     for (unsigned i = 0; i < threads; ++i) {
         shown += hosts[i].shown;
+        moved += hosts[i].moved_away;
         active += hosts[i].active;
         retained += hosts[i].runtime.retained;
         accepted += hosts[i].accepted;
@@ -3276,7 +3366,7 @@ int main(int argc, char **argv) {
             heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused,
             windows_full);
     if (named_apps) { /* what each app did */
-        fprintf(stderr, ",\"workers\":%u,\"apps\":[", owners ? workers : 0);
+        fprintf(stderr, ",\"workers\":%u,\"moved_home\":%" PRIu64 ",\"apps\":[", owners ? workers : 0, moved);
         for (unsigned a = 0; a < app_count; ++a) {
             const Owner *o = &apps[a].owner;
             fprintf(stderr, "%s{\"name\":", a ? "," : "");
