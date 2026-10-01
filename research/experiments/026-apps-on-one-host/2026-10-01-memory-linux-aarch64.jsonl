@@ -1,0 +1,4 @@
+{"way": "process", "apps": 1, "private_dirty_kib": 1296, "rss_kib": 2752, "pss_kib": 1311, "threads": 2}
+{"way": "host", "apps": 1, "private_dirty_kib": 1328, "rss_kib": 2784, "pss_kib": 1343, "threads": 3}
+{"way": "host", "apps": 10, "private_dirty_kib": 2384, "rss_kib": 3840, "pss_kib": 2399, "threads": 3}
+{"way": "host", "apps": 100, "private_dirty_kib": 13232, "rss_kib": 14688, "pss_kib": 13247, "threads": 3}

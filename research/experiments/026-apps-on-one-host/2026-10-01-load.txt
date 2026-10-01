@@ -1,0 +1,26 @@
+isolation  03:56:18 up  1:08,  2 users,  load average: 0.34, 1.39, 3.50
+isolation  04:17:12 up  1:29,  2 users,  load average: 0.43, 1.29, 2.23
+1 before  04:31:43 up  1:44,  1 user,  load average: 0.35, 1.48, 1.96
+1 after  04:33:29 up  1:45,  1 user,  load average: 0.91, 1.43, 1.90
+2 after  04:57:21 up  2:09,  1 user,  load average: 0.01, 1.42, 2.44
+2 before  04:58:47 up  2:11,  1 user,  load average: 1.01, 1.43, 2.35
+1 before  05:05:52 up  2:18,  1 user,  load average: 1.27, 1.54, 2.06
+1 after  05:07:19 up  2:19,  1 user,  load average: 1.16, 1.44, 1.97
+2 after  05:08:45 up  2:21,  1 user,  load average: 1.36, 1.49, 1.95
+2 before  05:10:31 up  2:22,  1 user,  load average: 1.27, 1.53, 1.92
+3 before  05:12:03 up  2:24,  1 user,  load average: 1.19, 1.48, 1.87
+3 after  05:13:30 up  2:25,  1 user,  load average: 1.31, 1.48, 1.84
+4 after  05:14:57 up  2:27,  1 user,  load average: 1.36, 1.51, 1.81
+4 before  05:16:34 up  2:28,  1 user,  load average: 1.31, 1.53, 1.79
+1 before  05:47:20 up  2:59,  3 users,  load average: 1.30, 3.61, 4.08
+1 after  05:48:46 up  3:01,  3 users,  load average: 1.32, 3.09, 3.86
+2 after  05:50:20 up  3:02,  3 users,  load average: 1.35, 2.66, 3.63
+2 before  05:51:56 up  3:04,  3 users,  load average: 1.29, 2.33, 3.42
+3 before  05:53:31 up  3:05,  3 users,  load average: 1.23, 2.12, 3.24
+3 after  05:55:07 up  3:07,  3 users,  load average: 1.38, 2.05, 3.12
+4 after  05:56:33 up  3:08,  3 users,  load average: 1.37, 1.91, 2.97
+4 before  05:58:09 up  3:10,  3 users,  load average: 1.42, 1.89, 2.87
+5 before  06:01:18 up  3:13,  3 users,  load average: 1.31, 2.11, 2.80
+5 after  06:03:15 up  3:15,  3 users,  load average: 1.40, 2.02, 2.70
+6 after  06:04:53 up  3:17,  3 users,  load average: 1.36, 1.93, 2.60
+6 before  06:20:04 up  3:32,  3 users,  load average: 1.30, 3.78, 3.64

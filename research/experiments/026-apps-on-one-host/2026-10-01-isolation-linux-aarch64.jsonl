@@ -1,0 +1,45 @@
+{"round": 1, "way": "processes", "kind": "alone", "b_p50_us": 80, "b_p99_us": 112, "b_per_second": 11524, "b_5xx": 0}
+{"round": 1, "way": "host", "kind": "alone", "b_p50_us": 84, "b_p99_us": 116, "b_per_second": 11001, "b_5xx": 0}
+{"round": 1, "way": "host1", "kind": "alone", "b_p50_us": 84, "b_p99_us": 112, "b_per_second": 11100, "b_5xx": 0}
+{"round": 1, "way": "processes", "kind": "flood", "b_p50_us": 108, "b_p99_us": 352, "b_per_second": 8191, "b_5xx": 0, "a_per_second": 111849, "a_p99_us": 864, "a_5xx": 0}
+{"round": 1, "way": "host", "kind": "flood", "b_p50_us": 96, "b_p99_us": 168, "b_per_second": 9846, "b_5xx": 0, "a_per_second": 106669, "a_p99_us": 928, "a_5xx": 0}
+{"round": 1, "way": "host1", "kind": "flood", "b_p50_us": 368, "b_p99_us": 576, "b_per_second": 2743, "b_5xx": 0, "a_per_second": 135345, "a_p99_us": 640, "a_5xx": 0}
+{"round": 1, "way": "processes", "kind": "both", "b_p50_us": 232, "b_p99_us": 1408, "b_per_second": 73148, "b_5xx": 0, "a_per_second": 73455, "a_p99_us": 1408, "a_5xx": 0}
+{"round": 1, "way": "host", "kind": "both", "b_p50_us": 232, "b_p99_us": 1408, "b_per_second": 72715, "b_5xx": 0, "a_per_second": 72881, "a_p99_us": 1472, "a_5xx": 0}
+{"round": 1, "way": "host1", "kind": "both", "b_p50_us": 368, "b_p99_us": 1088, "b_per_second": 69843, "b_5xx": 0, "a_per_second": 69850, "a_p99_us": 1088, "a_5xx": 0}
+{"round": 2, "way": "host1", "kind": "alone", "b_p50_us": 80, "b_p99_us": 108, "b_per_second": 11401, "b_5xx": 0}
+{"round": 2, "way": "host", "kind": "alone", "b_p50_us": 80, "b_p99_us": 108, "b_per_second": 11354, "b_5xx": 0}
+{"round": 2, "way": "processes", "kind": "alone", "b_p50_us": 80, "b_p99_us": 112, "b_per_second": 11379, "b_5xx": 0}
+{"round": 2, "way": "host1", "kind": "flood", "b_p50_us": 368, "b_p99_us": 544, "b_per_second": 2639, "b_5xx": 0, "a_per_second": 136230, "a_p99_us": 608, "a_5xx": 0}
+{"round": 2, "way": "host", "kind": "flood", "b_p50_us": 96, "b_p99_us": 168, "b_per_second": 9796, "b_5xx": 0, "a_per_second": 105159, "a_p99_us": 928, "a_5xx": 0}
+{"round": 2, "way": "processes", "kind": "flood", "b_p50_us": 108, "b_p99_us": 336, "b_per_second": 8245, "b_5xx": 0, "a_per_second": 111460, "a_p99_us": 832, "a_5xx": 0}
+{"round": 2, "way": "host1", "kind": "both", "b_p50_us": 384, "b_p99_us": 1088, "b_per_second": 69703, "b_5xx": 0, "a_per_second": 69832, "a_p99_us": 1088, "a_5xx": 0}
+{"round": 2, "way": "host", "kind": "both", "b_p50_us": 232, "b_p99_us": 1408, "b_per_second": 72878, "b_5xx": 0, "a_per_second": 72964, "a_p99_us": 1408, "a_5xx": 0}
+{"round": 2, "way": "processes", "kind": "both", "b_p50_us": 232, "b_p99_us": 1408, "b_per_second": 73014, "b_5xx": 0, "a_per_second": 73166, "a_p99_us": 1472, "a_5xx": 0}
+{"round": 3, "way": "processes", "kind": "alone", "b_p50_us": 80, "b_p99_us": 108, "b_per_second": 11355, "b_5xx": 0}
+{"round": 3, "way": "host", "kind": "alone", "b_p50_us": 92, "b_p99_us": 116, "b_per_second": 10709, "b_5xx": 0}
+{"round": 3, "way": "host1", "kind": "alone", "b_p50_us": 88, "b_p99_us": 112, "b_per_second": 10968, "b_5xx": 0}
+{"round": 3, "way": "processes", "kind": "flood", "b_p50_us": 108, "b_p99_us": 336, "b_per_second": 8254, "b_5xx": 0, "a_per_second": 111085, "a_p99_us": 864, "a_5xx": 0}
+{"round": 3, "way": "host", "kind": "flood", "b_p50_us": 96, "b_p99_us": 168, "b_per_second": 9740, "b_5xx": 0, "a_per_second": 103766, "a_p99_us": 960, "a_5xx": 0}
+{"round": 3, "way": "host1", "kind": "flood", "b_p50_us": 384, "b_p99_us": 512, "b_per_second": 2613, "b_5xx": 0, "a_per_second": 136063, "a_p99_us": 576, "a_5xx": 0}
+{"round": 3, "way": "processes", "kind": "both", "b_p50_us": 232, "b_p99_us": 1472, "b_per_second": 72441, "b_5xx": 0, "a_per_second": 72495, "a_p99_us": 1408, "a_5xx": 0}
+{"round": 3, "way": "host", "kind": "both", "b_p50_us": 224, "b_p99_us": 1536, "b_per_second": 73284, "b_5xx": 0, "a_per_second": 73680, "a_p99_us": 1472, "a_5xx": 0}
+{"round": 3, "way": "host1", "kind": "both", "b_p50_us": 384, "b_p99_us": 1088, "b_per_second": 69499, "b_5xx": 0, "a_per_second": 69671, "a_p99_us": 1088, "a_5xx": 0}
+{"round": 4, "way": "host1", "kind": "alone", "b_p50_us": 80, "b_p99_us": 108, "b_per_second": 11339, "b_5xx": 0}
+{"round": 4, "way": "host", "kind": "alone", "b_p50_us": 80, "b_p99_us": 112, "b_per_second": 11212, "b_5xx": 0}
+{"round": 4, "way": "processes", "kind": "alone", "b_p50_us": 80, "b_p99_us": 108, "b_per_second": 11273, "b_5xx": 0}
+{"round": 4, "way": "host1", "kind": "flood", "b_p50_us": 352, "b_p99_us": 544, "b_per_second": 2764, "b_5xx": 0, "a_per_second": 136121, "a_p99_us": 608, "a_5xx": 0}
+{"round": 4, "way": "host", "kind": "flood", "b_p50_us": 96, "b_p99_us": 168, "b_per_second": 9856, "b_5xx": 0, "a_per_second": 104503, "a_p99_us": 960, "a_5xx": 0}
+{"round": 4, "way": "processes", "kind": "flood", "b_p50_us": 108, "b_p99_us": 336, "b_per_second": 8236, "b_5xx": 0, "a_per_second": 110230, "a_p99_us": 864, "a_5xx": 0}
+{"round": 4, "way": "host1", "kind": "both", "b_p50_us": 368, "b_p99_us": 1088, "b_per_second": 69493, "b_5xx": 0, "a_per_second": 69639, "a_p99_us": 1088, "a_5xx": 0}
+{"round": 4, "way": "host", "kind": "both", "b_p50_us": 232, "b_p99_us": 1408, "b_per_second": 73333, "b_5xx": 0, "a_per_second": 73619, "a_p99_us": 1408, "a_5xx": 0}
+{"round": 4, "way": "processes", "kind": "both", "b_p50_us": 272, "b_p99_us": 1408, "b_per_second": 68374, "b_5xx": 0, "a_per_second": 68394, "a_p99_us": 1408, "a_5xx": 0}
+{"round": 5, "way": "processes", "kind": "alone", "b_p50_us": 80, "b_p99_us": 108, "b_per_second": 11207, "b_5xx": 0}
+{"round": 5, "way": "host", "kind": "alone", "b_p50_us": 80, "b_p99_us": 112, "b_per_second": 11127, "b_5xx": 0}
+{"round": 5, "way": "host1", "kind": "alone", "b_p50_us": 80, "b_p99_us": 112, "b_per_second": 11226, "b_5xx": 0}
+{"round": 5, "way": "processes", "kind": "flood", "b_p50_us": 108, "b_p99_us": 352, "b_per_second": 8154, "b_5xx": 0, "a_per_second": 109753, "a_p99_us": 928, "a_5xx": 0}
+{"round": 5, "way": "host", "kind": "flood", "b_p50_us": 96, "b_p99_us": 160, "b_per_second": 9749, "b_5xx": 0, "a_per_second": 104439, "a_p99_us": 960, "a_5xx": 0}
+{"round": 5, "way": "host1", "kind": "flood", "b_p50_us": 352, "b_p99_us": 544, "b_per_second": 2783, "b_5xx": 0, "a_per_second": 136101, "a_p99_us": 576, "a_5xx": 0}
+{"round": 5, "way": "processes", "kind": "both", "b_p50_us": 232, "b_p99_us": 1472, "b_per_second": 73178, "b_5xx": 0, "a_per_second": 73290, "a_p99_us": 1408, "a_5xx": 0}
+{"round": 5, "way": "host", "kind": "both", "b_p50_us": 232, "b_p99_us": 1408, "b_per_second": 73002, "b_5xx": 0, "a_per_second": 73119, "a_p99_us": 1408, "a_5xx": 0}
+{"round": 5, "way": "host1", "kind": "both", "b_p50_us": 384, "b_p99_us": 1088, "b_per_second": 69756, "b_5xx": 0, "a_per_second": 70013, "a_p99_us": 1088, "a_5xx": 0}
