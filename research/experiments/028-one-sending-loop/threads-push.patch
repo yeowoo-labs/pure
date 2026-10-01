@@ -1,0 +1,62 @@
+diff --git a/link/link.c b/link/link.c
+index 8f36e21..6287ae6 100644
+--- a/link/link.c
++++ b/link/link.c
+@@ -185,15 +185,18 @@ static void wake(int fd) {
+ 
+ bool pure_link_queue(PureLink *l, uint64_t seq, const unsigned char *bytes, size_t size) {
+     pthread_mutex_lock(&l->lock);
+-    bool ok = pure_link_sender_queue(l->sender, seq, bytes, size), signal = false;
+-    if (ok) {
+-        l->queued_new = true;
+-        signal = l->sleeping && !l->signaled;
+-        l->signaled = l->signaled || signal;
+-    }
++    bool ok = pure_link_sender_queue(l->sender, seq, bytes, size);
++    pthread_mutex_unlock(&l->lock);
++    return ok;
++}
++
++void pure_link_push(PureLink *l) {
++    pthread_mutex_lock(&l->lock);
++    l->queued_new = true;
++    bool signal = l->sleeping && !l->signaled;
++    l->signaled = l->signaled || signal;
+     pthread_mutex_unlock(&l->lock);
+     if (signal) wake(l->wake);
+-    return ok;
+ }
+ 
+ uint64_t pure_link_queued(PureLink *l) {
+diff --git a/link/link.h b/link/link.h
+index c8d8635..6dae11f 100644
+--- a/link/link.h
++++ b/link/link.h
+@@ -23,6 +23,7 @@ void pure_link_peer(PureLink *, const unsigned char peer[PURE_SEAL_KEY]);
+  * them by name (docs/design/014-fields-by-name.md). */
+ bool pure_link_fields(PureLink *, const unsigned char *fields, size_t size);
+ bool pure_link_queue(PureLink *, uint64_t seq, const unsigned char *bytes, size_t size);
++void pure_link_push(PureLink *);
+ uint64_t pure_link_queued(PureLink *);
+ /* The last number the receiver saved; any thread. */
+ uint64_t pure_link_delivered(PureLink *);
+diff --git a/serve/serve.c b/serve/serve.c
+index b5112d2..b0200a4 100644
+--- a/serve/serve.c
++++ b/serve/serve.c
+@@ -1829,6 +1829,7 @@ static void feed_outlets(Executor *ex) {
+                  delivered = wire ? pure_wire_delivered(wire) : link ? pure_link_delivered(link) : local_delivered(local);
+         size_t held = wire ? pure_wire_held(wire) : link ? pure_link_held(link) : local_held(local), at = ex->outlet_from[i];
+         at = at > gone ? at - (size_t)gone : 0;
++        uint64_t before = queued;
+         for (; at < ex->app.sent_saved; ++at) {
+             uint32_t of;
+             uint64_t seq;
+@@ -1844,6 +1845,7 @@ static void feed_outlets(Executor *ex) {
+             queued = seq;
+             held += payload.size;
+         }
++        if (link && queued != before) pure_link_push(link);
+         ex->outlet_from[i] = at;
+     }
+     uint64_t now = ex->local_count ? now_ms() : 0;
