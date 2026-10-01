@@ -1086,6 +1086,43 @@ static void pending_head(const char *path) {
     expect(path, "pending", &(Oracle){(unsigned char *)"new", 3, 2});
 }
 
+/* Each store has its writer's turn: while a commit to one waits in its sync,
+ * another store commits, and a second commit to the held store waits for
+ * the first. A second path to a store's directory takes the store's turn. */
+typedef struct { const char *path, *key; int64_t expected; int done; } Commit;
+static void clean(const char *path);
+
+static void *put_one(void *context) {
+    Commit *c = context;
+    int64_t revision;
+    CHECK(pure_store_put(c->path, c->key, c->expected, (PureSpan){(const unsigned char *)"v", 1}, &revision) == PURE_OK);
+    __atomic_store_n(&c->done, 1, __ATOMIC_SEQ_CST);
+    return NULL;
+}
+
+static void stores_apart(const char *path) {
+    char other[] = "/tmp/pure-tree-other-XXXXXX", alias[96];
+    CHECK(mkdtemp(other) && pure_store_init(other) == PURE_OK);
+    snprintf(alias, sizeof(alias), "%s/.", path);
+    __atomic_store_n(&held_sync, 1, __ATOMIC_SEQ_CST);
+    Commit held = {path, "held", 0, 0}, second = {alias, "second", 0, 0};
+    pthread_t first, next;
+    CHECK(pthread_create(&first, NULL, put_one, &held) == 0);
+    while (__atomic_load_n(&held_sync, __ATOMIC_SEQ_CST) != 2) pause_ms(1);
+    int64_t revision;
+    CHECK(pure_store_put(other, "free", 0, (PureSpan){(const unsigned char *)"w", 1}, &revision) == PURE_OK);
+    CHECK(revision == 1 && !__atomic_load_n(&held.done, __ATOMIC_SEQ_CST));
+    CHECK(pthread_create(&next, NULL, put_one, &second) == 0);
+    pause_ms(50);
+    CHECK(!__atomic_load_n(&second.done, __ATOMIC_SEQ_CST)); /* the same store, by another path: it waits */
+    __atomic_store_n(&held_sync, 0, __ATOMIC_SEQ_CST);
+    CHECK(pthread_join(first, NULL) == 0 && pthread_join(next, NULL) == 0);
+    expect(path, "held", &(Oracle){(unsigned char *)"v", 1, 1});
+    expect(path, "second", &(Oracle){(unsigned char *)"v", 1, 1});
+    expect(other, "free", &(Oracle){(unsigned char *)"w", 1, 1});
+    clean(other);
+}
+
 /* A commit costs one sync, and commits into the written zeros after the end
  * leave the file size alone (no journal commit for a new size). */
 static void one_sync(const char *path) {
@@ -1157,7 +1194,7 @@ int main(void) {
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, threads, grouped,
-                                      lost_commit, pending_head, one_sync, records, cycles};
+                                      lost_commit, pending_head, stores_apart, one_sync, records, cycles};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -1168,7 +1205,7 @@ int main(void) {
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
-         "atomic-batch-runtime-keys-store-handle-threads-group-commit-lost-commit-pending-head-one-sync-records-"
+         "atomic-batch-runtime-keys-store-handle-threads-group-commit-lost-commit-pending-head-stores-apart-one-sync-records-"
          "cycles\"}");
     return 0;
 }

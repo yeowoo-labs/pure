@@ -52,10 +52,52 @@ static const unsigned char record_magic[8] = {'P','U','R','E','R','E','C','1'};
 enum { CHECKPOINT = 16 };
 static const unsigned char branch_magic[4] = {'P','T','B','1'};
 static const char tree_name[] = "pure.tree";
-/* Threads of one process take turns as the writer: the file lock arbitrates
- * only between processes (it is the process's, and closing any descriptor of
- * the lock file drops it). */
-static pthread_mutex_t writers = PTHREAD_MUTEX_INITIALIZER;
+/* A store's turns in this process, one for each store directory (known by
+ * its identity: two paths to one directory share them). Threads take turns
+ * as its writer: the file lock arbitrates only between processes (it is the
+ * process's, and closing any descriptor of the lock file drops it). And
+ * their commits to it group (Group commits, below). Stores apart wait for
+ * nothing of each other's, a sync least of all. */
+typedef struct Turns {
+    dev_t device;
+    ino_t inode;
+    pthread_mutex_t writer;
+    pthread_mutex_t lock; /* the group's */
+    pthread_cond_t finished, joined;
+    struct Waiter *head, *tail;
+    size_t queued, expected; /* expected: how many requests groups have held lately */
+    bool leading;
+    unsigned long groups, requests;
+    struct Turns *next;
+} Turns;
+static struct { pthread_mutex_t lock; Turns *first; } stores = {PTHREAD_MUTEX_INITIALIZER, NULL};
+
+/* The turns of the store whose directory is info, made the first time;
+ * NULL without memory. */
+static Turns *turns_for(const struct stat *info) {
+    pthread_mutex_lock(&stores.lock);
+    Turns *t = stores.first;
+    while (t && (t->device != info->st_dev || t->inode != info->st_ino)) t = t->next;
+    if (!t && (t = calloc(1, sizeof(*t)))) {
+        *t = (Turns){.device = info->st_dev, .inode = info->st_ino, .expected = 1, .next = stores.first};
+        bool made = !pthread_mutex_init(&t->writer, NULL) && !pthread_mutex_init(&t->lock, NULL) &&
+                    !pthread_cond_init(&t->finished, NULL);
+        /* joined waits on the monotonic clock (core/wait.h); else it does not gather */
+        if (made && pure_cond_monotonic(&t->joined)) made = !pthread_cond_init(&t->joined, NULL);
+        if (made) stores.first = t;
+        else {
+            free(t);
+            t = NULL;
+        }
+    }
+    pthread_mutex_unlock(&stores.lock);
+    return t;
+}
+
+static Turns *turns_of(int directory) {
+    struct stat info;
+    return fstat(directory, &info) ? NULL : turns_for(&info);
+}
 static uint64_t temporary_sequence;
 
 /* A reference is a file offset, or an index into this edit's node arena.
@@ -853,8 +895,9 @@ static bool find(const Tree *tree, Entry catalog, const char *key, uint64_t *ind
 
 static int create_temporary(int directory, char name[96]) {
     for (unsigned attempt = 0; attempt < 64; ++attempt) {
-        if (temporary_sequence == UINT64_MAX) break;
-        snprintf(name, 96, ".pending-%ld-%" PRIu64, (long)getpid(), ++temporary_sequence);
+        uint64_t sequence = __atomic_add_fetch(&temporary_sequence, 1, __ATOMIC_RELAXED); /* writers of other stores too */
+        if (sequence == UINT64_MAX) break;
+        snprintf(name, 96, ".pending-%ld-%" PRIu64, (long)getpid(), sequence);
         int fd = openat(directory, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (fd >= 0) return fd;
         if (errno != EEXIST) break;
@@ -945,7 +988,12 @@ PureResult pure_store_init(const char *path) {
     if (!created && errno != EEXIST) return PURE_STORE_ERROR;
     int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (directory < 0) return PURE_STORE_ERROR; /* Never reinterpret an old DB file. */
-    pthread_mutex_lock(&writers);
+    Turns *turns = turns_of(directory);
+    if (!turns) {
+        close(directory);
+        return PURE_STORE_ERROR;
+    }
+    pthread_mutex_lock(&turns->writer);
     int lock = openat(directory, ".writer.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     struct stat info;
     bool ok = lock >= 0 && fstat(lock, &info) == 0 && S_ISREG(info.st_mode) && lock_writer(lock, true);
@@ -967,7 +1015,7 @@ PureResult pure_store_init(const char *path) {
     }
     ok = ok && sync_fd(lock) && sync_fd(directory);
     if (lock >= 0) close(lock);
-    pthread_mutex_unlock(&writers);
+    pthread_mutex_unlock(&turns->writer);
     close(directory);
     if (ok && created) {
         char *parent = strdup(path);
@@ -1073,7 +1121,7 @@ typedef struct {
     uint64_t slots[2]; /* the sequences of the slots' heads */
     Tree tree;
     struct stat file;
-    bool turn; /* holds this process's writer turn */
+    Turns *turns; /* whose writer's turn it holds, once it does */
 } Session;
 
 /* Keep written zeros after the published end, where commits and their
@@ -1091,16 +1139,18 @@ static void close_session(Session *session) {
     if (session->fd >= 0) close(session->fd);
     if (session->lock >= 0) close(session->lock);
     if (session->directory >= 0) close(session->directory);
-    if (session->turn) pthread_mutex_unlock(&writers);
-    session->turn = false;
+    if (session->turns) pthread_mutex_unlock(&session->turns->writer);
+    session->turns = NULL;
 }
 
 static PureResult open_session(const char *path, Session *session) {
     *session = (Session){.directory = -1, .lock = -1, .fd = -1};
-    pthread_mutex_lock(&writers); /* another thread of this process waits, not fails */
-    session->turn = true;
     session->directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (session->directory < 0) return PURE_STORE_ERROR;
+    Turns *turns = turns_of(session->directory);
+    if (!turns) return PURE_STORE_ERROR;
+    pthread_mutex_lock(&turns->writer); /* another thread of this process waits, not fails */
+    session->turns = turns;
     session->lock = openat(session->directory, ".writer.lock", O_RDWR | O_NOFOLLOW | O_CLOEXEC);
     struct stat info;
     if (session->lock < 0 || fstat(session->lock, &info) || !S_ISREG(info.st_mode)) return PURE_STORE_ERROR;
@@ -1575,30 +1625,20 @@ typedef struct Waiter {
     struct Waiter *next;
 } Waiter;
 
-static struct {
-    pthread_mutex_t lock;
-    pthread_cond_t finished, joined;
-    Waiter *head, *tail;
-    size_t queued, expected; /* expected: how many requests groups have held lately */
-    bool leading;
-    unsigned long groups, requests;
-} group = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, NULL, 0, 1, false, 0, 0};
-
+/* Every store's groups so far, and the requests they held. */
 void pure_store_group_counts(unsigned long *groups, unsigned long *requests) {
-    pthread_mutex_lock(&group.lock);
-    *groups = group.groups;
-    *requests = group.requests;
-    pthread_mutex_unlock(&group.lock);
+    *groups = *requests = 0;
+    pthread_mutex_lock(&stores.lock);
+    for (Turns *t = stores.first; t; t = t->next) {
+        pthread_mutex_lock(&t->lock);
+        *groups += t->groups;
+        *requests += t->requests;
+        pthread_mutex_unlock(&t->lock);
+    }
+    pthread_mutex_unlock(&stores.lock);
 }
 
 enum { GATHER_NS = 2000000 };
-
-/* Once: joined waits on the monotonic clock (core/wait.h). */
-static pthread_once_t group_made = PTHREAD_ONCE_INIT;
-static void make_group(void) {
-    pthread_cond_destroy(&group.joined);
-    if (pure_cond_monotonic(&group.joined)) pthread_cond_init(&group.joined, NULL); /* then it does not gather */
-}
 
 /* Publish the queued requests of the store at path in one session. */
 static void commit_group(const char *path, Waiter *first) {
@@ -1702,46 +1742,48 @@ PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t
         for (size_t k = 0; k < i; ++k) if (!strcmp(drafts[k]->key, drafts[i]->key)) return PURE_INVALID;
     }
     if (!count) return PURE_OK;
+    struct stat info;
+    Turns *group = stat(drafts[0]->path, &info) ? NULL : turns_for(&info);
+    if (!group) return PURE_STORE_ERROR;
     Waiter me = {.drafts = drafts, .count = count, .revisions = revisions};
-    pthread_once(&group_made, make_group);
-    pthread_mutex_lock(&group.lock);
-    if (group.tail) group.tail->next = &me; else group.head = &me;
-    group.tail = &me;
-    ++group.queued;
-    pthread_cond_signal(&group.joined);
+    pthread_mutex_lock(&group->lock);
+    if (group->tail) group->tail->next = &me; else group->head = &me;
+    group->tail = &me;
+    ++group->queued;
+    pthread_cond_signal(&group->joined);
     while (!me.done) {
-        if (group.leading) { pthread_cond_wait(&group.finished, &group.lock); continue; }
-        group.leading = true;
+        if (group->leading) { pthread_cond_wait(&group->finished, &group->lock); continue; }
+        group->leading = true;
         /* When several threads have been committing together, give the others
          * a moment (at most 2 ms) to join, or they would miss this group and
          * wait for the next one: a sync costs far more. One thread never waits. */
-        if (group.expected > 1 && group.queued < group.expected) {
+        if (group->expected > 1 && group->queued < group->expected) {
             struct timespec deadline = pure_wait_until(GATHER_NS);
-            while (group.queued < group.expected &&
-                   pthread_cond_timedwait(&group.joined, &group.lock, &deadline) == 0) {}
+            while (group->queued < group->expected &&
+                   pthread_cond_timedwait(&group->joined, &group->lock, &deadline) == 0) {}
         }
-        Waiter *batch = group.head;
-        size_t size = group.queued;
-        group.head = group.tail = NULL;
-        group.queued = 0;
-        ++group.groups;
-        group.requests += size;
+        Waiter *batch = group->head;
+        size_t size = group->queued;
+        group->head = group->tail = NULL;
+        group->queued = 0;
+        ++group->groups;
+        group->requests += size;
         /* Remember the largest recent group, forgetting one member per group. */
-        group.expected = size > group.expected - 1 ? size : group.expected - 1;
-        if (!group.expected) group.expected = 1;
-        pthread_mutex_unlock(&group.lock);
-        /* One session per store among the queued requests. */
+        group->expected = size > group->expected - 1 ? size : group->expected - 1;
+        if (!group->expected) group->expected = 1;
+        pthread_mutex_unlock(&group->lock);
+        /* One session per path among the queued requests (two paths may name the store). */
         for (Waiter *w = batch; w; w = w->next) {
             bool earlier = false;
             for (Waiter *v = batch; v != w && !earlier; v = v->next) earlier = !strcmp(v->drafts[0]->path, w->drafts[0]->path);
             if (!earlier) commit_group(w->drafts[0]->path, batch);
         }
-        pthread_mutex_lock(&group.lock);
+        pthread_mutex_lock(&group->lock);
         for (Waiter *w = batch, *next; w; w = next) { next = w->next; w->done = true; }
-        group.leading = false;
-        pthread_cond_broadcast(&group.finished);
+        group->leading = false;
+        pthread_cond_broadcast(&group->finished);
     }
-    pthread_mutex_unlock(&group.lock);
+    pthread_mutex_unlock(&group->lock);
     return me.result;
 }
 
