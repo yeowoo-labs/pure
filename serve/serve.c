@@ -1425,28 +1425,27 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
             for (unsigned k = 0; k < count; ++k) {
                 put_bytes(&o, columns[k].key + !k, columns[k].length - !k);
                 uint8_t kind = m->view_type[columns[k].view];
+                bool valued;
                 if (kind == PURE_VIEW_I64) {
                     int64_t integer;
-                    if (!pure_app_cell_i64(app, columns[k].view, row, &integer)) put_bytes(&o, "null", 4);
-                    else put_integer(&o, integer);
+                    if ((valued = pure_app_cell_i64(app, columns[k].view, row, &integer))) put_integer(&o, integer);
                 } else if (kind == PURE_VIEW_NUM || kind == PURE_VIEW_BOOL) {
-                    if (!pure_app_cell(app, columns[k].view, row, &value)) put_bytes(&o, "null", 4);
-                    else if (kind == PURE_VIEW_BOOL) put_bytes(&o, value ? "true" : "false", value ? 4 : 5);
+                    if (!(valued = pure_app_cell(app, columns[k].view, row, &value))) {
+                    } else if (kind == PURE_VIEW_BOOL) put_bytes(&o, value ? "true" : "false", value ? 4 : 5);
                     else put_number(&o, value);
                 } else {
                     size_t mark = o.size;
                     put_bytes(&o, "\"", 1);
-                    if (pure_app_cell_text(app, columns[k].view, row, put_json_span, &o) == PURE_OK) put_bytes(&o, "\"", 1);
-                    else if (!o.failed) {
-                        o.size = mark;
-                        put_bytes(&o, "null", 4);
-                    }
+                    if ((valued = pure_app_cell_text(app, columns[k].view, row, put_json_span, &o) == PURE_OK)) put_bytes(&o, "\"", 1);
+                    else o.size = o.failed ? o.size : mark;
                 }
+                if (valued) continue;
                 if (pure_app_view_fault(app) == PURE_FAULT_WORK) { /* a cell past the work budget fails the table */
                     status = PURE_LIMIT;
                     end = row;
                     break;
                 }
+                put_bytes(&o, "null", 4); /* a cell without a value */
             }
             put_bytes(&o, "}", 1);
         }

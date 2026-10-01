@@ -554,11 +554,11 @@ size_t pure_app_state_bytes(const PureApp *);
  * item of its list (of its slice, when it takes one) it goes over, all
  * counted as the fold or walk begins. Past it the event fails with the fault
  * PURE_FAULT_WORK (PURE_LIMIT) and changes nothing, and a view has no value.
- * 0: no budget, at first. */
+ * 0: no budget, at first, and then nothing is counted (PureApp.work stays). */
 void pure_app_work(PureApp *, uint64_t instructions);
 /* Why the last view evaluated on this app (or a table's rows asked for)
- * had no value: PURE_FAULT_WORK past the work budget, another fault, or
- * PURE_FAULT_NONE when it had one. */
+ * had no value, once it had none: PURE_FAULT_WORK past the work budget,
+ * another fault, or PURE_FAULT_NONE. pure_app_rows always says. */
 PureFault pure_app_view_fault(const PureApp *);
 
 /* Readers on other threads. Right after a save an app can make a snapshot of

@@ -1442,10 +1442,12 @@ static PureResult fault(PureApp *app, PureFault kind, uint32_t pc) {
 }
 
 /* Count what the unit running (an event, or a view's evaluation) is about
- * to run, as written: false past the app's work budget. */
-static bool charge(PureApp *app, uint64_t instructions) {
+ * to run, as written: false past the app's work budget. Without a budget
+ * nothing is counted. */
+static inline bool charge(PureApp *app, uint64_t instructions) {
+    if (!app->work_budget) return true;
     app->work += instructions;
-    return !app->work_budget || app->work <= app->work_budget;
+    return app->work <= app->work_budget;
 }
 
 static bool reserve(PureArena *arena, size_t more) {
@@ -3445,10 +3447,10 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     PureFault fault = app->fault;
     uint32_t fault_pc = app->fault_pc;
     PureBlock code = app->module->view_code[view];
-    app->work = 0;
     app->fault = PURE_FAULT_NONE;
-    PureResult result = charge(app, code.length) ? run(app->module, values, code, &ev, out) : PURE_LIMIT;
-    app->view_fault = result == PURE_OK ? PURE_FAULT_NONE : app->fault != PURE_FAULT_NONE ? app->fault : PURE_FAULT_WORK;
+    bool counted = !app->work_budget || (app->work = 0, charge(app, code.length));
+    PureResult result = counted ? run(app->module, values, code, &ev, out) : PURE_LIMIT;
+    if (result != PURE_OK) app->view_fault = counted ? app->fault : PURE_FAULT_WORK; /* why it has no value */
     app->fault = fault;
     app->fault_pc = fault_pc;
     return result;
@@ -3536,13 +3538,17 @@ bool pure_app_row_item(PureApp *app, uint32_t table, size_t row, size_t *item) {
     if (table >= m->views || m->view_type[table] != PURE_VIEW_TABLE) return false;
     if (!m->view_code[table].length) {
         *item = row;
-        return row < pure_list_count(app->lists[m->view_list[table]]);
+        if (row < pure_list_count(app->lists[m->view_list[table]])) return true;
+        app->view_fault = PURE_FAULT_NONE;
+        return false;
     }
     struct PureRows *rows = filtered(app, table);
+    if (rows && row < rows->count) {
+        *item = rows->items[row];
+        return true;
+    }
     app->view_fault = rows ? rows->fault : PURE_FAULT_NONE;
-    if (!rows || row >= rows->count) return false;
-    *item = rows->items[row];
-    return true;
+    return false;
 }
 
 bool pure_app_item_row(PureApp *app, uint32_t table, size_t item, size_t *row) {
@@ -3567,12 +3573,13 @@ bool pure_app_item_row(PureApp *app, uint32_t table, size_t item, size_t *row) {
 /* A view outside a table (column false), or a column and a row of its table. */
 static PureResult view_of(PureApp *app, uint32_t view, bool column, size_t row, uint8_t type, Slot *slot) {
     const PureModule *m = app->module;
-    app->view_fault = PURE_FAULT_NONE;
-    if (view >= m->views) return PURE_INVALID;
-    uint8_t kind = m->view_type[view] == PURE_VIEW_BOOL ? PURE_VIEW_NUM : m->view_type[view]; /* a bool's value is 0 or 1 */
-    if (kind != type || (m->view_table[view] != 0) != column) return PURE_INVALID;
-    if (column && !pure_app_row_item(app, m->view_table[view] - 1u, row, &row)) return PURE_NOT_FOUND;
-    return evaluate(app, view, row, slot);
+    if (view >= m->views || (m->view_type[view] == PURE_VIEW_BOOL ? PURE_VIEW_NUM : m->view_type[view]) != type ||
+        (m->view_table[view] != 0) != column) { /* a bool's value is 0 or 1 */
+        app->view_fault = PURE_FAULT_NONE;
+        return PURE_INVALID;
+    }
+    if (column && !pure_app_row_item(app, m->view_table[view] - 1u, row, &row)) return PURE_NOT_FOUND; /* it says why */
+    return evaluate(app, view, row, slot); /* and so does this */
 }
 
 bool pure_app_view(PureApp *app, uint32_t view, double *out) {

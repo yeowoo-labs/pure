@@ -2677,6 +2677,8 @@ static void lane_folds(void) {
         memset(module_b.view_plan, 0, sizeof(module_b.view_plan));
         PureApp a, b;
         CHECK(pure_app_start(&a, &module_a, (PureData){0}) == PURE_OK && pure_app_start(&b, &module_b, (PureData){0}) == PURE_OK);
+        pure_app_work(&a, UINT64_MAX); /* counted, never past it */
+        pure_app_work(&b, UINT64_MAX);
         size_t l_items = roll(&g, 4) ? roll(&g, 200) : 0, m_items = roll(&g, 4) ? roll(&g, 100) : 0;
         for (size_t i = 0; i < l_items + m_items; ++i) {
             bool in_l = i < l_items;
@@ -4350,6 +4352,7 @@ static void work_budget(void) {
     CHECK(load(walk_spec(walk_code, LEN(walk_code), walk_inputs, 3, walk_handlers, 3, walk_lists, NULL, 0), &module_a) == PURE_OK);
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    pure_app_work(&app, UINT64_MAX); /* counted, never past it */
     unsigned char payload[8];
     for (uint32_t item = 0; item < 5; ++item) {
         put32(put32(payload, item), 2);
@@ -4373,15 +4376,16 @@ static void work_budget(void) {
     /* Views: open is 4 instructions and its fold's 3 for each task. */
     CHECK(load(fold_spec(fold_code, LEN(fold_code), fold_views, LEN(fold_views), fold_handlers, 2), &module_a) == PURE_OK);
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    pure_app_work(&app, UINT64_MAX);
     for (const char *word = "abc"; *word; ++word)
         CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK && app.work == 7);
     double value;
-    CHECK(number_view(&app, 0) == 3 && app.work == 4 + 3 * 3 && pure_app_view_fault(&app) == PURE_FAULT_NONE);
+    CHECK(number_view(&app, 0) == 3 && app.work == 4 + 3 * 3);
     pure_app_work(&app, 4 + 3 * 3 - 1);
     CHECK(!pure_app_view(&app, 0, &value) && pure_app_view_fault(&app) == PURE_FAULT_WORK);
     CHECK(app.fault == PURE_FAULT_NONE); /* a view leaves the app's own fault alone */
     pure_app_work(&app, 4 + 3 * 3);
-    CHECK(number_view(&app, 0) == 3 && pure_app_view_fault(&app) == PURE_FAULT_NONE);
+    CHECK(number_view(&app, 0) == 3);
     pure_app_work(&app, 0);
     CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_app_point(&app, 1, 0) == PURE_OK &&
           pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_app_point(&app, 1, 1) == PURE_OK &&
