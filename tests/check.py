@@ -3659,6 +3659,73 @@ def server_meaning(aup, pure, work):
     return {'values': len(expected), 'refused': refused, 'exits': len(exits), 'checkpoints': checkpoints}
 
 
+WORK_SOURCE = """record Item {
+  n = 0
+}
+state items: list of Item
+input add = message { n: number }
+input touch = message { step: number }
+on add {
+  items.append(Item { n: add.n })
+}
+on touch {
+  for i in items {
+    i.n = i.n + touch.step
+  }
+}
+view total = sum(i.n for i in items)
+view big = each i in items where i.n > 0 {
+  n = i.n
+}
+"""
+
+
+def server_work(aup, pure, work):
+    """A work budget (docs/design/017) over HTTP: as the list grows, the
+    walking event, the folding view and the filtered table each come to run
+    past the budget, from then on answer 422 work, and a refused event
+    changes nothing; the cheap event that adds an item still runs."""
+    source = work / 'work.aup'
+    source.write_text(WORK_SOURCE)
+    compile_module(aup, source, work / 'work.pmod')
+    host = HttpHost([pure / 'build/pure-serve', '--module', work / 'work.pmod', '--store', work / 'work-store', '--work', 400])
+    first = {}
+    try:
+        def total():
+            status, _, _, body = http(host.port, 'GET', '/views/total')
+            return status, body
+
+        for n in range(1, 200):
+            status, why, _, _ = http(host.port, 'POST', '/inputs/add?n=1')
+            assert status == 200, (n, status, why)  # adding stays cheap
+            before = total()
+            status, why, _, _ = http(host.port, 'POST', '/inputs/touch?step=1')
+            assert status in (200, 422) and (status == 200 or why == 'work'), (n, status, why)
+            if status == 422:
+                first.setdefault('touch', n)
+                assert total() == before, n  # refused: nothing changed
+            else:
+                assert 'touch' not in first, n  # once past the budget, always past it
+            status, why, _, body = http(host.port, 'GET', '/views/total')
+            assert status == 200 or (status, why) == (422, 'work'), (n, status, why)
+            if status == 422:
+                first.setdefault('total', n)
+            else:
+                assert 'total' not in first, n
+            status, why, _, body = http(host.port, 'GET', '/views/big')
+            assert status == 200 or (status, why) == (422, 'work'), (n, status, why)
+            if status == 422:
+                first.setdefault('big', n)
+            else:
+                assert 'big' not in first and json.loads(body)['rows'] == n, (n, body[:80])
+            if len(first) == 3:
+                break
+        assert len(first) == 3 and first['touch'] < first['big'], first  # a walk's block is longer than a filter's
+    finally:
+        host.stop()
+    return first
+
+
 def main():
     global EDITOR
     parser = argparse.ArgumentParser()
@@ -3707,6 +3774,7 @@ def main():
         report['server_answers'] = server_answers(aup, pure, work)
         report['server_answers_memory'] = server_answers_memory(aup, pure, work)
         report['server_meaning'] = server_meaning(aup, pure, work)
+        report['server_work'] = server_work(aup, pure, work)
     print(json.dumps(report))
 
 

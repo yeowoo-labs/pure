@@ -153,14 +153,15 @@ typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
 /* EXISTS: an item with that key is already in the keyed list (the event
  * reports PURE_CONFLICT). MEMORY: the event would leave the states holding
  * more than the app's budget (pure_app_memory; it reports PURE_BUDGET).
- * OVERFLOW: an i64 past its range. */
+ * OVERFLOW: an i64 past its range. WORK: the event (or a view's evaluation)
+ * would run more than the app's work budget (pure_app_work; PURE_LIMIT). */
 typedef enum {
     PURE_FAULT_NONE, PURE_FAULT_DIVIDE, PURE_FAULT_NON_FINITE, PURE_FAULT_CLAMP,
     PURE_FAULT_LIMIT, PURE_FAULT_NOT_FOUND, PURE_FAULT_ENCODING, PURE_FAULT_EXISTS,
-    PURE_FAULT_MEMORY, PURE_FAULT_OVERFLOW, PURE_FAULT_COUNT
+    PURE_FAULT_MEMORY, PURE_FAULT_OVERFLOW, PURE_FAULT_WORK, PURE_FAULT_COUNT
 } PureFault;
 /* A fault's name as hosts report it: none, divide, non_finite, clamp, limit,
- * not_found, encoding, exists, memory, overflow. */
+ * not_found, encoding, exists, memory, overflow, work. */
 const char *pure_fault_name(PureFault);
 
 /* plan, shape and range are the runtime's, set at load: a fold whose block
@@ -377,6 +378,8 @@ typedef struct {
     PureFault fault;
     uint32_t fault_pc;
     size_t memory; /* the budget of what the states hold (0: none): pure_app_memory */
+    uint64_t work_budget, work; /* pure_app_work's budget (0: none), and what the unit running has used */
+    PureFault view_fault; /* why the last view evaluated had no value (pure_app_view_fault) */
     char why[128]; /* why the last start or replace was refused, when it says (else empty; a failed start keeps it) */
     uint32_t counted; /* the states it counts, a bit each: lists (not a message's rows) and texts */
     uint64_t ticks, events;
@@ -384,7 +387,7 @@ typedef struct {
      * sets it, so a script can replay any time; views never see it. */
     double now;
     uint64_t changes; /* counts every change of states, never back: what a filter's rows are fresh for */
-    struct PureRows { uint32_t table; uint64_t changes, given; size_t *items, count, capacity; } *rows; /* a filtered table's items */
+    struct PureRows { uint32_t table; uint64_t changes, given; size_t *items, count, capacity; PureFault fault; } *rows; /* a filtered table's items */
     unsigned row_tables;
     /* Current message or text event, kept until pure_app_finish. */
     void *document;
@@ -543,6 +546,20 @@ uint64_t pure_app_heard(const PureApp *, const char *source);
 void pure_app_memory(PureApp *, size_t bytes);
 /* What the states hold now, as the budget counts it. */
 size_t pure_app_state_bytes(const PureApp *);
+
+/* An app's work budget (docs/design/017-apps-on-one-host.md): what one
+ * event, or one evaluation of a view (a value, a cell, a table's filter),
+ * may run, in instructions counted as written, whatever the plan: a block's
+ * length each time it runs, and a fold's or a walk's block length for each
+ * item of its list (of its slice, when it takes one) it goes over, all
+ * counted as the fold or walk begins. Past it the event fails with the fault
+ * PURE_FAULT_WORK (PURE_LIMIT) and changes nothing, and a view has no value.
+ * 0: no budget, at first. */
+void pure_app_work(PureApp *, uint64_t instructions);
+/* Why the last view evaluated on this app (or a table's rows asked for)
+ * had no value: PURE_FAULT_WORK past the work budget, another fault, or
+ * PURE_FAULT_NONE when it had one. */
+PureFault pure_app_view_fault(const PureApp *);
 
 /* Readers on other threads. Right after a save an app can make a snapshot of
  * its saved states, for evaluating views anywhere while it keeps applying

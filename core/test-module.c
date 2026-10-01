@@ -2692,13 +2692,14 @@ static void lane_folds(void) {
             double x = 0, y = 0;
             bool ok_a = pure_app_view(&a, v, &x), ok_b = pure_app_view(&b, v, &y);
             faults += !ok_a;
+            CHECK(a.work == b.work); /* counted as written, however it ran */
             if (!same_number(ok_a, x, ok_b, y)) {
                 fprintf(stderr, "lane round %u view %u: %d %g / %d %g\n", round, v, ok_a, x, ok_b, y);
                 abort();
             }
         }
         size_t rows = pure_app_rows(&a, VIEWS);
-        CHECK(rows == pure_app_rows(&b, VIEWS));
+        CHECK(rows == pure_app_rows(&b, VIEWS) && a.work == b.work);
         for (size_t row = 0; row < rows; ++row) {
             size_t item_a, item_b;
             CHECK(pure_app_row_item(&a, VIEWS, row, &item_a) && pure_app_row_item(&b, VIEWS, row, &item_b) && item_a == item_b);
@@ -2706,6 +2707,7 @@ static void lane_folds(void) {
                 double x = 0, y = 0;
                 bool ok_a = pure_app_cell(&a, VIEWS + 1 + c, row, &x), ok_b = pure_app_cell(&b, VIEWS + 1 + c, row, &y);
                 ++cells;
+                CHECK(a.work == b.work);
                 if (!same_number(ok_a, x, ok_b, y)) {
                     fprintf(stderr, "lane round %u column %u row %zu: %d %g / %d %g\n", round, c, row, ok_a, x, ok_b, y);
                     abort();
@@ -2714,7 +2716,8 @@ static void lane_folds(void) {
         }
         passes += pure_app_passes(&a);
         PureResult went_a = pure_app_input(&a, 0, PURE_EDGE_DOWN), went_b = pure_app_input(&b, 0, PURE_EDGE_DOWN);
-        if (went_a != went_b || a.fault != b.fault || a.fault_pc != b.fault_pc || memcmp(a.values, b.values, 4 * sizeof(double))) {
+        if (went_a != went_b || a.fault != b.fault || a.fault_pc != b.fault_pc || a.work != b.work ||
+            memcmp(a.values, b.values, 4 * sizeof(double))) {
             fprintf(stderr, "lane round %u handler: %d %d %u / %d %d %u\n", round, went_a, a.fault, a.fault_pc, went_b, b.fault,
                     b.fault_pc);
             abort();
@@ -4334,6 +4337,76 @@ static void links(void) {
  * nothing; one that frees them goes on; sends waiting for their receivers
  * count, so a full outbox refuses more until some are trimmed; a delivery
  * refused so is not heard, and comes again; an answer has its send's room. */
+/* ---- Work budgets (docs/design/017) ------------------------------------
+ * An event, or one evaluation of a view, runs at most the app's work
+ * budget, counted as written as it begins: a block's length, and a fold's or
+ * a walk's block length for every item of its list. Past it an event fails
+ * with work and changes nothing; a view, a cell or a table's rows have no
+ * value, and pure_app_view_fault says why. (lane_folds checks that a planned
+ * fold counts what the same fold run item by item counts.) */
+static void work_budget(void) {
+    CHECK(!strcmp(pure_fault_name(PURE_FAULT_WORK), "work"));
+    /* The shop: restock runs 3 instructions; clean 23, and its walk's 22 for each item stocked. */
+    CHECK(load(walk_spec(walk_code, LEN(walk_code), walk_inputs, 3, walk_handlers, 3, walk_lists, NULL, 0), &module_a) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    unsigned char payload[8];
+    for (uint32_t item = 0; item < 5; ++item) {
+        put32(put32(payload, item), 2);
+        CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8}) == PURE_OK && app.work == 3);
+    }
+    pure_app_work(&app, 23 + 22 * 5 - 1);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
+    for (size_t i = 0; i < 5; ++i) CHECK(pure_list_get(app.lists[W_STOCK], i, 1).num == 2); /* nothing changed */
+    pure_app_work(&app, 23 + 22 * 5);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.work == 23 + 22 * 5);
+    for (size_t i = 0; i < 5; ++i) CHECK(pure_list_get(app.lists[W_STOCK], i, 1).num == 3);
+    pure_app_work(&app, 2);
+    put32(put32(payload, 9), 1);
+    CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8}) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
+    CHECK(pure_list_count(app.lists[W_STOCK]) == 5);
+    pure_app_work(&app, 0); /* none */
+    CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8}) == PURE_OK && pure_list_count(app.lists[W_STOCK]) == 6);
+    pure_app_stop(&app);
+    pure_module_release(&module_a);
+
+    /* Views: open is 4 instructions and its fold's 3 for each task. */
+    CHECK(load(fold_spec(fold_code, LEN(fold_code), fold_views, LEN(fold_views), fold_handlers, 2), &module_a) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    for (const char *word = "abc"; *word; ++word)
+        CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK && app.work == 7);
+    double value;
+    CHECK(number_view(&app, 0) == 3 && app.work == 4 + 3 * 3 && pure_app_view_fault(&app) == PURE_FAULT_NONE);
+    pure_app_work(&app, 4 + 3 * 3 - 1);
+    CHECK(!pure_app_view(&app, 0, &value) && pure_app_view_fault(&app) == PURE_FAULT_WORK);
+    CHECK(app.fault == PURE_FAULT_NONE); /* a view leaves the app's own fault alone */
+    pure_app_work(&app, 4 + 3 * 3);
+    CHECK(number_view(&app, 0) == 3 && pure_app_view_fault(&app) == PURE_FAULT_NONE);
+    pure_app_work(&app, 0);
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_app_point(&app, 1, 0) == PURE_OK &&
+          pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_app_point(&app, 1, 1) == PURE_OK &&
+          pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK); /* all done */
+    CHECK(!pure_app_view(&app, 4, &value) && pure_app_view_fault(&app) == PURE_FAULT_NOT_FOUND); /* fewest open: none */
+    pure_app_stop(&app);
+    pure_module_release(&module_a);
+
+    /* A table's filter is a unit of its own: 3 instructions for each task; a cell's column is 2. */
+    CHECK(load(filter_spec(filter_code, LEN(filter_code), filter_views, 3), &module_a) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    for (const char *word = "abcd"; *word; ++word)
+        CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK);
+    pure_app_work(&app, 3 * 4 - 1);
+    size_t at;
+    CHECK(pure_app_rows(&app, 0) == 0 && pure_app_view_fault(&app) == PURE_FAULT_WORK && !pure_app_row_item(&app, 0, 0, &at));
+    CHECK(!pure_app_cell(&app, 2, 0, &value) && pure_app_view_fault(&app) == PURE_FAULT_WORK);
+    pure_app_work(&app, 3 * 4); /* the rows refused before are asked again */
+    CHECK(pure_app_rows(&app, 0) == 4 && app.work == 3 * 4 && pure_app_view_fault(&app) == PURE_FAULT_NONE);
+    CHECK(pure_app_cell(&app, 2, 3, &value) && value == 3 && app.work == 2);
+    pure_app_stop(&app);
+    pure_module_release(&module_a);
+    puts("{\"work_budget\":\"events-views-cells-rows-rolled-back\"}");
+}
+
 static void memory_budget(void) {
     enum { ADD, DROP, SEND_KEY, OUT, TAKE, ANSWER };
     static const S nums[] = {{"n", 0}};
@@ -5166,6 +5239,7 @@ int main(void) {
     bools();
     integers();
     memory_budget();
+    work_budget();
     fold_mutations();
     pointing();
     list_mutations();

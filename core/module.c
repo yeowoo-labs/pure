@@ -165,7 +165,7 @@ static void write_i64(unsigned char *p, int64_t value) {
 
 const char *pure_fault_name(PureFault fault) {
     static const char *const names[PURE_FAULT_COUNT] = {"none", "divide", "non_finite", "clamp", "limit", "not_found",
-                                                        "encoding", "exists", "memory", "overflow"};
+                                                        "encoding", "exists", "memory", "overflow", "work"};
     return fault < PURE_FAULT_COUNT ? names[fault] : "none";
 }
 
@@ -1437,8 +1437,15 @@ typedef struct {
 static PureResult fault(PureApp *app, PureFault kind, uint32_t pc) {
     app->fault = kind;
     app->fault_pc = pc;
-    return kind == PURE_FAULT_LIMIT ? PURE_LIMIT : kind == PURE_FAULT_NOT_FOUND ? PURE_NOT_FOUND :
+    return kind == PURE_FAULT_LIMIT || kind == PURE_FAULT_WORK ? PURE_LIMIT : kind == PURE_FAULT_NOT_FOUND ? PURE_NOT_FOUND :
            kind == PURE_FAULT_EXISTS ? PURE_CONFLICT : kind == PURE_FAULT_MEMORY ? PURE_BUDGET : PURE_INVALID;
+}
+
+/* Count what the unit running (an event, or a view's evaluation) is about
+ * to run, as written: false past the app's work budget. */
+static bool charge(PureApp *app, uint64_t instructions) {
+    app->work += instructions;
+    return !app->work_budget || app->work <= app->work_budget;
 }
 
 static bool reserve(PureArena *arena, size_t more) {
@@ -2598,6 +2605,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
                 Slot high = stack[--sp], low = stack[--sp];
                 slice_of(list, m->state_key[arg >> 8 & 0xFF] - 1u, low, high, &from, &to);
             }
+            if (!charge(app, (uint64_t)inner.length * (to - from))) { kind = PURE_FAULT_WORK; goto failed; } /* as written */
             if (!op->shape || !fold_shaped(m, values, op, list, &per, &fold)) {
                 if (op->range) /* only the items a range of keys allows can count */
                     range_bounds(m, values, &m->range[op->range - 1], list, m->state_key[arg >> 8 & 0xFF] - 1u, &per, &from, &to);
@@ -2628,7 +2636,13 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             if (arg & PURE_EACH_SLICED) { /* the items with keys from low up to before high */
                 Slot high = stack[--sp], low = stack[--sp];
                 slice_of(app->lists[walk.list], m->state_key[walk.list] - 1u, low, high, &walk.at, &walk.end);
-            } else if (op->range) /* a where that bounds the key: only the items in bounds */
+            }
+            size_t items = pure_list_count(app->lists[walk.list]); /* as written: what it starts with, the list only shrinking */
+            if (!charge(app, (uint64_t)inner.length * ((walk.end < items ? walk.end : items) - walk.at))) {
+                kind = PURE_FAULT_WORK;
+                goto failed;
+            }
+            if (!(arg & PURE_EACH_SLICED) && op->range) /* a where that bounds the key: only the items in bounds */
                 range_bounds(m, values, &m->range[op->range - 1], app->lists[walk.list], m->state_key[walk.list] - 1u, &per,
                              &walk.at, &walk.end);
             while (walk.at < walk.end && walk.at < pure_list_count(app->lists[walk.list])) {
@@ -3083,6 +3097,13 @@ static void clear_rows(PureApp *app) {
 
 void pure_app_memory(PureApp *app, size_t bytes) { app->memory = bytes; }
 
+void pure_app_work(PureApp *app, uint64_t instructions) {
+    app->work_budget = instructions;
+    for (unsigned i = 0; i < app->row_tables; ++i) app->rows[i].changes = UINT64_MAX; /* a filter refused before may pass */
+}
+
+PureFault pure_app_view_fault(const PureApp *app) { return app->view_fault; }
+
 size_t pure_app_state_bytes(const PureApp *app) {
     size_t bytes = (app->outbox ? pure_list_size(app->outbox) : 0) + (app->heard ? pure_list_size(app->heard) : 0);
     for (uint32_t left = app->counted; left; left &= left - 1) {
@@ -3108,9 +3129,12 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     memcpy(pending, app->values, sizeof(app->values));
     app->fault = PURE_FAULT_NONE;
     app->fault_pc = UINT32_MAX;
+    app->work = 0;
     PureResult result = PURE_OK;
     for (uint32_t i = 0; i < m->handlers && result == PURE_OK; ++i)
-        if (m->handler[i].event == event) result = run(m, pending, m->handler[i].code, ev, NULL);
+        if (m->handler[i].event == event)
+            result = charge(app, m->handler[i].code.length) ? run(m, pending, m->handler[i].code, ev, NULL)
+                                                            : fault(app, PURE_FAULT_WORK, m->handler[i].code.start);
     /* An edit needs the revision it was made against. A save rebases an
      * edited document and releasing texts may reclaim earlier text versions:
      * keep such a reply by copying it first. */
@@ -3420,7 +3444,11 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     if (!argue(app, view, &ev)) return PURE_INVALID;
     PureFault fault = app->fault;
     uint32_t fault_pc = app->fault_pc;
-    PureResult result = run(app->module, values, app->module->view_code[view], &ev, out);
+    PureBlock code = app->module->view_code[view];
+    app->work = 0;
+    app->fault = PURE_FAULT_NONE;
+    PureResult result = charge(app, code.length) ? run(app->module, values, code, &ev, out) : PURE_LIMIT;
+    app->view_fault = result == PURE_OK ? PURE_FAULT_NONE : app->fault != PURE_FAULT_NONE ? app->fault : PURE_FAULT_WORK;
     app->fault = fault;
     app->fault_pc = fault_pc;
     return result;
@@ -3461,9 +3489,18 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
     }
     if (rows->changes == app->changes && (!m->view_arguments[table] || rows->given == app->arguments_given)) return rows;
     rows->count = 0;
+    /* A unit of work of its own, counted as written: the filter for every item. */
+    const PureList *list = app->lists[m->view_list[table]];
+    app->work = 0;
+    rows->fault = charge(app, (uint64_t)m->view_code[table].length * pure_list_count(list)) ? PURE_FAULT_NONE : PURE_FAULT_WORK;
+    uint64_t work = app->work;
+    if (rows->fault != PURE_FAULT_NONE) {
+        rows->changes = app->changes;
+        rows->given = app->arguments_given;
+        return rows;
+    }
     /* A leaf of the list at a time when the filter has lane forms; a leaf
      * where an item would fault goes item by item, leaving that item out. */
-    const PureList *list = app->lists[m->view_list[table]];
     PureRun run;
     if (m->view_plan[table]) {
         double store[PURE_MODULE_STACK][PURE_LIST_RUN], scratch[PURE_LIST_RUN];
@@ -3488,6 +3525,7 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
     } else
         for (size_t item = 0, items = pure_list_count(list); item < items; ++item)
             if (!keep_evaluated(app, table, rows, item)) return NULL;
+    app->work = work; /* the filter's, whichever items ran alone */
     rows->changes = app->changes;
     rows->given = app->arguments_given;
     return rows;
@@ -3501,6 +3539,7 @@ bool pure_app_row_item(PureApp *app, uint32_t table, size_t row, size_t *item) {
         return row < pure_list_count(app->lists[m->view_list[table]]);
     }
     struct PureRows *rows = filtered(app, table);
+    app->view_fault = rows ? rows->fault : PURE_FAULT_NONE;
     if (!rows || row >= rows->count) return false;
     *item = rows->items[row];
     return true;
@@ -3528,6 +3567,7 @@ bool pure_app_item_row(PureApp *app, uint32_t table, size_t item, size_t *row) {
 /* A view outside a table (column false), or a column and a row of its table. */
 static PureResult view_of(PureApp *app, uint32_t view, bool column, size_t row, uint8_t type, Slot *slot) {
     const PureModule *m = app->module;
+    app->view_fault = PURE_FAULT_NONE;
     if (view >= m->views) return PURE_INVALID;
     uint8_t kind = m->view_type[view] == PURE_VIEW_BOOL ? PURE_VIEW_NUM : m->view_type[view]; /* a bool's value is 0 or 1 */
     if (kind != type || (m->view_table[view] != 0) != column) return PURE_INVALID;
@@ -3559,6 +3599,7 @@ size_t pure_app_rows(PureApp *app, uint32_t table) {
     const PureModule *m = app->module;
     if (table >= m->views || m->view_type[table] != PURE_VIEW_TABLE) return 0;
     struct PureRows *rows = filtered(app, table);
+    app->view_fault = rows ? rows->fault : PURE_FAULT_NONE;
     return rows ? rows->count : m->view_code[table].length ? 0 : pure_list_count(app->lists[m->view_list[table]]);
 }
 

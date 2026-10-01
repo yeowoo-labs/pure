@@ -83,6 +83,8 @@ static PureSealKey *seal_key;
 static bool sealed_only;
 static struct Sender { char name[PURE_SOURCE + 1]; unsigned char key[PURE_SEAL_KEY]; } senders[PURE_MODULE_INPUTS];
 static unsigned sender_count;
+static size_t memory_budget; /* --memory: the app's budget of what its states hold (0: none) */
+static uint64_t work_budget;  /* --work: what an event or a view's evaluation may run (0: none) */
 
 /* A delivery's X-Pure-Seal: the suite, the sender's session (its
  * encapsulated key), the seal's number in it and, when the sender sealed
@@ -1333,6 +1335,7 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
     } else {
         *type = "application/json";
         size_t rows = pure_app_rows(app, view), from = route->from < rows ? route->from : rows;
+        if (pure_app_view_fault(app) == PURE_FAULT_WORK) status = PURE_LIMIT, rows = from = 0; /* its filter's */
         size_t end = from + (route->count < rows - from ? route->count : rows - from);
         /* Each column's key, ,"name": (the first row's first without the comma), made once. */
         struct { uint32_t view; size_t length; char key[PURE_MODULE_NAME + 4]; } columns[PURE_MODULE_VIEWS];
@@ -1355,25 +1358,32 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
                     int64_t integer;
                     if (!pure_app_cell_i64(app, columns[k].view, row, &integer)) put_bytes(&o, "null", 4);
                     else put_integer(&o, integer);
-                    continue;
-                }
-                if (kind == PURE_VIEW_NUM || kind == PURE_VIEW_BOOL) {
+                } else if (kind == PURE_VIEW_NUM || kind == PURE_VIEW_BOOL) {
                     if (!pure_app_cell(app, columns[k].view, row, &value)) put_bytes(&o, "null", 4);
                     else if (kind == PURE_VIEW_BOOL) put_bytes(&o, value ? "true" : "false", value ? 4 : 5);
                     else put_number(&o, value);
-                    continue;
+                } else {
+                    size_t mark = o.size;
+                    put_bytes(&o, "\"", 1);
+                    if (pure_app_cell_text(app, columns[k].view, row, put_json_span, &o) == PURE_OK) put_bytes(&o, "\"", 1);
+                    else if (!o.failed) {
+                        o.size = mark;
+                        put_bytes(&o, "null", 4);
+                    }
                 }
-                size_t mark = o.size;
-                put_bytes(&o, "\"", 1);
-                if (pure_app_cell_text(app, columns[k].view, row, put_json_span, &o) == PURE_OK) put_bytes(&o, "\"", 1);
-                else if (!o.failed) {
-                    o.size = mark;
-                    put_bytes(&o, "null", 4);
+                if (pure_app_view_fault(app) == PURE_FAULT_WORK) { /* a cell past the work budget fails the table */
+                    status = PURE_LIMIT;
+                    end = row;
+                    break;
                 }
             }
             put_bytes(&o, "}", 1);
         }
         put_bytes(&o, "]}", 2);
+    }
+    if (status != PURE_OK && pure_app_view_fault(app) == PURE_FAULT_WORK) { /* past the work budget: 422 work */
+        answer->fault = PURE_FAULT_WORK;
+        status = PURE_LIMIT;
     }
     if (status == PURE_OK && !o.bytes && !(o.bytes = malloc(1))) o.failed = true; /* an empty value has a buffer too */
     if (status == PURE_OK && o.failed) status = PURE_ALLOCATION;
@@ -1925,6 +1935,7 @@ static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) 
     }
     PureApp reader = {0};
     pure_app_read(&reader, snapshot);
+    pure_app_work(&reader, work_budget);
     reader.module = &held->module; /* the app's states, the query's views */
     Route route = job->route;
     route.target = (uint32_t)pure_module_view(&held->module, job->effect.key);
@@ -2262,7 +2273,6 @@ static void accept_all(Host *host) {
     }
 }
 
-static size_t memory_budget; /* --memory: the app's budget of what its states hold (0: none) */
 
 static bool start_executor(Executor *ex, const PureModule *module, uint32_t show, uint32_t edit, const char *store) {
     ex->module = module;
@@ -2275,6 +2285,7 @@ static bool start_executor(Executor *ex, const PureModule *module, uint32_t show
     }
     pure_app_background_checkpoints(&ex->app, true);
     pure_app_memory(&ex->app, memory_budget);
+    pure_app_work(&ex->app, work_budget);
     return true;
 }
 
@@ -2294,6 +2305,7 @@ static bool start_shard(Host *host, const PureModule *module, bool documents, ui
     host->module = module;
     host->documents = documents;
     host->wake = -1;
+    pure_app_work(&host->reader, work_budget); /* the views it shows from snapshots */
     if (!host->owner && !start_executor(&host->local, module, show, edit, store)) return false;
     host->work = calloc(host->capacity, sizeof(*host->work));
     host->table = calloc(host->capacity, sizeof(*host->table));
@@ -2683,6 +2695,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--link-idle-ms") && number(argv[i + 1], 86400000, &value) && value) link_idle_ms = value;
         else if (!strcmp(argv[i], "--budget") && number(argv[i + 1], SIZE_MAX, &value) && value) budget = (size_t)value;
         else if (!strcmp(argv[i], "--memory") && number(argv[i + 1], SIZE_MAX, &value) && value) memory_budget = (size_t)value;
+        else if (!strcmp(argv[i], "--work") && number(argv[i + 1], UINT64_MAX, &value) && value) work_budget = value;
         else if (!strcmp(argv[i], "--window") && number(argv[i + 1], SIZE_MAX, &value) && value) window_bytes = (size_t)value;
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
         else if (!strcmp(argv[i], "--threads") && !strcmp(argv[i + 1], "auto")) threads = 0;
@@ -2874,7 +2887,7 @@ usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
           "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=URL ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
-          "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] "
+          "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] [--work N] "
           "[--window 4194304] [--surface LIBRARY [-- ARGUMENTS]]\n"
           "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
           "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"
@@ -2884,6 +2897,8 @@ usage:
           "      .pmod unless given; the first line out says it)\n"
           "  --memory BYTES: what the app's states may hold (lists' items, texts, sends not yet stored): an event\n"
           "      past it is refused, 503 memory (docs/design/013-memory-budget.md)\n"
+          "  --work N: what an event, or one evaluation of a view, may run, in instructions counted as written: past\n"
+          "      it the event is refused and the view has no value, 422 work (docs/design/017-apps-on-one-host.md)\n"
           "  --window BYTES: what each --send holds of its sends beyond what its receiver has (and 65,536 sends);\n"
           "      the outbox keeps the rest\n", stderr);
     return 2;
