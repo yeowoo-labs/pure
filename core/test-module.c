@@ -1,4 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE /* mkdtemp, which _POSIX_C_SOURCE hides there */
+#endif
 #include "module.h"
 #include "module-save.h"
 #include "module-store.h"
@@ -781,7 +784,8 @@ enum { CUL = PURE_OP_CUR_LOAD, CS = PURE_OP_CUR_STORE, CM = PURE_OP_CUR_MOVE, TI
 static void texts(void) {
     static const S nums[] = {{"edits", 0}};
     static const T textual[] = {{"note", 1, 0}, {"at", 2, 1}, {"title", 1, 1}};
-    static const char *const constants[] = {"\xea\xb0\x80" "a\nbc", "\xeb\xa9\x94\xeb\xaa\xa8", "XYZ",
+    static const char *const constants[] = {("\xea\xb0\x80" "a\nbc"), /* apart: \x80a would be one escape */
+                                            "\xeb\xa9\x94\xeb\xaa\xa8", "XYZ",
                                             " \xc2\xb7 ", "\xec\x9e\x90"};
     static const I inputs[] = {
         {"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("left", "ArrowLeft"), KEY("right", "ArrowRight"),
@@ -1113,7 +1117,7 @@ static void list_trees(void) {
     PureList *copies[SHARES];
     Model shared[SHARES] = {{0}};
     PureRetired retired[SHARES + 1] = {{0}};
-    unsigned first = 0, held = 0, splits_seen = 0;
+    unsigned first = 0, held = 0;
     uint64_t epoch = 0; /* the copies', one after another */
     size_t largest = 0, events = 0, undone = 0;
     for (unsigned event = 0; event < 6000; ++event) {
@@ -1159,7 +1163,6 @@ static void list_trees(void) {
             pure_undo_commit(&undo);
         ++events;
         largest = model.count > largest ? model.count : largest;
-        splits_seen += model.count > 32;
         if (event % 7 == 0) CHECK(same_items(list, &model));
         /* A save every few events: its records after the stored ones, or now
          * and then the items stored whole with none after them. */
@@ -1488,7 +1491,7 @@ static void list_mutations(void) {
                     for (size_t at = 0; at < pure_list_count(app.lists[s]); ++at)
                         for (unsigned f = 0; f < record->count; ++f) {
                             PureCell cell = pure_list_get(app.lists[s], at, f);
-                            if ((module_b.record_field_type[record->first + f] == PURE_RECORD_TEXT))
+                            if (module_b.record_field_type[record->first + f] == PURE_RECORD_TEXT)
                                 CHECK(pure_utf8_valid((PureSpan){cell.text, cell.size}));
                             else CHECK(isfinite(cell.num));
                         }
@@ -3823,7 +3826,9 @@ static void snapshot_held(Spec spec, void (*event)(PureApp *, uint32_t *)) {
     CHECK(held);
     Shown before = {was, 0, sizeof(was)}, shown = {shown_text, 0, sizeof(shown_text)};
     describe(&app, &before);
+#ifdef __GLIBC__
     size_t used[3] = {0, 0, 0};
+#endif
     for (unsigned half = 0; half < 2; ++half) {
 #ifdef __GLIBC__
         used[half] = mallinfo2().uordblks;

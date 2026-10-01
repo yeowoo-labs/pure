@@ -113,7 +113,7 @@ enum { PURE_TIMER_LONGEST = 86400000, PURE_SOURCE = 64 };
  * they are not whole. */
 typedef enum { PURE_FIELD_U32 = 1, PURE_FIELD_BYTES = 2, PURE_FIELD_NUMBER = 3, PURE_FIELD_TEXT = 4,
                PURE_FIELD_ROWS = 5, PURE_FIELD_BOOL = 6, PURE_FIELD_I64 = 7 } PureFieldType;
-enum { PURE_FIELD_REST = UINT32_MAX };
+#define PURE_FIELD_REST UINT32_MAX /* a macro: an enum's values are ints (C17) */
 /* A field held in its payload's prefix (a u32, a number, a bool, an i64), and the bytes it takes there. */
 static inline bool pure_field_fixed(uint8_t type) {
     return type == PURE_FIELD_U32 || type == PURE_FIELD_NUMBER || type == PURE_FIELD_BOOL || type == PURE_FIELD_I64;

@@ -1202,7 +1202,7 @@ static PureResult publish(Session *session, Writer *writer, size_t count, const 
         written = find(&session->tree, catalog, keys[i], &index, &found, &current, &stored) &&
                   rebuild(&session->tree, catalog, index * RECORD, found ? RECORD : 0,
                           (PureSpan){record, RECORD}, &updated);
-        catalog = updated;
+        if (written) catalog = updated;
     }
     written = written && write_root(&session->tree, writer, &catalog, false) && flush(writer);
     /* Unpublished bytes stay in the tail; the next commit overwrites them. */

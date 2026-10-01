@@ -5,6 +5,9 @@
  * model kept, and its files stay as many as the unreleased entries need.
  * Then list images: written whole, read back, refused when damaged. */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE /* mkdtemp, which _POSIX_C_SOURCE hides there */
+#endif
 #include "log.h"
 #include "store.h"
 #include <dirent.h>

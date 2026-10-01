@@ -1429,7 +1429,7 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
         char head[80];
         put_bytes(&o, head, (size_t)snprintf(head, sizeof(head), "{\"rows\":%zu,\"from\":%zu,\"items\":[", rows, from));
         for (size_t row = from; row < end && !o.failed; ++row) {
-            put_bytes(&o, ",{" + (row == from), 2 - (row == from));
+            put_bytes(&o, row == from ? "{" : ",{", row == from ? 1 : 2);
             for (unsigned k = 0; k < count; ++k) {
                 put_bytes(&o, columns[k].key + !k, columns[k].length - !k);
                 uint8_t kind = m->view_type[columns[k].view];

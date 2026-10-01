@@ -1,4 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE /* mkdtemp, which _POSIX_C_SOURCE hides there */
+#endif
 #include "store.h"
 #include "state.h"
 #include <assert.h>

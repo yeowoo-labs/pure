@@ -493,7 +493,10 @@ PureResult pure_image_write(const char *directory, const char *name, bool (*next
     put64(head + 8, 0); /* its length, once known */
     Digest digest = {0};
     bool ok = write_all(fd, head, sizeof(head), 0), produced = true;
-    uint64_t at = sizeof(head), started = 0;
+    uint64_t at = sizeof(head);
+#if defined(__linux__)
+    uint64_t started = 0; /* the bytes handed to the device */
+#endif
     for (PureSpan chunk; ok && (produced = next(context, &chunk)) && chunk.size;)
         for (size_t done = 0; ok && done < chunk.size;) {
             size_t take = chunk.size - done < STEP ? chunk.size - done : STEP;
