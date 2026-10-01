@@ -359,6 +359,9 @@ struct App {
     bool running;   /* started; else its routes answer 503 stopped, and why says why */
     char why[256];
     unsigned home;  /* the connection thread its connections move to (a host of apps) */
+    /* Its wiring in --apps (send=, seal=, reply=), as --send, --seal and --reply give the one app's. */
+    const char *sends[PURE_MODULE_INPUTS], *seals[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
+    unsigned send_count, seal_count, reply_count;
     Owner owner;
 };
 static App *apps;
@@ -2738,20 +2741,33 @@ static void stop_shard(Host *host) {
 /* The input a link's stream goes to: one taking messages (not keyed) of the
  * sender's shape, or, named its fields, one that takes them by name
  * (pure_module_takes: each record is laid out anew for it). */
+/* In a host of apps the name is APP/INPUT; the input found is the app's
+ * place times PURE_MODULE_INPUTS, plus the input's. */
 static int link_input(void *context, const char *name, uint32_t shape, const unsigned char *fields, size_t size) {
-    const PureModule *m = ((Owner *)context)->executor.app.module;
+    (void)context;
+    unsigned a = 0;
+    if (named_apps) {
+        const char *slash = strchr(name, '/');
+        size_t length = slash ? (size_t)(slash - name) : 0;
+        for (a = 0; a < app_count && (strlen(apps[a].name) != length || memcmp(apps[a].name, name, length)); ++a) {}
+        if (a == app_count || !apps[a].running) return -PURE_LINK_NO_INPUT;
+        name = slash + 1;
+    }
+    const PureModule *m = &apps[a].module;
     int index = pure_module_input(m, name);
     if (index < 0 || m->input[index].kind != PURE_KIND_MESSAGE || m->input[index].keyed) return -PURE_LINK_NO_INPUT;
-    if (pure_module_shape(m, (uint32_t)index) == shape) return index;
+    int found = (int)(a * PURE_MODULE_INPUTS) + index;
+    if (pure_module_shape(m, (uint32_t)index) == shape) return found;
     if (!fields) return -PURE_LINK_OTHER_SHAPE;
-    return pure_module_takes(m, (uint32_t)index, fields, size) ? index : -PURE_LINK_FIELDS_LACKED;
+    return pure_module_takes(m, (uint32_t)index, fields, size) ? found : -PURE_LINK_FIELDS_LACKED;
 }
 
 /* Records a link delivered, queued at the owner as a request is: applied
  * with the next burst and done (pure_link_done) once its save is over. */
 static PureLinkListener *link_listener;
 static bool link_deliver(void *context, const PureLinkDelivery *d) {
-    Owner *owner = context;
+    (void)context;
+    Owner *owner = &apps[d->input / PURE_MODULE_INPUTS].owner;
     size_t size = 4 + DELIVERY + d->size + d->fields_size, length = strlen(d->source);
     unsigned char *ingress = malloc(size);
     LinkJob *link = malloc(sizeof(*link));
@@ -2769,7 +2785,7 @@ static bool link_deliver(void *context, const PureLinkDelivery *d) {
     memcpy(ingress + 4 + DELIVERY, d->records, d->size);
     if (d->fields_size) memcpy(ingress + 4 + DELIVERY + d->size, d->fields, d->fields_size); /* laid out with those */
     *link = (LinkJob){link_listener, d->token, ingress};
-    Job job = {.route = {.kind = ROUTE_INPUT, .target = d->input}, .link = link,
+    Job job = {.route = {.kind = ROUTE_INPUT, .target = d->input % PURE_MODULE_INPUTS}, .link = link,
                .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {ingress, size}}};
     pthread_mutex_lock(&owner->lock);
     bool queued = !owner->stopping && grow(&owner->jobs, &owner->capacity, owner->count + 1, sizeof(*owner->jobs));
@@ -2991,15 +3007,17 @@ static bool read_apps(const char *path) {
     bool ok = true;
     while (ok && fgets(line, sizeof(line), file)) {
         ++at;
-        char *hash = strchr(line, '#'), *words[8], *rest = NULL;
+        char *hash = strchr(line, '#'), *words[3 + 3 + 3 * PURE_MODULE_INPUTS], *rest = NULL;
         if (hash) *hash = 0;
         unsigned count = 0;
-        for (char *word = strtok_r(line, " \t\r\n", &rest); word && count < 8; word = strtok_r(NULL, " \t\r\n", &rest))
+        for (char *word = strtok_r(line, " \t\r\n", &rest); word && count < sizeof(words) / sizeof(*words);
+             word = strtok_r(NULL, " \t\r\n", &rest))
             words[count++] = word;
         if (!count) continue;
-        App *grown = count >= 3 && count <= 6 ? realloc(apps, (app_count + 1) * sizeof(*apps)) : NULL;
+        App *grown = count >= 3 ? realloc(apps, (app_count + 1) * sizeof(*apps)) : NULL;
         if (!grown) {
-            fprintf(stderr, "--apps %s:%u: NAME MODULE STORE [memory=BYTES] [work=N] [queue=N]\n", path, at);
+            fprintf(stderr, "--apps %s:%u: NAME MODULE STORE [memory=BYTES] [work=N] [queue=N] [send=OUTPUT=URL ...]\n",
+                    path, at);
             ok = false;
             break;
         }
@@ -3026,8 +3044,15 @@ static bool read_apps(const char *path) {
             if (value && !strcmp(words[w], "memory") && number(value, SIZE_MAX, &n)) app->memory = (size_t)n;
             else if (value && !strcmp(words[w], "work") && number(value, UINT64_MAX, &n)) app->work = n;
             else if (value && !strcmp(words[w], "queue") && number(value, SIZE_MAX, &n)) app->owner.queue = (size_t)n;
+            else if (value && !strcmp(words[w], "send") && app->send_count < PURE_MODULE_INPUTS)
+                ok = (app->sends[app->send_count++] = strdup(value)) != NULL;
+            else if (value && !strcmp(words[w], "seal") && app->seal_count < PURE_MODULE_INPUTS)
+                ok = (app->seals[app->seal_count++] = strdup(value)) != NULL;
+            else if (value && !strcmp(words[w], "reply") && app->reply_count < PURE_MODULE_INPUTS)
+                ok = (app->replies[app->reply_count++] = strdup(value)) != NULL;
             else {
-                fprintf(stderr, "--apps %s:%u: budgets are memory=BYTES, work=N and queue=N\n", path, at);
+                fprintf(stderr, "--apps %s:%u: an app takes memory=BYTES, work=N, queue=N, send=OUTPUT=URL, "
+                        "seal=OUTPUT=KEY and reply=OUTPUT=INPUT\n", path, at);
                 ok = false;
             }
         }
@@ -3115,10 +3140,10 @@ int main(int argc, char **argv) {
     surface_argv[surface_argc] = NULL;
     if (options < argc && !surface_path) goto usage;
     if (apps_path) { /* a host of apps: each its own module, store and budgets; none sends yet (017, stage 1) */
-        if (module_path || store || name || send_count || reply_count || seal_count || link_port || surface_path ||
-            memory_budget || work_budget) {
-            fputs("--apps gives each app its module, store and budgets; --send, --reply, --seal, --link-port, --name "
-                  "and --surface are for a host of one app (--module)\n", stderr);
+        if (module_path || store || name || send_count || reply_count || seal_count || surface_path || memory_budget ||
+            work_budget) {
+            fputs("--apps gives each app its module, store, budgets and wiring (send=, seal=, reply=); --name and "
+                  "--surface are for a host of one app (--module)\n", stderr);
             return 2;
         }
         if (!read_apps(apps_path)) return 2;
@@ -3193,18 +3218,41 @@ int main(int argc, char **argv) {
         name = stem;
     }
     Owner *owner = &apps[0].owner; /* the one app's, in a host of one */
-    if (!named_apps && apps[0].owned &&
-        (!open_wires(&owner->executor, &apps[0].module, sends, send_count, name) ||
-         !wire_replies(&owner->executor, &apps[0].module, replies, reply_count) ||
-         !wire_seals(&owner->executor, &apps[0].module, seals, seal_count, seal_key ? own_public : NULL))) return 2;
+    if (!named_apps) { /* its --send, --seal and --reply */
+        memcpy(apps[0].sends, sends, send_count * sizeof(*sends));
+        memcpy(apps[0].seals, seals, seal_count * sizeof(*seals));
+        memcpy(apps[0].replies, replies, reply_count * sizeof(*replies));
+        apps[0].send_count = send_count, apps[0].seal_count = seal_count, apps[0].reply_count = reply_count;
+    }
+    /* Each app's wiring, its sends' source APP.OUTPUT (the one app's
+     * --name.OUTPUT): an app of --apps wired wrong stops alone. */
+    for (unsigned a = 0; a < app_count; ++a) {
+        App *app = &apps[a];
+        Executor *ex = &app->owner.executor;
+        if (!app->running || !app->owned) continue;
+        if (open_wires(ex, &app->module, app->sends, app->send_count, named_apps ? app->name : name) &&
+            wire_replies(ex, &app->module, app->replies, app->reply_count) &&
+            wire_seals(ex, &app->module, app->seals, app->seal_count, seal_key ? own_public : NULL))
+            continue;
+        if (!named_apps) return 2;
+        snprintf(app->why, sizeof(app->why), "Its sends are wired wrong (said above)");
+        for (unsigned i = 0; i < ex->wire_count; ++i) pure_wire_close(ex->wires[i]);
+        for (unsigned i = 0; i < ex->link_count; ++i) pure_link_close(ex->links[i]);
+        ex->wire_count = ex->link_count = 0;
+        stop_executor(ex);
+        app->running = false;
+        --owners;
+    }
     for (unsigned a = 0; a < app_count; ++a)
         if (apps[a].running && apps[a].owned) after_save(&apps[a].owner.executor); /* the snapshot, and the sends stored before */
-    if (!named_apps && apps[0].owned) {
-        for (unsigned i = 0; i < owner->executor.wire_count; ++i)
-            if (!pure_wire_start(owner->executor.wires[i], wire_delivered, owner)) { fputs("Cannot start a wire\n", stderr); return 1; }
-        for (unsigned i = 0; i < owner->executor.link_count; ++i) {
+    for (unsigned a = 0; a < app_count; ++a) {
+        Owner *o = &apps[a].owner;
+        if (!apps[a].running || !apps[a].owned) continue;
+        for (unsigned i = 0; i < o->executor.wire_count; ++i)
+            if (!pure_wire_start(o->executor.wires[i], wire_delivered, o)) { fputs("Cannot start a wire\n", stderr); return 1; }
+        for (unsigned i = 0; i < o->executor.link_count; ++i) {
             char error[256];
-            if (!pure_link_start(owner->executor.links[i], wire_delivered, owner, error, sizeof(error))) {
+            if (!pure_link_start(o->executor.links[i], wire_delivered, o, error, sizeof(error))) {
                 fprintf(stderr, "--send %s\n", error);
                 return 2;
             }
@@ -3231,12 +3279,12 @@ int main(int argc, char **argv) {
         if (apps[a].running && apps[a].owned) schedule(&apps[a].owner); /* a first turn: its timers begin */
     if (link_port) { /* records from the senders named, over UDP */
         char error[256];
-        if (named_apps || !apps[0].owned || !seal_key) {
+        if ((!named_apps && !apps[0].owned) || !seal_key) {
             fputs("--link-port needs an app with states and the node's --key\n", stderr);
             return 2;
         }
         PureLinkReceiver *receiver =
-            pure_link_receiver(seal_key, own_public, &(PureLinkHost){link_input, link_deliver, owner}, error, sizeof(error));
+            pure_link_receiver(seal_key, own_public, &(PureLinkHost){link_input, link_deliver, NULL}, error, sizeof(error));
         bool allowed = receiver != NULL && allow_senders(receiver, senders_path, error, sizeof(error));
         for (unsigned i = 0; allowed && i < sender_count; ++i)
             allowed = pure_link_allow(receiver, senders[i].name, senders[i].key, error, sizeof(error));
@@ -3388,9 +3436,12 @@ usage:
           "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] [--work N] "
           "[--window 4194304] [--surface LIBRARY [-- ARGUMENTS]]\n"
           "pure-serve --apps FILE [--port 8767] [--threads 1|N|auto] [--workers N] [--budget BYTES] [--connections 1024] "
-          "[--timeout-ms 10000]\n"
+          "[--timeout-ms 10000] [--key FILE] [--sealed-only] [--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] "
+          "[--send-ca FILE] [--window BYTES]\n"
           "  --apps FILE: a host of apps (docs/design/017-apps-on-one-host.md), a line each:\n"
-          "      NAME MODULE.pmod STORE [memory=BYTES] [work=N] [queue=N]; its routes start /NAME/\n"
+          "      NAME MODULE.pmod STORE [memory=BYTES] [work=N] [queue=N] [send=OUTPUT=URL ...] [seal=OUTPUT=KEY ...]\n"
+          "      [reply=OUTPUT=INPUT ...]; its routes start /NAME/, its sends' sources are NAME.OUTPUT, and a\n"
+          "      --link-port takes its inputs as NAME/INPUT\n"
           "  --workers N: the threads the apps' owners take turns on (1 for one app; for apps, one a CPU at most)\n"
           "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
           "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"

@@ -3848,6 +3848,80 @@ twin   {work / 'apps.pmod'}   {work / 'store-a'}
     return {'apps': len(running), 'stopped': 2, 'flooded': len(flood), 'busy': busy, 'moved_home': moved}
 
 
+LINKS_SOURCE = """state n = 0
+input put = message { k: u32 }
+output out = message { k: u32 }
+on put {
+  n = n + 1
+  send out { k: put.k }
+}
+view count = n
+"""
+LINKS_TAKER = """record Got {
+  k = 0
+}
+state got: list of Got
+state last = 0
+state ordered = true
+input take = message { k: u32 }
+on take {
+  if take.k != last + 1 {
+    ordered = false
+  }
+  got.append(Got { k: take.k })
+  last = take.k
+}
+view count = count(g in got where g.k > 0)
+view sum = sum(g.k for g in got)
+view in_order = ordered
+"""
+
+
+def server_apps_links(aup, pure, work):
+    """Apps of a host send (docs/design/017, stage 2): an app's send= wires
+    its output, its sends' source APP.OUTPUT, sealed with the host's key; an
+    app of another host takes them on that host's one --link-port, named
+    APP/INPUT. Every send arrives once and in order, and the stop line counts
+    the link's packets."""
+    import socket
+    import time
+    for name, text in (('links-src', LINKS_SOURCE), ('links-taker', LINKS_TAKER)):
+        (work / f'{name}.aup').write_text(text)
+        compile_module(aup, work / f'{name}.aup', work / f'{name}.pmod')
+    serve = pure / 'build/pure-serve'
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(('127.0.0.1', 0))
+        link_port = probe.getsockname()[1]
+    keys = {}
+    for side in ('sender', 'receiver'):
+        (work / f'links-{side}.conf').write_text(f"x {work / 'links-taker.pmod'} {work / f'links-keys-{side}'}\n")
+        host = HttpHost([serve, '--apps', work / f'links-{side}.conf', '--key', work / f'links-{side}.key'])
+        keys[side] = host.info['public_key']
+        host.stop()
+    (work / 'links-far.conf').write_text(f"far {work / 'links-taker.pmod'} {work / 'links-far'}\n")
+    (work / 'links-near.conf').write_text(f"src {work / 'links-src.pmod'} {work / 'links-src'} "
+                                          f"send=out=pure://127.0.0.1:{link_port}/far/take seal=out={keys['receiver']}\n")
+    far = HttpHost([serve, '--apps', work / 'links-far.conf', '--key', work / 'links-receiver.key',
+                    '--link-port', link_port, '--sender', f"src.out={keys['sender']}"])
+    near = HttpHost([serve, '--apps', work / 'links-near.conf', '--key', work / 'links-sender.key'])
+    sent = 300
+    try:
+        for k in range(1, sent + 1):
+            status, why, _, _ = http(near.port, 'POST', f'/src/inputs/put?k={k}')
+            assert status == 200, (k, status, why)
+        deadline = time.time() + 30
+        while time.time() < deadline and http(far.port, 'GET', '/far/views/count')[3] != str(sent).encode():
+            time.sleep(0.05)
+        assert http(far.port, 'GET', '/far/views/count')[3] == str(sent).encode()
+        assert http(far.port, 'GET', '/far/views/sum')[3] == str(sent * (sent + 1) // 2).encode()
+        assert http(far.port, 'GET', '/far/views/in_order')[3] == b'true'
+    finally:
+        packets = near.stop()[-1]['link_packets']
+        far.stop()
+    assert packets > 0, packets
+    return {'sent': sent, 'link_packets': packets}
+
+
 def main():
     global EDITOR
     parser = argparse.ArgumentParser()
@@ -3898,6 +3972,7 @@ def main():
         report['server_meaning'] = server_meaning(aup, pure, work)
         report['server_work'] = server_work(aup, pure, work)
         report['server_apps'] = server_apps(aup, pure, work)
+        report['server_apps_links'] = server_apps_links(aup, pure, work)
     print(json.dumps(report))
 
 
