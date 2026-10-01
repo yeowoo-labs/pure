@@ -2,7 +2,7 @@
 /* HTTP/1.1 load for Pure's benchmarks: N connections on one epoll thread,
  * each sending one request at a time and measuring its latency.
  *
- * load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json|transfer KEYS [keep-alive|close] [BODY]
+ * load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json|transfer KEYS [keep-alive|close] [BODY] [PREFIX]
  * get: GET /objects/kI for I in [0, KEYS).
  * put: connection C edits its own key kC (C mod KEYS), inserting BODY bytes
  *      at 0 with If-Match on the revision it last saw (If-None-Match: * at
@@ -16,6 +16,8 @@
  * {"aid","tid","bid","delta"}, a random account of KEYS, teller and branch of
  * the scale (100,000 accounts, 10 tellers and a branch each) and delta in
  * [-5000, 5000], as pgbench picks them.
+ * PREFIX goes before every path: /NAME for an app of a host of apps
+ * (pure-serve --apps, docs/design/017-apps-on-one-host.md).
  * Prints one JSON line: requests/s, statuses, latency percentiles (µs). */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -77,6 +79,7 @@ static enum { GET, PUT, SCORE, TOTAL, PAGE, NOTE, JSON, TRANSFER } method;
 static bool put, keep_alive;
 static char *body;
 static size_t body_bytes;
+static const char *prefix = ""; /* before every path: /NAME for an app of a host of apps */
 static int epoll_fd;
 
 /* xorshift64: each connection its own sequence. */
@@ -97,16 +100,16 @@ static void prepare(Connection *c) {
                               (unsigned)(next_random(&c->random) % scale) + 1,
                               (int)(next_random(&c->random) % 10001) - 5000);
         c->request_size = (size_t)snprintf(c->request, sizeof(c->request),
-            "POST /inputs/transfer HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
-            "Content-Length: %d\r\n%s\r\n%s", length, closing, json);
+            "POST %s/inputs/transfer HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+            "Content-Length: %d\r\n%s\r\n%s", prefix, length, closing, json);
         c->sent = c->received = c->body_sent = c->body_size = 0;
         c->started = now_us();
         return;
     }
     if (method == JSON) {
         c->request_size = (size_t)snprintf(c->request, sizeof(c->request),
-            "POST /inputs/echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
-            "Content-Length: %zu\r\n%s\r\n", body_bytes, closing);
+            "POST %s/inputs/echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+            "Content-Length: %zu\r\n%s\r\n", prefix, body_bytes, closing);
         c->sent = c->received = c->body_sent = 0;
         c->body_size = body_bytes;
         c->started = now_us();
@@ -116,9 +119,9 @@ static void prepare(Connection *c) {
         char name[16];
         int length = snprintf(name, sizeof(name), "k%d", c->key);
         c->request_size = (size_t)(method == SCORE ?
-            snprintf(c->request, sizeof(c->request), "POST /inputs/score?points=1 HTTP/1.1\r\nHost: localhost\r\n"
-                     "Content-Length: %d\r\n%s\r\n%s", length, closing, name) :
-            snprintf(c->request, sizeof(c->request), "GET /views/%s HTTP/1.1\r\nHost: localhost\r\n%s\r\n",
+            snprintf(c->request, sizeof(c->request), "POST %s/inputs/score?points=1 HTTP/1.1\r\nHost: localhost\r\n"
+                     "Content-Length: %d\r\n%s\r\n%s", prefix, length, closing, name) :
+            snprintf(c->request, sizeof(c->request), "GET %s/views/%s HTTP/1.1\r\nHost: localhost\r\n%s\r\n", prefix,
                      method == TOTAL ? "total" : method == NOTE ? "page" : "leaders?from=0&count=20", closing));
         c->sent = c->received = c->body_sent = c->body_size = 0;
         c->started = now_us();
@@ -130,8 +133,8 @@ static void prepare(Connection *c) {
         else snprintf(condition, sizeof(condition), "If-None-Match: *\r\n");
     }
     c->request_size = (size_t)snprintf(c->request, sizeof(c->request),
-        "%s /objects/k%d HTTP/1.1\r\nHost: localhost\r\nContent-Length: %zu\r\n%s%s\r\n",
-        put ? "PUT" : "GET", c->key, put ? body_bytes + 8 : 0, condition, keep_alive ? "" : "Connection: close\r\n");
+        "%s %s/objects/k%d HTTP/1.1\r\nHost: localhost\r\nContent-Length: %zu\r\n%s%s\r\n",
+        put ? "PUT" : "GET", prefix, c->key, put ? body_bytes + 8 : 0, condition, keep_alive ? "" : "Connection: close\r\n");
     c->sent = c->received = c->body_sent = 0;
     c->body_size = put ? body_bytes + 8 : 0;
     c->started = now_us();
@@ -177,8 +180,8 @@ static bool complete(Connection *c, int *status, bool *closing, size_t *length) 
 
 int main(int argc, char **argv) {
     if (argc < 6) {
-        fputs("load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json|transfer KEYS [keep-alive|close] [BODY]\n",
-              stderr);
+        fputs("load PORT CONNECTIONS SECONDS get|put|score|total|page|note|json|transfer KEYS [keep-alive|close] [BODY] "
+              "[PREFIX]\n", stderr);
         return 2;
     }
     port = atoi(argv[1]);
@@ -191,6 +194,7 @@ int main(int argc, char **argv) {
     keys = atoi(argv[5]);
     keep_alive = argc > 6 && !strcmp(argv[6], "keep-alive");
     body_bytes = argc > 7 ? strtoul(argv[7], NULL, 10) : 16;
+    prefix = argc > 8 ? argv[8] : "";
     body = calloc(body_bytes + 32, 1);
     memset(body + 8, 'x', body_bytes);
     if (method == JSON) {
