@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
+#include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -115,18 +117,17 @@ struct PureLink {
     char host[256], port[8], input[PURE_LINK_NAME + 1], source[PURE_LINK_NAME + 1];
     bool peered, keyed; /* given the receiver's key; the keys made from it */
     pthread_mutex_t lock;
-    bool stopping, started;
-    /* The thread sleeps (in poll), and has been woken since; records were
-     * queued since it last sent. A queue wakes it only when it sleeps, once. */
-    bool sleeping, signaled, queued_new;
-    uint64_t told; /* the last stored the owner was told of */
-    int fd, wake;
-    pthread_t thread;
+    bool started;
+    bool queued_new; /* records were queued since it last sent */
+    uint64_t told;   /* the last stored the owner was told of */
+    int fd;
     void (*notify)(void *);
     void *context;
-    /* The thread's own. */
-    Taking *taking;       /* answers, received at once */
-    unsigned char *burst; /* packets sealed and not yet sent (BURST datagrams) */
+    /* The sending loop's own (below). */
+    struct PureLink *next; /* in the loop */
+    uint64_t id;           /* its epoll events' */
+    bool readable;         /* its socket said so this round */
+    unsigned char *burst;  /* packets sealed and not yet sent (BURST datagrams) */
     size_t burst_size;
     unsigned burst_count;
     uint64_t burst_pn[BURST];
@@ -161,7 +162,7 @@ PureLink *pure_link_open(const char *url, const char *source, uint32_t shape, co
     memcpy(l->port, colon + 1, (size_t)(slash - colon - 1));
     strcpy(l->input, slash + 1);
     memcpy(l->source, source, length);
-    l->fd = l->wake = -1;
+    l->fd = -1;
     if (!(l->sender = pure_link_sender(source, l->input, shape, own, own_public))) {
         pthread_mutex_destroy(&l->lock);
         free(l);
@@ -183,16 +184,32 @@ static void wake(int fd) {
     if (fd >= 0 && write(fd, &one, sizeof(one)) != sizeof(one)) { /* full: it is readable already */ }
 }
 
+/* The sending loop: every link of the process sends on one thread
+ * (docs/design/017-apps-on-one-host.md, 2b), an epoll over their sockets
+ * and one wake, sleeping until the soonest link's next time. Made with the
+ * first link started, stopped with the last closed. A queue wakes it only
+ * when it sleeps, once: queued tells it records came (it then does not
+ * sleep), sleeping that it is about to, signaled that it was woken. */
+static struct {
+    pthread_mutex_t lock; /* the links, and its making and stopping */
+    PureLink *first;
+    int epoll, wake;
+    pthread_t thread;
+    bool running, stopping;
+    uint64_t ids;
+    Taking *taking; /* answers, received at once, any link's */
+    _Atomic bool queued, sleeping, signaled;
+} loop = {.lock = PTHREAD_MUTEX_INITIALIZER, .epoll = -1, .wake = -1};
+
 bool pure_link_queue(PureLink *l, uint64_t seq, const unsigned char *bytes, size_t size) {
     pthread_mutex_lock(&l->lock);
-    bool ok = pure_link_sender_queue(l->sender, seq, bytes, size), signal = false;
-    if (ok) {
-        l->queued_new = true;
-        signal = l->sleeping && !l->signaled;
-        l->signaled = l->signaled || signal;
-    }
+    bool ok = pure_link_sender_queue(l->sender, seq, bytes, size);
+    if (ok) l->queued_new = true;
     pthread_mutex_unlock(&l->lock);
-    if (signal) wake(l->wake);
+    if (ok) {
+        atomic_store(&loop.queued, true);
+        if (atomic_load(&loop.sleeping) && !atomic_exchange(&loop.signaled, true)) wake(loop.wake);
+    }
     return ok;
 }
 
@@ -226,9 +243,9 @@ size_t pure_link_held(PureLink *l) {
 
 static void take_answers(PureLink *l, uint64_t now) {
     for (unsigned rounds = 0, n = TAKE; rounds < 4 && n == TAKE; ++rounds) {
-        n = (unsigned)take_datagrams(l->fd, l->taking);
+        n = (unsigned)take_datagrams(l->fd, loop.taking);
         for (unsigned k = 0; k < n; ++k)
-            pure_link_sender_take(l->sender, l->taking->bytes[k], l->taking->messages[k].msg_len, now);
+            pure_link_sender_take(l->sender, loop.taking->bytes[k], loop.taking->messages[k].msg_len, now);
     }
 }
 
@@ -345,50 +362,79 @@ static bool look(PureLink *l, char *error, size_t size) {
  * once when the system says there is no way there. */
 enum { LOOK_PROBES = 3 };
 
-static void *run_link(void *context) {
-    PureLink *l = context;
+/* A link's round in the loop (its lock not held): answers taken when its
+ * socket had them, its times kept, the receiver looked for again when
+ * probes go unanswered, packets sent, and the owner told of what was
+ * stored. When it wants its next round (ns on now's clock; 0: none). */
+static uint64_t link_round(PureLink *l) {
+    pthread_mutex_lock(&l->lock);
+    uint64_t now = now_ns();
+    if (l->readable) take_answers(l, now);
+    l->readable = false;
+    pure_link_sender_tick(l->sender, now);
+    unsigned probes = pure_link_sender_probes(l->sender);
+    if ((probes >= LOOK_PROBES && probes != l->looked) || l->nowhere) { /* before the next goes, so its answer comes to the new socket */
+        l->nowhere = false;
+        pthread_mutex_unlock(&l->lock); /* a name looked up may take its time: the owner queues meanwhile */
+        int before = l->fd;
+        look(l, NULL, 0);
+        if (l->fd != before && l->fd >= 0) { /* its new socket in the epoll (the old one left it closed) */
+            struct epoll_event event = {.events = EPOLLIN, .data.u64 = l->id};
+            epoll_ctl(loop.epoll, EPOLL_CTL_ADD, l->fd, &event);
+        }
+        pthread_mutex_lock(&l->lock);
+    }
+    l->looked = probes;
+    send_packets(l, now);
+    uint64_t stored = pure_link_sender_stored(l->sender), due = l->queued_new ? now : pure_link_sender_due(l->sender);
+    bool told = stored != l->told;
+    l->told = stored;
+    unsigned refusal = pure_link_sender_refusal(l->sender), before = l->refusal;
+    l->refusal = refusal;
+    pthread_mutex_unlock(&l->lock);
+    if (told && l->notify) l->notify(l->context);
+    if (refusal && refusal != before) /* as a wire says the receiver does not take its sends */
+        fprintf(stderr, "{\"link\":\"pure://%s:%s/%s\",\"source\":\"%s\",\"error\":\"the receiver refuses the stream: %s; "
+                "trying again\"}\n", l->host, l->port, l->input, l->source,
+                refusal == PURE_LINK_NOT_ALLOWED ? "this node's key may not send as that source"
+                : refusal == PURE_LINK_OTHER_SHAPE ? "its input takes messages of another shape"
+                : refusal == PURE_LINK_FIELDS_LACKED ? "its input lacks fields this output sends (it would drop them)"
+                                                     : "it has no input of that name taking messages");
+    return due;
+}
+
+static void *run_sending(void *context) {
+    (void)context;
+    struct epoll_event events[64];
+    int timeout = 0;
     for (;;) {
-        pthread_mutex_lock(&l->lock);
-        uint64_t now = now_ns(), due = pure_link_sender_due(l->sender);
-        bool stopping = l->stopping, more = l->queued_new; /* queued while it sent: no sleep */
-        l->sleeping = !more;
-        pthread_mutex_unlock(&l->lock);
-        if (stopping) break;
-        int timeout = more ? 0 : due ? (int)((due > now ? due - now : 0) / MS) + 1 : -1;
-        struct pollfd waits[2] = {{l->fd, POLLIN, 0}, {l->wake, POLLIN, 0}};
-        if (poll(waits, 2, timeout) < 0 && errno != EINTR) break;
-        if (waits[1].revents & POLLIN) {
-            uint64_t signals;
-            if (read(l->wake, &signals, sizeof(signals)) < 0) { /* cleared already */ }
+        atomic_store(&loop.sleeping, true);
+        if (atomic_load(&loop.queued)) timeout = 0; /* queued since: no sleep */
+        int ready = epoll_wait(loop.epoll, events, 64, timeout);
+        atomic_store(&loop.sleeping, false);
+        atomic_store(&loop.signaled, false);
+        atomic_store(&loop.queued, false);
+        pthread_mutex_lock(&loop.lock);
+        if (loop.stopping) {
+            pthread_mutex_unlock(&loop.lock);
+            break;
         }
-        pthread_mutex_lock(&l->lock);
-        l->sleeping = l->signaled = false;
-        now = now_ns();
-        if (waits[0].revents) take_answers(l, now);
-        pure_link_sender_tick(l->sender, now);
-        unsigned probes = pure_link_sender_probes(l->sender);
-        if ((probes >= LOOK_PROBES && probes != l->looked) || l->nowhere) { /* before the next goes, so its answer comes to the new socket */
-            l->nowhere = false;
-            pthread_mutex_unlock(&l->lock); /* a name looked up may take its time: the owner queues meanwhile */
-            look(l, NULL, 0);
-            pthread_mutex_lock(&l->lock);
+        for (int e = 0; e < ready; ++e) {
+            if (events[e].data.u64 == 0) { /* the wake */
+                uint64_t signals;
+                if (read(loop.wake, &signals, sizeof(signals)) < 0) { /* cleared already */ }
+                continue;
+            }
+            for (PureLink *l = loop.first; l; l = l->next) /* a link closed since is gone from the list */
+                if (l->id == events[e].data.u64) l->readable = true;
         }
-        l->looked = probes;
-        send_packets(l, now);
-        uint64_t stored = pure_link_sender_stored(l->sender);
-        bool told = stored != l->told;
-        l->told = stored;
-        unsigned refusal = pure_link_sender_refusal(l->sender), before = l->refusal;
-        l->refusal = refusal;
-        pthread_mutex_unlock(&l->lock);
-        if (told && l->notify) l->notify(l->context);
-        if (refusal && refusal != before) /* as a wire says the receiver does not take its sends */
-            fprintf(stderr, "{\"link\":\"pure://%s:%s/%s\",\"source\":\"%s\",\"error\":\"the receiver refuses the stream: %s; "
-                    "trying again\"}\n", l->host, l->port, l->input, l->source,
-                    refusal == PURE_LINK_NOT_ALLOWED ? "this node's key may not send as that source"
-                    : refusal == PURE_LINK_OTHER_SHAPE ? "its input takes messages of another shape"
-                    : refusal == PURE_LINK_FIELDS_LACKED ? "its input lacks fields this output sends (it would drop them)"
-                                                         : "it has no input of that name taking messages");
+        uint64_t soonest = 0, now = now_ns();
+        for (PureLink *l = loop.first; l; l = l->next) {
+            uint64_t due = link_round(l);
+            if (due && (!soonest || due < soonest)) soonest = due;
+        }
+        pthread_mutex_unlock(&loop.lock);
+        timeout = !soonest ? -1 : soonest <= now ? 0 : (int)((soonest - now) / MS) + 1;
     }
     return NULL;
 }
@@ -400,16 +446,39 @@ bool pure_link_start(PureLink *l, void (*notify)(void *), void *context, char *e
     }
     if (!look(l, error, size)) return false;
     l->segment = DATAGRAM;
-    bool ok = l->keyed && (l->burst = malloc(BURST_BYTES + DATAGRAM_MOST)) && (l->taking = malloc(sizeof(*l->taking))) &&
-              (l->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) >= 0;
     l->notify = notify;
     l->context = context;
-    if (!ok || pthread_create(&l->thread, NULL, run_link, l)) {
+    if (!l->keyed || !(l->burst = malloc(BURST_BYTES + DATAGRAM_MOST))) {
         snprintf(error, size, "pure://%s:%s/%s: cannot start (the keys, memory)", l->host, l->port, l->input);
         return false;
     }
-    pthread_setname_np(l->thread, "pure-link"); /* a link's CPU, seen apart */
-    l->started = true;
+    pthread_mutex_lock(&loop.lock);
+    bool ok = loop.running;
+    if (!ok) { /* the first link: the loop */
+        loop.stopping = false;
+        struct epoll_event event = {.events = EPOLLIN, .data.u64 = 0};
+        ok = (loop.taking || (loop.taking = malloc(sizeof(*loop.taking)))) &&
+             (loop.epoll >= 0 || (loop.epoll = epoll_create1(EPOLL_CLOEXEC)) >= 0) &&
+             (loop.wake >= 0 || ((loop.wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) >= 0 &&
+                                 !epoll_ctl(loop.epoll, EPOLL_CTL_ADD, loop.wake, &event))) &&
+             !pthread_create(&loop.thread, NULL, run_sending, NULL);
+        if (ok) pthread_setname_np(loop.thread, "pure-send"); /* the sends' CPU, seen apart */
+        loop.running = ok;
+    }
+    struct epoll_event event = {.events = EPOLLIN, .data.u64 = l->id = ++loop.ids};
+    ok = ok && !epoll_ctl(loop.epoll, EPOLL_CTL_ADD, l->fd, &event);
+    if (ok) {
+        l->next = loop.first;
+        loop.first = l;
+        l->started = true;
+        atomic_store(&loop.queued, true); /* a first round for it */
+    }
+    pthread_mutex_unlock(&loop.lock);
+    if (!ok) {
+        snprintf(error, size, "pure://%s:%s/%s: cannot start (the sending loop)", l->host, l->port, l->input);
+        return false;
+    }
+    wake(loop.wake);
     return true;
 }
 
@@ -421,18 +490,25 @@ void pure_link_counts(PureLink *l, PureLinkCounts *out) {
 
 void pure_link_close(PureLink *l) {
     if (!l) return;
-    if (l->started) {
-        pthread_mutex_lock(&l->lock);
-        l->stopping = true;
-        pthread_mutex_unlock(&l->lock);
-        wake(l->wake);
-        pthread_join(l->thread, NULL);
+    if (l->started) { /* out of the loop: the loop holds its lock while it goes over the links */
+        pthread_mutex_lock(&loop.lock);
+        for (PureLink **at = &loop.first; *at; at = &(*at)->next)
+            if (*at == l) {
+                *at = l->next;
+                break;
+            }
+        if (l->fd >= 0) epoll_ctl(loop.epoll, EPOLL_CTL_DEL, l->fd, NULL);
+        bool last = !loop.first && loop.running;
+        if (last) loop.stopping = true, loop.running = false;
+        pthread_mutex_unlock(&loop.lock);
+        if (last) { /* the last link: the loop stops */
+            wake(loop.wake);
+            pthread_join(loop.thread, NULL);
+        }
     }
     pure_link_sender_free(l->sender);
     free(l->burst);
-    free(l->taking);
     if (l->fd >= 0) close(l->fd);
-    if (l->wake >= 0) close(l->wake);
     pthread_mutex_destroy(&l->lock);
     free(l);
 }
