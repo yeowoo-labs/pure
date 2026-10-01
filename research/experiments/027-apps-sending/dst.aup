@@ -1,0 +1,9 @@
+state n = 0
+state total = 0
+input take = message { k: u32 }
+on take {
+  n = n + 1
+  total = total + take.k
+}
+view count = n
+view sum = total

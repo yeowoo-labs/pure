@@ -1,0 +1,16 @@
+record Item {
+  k = 0
+}
+state items: list of Item
+input fill = message { k: u32 }
+input burst = message { step: u32 }
+output out = message { k: u32 }
+on fill {
+  items.append(Item { k: fill.k })
+}
+on burst {
+  for i in items {
+    send out { k: i.k + burst.step }
+  }
+}
+view count = count(i in items where i.k > 0)

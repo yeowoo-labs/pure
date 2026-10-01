@@ -1,0 +1,10 @@
+{"round": 1, "way": "local", "sends": 2000000, "seconds": 1.778, "sends_per_second": 1124661, "cpu_us_per_send": 1.17, "handed": 1999, "link_packets": 0}
+{"round": 1, "way": "link", "sends": 2000000, "seconds": 3.477, "sends_per_second": 575155, "cpu_us_per_send": 2.92, "handed": 0, "link_packets": 63888}
+{"round": 2, "way": "link", "sends": 2000000, "seconds": 3.383, "sends_per_second": 591140, "cpu_us_per_send": 2.87, "handed": 0, "link_packets": 63094}
+{"round": 2, "way": "local", "sends": 2000000, "seconds": 1.74, "sends_per_second": 1149587, "cpu_us_per_send": 1.17, "handed": 2000, "link_packets": 0}
+{"round": 3, "way": "local", "sends": 2000000, "seconds": 1.756, "sends_per_second": 1138945, "cpu_us_per_send": 1.18, "handed": 2000, "link_packets": 0}
+{"round": 3, "way": "link", "sends": 2000000, "seconds": 3.455, "sends_per_second": 578879, "cpu_us_per_send": 2.94, "handed": 0, "link_packets": 66506}
+{"round": 4, "way": "link", "sends": 2000000, "seconds": 3.636, "sends_per_second": 550106, "cpu_us_per_send": 3.12, "handed": 0, "link_packets": 72477}
+{"round": 4, "way": "local", "sends": 2000000, "seconds": 1.752, "sends_per_second": 1141642, "cpu_us_per_send": 1.17, "handed": 2000, "link_packets": 0}
+{"round": 5, "way": "local", "sends": 2000000, "seconds": 1.721, "sends_per_second": 1161814, "cpu_us_per_send": 1.16, "handed": 2000, "link_packets": 0}
+{"round": 5, "way": "link", "sends": 2000000, "seconds": 3.325, "sends_per_second": 601578, "cpu_us_per_send": 2.93, "handed": 0, "link_packets": 69839}
