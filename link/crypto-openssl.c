@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/crypto.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
 #include <openssl/hpke.h>
@@ -34,13 +35,13 @@ static bool tls_start(const char *ca_file) {
         return false;
     }
     SSL_CTX_set_verify(context, SSL_VERIFY_PEER, NULL);
-    SSL_CTX_set_mode(context, SSL_MODE_AUTO_RETRY);
+    SSL_CTX_set_mode(context, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
     tls_context = context;
     return true;
 }
 
-/* TLS over a connected socket: the receiver's certificate must name the host
- * (a DNS name, or an IP address written as one). */
+/* TLS over a connected, non-blocking socket: the receiver's certificate
+ * must name the host (a DNS name, or an IP address written as one). */
 static PureTls *tls_open(const char *host, int fd) {
     SSL *ssl = SSL_new(tls_context);
     if (!ssl) return NULL;
@@ -48,15 +49,44 @@ static PureTls *tls_open(const char *host, int fd) {
     bool literal = inet_pton(AF_INET, host, address) == 1 || inet_pton(AF_INET6, host, address) == 1;
     bool named = literal ? X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), host) == 1 :
                            SSL_set_tlsext_host_name(ssl, host) == 1 && SSL_set1_host(ssl, host) == 1;
-    if (!named || SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1 || SSL_get_verify_result(ssl) != X509_V_OK) {
+    if (!named || SSL_set_fd(ssl, fd) != 1) {
         SSL_free(ssl);
         return NULL;
     }
+    SSL_set_connect_state(ssl);
     return (PureTls *)ssl;
 }
 
-static int tls_read(PureTls *tls, void *bytes, int size) { return SSL_read((SSL *)tls, bytes, size); }
-static int tls_write(PureTls *tls, const void *bytes, int size) { return SSL_write((SSL *)tls, bytes, size); }
+/* What a call that moved nothing waits for (link/tls.h). */
+static int wants(SSL *ssl, int result) {
+    switch (SSL_get_error(ssl, result)) {
+    case SSL_ERROR_WANT_READ: return PURE_TLS_WANTS_READ;
+    case SSL_ERROR_WANT_WRITE: return PURE_TLS_WANTS_WRITE;
+    case SSL_ERROR_ZERO_RETURN: return PURE_TLS_CLOSED;
+    default: return PURE_TLS_FAILED;
+    }
+}
+
+static int tls_step(PureTls *tls) {
+    SSL *ssl = (SSL *)tls;
+    ERR_clear_error(); /* SSL_get_error reads the thread's queue */
+    int result = SSL_do_handshake(ssl);
+    if (result == 1) return SSL_get_verify_result(ssl) == X509_V_OK ? 1 : PURE_TLS_FAILED;
+    int waits = wants(ssl, result);
+    return waits == PURE_TLS_CLOSED ? PURE_TLS_FAILED : waits;
+}
+
+static int tls_read(PureTls *tls, void *bytes, int size) {
+    ERR_clear_error();
+    int n = SSL_read((SSL *)tls, bytes, size);
+    return n > 0 ? n : wants((SSL *)tls, n);
+}
+
+static int tls_write(PureTls *tls, const void *bytes, int size) {
+    ERR_clear_error();
+    int n = SSL_write((SSL *)tls, bytes, size);
+    return n > 0 ? n : wants((SSL *)tls, n);
+}
 static void tls_close(PureTls *tls) { SSL_free((SSL *)tls); }
 
 /* ---- Sealing: HPKE (RFC 9180), X25519 and HKDF-SHA256, with the AEAD the
@@ -305,7 +335,7 @@ static bool aead_open(PureAead *a, const unsigned char *key, const unsigned char
            EVP_DecryptFinal_ex(a->open, plain + body, &last) == 1;
 }
 
-const PureCrypto pure_crypto = {PURE_CRYPTO_VERSION, tls_start, tls_open, tls_read, tls_write, tls_close,
+const PureCrypto pure_crypto = {PURE_CRYPTO_VERSION, tls_start, tls_open, tls_step, tls_read, tls_write, tls_close,
                                 seal_key, seal_key_free, sealer, seal, sealer_free, opener, unseal, opener_free,
                                 link_secret, link_ephemeral, link_agree, link_derive, aead, aead_seal, aead_open,
                                 aead_free};

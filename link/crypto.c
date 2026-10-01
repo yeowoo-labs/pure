@@ -58,6 +58,7 @@ bool pure_tls_start(const char *ca_file, char *error, size_t size) {
 
 /* A session exists only once the table is loaded. */
 PureTls *pure_tls_open(const char *host, int fd) { return crypto ? crypto->tls_open(host, fd) : NULL; }
+int pure_tls_step(PureTls *tls) { return crypto->tls_step(tls); }
 int pure_tls_read(PureTls *tls, void *bytes, int size) { return crypto->tls_read(tls, bytes, size); }
 int pure_tls_write(PureTls *tls, const void *bytes, int size) { return crypto->tls_write(tls, bytes, size); }
 void pure_tls_close(PureTls *tls) { if (tls) crypto->tls_close(tls); }

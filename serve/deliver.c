@@ -1,8 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "deliver.h"
 #include <inttypes.h>
-#include "wait.h"
 #include "seal.h"
+#include "sending.h"
 #include "message-json.h"
 #include "module-text.h"
 #include <errno.h>
@@ -15,36 +15,42 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
 enum { TIMEOUT_S = 10, FIRST_PAUSE_MS = 100, LONGEST_PAUSE_MS = 10000, GROUPS = PURE_MODULE_NAME / 2, BATCH_MOST = 256,
-       ANSWER_MOST = 1 << 20 };
+       ANSWER_MOST = 1 << 20, HEAD_MOST = 64 << 10 };
 enum { DELIVERED, AGAIN, REFUSED_BY_PEER, TLS_FAILED, ANSWER_UNREAD };
+#define MS UINT64_C(1000000)
+
+typedef struct { char *bytes; size_t size, capacity; bool failed; } Text;
 
 typedef struct { char *body; size_t size; uint64_t seq; unsigned char *sent; size_t sent_size; } Pending;
 /* An answer made into its input's message: a table of the fields' starts and
  * sizes (u32le), then the payload from its prefix on. */
 typedef struct { uint64_t seq; unsigned char *bytes; size_t size, table; } Answer;
 
+/* Where a request is: none under way, to connect, connecting, in its TLS
+ * handshake, written, its answer read. */
+enum { IDLE, CONNECT, CONNECTING, HANDSHAKE, WRITING, READING };
+
 struct PureWire {
+    PureSending sending; /* its place in the sending loop (link/sending.h) */
     const PureModule *module;
     uint32_t output;
     char host[256], port[8], path[1024], source[PURE_SOURCE + 1];
     pthread_mutex_t lock;
-    pthread_cond_t changed;
     Pending *queue; /* the sends to deliver, in order, from head */
     size_t held;    /* their bytes */
     size_t head, count, capacity;
     uint64_t queued, delivered, attempts, deliveries;
     unsigned batch; /* how many a request may carry, as the receiver said (X-Pure-Batch); 0: one */
-    bool stopping, started, stuck;
-    pthread_t thread;
+    bool started, stuck;
     void (*notify)(void *);
     void *context;
-    int fd;   /* the connection kept for the next send, or -1; changed under the lock */
+    int fd;           /* the connection kept for the next send, or -1 */
     bool tls;         /* https: the connection is TLS */
     PureTls *session; /* its TLS session */
     int answer_input; /* the input answers become events of, or -1 */
@@ -58,6 +64,29 @@ struct PureWire {
     unsigned char peer[PURE_SEAL_KEY], from[PURE_SEAL_KEY], enc[PURE_SEAL_KEY];
     const PureSealKey *own;
     PureSealer *sealer;
+    /* Its rounds' own, on the sending loop: the request under way. */
+    int phase;
+    struct addrinfo *addresses, *trying; /* the receiver's, while it connects */
+    bool fresh;                          /* its connection was made for it */
+    char *request;
+    size_t request_size, written;
+    Pending first;     /* the first send it carries */
+    unsigned carried;  /* how many */
+    uint64_t last;     /* the last one's number */
+    uint64_t deadline; /* nothing moved by then: it failed */
+    /* Its answer as it comes: got, its head (got_head bytes) and a chunked
+     * body after it; what the head says; the body kept when answers are
+     * wired. */
+    Text got, body;
+    size_t got_head;
+    bool headed, keep, refused, sized, chunked;
+    int status;
+    unsigned batch_said;
+    uint64_t left; /* a sized body's bytes to come */
+    /* After a request failed: none till then. */
+    uint64_t pause_until;
+    long pause_ms;
+    uint64_t reported; /* the first send the last failure was said of */
 };
 
 /* TLS verifies a receiver's certificate against the system's CAs or the
@@ -67,8 +96,6 @@ static const char *tls_ca;
 void pure_wire_trust(const char *ca_file) { tls_ca = ca_file; }
 
 /* ---- A send as JSON: its fields in order, a group's fields as an object. */
-
-typedef struct { char *bytes; size_t size, capacity; bool failed; } Text;
 
 static void put(Text *t, const void *bytes, size_t size) {
     if (t->failed) return;
@@ -176,6 +203,8 @@ static bool encode(const PureWire *w, PureSpan payload, Text *t) {
 
 /* ---- The wire. */
 
+static uint64_t wire_round(PureSending *, uint32_t ready);
+
 PureWire *pure_wire_open(const PureModule *m, const char *output, const char *url, const char *source,
                          char *error, size_t size) {
     int index = pure_module_input(m, output);
@@ -230,7 +259,7 @@ PureWire *pure_wire_open(const PureModule *m, const char *output, const char *ur
     w->tls = tls;
     w->answer_input = -1;
     pthread_mutex_init(&w->lock, NULL);
-    pure_cond_monotonic(&w->changed);
+    pure_sending_init(&w->sending, wire_round);
     return w;
 }
 
@@ -327,162 +356,19 @@ bool pure_wire_queue(PureWire *w, uint64_t seq, PureSpan payload) {
     w->queue[w->head + w->count++] = (Pending){t.bytes, t.size, seq, sent, payload.size};
     w->queued = seq;
     w->held += t.size + (sent ? payload.size : 0);
-    pthread_cond_signal(&w->changed);
     pthread_mutex_unlock(&w->lock);
     return true;
 }
 
-/* ---- HTTP/1.1, one request at a time on a kept connection. */
+void pure_wire_push(PureWire *w) { pure_sending_push(&w->sending); }
 
-typedef struct { PureWire *wire; char bytes[4096]; size_t at, end; } Reader;
-
-static bool fill(Reader *r) {
-    if (r->at == r->end) r->at = r->end = 0;
-    if (r->end == sizeof(r->bytes)) return false;
-    PureWire *w = r->wire;
-    ssize_t n;
-    if (w->session) n = pure_tls_read(w->session, r->bytes + r->end, (int)(sizeof(r->bytes) - r->end));
-    else do n = recv(w->fd, r->bytes + r->end, sizeof(r->bytes) - r->end, 0); while (n < 0 && errno == EINTR);
-    if (n <= 0) return false;
-#ifdef TCP_QUICKACK
-    /* Acknowledge at once: a server that writes an answer in pieces holds the
-     * next piece until the first is acknowledged (Nagle), which a delayed
-     * acknowledgement would stall for 40 ms. The flag does not stay set. */
-    int one = 1;
-    setsockopt(w->fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
-#endif
-    r->end += (size_t)n;
-    return true;
-}
-
-/* A line without its CRLF, in line (at most size - 1 bytes). */
-static bool read_line(Reader *r, char *line, size_t size) {
-    for (;;) {
-        char *end = memchr(r->bytes + r->at, '\n', r->end - r->at);
-        if (end) {
-            size_t length = (size_t)(end - (r->bytes + r->at));
-            if (length && end[-1] == '\r') --length;
-            if (length >= size) return false;
-            memcpy(line, r->bytes + r->at, length);
-            line[length] = 0;
-            r->at = (size_t)(end - r->bytes) + 1;
-            return true;
-        }
-        if (r->at) {
-            memmove(r->bytes, r->bytes + r->at, r->end - r->at);
-            r->end -= r->at;
-            r->at = 0;
-        }
-        if (!fill(r)) return false;
-    }
-}
-
-/* size bytes of the body: kept in into (up to ANSWER_MOST), or skipped when it is NULL. */
-static bool take(Reader *r, uint64_t size, Text *into) {
-    if (into && size > ANSWER_MOST - into->size) return false;
-    while (size) {
-        if (r->at == r->end && !fill(r)) return false;
-        size_t n = r->end - r->at < size ? r->end - r->at : (size_t)size;
-        if (into) put(into, r->bytes + r->at, n);
-        r->at += n;
-        size -= n;
-    }
-    return !into || !into->failed;
-}
-
-static bool send_all(PureWire *w, const char *bytes, size_t size) {
-    while (size) {
-        ssize_t n = w->session ? pure_tls_write(w->session, bytes, (int)(size < INT32_MAX ? size : INT32_MAX)) :
-                                 send(w->fd, bytes, size, MSG_NOSIGNAL);
-        if (n < 0 && !w->session && errno == EINTR) continue;
-        if (n <= 0) return false;
-        bytes += n;
-        size -= (size_t)n;
-    }
-    return true;
-}
-
-static int connect_to(const PureWire *w) {
-    struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM}, *list;
-    if (getaddrinfo(w->host, w->port, &hints, &list)) return -1;
-    int fd = -1;
-    for (struct addrinfo *a = list; a && fd < 0; a = a->ai_next) {
-        fd = socket(a->ai_family, a->ai_socktype | SOCK_CLOEXEC, a->ai_protocol);
-        if (fd < 0) continue;
-        struct timeval limit = {TIMEOUT_S, 0};
-        int one = 1;
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &limit, sizeof(limit));
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &limit, sizeof(limit));
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-        if (connect(fd, a->ai_addr, a->ai_addrlen)) {
-            close(fd);
-            fd = -1;
-        }
-    }
-    freeaddrinfo(list);
-    return fd;
-}
-
-static void drop_connection(PureWire *w) {
-    pthread_mutex_lock(&w->lock);
-    pure_tls_close(w->session);
-    if (w->fd >= 0) close(w->fd);
-    w->session = NULL;
-    w->fd = -1;
-    pthread_mutex_unlock(&w->lock);
-}
+/* ---- Requests. */
 
 /* A fault a Pure receiver answers when its app refused the message: any
  * but memory (its budget: it may take the message later). */
 static bool refusal(const char *error) {
     for (unsigned f = PURE_FAULT_DIVIDE; f < PURE_FAULT_COUNT; ++f)
         if (f != PURE_FAULT_MEMORY && !strcmp(error, pure_fault_name((PureFault)f))) return true;
-    return false;
-}
-
-/* The answer to one request: its status, whether a Pure receiver refused it,
- * and whether the connection may carry the next. */
-static bool read_answer(PureWire *w, int *status, bool *refused, bool *keep, unsigned *batch, Text *body) {
-    Reader r = {.wire = w};
-    char line[1024];
-    if (!read_line(&r, line, sizeof(line)) || strncmp(line, "HTTP/1.", 7) || strlen(line) < 12) return false;
-    *status = atoi(line + 9);
-    *keep = line[7] == '1';
-    *refused = false;
-    uint64_t length = 0;
-    bool sized = false, chunked = false;
-    while (read_line(&r, line, sizeof(line))) {
-        if (!*line) {
-            if (chunked) {
-                for (;;) {
-                    uint64_t chunk;
-                    if (!read_line(&r, line, sizeof(line))) return false;
-                    chunk = strtoull(line, NULL, 16);
-                    if (!chunk) break;
-                    if (!take(&r, chunk, body) || !read_line(&r, line, sizeof(line))) return false;
-                }
-                while (read_line(&r, line, sizeof(line)) && *line) {}
-                return true;
-            }
-            if (*status == 204 || *status == 304 || *status < 200) return true;
-            if (sized) return take(&r, length, body);
-            *keep = false; /* the body runs to the close */
-            while (fill(&r)) {
-                if (body && !take(&r, r.end - r.at, body)) return false;
-                r.at = r.end;
-            }
-            return true;
-        }
-        char *value = strchr(line, ':');
-        if (!value) return false;
-        *value++ = 0;
-        while (*value == ' ' || *value == '\t') ++value;
-        if (!strcasecmp(line, "Content-Length")) { length = strtoull(value, NULL, 10); sized = true; }
-        else if (!strcasecmp(line, "Transfer-Encoding")) chunked = !strcasecmp(value, "chunked");
-        else if (!strcasecmp(line, "Connection")) *keep = strcasecmp(value, "close") != 0 && *keep;
-        else if (!strcasecmp(line, "X-Pure-Error")) *refused = refusal(value);
-        else if (!strcasecmp(line, "X-Pure-Batch")) *batch = (unsigned)strtoul(value, NULL, 10);
-    }
     return false;
 }
 
@@ -562,8 +448,6 @@ static bool form_answer(const PureWire *w, int status, const Text *body, const P
     return true;
 }
 
-static int send_request(PureWire *w, const char *request, size_t size, const Pending *p, Answer *answer);
-
 void pure_wire_seal(PureWire *w, const unsigned char peer[PURE_SEAL_KEY], const PureSealKey *own,
                     const unsigned char *from) {
     memcpy(w->peer, peer, PURE_SEAL_KEY);
@@ -616,16 +500,16 @@ static unsigned char *seal_body(PureWire *w, const Pending *p, unsigned count, s
 }
 
 /* One request for count sends from p (numbered in a row): one object, or
- * an array of them for a receiver that takes batches. A final answer to a
- * send whose answers are wired is made into *answer. */
-static int post(PureWire *w, const Pending *p, unsigned count, Answer *answer) {
+ * an array of them for a receiver that takes batches; NULL when it cannot
+ * be made (memory, a seal). */
+static char *make_request(PureWire *w, const Pending *p, unsigned count, size_t *size) {
     size_t body = count > 1 ? count + 1 : 0;
     for (unsigned i = 0; i < count; ++i) body += p[i].size;
     size_t length = body + (w->sealed ? PURE_SEAL_OVERHEAD : 0);
     char batch[32] = "", seal[256] = "";
     if (count > 1) snprintf(batch, sizeof(batch), "X-Pure-Count: %u\r\n", count);
     unsigned char *sealed = w->sealed ? seal_body(w, p, count, body, seal, sizeof(seal)) : NULL;
-    if (w->sealed && !sealed) return AGAIN;
+    if (w->sealed && !sealed) return NULL;
     /* The request in one piece, its head and then a batch in its brackets:
      * one write where there were two a send (a batch drained at 91k sends a
      * second, and at 470k in one piece). */
@@ -633,7 +517,7 @@ static int post(PureWire *w, const Pending *p, unsigned count, Answer *answer) {
     char *request = malloc(HEAD + length);
     if (!request) {
         free(sealed);
-        return AGAIN;
+        return NULL;
     }
     int head = snprintf(request, HEAD,
                         "POST %s HTTP/1.1\r\nHost: %s:%s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n"
@@ -643,145 +527,435 @@ static int post(PureWire *w, const Pending *p, unsigned count, Answer *answer) {
     if (sealed) memcpy(request + head, sealed, length);
     else put_body((unsigned char *)request + head, p, count);
     free(sealed);
-    int result = send_request(w, request, (size_t)head + length, p, answer);
-    free(request);
-    return result;
+    *size = (size_t)head + length;
+    return request;
 }
 
-static int send_request(PureWire *w, const char *request, size_t size, const Pending *p, Answer *answer) {
-    /* A kept connection the peer closed is tried once more on a new one. */
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        bool fresh = w->fd < 0;
-        if (fresh) {
-            int fd = connect_to(w);
-            if (fd < 0) return AGAIN;
-            pthread_mutex_lock(&w->lock);
-            w->fd = fd;
-            bool stopping = w->stopping;
-            pthread_mutex_unlock(&w->lock);
-            if (stopping) return AGAIN;
-            /* The receiver's certificate must name the host. */
-            PureTls *session = w->tls ? pure_tls_open(w->host, fd) : NULL;
-            if (w->tls && !session) {
-                drop_connection(w);
-                return TLS_FAILED;
-            }
-            pthread_mutex_lock(&w->lock);
-            w->session = session;
-            pthread_mutex_unlock(&w->lock);
-        }
-        int status;
-        bool refused, keep, sent = send_all(w, request, size);
-        unsigned batch_size = 0;
-        Text body = {0};
-        if (!sent || !read_answer(w, &status, &refused, &keep, &batch_size, w->answer_input >= 0 ? &body : NULL)) {
-            free(body.bytes);
-            drop_connection(w);
-            if (fresh) return AGAIN;
-            continue;
-        }
-        if (!keep) drop_connection(w);
-        if (batch_size && w->answer_input < 0) w->batch = batch_size;
-        if (status == 408 || status == 429 || status >= 500) {
-            free(body.bytes);
-            return AGAIN;
-        }
-        if (w->answer_input >= 0 && status >= 200 && status < 500) { /* a final answer: the app hears it */
-            bool formed = form_answer(w, status, &body, p, answer);
-            free(body.bytes);
-            return formed ? DELIVERED : ANSWER_UNREAD;
-        }
-        free(body.bytes);
-        if ((status >= 200 && status < 300) || (status >= 400 && status < 500 && refused)) return DELIVERED;
-        return REFUSED_BY_PEER;
+/* ---- HTTP/1.1, one request at a time on a kept connection, in the wire's
+ * rounds on the sending loop: each goes as far as its socket lets it, and
+ * then waits for the socket (or its deadline, TIMEOUT_S after the last
+ * bytes moved). */
+
+/* Where the head ends in b (after its blank line), looking from from; 0
+ * while it has not. */
+static size_t head_end(const char *b, size_t size, size_t from) {
+    for (const char *at = memchr(b + from, '\n', size - from); at; at = memchr(at + 1, '\n', (size_t)(b + size - at - 1))) {
+        size_t i = (size_t)(at - b);
+        if (i + 1 < size && b[i + 1] == '\n') return i + 2;
+        if (i + 2 < size && b[i + 1] == '\r' && b[i + 2] == '\n') return i + 3;
     }
-    return AGAIN;
+    return 0;
 }
 
-static void *deliver(void *context) {
-    PureWire *w = context;
-    long pause_ms = 0;
-    uint64_t reported = 0;
-    pthread_mutex_lock(&w->lock);
-    for (;;) {
-        while (!w->stopping && !w->count) pthread_cond_wait(&w->changed, &w->lock);
-        if (w->stopping) break;
-        /* As many as the receiver takes at once; their bodies stay put while
-         * the queue only grows behind them. */
-        unsigned count = w->batch > 1 ? (unsigned)(w->count < w->batch ? w->count : w->batch) : 1;
-        Pending next[BATCH_MOST];
-        if (count > BATCH_MOST) count = BATCH_MOST;
-        memcpy(next, w->queue + w->head, count * sizeof(*next));
-        ++w->attempts;
-        pthread_mutex_unlock(&w->lock);
-        Answer answer = {0};
-        int outcome = post(w, next, count, &answer);
-        pthread_mutex_lock(&w->lock);
-        if (outcome == DELIVERED && answer.bytes) { /* for the owner, who then counts it delivered */
-            if (w->answer_head + w->answer_count == w->answer_capacity) {
-                if (w->answer_head) {
-                    memmove(w->answers, w->answers + w->answer_head, w->answer_count * sizeof(*w->answers));
-                    w->answer_head = 0;
-                } else {
-                    size_t capacity = w->answer_capacity ? 2 * w->answer_capacity : 16;
-                    Answer *grown = realloc(w->answers, capacity * sizeof(*grown));
-                    if (!grown) { free(answer.bytes); outcome = AGAIN; }
-                    else { w->answers = grown; w->answer_capacity = capacity; }
-                }
-            }
-            if (outcome == DELIVERED) w->answers[w->answer_head + w->answer_count++] = answer;
-        }
-        if (outcome == DELIVERED) {
-            for (unsigned i = 0; i < count; ++i) {
-                const Pending *p = &w->queue[w->head + i];
-                w->held -= p->size + (p->sent ? p->sent_size : 0);
-                free(p->body);
-                free(p->sent);
-            }
-            w->head += count;
-            w->count -= count;
-            if (!answer.bytes) w->delivered = next[count - 1].seq;
-            w->deliveries += count;
-            pause_ms = 0;
-            pthread_mutex_unlock(&w->lock);
-            if (w->notify) w->notify(w->context);
-            pthread_mutex_lock(&w->lock);
+/* The head's lines (size bytes of b): the status, and the headers a wire
+ * heeds. False when it is no HTTP/1 answer. */
+static bool read_head(PureWire *w, const char *b, size_t size) {
+    w->sized = w->chunked = w->refused = false;
+    w->left = 0;
+    w->batch_said = 0;
+    for (size_t at = 0, n = 0; at < size; ++n) {
+        const char *end = memchr(b + at, '\n', size - at);
+        if (!end) return false;
+        size_t length = (size_t)(end - (b + at));
+        if (length && end[-1] == '\r') --length;
+        char line[1024];
+        if (length >= sizeof(line)) return false;
+        memcpy(line, b + at, length);
+        line[length] = 0;
+        at = (size_t)(end - b) + 1;
+        if (!n) {
+            if (length < 12 || strncmp(line, "HTTP/1.", 7)) return false;
+            w->status = atoi(line + 9);
+            w->keep = line[7] == '1';
             continue;
         }
-        if (outcome != AGAIN && reported != next[0].seq) {
-            fprintf(stderr, "{\"wire\":\"%s\",\"seq\":%llu,\"error\":\"%s\"}\n", w->source,
-                    (unsigned long long)next[0].seq, outcome == TLS_FAILED ? "the receiver's certificate is not trusted; trying again" :
-                    outcome == ANSWER_UNREAD ? "its answer does not make the answer input's message; trying again" :
-                    "the receiver does not take it; trying again");
-            reported = next[0].seq;
+        if (!*line) break;
+        char *value = strchr(line, ':');
+        if (!value) return false;
+        *value++ = 0;
+        while (*value == ' ' || *value == '\t') ++value;
+        if (!strcasecmp(line, "Content-Length")) { w->left = strtoull(value, NULL, 10); w->sized = true; }
+        else if (!strcasecmp(line, "Transfer-Encoding")) w->chunked = !strcasecmp(value, "chunked");
+        else if (!strcasecmp(line, "Connection")) w->keep = strcasecmp(value, "close") != 0 && w->keep;
+        else if (!strcasecmp(line, "X-Pure-Error")) w->refused = refusal(value);
+        else if (!strcasecmp(line, "X-Pure-Batch")) w->batch_said = (unsigned)strtoul(value, NULL, 10);
+    }
+    return true;
+}
+
+/* A chunked body after the head, as far as it came (closed: no more
+ * comes), made again from its start each time (such answers are few and
+ * small): 1 once it is whole (kept when answers are wired), 0 while more
+ * must come, -1 when it cannot be. */
+static int chunks(PureWire *w, bool closed) {
+    const char *b = w->got.bytes + w->got_head;
+    size_t size = w->got.size - w->got_head, at = 0;
+    w->body.size = 0;
+    for (;;) {
+        const char *end = memchr(b + at, '\n', size - at);
+        if (!end) return closed ? -1 : 0;
+        uint64_t chunk = strtoull(b + at, NULL, 16);
+        at = (size_t)(end - b) + 1;
+        if (!chunk) break;
+        if (chunk > size - at) return closed ? -1 : 0;
+        if (w->answer_input >= 0) {
+            if (chunk > ANSWER_MOST - w->body.size) return -1;
+            put(&w->body, b + at, (size_t)chunk);
         }
-        pause_ms = outcome != AGAIN ? LONGEST_PAUSE_MS : pause_ms ? 2 * pause_ms : FIRST_PAUSE_MS;
-        if (pause_ms > LONGEST_PAUSE_MS) pause_ms = LONGEST_PAUSE_MS;
-        struct timespec until = pure_wait_until(pause_ms * 1000000LL);
-        while (!w->stopping && pthread_cond_timedwait(&w->changed, &w->lock, &until) == 0) {}
+        at += (size_t)chunk;
+        if (!(end = memchr(b + at, '\n', size - at))) return closed ? -1 : 0;
+        at = (size_t)(end - b) + 1;
+    }
+    for (;;) { /* its trailers, to a blank line (or the close) */
+        const char *end = memchr(b + at, '\n', size - at);
+        if (!end) return closed ? 1 : 0;
+        size_t length = (size_t)(end - (b + at));
+        at = (size_t)(end - b) + 1;
+        if (!length || (length == 1 && end[-1] == '\r')) return w->body.failed ? -1 : 1;
+    }
+}
+
+/* Bytes of the answer as they come (closed: no more come): 1 once it is
+ * whole, 0 while more must come, -1 when it is no answer or too large. */
+static int answer_bytes(PureWire *w, const char *bytes, size_t n, bool closed) {
+    if (!w->headed) {
+        size_t before = w->got.size;
+        put(&w->got, bytes, n);
+        size_t end = w->got.failed ? 0 : head_end(w->got.bytes, w->got.size, before >= 2 ? before - 2 : 0);
+        if (!end) return closed || w->got.failed || w->got.size > HEAD_MOST ? -1 : 0;
+        if (!read_head(w, w->got.bytes, end)) return -1;
+        w->headed = true;
+        w->got_head = end;
+        if (w->status == 204 || w->status == 304 || w->status < 200) return 1;
+        if (w->chunked) return chunks(w, closed);
+        bytes = w->got.bytes + end; /* the body's first bytes */
+        n = w->got.size - end;
+    } else if (w->chunked) {
+        put(&w->got, bytes, n);
+        return w->got.failed || w->got.size - w->got_head > ANSWER_MOST + HEAD_MOST ? -1 : chunks(w, closed);
+    }
+    size_t taken = w->sized && n > w->left ? (size_t)w->left : n;
+    if (w->answer_input >= 0) {
+        if (taken > ANSWER_MOST - w->body.size) return -1;
+        put(&w->body, bytes, taken);
+        if (w->body.failed) return -1;
+    }
+    if (w->sized) {
+        w->left -= taken;
+        return !w->left ? 1 : closed ? -1 : 0;
+    }
+    w->keep = false; /* the body runs to the close */
+    return closed ? 1 : 0;
+}
+
+static void drop(PureWire *w) {
+    pure_sending_watch(&w->sending, -1, 0); /* before its socket closes */
+    pure_tls_close(w->session);
+    w->session = NULL;
+    if (w->fd >= 0) close(w->fd);
+    w->fd = -1;
+}
+
+/* The request is done with: delivered, or to be tried again after a pause
+ * (0.1 s doubling to 10 s; 10 s for one the receiver does not take). */
+static void finish(PureWire *w, int outcome, Answer *answer) {
+    free(w->request);
+    w->request = NULL;
+    w->phase = IDLE;
+    w->headed = false;
+    w->got.size = w->body.size = 0;
+    w->got.failed = w->body.failed = false;
+    if (w->addresses) freeaddrinfo(w->addresses);
+    w->addresses = w->trying = NULL;
+    if (w->fd >= 0) pure_sending_watch(&w->sending, w->fd, EPOLLIN); /* kept: heard if it closes */
+    pthread_mutex_lock(&w->lock);
+    if (outcome == DELIVERED && answer && answer->bytes) { /* for the owner, who then counts it delivered */
+        if (w->answer_head + w->answer_count == w->answer_capacity) {
+            if (w->answer_head) {
+                memmove(w->answers, w->answers + w->answer_head, w->answer_count * sizeof(*w->answers));
+                w->answer_head = 0;
+            } else {
+                size_t capacity = w->answer_capacity ? 2 * w->answer_capacity : 16;
+                Answer *grown = realloc(w->answers, capacity * sizeof(*grown));
+                if (!grown) { free(answer->bytes); outcome = AGAIN; }
+                else { w->answers = grown; w->answer_capacity = capacity; }
+            }
+        }
+        if (outcome == DELIVERED) w->answers[w->answer_head + w->answer_count++] = *answer;
+    }
+    if (outcome == DELIVERED) {
+        for (unsigned i = 0; i < w->carried; ++i) {
+            const Pending *p = &w->queue[w->head + i];
+            w->held -= p->size + (p->sent ? p->sent_size : 0);
+            free(p->body);
+            free(p->sent);
+        }
+        w->head += w->carried;
+        w->count -= w->carried;
+        if (!answer || !answer->bytes) w->delivered = w->last;
+        w->deliveries += w->carried;
+        w->pause_ms = 0;
+        pthread_mutex_unlock(&w->lock);
+        if (w->notify) w->notify(w->context);
+        return;
     }
     pthread_mutex_unlock(&w->lock);
-    return NULL;
+    if (outcome != AGAIN && w->reported != w->first.seq) {
+        fprintf(stderr, "{\"wire\":\"%s\",\"seq\":%llu,\"error\":\"%s\"}\n", w->source, (unsigned long long)w->first.seq,
+                outcome == TLS_FAILED ? "the receiver's certificate is not trusted; trying again" :
+                outcome == ANSWER_UNREAD ? "its answer does not make the answer input's message; trying again" :
+                "the receiver does not take it; trying again");
+        w->reported = w->first.seq;
+    }
+    w->pause_ms = outcome != AGAIN ? LONGEST_PAUSE_MS : w->pause_ms ? 2 * w->pause_ms : FIRST_PAUSE_MS;
+    if (w->pause_ms > LONGEST_PAUSE_MS) w->pause_ms = LONGEST_PAUSE_MS;
+    w->pause_until = pure_sending_now() + (uint64_t)w->pause_ms * MS;
+}
+
+/* The request failed on its connection: the connection goes, and a request
+ * on one kept from before is tried once more on a new one. */
+static void failed(PureWire *w, int outcome) {
+    bool again = outcome == AGAIN && !w->fresh;
+    drop(w);
+    if (!again) {
+        finish(w, outcome, NULL);
+        return;
+    }
+    w->phase = CONNECT;
+    w->written = 0;
+    w->headed = false;
+    w->got.size = w->body.size = 0;
+    w->got.failed = w->body.failed = false;
+}
+
+/* The next request, from the sends queued (as many as the receiver takes
+ * at once: their bodies stay put while the queue only grows behind them):
+ * false when none waits. */
+static bool begin(PureWire *w, uint64_t now) {
+    Pending next[BATCH_MOST];
+    pthread_mutex_lock(&w->lock);
+    unsigned count = w->batch > 1 ? (unsigned)(w->count < w->batch ? w->count : w->batch) : w->count ? 1 : 0;
+    if (count > BATCH_MOST) count = BATCH_MOST;
+    memcpy(next, w->queue + w->head, count * sizeof(*next));
+    if (count) ++w->attempts;
+    pthread_mutex_unlock(&w->lock);
+    if (!count) return false;
+    w->first = next[0];
+    w->carried = count;
+    w->last = next[count - 1].seq;
+    w->written = 0;
+    w->deadline = now + TIMEOUT_S * 1000 * MS;
+    if (!(w->request = make_request(w, next, count, &w->request_size))) finish(w, AGAIN, NULL);
+    else w->phase = w->fd >= 0 ? WRITING : CONNECT;
+    w->fresh = w->fd < 0;
+    return true;
+}
+
+/* A socket connecting to the next of the receiver's addresses (watched to
+ * be writable: connected); false when none is left. */
+static bool connect_next(PureWire *w) {
+    for (; w->trying; w->trying = w->trying->ai_next) {
+        struct addrinfo *a = w->trying;
+        int fd = socket(a->ai_family, a->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC, a->ai_protocol), one = 1;
+        if (fd < 0) continue;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        if (!connect(fd, a->ai_addr, a->ai_addrlen) || errno == EINPROGRESS) {
+            w->fd = fd;
+            pure_sending_watch(&w->sending, fd, EPOLLOUT);
+            return true;
+        }
+        close(fd);
+    }
+    return false;
+}
+
+/* The request's bytes to the socket as far as it takes them: 1 all
+ * written, 0 when it waits for the socket, -1 when it failed. */
+static int write_some(PureWire *w) {
+    while (w->written < w->request_size) {
+        size_t left = w->request_size - w->written;
+        ssize_t n;
+        if (w->session) {
+            int moved = pure_tls_write(w->session, w->request + w->written, left < INT32_MAX ? (int)left : INT32_MAX);
+            if (moved == PURE_TLS_WANTS_READ || moved == PURE_TLS_WANTS_WRITE) {
+                pure_sending_watch(&w->sending, w->fd, moved == PURE_TLS_WANTS_READ ? EPOLLIN : EPOLLOUT);
+                return 0;
+            }
+            n = moved;
+        } else {
+            n = send(w->fd, w->request + w->written, left, MSG_NOSIGNAL);
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                pure_sending_watch(&w->sending, w->fd, EPOLLOUT);
+                return 0;
+            }
+        }
+        if (n <= 0) return -1;
+        w->written += (size_t)n;
+        w->deadline = pure_sending_now() + TIMEOUT_S * 1000 * MS;
+    }
+    return 1;
+}
+
+/* The answer's bytes from the socket as far as they came: 1 once it is
+ * whole, 0 when it waits for more, -1 when it failed. */
+static int read_some(PureWire *w) {
+    char bytes[16384];
+    for (;;) {
+        ssize_t n;
+        if (w->session) {
+            int moved = pure_tls_read(w->session, bytes, (int)sizeof(bytes));
+            if (moved == PURE_TLS_WANTS_READ || moved == PURE_TLS_WANTS_WRITE) {
+                pure_sending_watch(&w->sending, w->fd, moved == PURE_TLS_WANTS_READ ? EPOLLIN : EPOLLOUT);
+                return 0;
+            }
+            n = moved; /* closed, or failed: as the close */
+        } else {
+            n = recv(w->fd, bytes, sizeof(bytes), 0);
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                pure_sending_watch(&w->sending, w->fd, EPOLLIN);
+                return 0;
+            }
+        }
+        if (n > 0) {
+#ifdef TCP_QUICKACK
+            /* Acknowledge at once: a server that writes an answer in pieces
+             * holds the next piece until the first is acknowledged (Nagle),
+             * which a delayed acknowledgement would stall for 40 ms. The flag
+             * does not stay set. */
+            int one = 1;
+            setsockopt(w->fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+#endif
+            w->deadline = pure_sending_now() + TIMEOUT_S * 1000 * MS;
+        }
+        int whole = answer_bytes(w, bytes, n > 0 ? (size_t)n : 0, n <= 0);
+        if (whole || n <= 0) return whole ? whole : -1;
+    }
+}
+
+/* The whole answer: what came of the request. */
+static void answered(PureWire *w) {
+    if (w->batch_said && w->answer_input < 0) w->batch = w->batch_said;
+    if (!w->keep) drop(w);
+    int status = w->status, outcome;
+    Answer answer = {0};
+    if (status == 408 || status == 429 || status >= 500) outcome = AGAIN;
+    else if (w->answer_input >= 0 && status >= 200 && status < 500) /* a final answer: the app hears it */
+        outcome = form_answer(w, status, &w->body, &w->first, &answer) ? DELIVERED : ANSWER_UNREAD;
+    else if ((status >= 200 && status < 300) || (status >= 400 && status < 500 && w->refused)) outcome = DELIVERED;
+    else outcome = REFUSED_BY_PEER;
+    finish(w, outcome, &answer);
+}
+
+/* A round: the request under way taken as far as it goes, and the next
+ * begun when it is done. When the wire wants its next round. */
+static uint64_t wire_round(PureSending *s, uint32_t ready) {
+    PureWire *w = (PureWire *)s;
+    for (;;) {
+        uint64_t now = pure_sending_now();
+        if (w->phase >= CONNECTING && !ready && now >= w->deadline) { /* nothing moved for TIMEOUT_S */
+            failed(w, AGAIN);
+            continue;
+        }
+        switch (w->phase) {
+        case IDLE:
+            if ((ready & (EPOLLIN | EPOLLHUP | EPOLLERR)) && w->fd >= 0) drop(w); /* a kept connection that speaks unasked is closing */
+            ready = 0;
+            if (now < w->pause_until) return w->pause_until;
+            if (!begin(w, now)) return 0;
+            continue;
+        case CONNECT:
+            w->fresh = true;
+            if (!w->addresses) {
+                struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM};
+                if (getaddrinfo(w->host, w->port, &hints, &w->addresses)) w->addresses = NULL; /* a name looked up waits here */
+                w->trying = w->addresses;
+            }
+            if (!connect_next(w)) {
+                finish(w, AGAIN, NULL);
+                continue;
+            }
+            w->phase = CONNECTING;
+            w->deadline = now + TIMEOUT_S * 1000 * MS;
+            return w->deadline;
+        case CONNECTING: {
+            if (!ready) return w->deadline;
+            ready = 0;
+            int error = 0;
+            socklen_t size = sizeof(error);
+            if (getsockopt(w->fd, SOL_SOCKET, SO_ERROR, &error, &size) || error) { /* the next address */
+                drop(w);
+                w->trying = w->trying->ai_next;
+                w->phase = CONNECT;
+                continue;
+            }
+            freeaddrinfo(w->addresses);
+            w->addresses = w->trying = NULL;
+            pure_sending_watch(s, w->fd, EPOLLIN);
+            w->deadline = now + TIMEOUT_S * 1000 * MS;
+            if (!w->tls) w->phase = WRITING;
+            else if ((w->session = pure_tls_open(w->host, w->fd))) w->phase = HANDSHAKE; /* the certificate must name the host */
+            else failed(w, TLS_FAILED);
+            continue;
+        }
+        case HANDSHAKE: {
+            ready = 0;
+            int step = pure_tls_step(w->session);
+            if (step == PURE_TLS_WANTS_READ || step == PURE_TLS_WANTS_WRITE) {
+                pure_sending_watch(s, w->fd, step == PURE_TLS_WANTS_READ ? EPOLLIN : EPOLLOUT);
+                return w->deadline;
+            }
+            if (step != 1) {
+                failed(w, TLS_FAILED);
+                continue;
+            }
+            pure_sending_watch(s, w->fd, EPOLLIN);
+            w->phase = WRITING;
+            continue;
+        }
+        case WRITING: {
+            ready = 0;
+            int written = write_some(w);
+            if (written < 0) failed(w, AGAIN);
+            else if (!written) return w->deadline;
+            else { /* the answer, once the socket has it */
+                pure_sending_watch(s, w->fd, EPOLLIN);
+                w->phase = READING;
+                return w->deadline;
+            }
+            continue;
+        }
+        case READING: {
+            if (!ready) return w->deadline;
+            ready = 0;
+            int whole = read_some(w);
+            if (whole < 0) failed(w, AGAIN);
+            else if (!whole) return w->deadline;
+            else answered(w);
+            continue;
+        }
+        }
+    }
 }
 
 bool pure_wire_start(PureWire *w, void (*notify)(void *), void *context) {
     w->notify = notify;
     w->context = context;
-    w->started = pthread_create(&w->thread, NULL, deliver, w) == 0;
+    char why[128];
+    w->started = pure_sending_join(&w->sending, why, sizeof(why));
     return w->started;
 }
 
 void pure_wire_close(PureWire *w) {
     if (!w) return;
-    pthread_mutex_lock(&w->lock);
-    w->stopping = true;
-    if (w->fd >= 0) shutdown(w->fd, SHUT_RDWR); /* a send or an answer waited for ends now */
-    pthread_cond_broadcast(&w->changed);
-    pthread_mutex_unlock(&w->lock);
-    if (w->started) pthread_join(w->thread, NULL);
-    pure_tls_close(w->session);
+    pure_sending_leave(&w->sending); /* no round of it after */
+    drop(w);
+    if (w->addresses) freeaddrinfo(w->addresses);
+    free(w->request);
+    free(w->got.bytes);
+    free(w->body.bytes);
     pure_sealer_free(w->sealer);
-    if (w->fd >= 0) close(w->fd);
     for (size_t i = 0; i < w->count; ++i) {
         free(w->queue[w->head + i].body);
         free(w->queue[w->head + i].sent);
@@ -789,7 +963,6 @@ void pure_wire_close(PureWire *w) {
     for (size_t i = 0; i < w->answer_count; ++i) free(w->answers[w->answer_head + i].bytes);
     free(w->answers);
     free(w->queue);
-    pthread_cond_destroy(&w->changed);
     pthread_mutex_destroy(&w->lock);
     free(w);
 }

@@ -8,15 +8,17 @@
  * first time a server seals, opens a seal or connects to an https receiver
  * (link/crypto.c): one that does none of these maps no OpenSSL, 2.3 MiB
  * less resident and 0.6 MiB less of its own. */
-enum { PURE_CRYPTO_VERSION = 5 };
+enum { PURE_CRYPTO_VERSION = 6 };
 
 typedef struct {
     unsigned version;
     /* TLS client: the context (verifying against ca_file, or the system's
-     * CAs when NULL), sessions over connected sockets, their reads and
-     * writes (as SSL_read and SSL_write: bytes, or <= 0), and their end. */
+     * CAs when NULL), sessions over connected non-blocking sockets, their
+     * handshakes' steps, reads and writes (as link/tls.h says), and their
+     * end. */
     bool (*tls_start)(const char *ca_file);
     PureTls *(*tls_open)(const char *host, int fd);
+    int (*tls_step)(PureTls *);
     int (*tls_read)(PureTls *, void *bytes, int size);
     int (*tls_write)(PureTls *, const void *bytes, int size);
     void (*tls_close)(PureTls *);

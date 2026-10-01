@@ -32,15 +32,20 @@ uint32_t pure_wire_output(const PureWire *);
 void pure_wire_seal(PureWire *, const unsigned char peer[32], const PureSealKey *own, const unsigned char *from);
 /* The owner's side: queue a saved send numbered after the last queued one
  * (it is encoded now); false when it cannot be (a bytes field that is not
- * UTF-8 has no JSON form), and the wire then stops at it. */
+ * UTF-8 has no JSON form), and the wire then stops at it. What was queued
+ * goes once pushed, so a turn's sends go together. */
 bool pure_wire_queue(PureWire *, uint64_t seq, PureSpan payload);
+void pure_wire_push(PureWire *);
 uint64_t pure_wire_queued(const PureWire *);
 /* The last number delivered; any thread. */
 uint64_t pure_wire_delivered(PureWire *);
 /* The bytes of the sends queued and not yet delivered (their JSON, and the
  * payloads kept for answers); any thread. */
 size_t pure_wire_held(PureWire *);
-/* Deliver on a thread of the wire's own, calling notify after each delivery. */
+/* Deliver on the process's sending loop (link/sending.h), calling notify
+ * (on its thread) after each delivery. A request goes on a non-blocking
+ * socket, a step at a time as it is ready; a receiver's name is looked up
+ * (DNS) where it connects, and the loop waits for it. */
 bool pure_wire_start(PureWire *, void (*notify)(void *), void *context);
 /* Stop (a delivery under way is finished or abandoned) and free. */
 void pure_wire_close(PureWire *);

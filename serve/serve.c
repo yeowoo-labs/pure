@@ -1845,7 +1845,8 @@ static void feed_outlets(Executor *ex) {
             queued = seq;
             held += payload.size;
         }
-        if (link && queued != before) pure_link_push(link); /* the turn's together */
+        if (queued != before && link) pure_link_push(link); /* the turn's together */
+        else if (queued != before && wire) pure_wire_push(wire);
         ex->outlet_from[i] = at;
     }
     uint64_t now = ex->local_count ? now_ms() : 0;
