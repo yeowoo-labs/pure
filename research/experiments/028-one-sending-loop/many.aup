@@ -1,0 +1,43 @@
+input ping = message { k: u32 }
+output l1 = message { k: u32 }
+output l2 = message { k: u32 }
+output l3 = message { k: u32 }
+output l4 = message { k: u32 }
+output l5 = message { k: u32 }
+output l6 = message { k: u32 }
+output l7 = message { k: u32 }
+output l8 = message { k: u32 }
+output l9 = message { k: u32 }
+output l10 = message { k: u32 }
+output w1 = message { k: u32 }
+output w2 = message { k: u32 }
+output w3 = message { k: u32 }
+output w4 = message { k: u32 }
+output w5 = message { k: u32 }
+output w6 = message { k: u32 }
+output w7 = message { k: u32 }
+output w8 = message { k: u32 }
+output w9 = message { k: u32 }
+output w10 = message { k: u32 }
+on ping {
+  send l1 { k: ping.k }
+  send l2 { k: ping.k }
+  send l3 { k: ping.k }
+  send l4 { k: ping.k }
+  send l5 { k: ping.k }
+  send l6 { k: ping.k }
+  send l7 { k: ping.k }
+  send l8 { k: ping.k }
+  send l9 { k: ping.k }
+  send l10 { k: ping.k }
+  send w1 { k: ping.k }
+  send w2 { k: ping.k }
+  send w3 { k: ping.k }
+  send w4 { k: ping.k }
+  send w5 { k: ping.k }
+  send w6 { k: ping.k }
+  send w7 { k: ping.k }
+  send w8 { k: ping.k }
+  send w9 { k: ping.k }
+  send w10 { k: ping.k }
+}

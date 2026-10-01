@@ -1,0 +1,4 @@
+{"version": "before", "outputs": "none", "threads": 3}
+{"version": "before", "outputs": "ten links, ten wires", "threads": 24}
+{"version": "wires", "outputs": "none", "threads": 3}
+{"version": "wires", "outputs": "ten links, ten wires", "threads": 5}
