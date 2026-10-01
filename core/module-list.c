@@ -1087,7 +1087,8 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
 
 PureCell pure_list_get(const PureList *list, size_t at, unsigned field) {
     size_t within;
-    return cell_at(&list->layout, leaf_of(list, at, &within), (unsigned)within, field);
+    const Node *leaf = leaf_of(list, at, &within); /* first: an argument beside it would be read in either order */
+    return cell_at(&list->layout, leaf, (unsigned)within, field);
 }
 
 static void open_run(const Layout *l, const Node *leaf, PureRun *run) {
