@@ -60,6 +60,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
@@ -74,7 +75,8 @@ typedef struct Host Host;
 typedef enum { ROUTE_NONE, ROUTE_OBJECT, ROUTE_VIEW, ROUTE_INPUT, ROUTE_QUERY } RouteKind;
 /* A view's (or a query's) arguments come as the request's query: argued
  * says so, and given is its text, kept on the request's work slot. */
-typedef struct { RouteKind kind; uint32_t target; size_t from, count; bool argued; const char *given; } Route;
+typedef struct App App;
+typedef struct { RouteKind kind; uint32_t target; size_t from, count; bool argued; const char *given; App *app; } Route;
 
 /* This node's key, for deliveries sealed to it (--key), and whether it
  * takes only those (--sealed-only), or only those from the senders named,
@@ -114,6 +116,7 @@ typedef struct Connection {
     uint64_t deadline;
     char key[65]; /* the document's key, or the view's or input's name */
     RouteKind route;
+    App *app; /* the app the path names (NULL: none of the host's) */
     /* An app input's message: its fixed fields from the query, which fields
      * were given there, and whether the body is a JSON object of the rest.
      * Its ingress is [u32le payload size][payload]; with JSON it is [u32le
@@ -166,6 +169,7 @@ typedef struct {
     PureFault fault;  /* a failed event's */
     const char *type; /* a view's content type */
     struct LinkJob *link; /* records a link delivered (link/link.h) */
+    const char *refused;  /* refused by the host (503 and this name), not applied */
     uint64_t heard;       /* then the source's last number heard after them */
     bool gap;             /* and whether they stopped at a gap */
 } Applied;
@@ -305,7 +309,7 @@ typedef struct LinkJob { PureLinkListener *listener; void *token; unsigned char 
 typedef struct { Host *host; PureEffect effect; Route route; Waiter *waiter; LinkJob *link; } Job;
 
 /* The owner of an app with states served by several connection threads:
- * their requests wait here, and it runs them in bursts, one save each
+ * their requests wait here, and a worker runs them in bursts, one save each
  * however many threads they came from, handing each thread back its
  * applied requests to answer (and a surface its events). */
 typedef struct Owner {
@@ -319,14 +323,53 @@ typedef struct Owner {
     bool delivered; /* a wire delivered a send: trim it */
     Host *hosts;
     unsigned host_count;
+    /* Its turns on the workers (docs/design/017-apps-on-one-host.md): queued
+     * with work to do, or running on one; again when work came while it ran;
+     * due when its next timer is (the monotonic clock in ms, 0: none). */
+    struct Owner *next;
+    bool queued, running, again;
+    uint64_t due, turns;
+    size_t queue; /* how many requests may wait for its turn (0: any number) */
+    uint64_t busy; /* requests refused for that */
+    /* Between its turns: whether the last one saved (it then gathers the
+     * clients it answered), the arrivals when it handed them back, and the
+     * jobs' spare array. */
+    bool gather;
+    uint64_t answered_at;
+    Job *spare;
+    size_t spare_capacity;
 } Owner;
 
-struct Host {
-    const PureModule *module;
+/* An app of the host (docs/design/017-apps-on-one-host.md): its module,
+ * store and budgets, and the owner that applies its events on the workers,
+ * taking turns with the host's other apps. The one app of a host started
+ * with --module has no name (its routes start /views/ and so on); each of
+ * --apps has its own, the first segment of its routes. */
+enum { APP_NAME = 32 };
+struct App {
+    char name[APP_NAME + 1];
+    PureModule module;
+    const char *store;
     bool documents; /* the module serves /objects: it has show and edit */
-    Executor local; /* the app, when this thread runs it */
-    Owner *owner;   /* or the owner that runs it */
-    PureApp reader; /* shows the owner's snapshot here */
+    bool owned;     /* an owner runs it (states or outputs, or any of --apps); else the connection threads */
+    uint32_t show, edit;
+    size_t memory;  /* its budgets (0: none): what its states hold, */
+    uint64_t work;  /* what an event or a view's evaluation may run */
+    bool running;   /* started; else its routes answer 503 stopped, and why says why */
+    char why[256];
+    Owner owner;
+};
+static App *apps;
+static unsigned app_count;
+static bool named_apps; /* --apps: a route's first segment names its app */
+static void schedule(Owner *owner);
+
+struct Host {
+    Executor local;   /* the one app of the host, when this thread runs it (documents alone) */
+    PureApp *readers; /* by app: shows its owner's snapshots here */
+    PureSnapshot **snapshots; /* by app: the snapshot a round reads views from, once */
+    uint64_t round, *read_in, *handed_in; /* by app: the round it was read in, its requests handed in */
+    unsigned *touched; /* the apps read in this round */
     Applied *views; /* a round's views shown here, answered together */
     size_t views_capacity;
     uint64_t shown; /* views shown from snapshots */
@@ -606,6 +649,15 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     *version++ = 0;
     if (strcmp(version, "HTTP/1.1")) return false;
     if ((*query = strchr(path, '?'))) *(*query)++ = 0;
+    /* A host of apps (--apps): the path's first segment names one, and the rest routes in it. */
+    c->app = named_apps ? NULL : &apps[0];
+    if (named_apps && *path == '/') {
+        const char *end = strchr(path + 1, '/');
+        size_t length = end ? (size_t)(end - path - 1) : 0;
+        for (unsigned i = 0; end && i < app_count && !c->app; ++i)
+            if (strlen(apps[i].name) == length && !memcmp(apps[i].name, path + 1, length)) c->app = &apps[i];
+        if (end) path += 1 + length;
+    }
     static const struct { const char *prefix; RouteKind kind; } routes[] = {
         {"/objects/", ROUTE_OBJECT}, {"/views/", ROUTE_VIEW}, {"/inputs/", ROUTE_INPUT}, {"/queries/", ROUTE_QUERY}};
     const char *key = "";
@@ -729,13 +781,20 @@ static long percent_decoded(char *text, size_t length) {
  * taken from the query (%XX decoded, as a view's arguments are) into
  * c->fields. NULL, or the error to answer (404 for a name the module lacks,
  * 400 otherwise). */
-static const char *resolve(const Host *host, Connection *c, char *query, Route *route, int *status) {
-    const PureModule *m = host->module;
+static const char *resolve(Connection *c, char *query, Route *route, int *status) {
+    App *app = c->app;
     *status = 404;
     c->field_bytes = 0;
     memset(c->given, 0, sizeof(c->given));
-    if (route->kind == ROUTE_NONE || (route->kind == ROUTE_OBJECT && !host->documents) ||
-        (route->kind == ROUTE_QUERY && !host->owner)) return "route"; /* a query reads an app's states */
+    if (!app) return "no_app";
+    if (!app->running) {
+        *status = 503;
+        return "stopped";
+    }
+    const PureModule *m = &app->module;
+    route->app = app;
+    if (route->kind == ROUTE_NONE || (route->kind == ROUTE_OBJECT && !app->documents) ||
+        (route->kind == ROUTE_QUERY && !app->owned)) return "route"; /* a query reads an app's states */
     if (route->kind == ROUTE_OBJECT) return NULL;
     if (route->kind == ROUTE_QUERY) { /* the view is the query module's, found when shown */
         route->from = 0;
@@ -770,7 +829,7 @@ static const char *resolve(const Host *host, Connection *c, char *query, Route *
     bool message = shape && shape->kind == PURE_KIND_MESSAGE;
     if (message && shape->keyed) return "keyed";
     if (*c->source && !message) return "delivery";
-    if (!host->owner) c->source[0] = 0; /* an app without states or outputs applies it as a message */
+    if (!app->owned) c->source[0] = 0; /* an app without states or outputs applies it as a message */
     if (shape) {
         /* A body is a text input's text, a message's one variable field (rows
          * in their list's stored form), or a JSON object of a message's fields
@@ -841,14 +900,14 @@ enum { DELIVERY = 80 };
  * into the prefix; strings stay in the body, and the table says where.
  * NULL, or the error to answer. */
 static const char *convert(Connection *c) {
-    const PureInputShape *shape = &c->host->module->input[c->input];
+    const PureInputShape *shape = &(&c->app->module)->input[c->input];
     uint32_t delivered = get_u32(c->ingress) & DELIVERED;
     size_t table = 8 * (size_t)shape->field_count, payload = c->batch * c->field_bytes + c->body_size;
     unsigned char *tables = c->ingress + 4 + (delivered ? DELIVERY : 0), *prefixes = tables + c->batch * table;
     unsigned char *json = c->body;
     size_t size = c->body_size, at = pure_json_space(json, 0, size);
     /* A message's rows go after the body: they are encoded, then placed. */
-    PureJsonMessage b = {.module = c->host->module, .shape = shape, .given = c->given, .rows_base = payload};
+    PureJsonMessage b = {.module = (&c->app->module), .shape = shape, .given = c->given, .rows_base = payload};
     const char *why = NULL;
     /* A batch is an array of its messages' objects. */
     if (c->batch > 1) {
@@ -868,7 +927,7 @@ static const char *convert(Connection *c) {
          * member naming no field is refused all the same: it would be dropped. */
         for (uint32_t f = 0; !why && f < shape->field_count; ++f) {
             if (b.seen[f] || c->given[f]) continue;
-            const PureField *field = &c->host->module->field[shape->field_start + f];
+            const PureField *field = &(&c->app->module)->field[shape->field_start + f];
             if (!delivered || field->type == PURE_FIELD_ROWS) why = "missing_field";
             else if (pure_field_fixed(field->type))
                 memset(b.payload + field->offset, 0, pure_field_size(field->type));
@@ -979,12 +1038,15 @@ static void start_request(Connection *c, size_t head_size) {
     ++host->requests;
     Route route = {.kind = c->route};
     int status;
-    const char *why = resolve(host, c, query, &route, &status);
-    if (why) { reject(c, status, status == 404 ? "Not Found" : "Bad Request", why); return; }
+    const char *why = resolve(c, query, &route, &status);
+    if (why) {
+        reject(c, status, status == 404 ? "Not Found" : status == 503 ? "Service Unavailable" : "Bad Request", why);
+        return;
+    }
     /* A document's PUT carries its body; an input's event its payload's size,
      * the payload (the fixed fields, then the body), and room for its JSON. */
     bool write = route.kind == ROUTE_INPUT || c->put;
-    size_t table = route.kind == ROUTE_INPUT && c->json ? 8 * (size_t)host->module->input[c->input].field_count : 0;
+    size_t table = route.kind == ROUTE_INPUT && c->json ? 8 * (size_t)c->app->module.input[c->input].field_count : 0;
     size_t lead = 4 + (route.kind == ROUTE_INPUT && *c->source ? DELIVERY : 0);
     /* A batch has a table and a prefix for each of its messages. */
     size_t input_size = route.kind == ROUTE_INPUT ? lead + c->batch * (table + c->field_bytes) + c->body_size :
@@ -1769,7 +1831,10 @@ static void answer_applied(Host *host, Applied *a) {
         if (result.status == PURE_OK && a->extents)
             respond_typed(c, 200, "OK", "none", result.revision, a->type ? a->type : "application/octet-stream",
                           a->extents, a->extent_count, result.body.size);
-        else if (a->route != ROUTE_OBJECT) answer_app(c, result, a->route == ROUTE_VIEW, a->fault, a->type);
+        else if (a->refused) {
+            respond(c, 503, "Service Unavailable", a->refused, 0, (PureSpan){0});
+            release_ticket(c);
+        } else if (a->route != ROUTE_OBJECT) answer_app(c, result, a->route == ROUTE_VIEW, a->fault, a->type);
         else answer(c, result);
         drive(c); /* most answers fit the socket buffer at once */
     }
@@ -1837,13 +1902,15 @@ static void answer_handed(Host *host) {
 /* The owner's newest snapshot, held, shown by this thread's reader; NULL
  * when there is none. Taken for each round, after the round's answers from
  * the owner: those were handed back after their saves' snapshots. */
-static PureSnapshot *read_published(Host *host) {
-    Executor *ex = &host->owner->executor;
+static PureSnapshot *read_published(Host *host, App *app) {
+    Executor *ex = &app->owner.executor;
     pthread_mutex_lock(&ex->published_lock);
     PureSnapshot *snapshot = ex->published;
     if (snapshot) pure_snapshot_hold(snapshot);
     pthread_mutex_unlock(&ex->published_lock);
-    if (snapshot) pure_app_read(&host->reader, snapshot);
+    PureApp *reader = &host->readers[app - apps];
+    if (snapshot) pure_app_read(reader, snapshot);
+    reader->work_budget = app->work;
     return snapshot;
 }
 
@@ -1855,7 +1922,7 @@ static PureSnapshot *read_published(Host *host) {
  * holds up, the owner's writes. */
 enum { QUERIES = 64 };
 typedef struct { PureModule module; unsigned refs; } Held;
-static struct { char name[65]; Held *held; } queries[QUERIES];
+static struct { const App *app; char name[65]; Held *held; } queries[QUERIES];
 static pthread_mutex_t queries_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void let_go_query(Held *held) {
@@ -1889,7 +1956,8 @@ static bool same_states(const PureModule *a, const PureModule *b) {
     return true;
 }
 
-static PureResult register_query(const Host *host, const Job *job) {
+static PureResult register_query(const Job *job) {
+    const App *app = job->route.app;
     Held *held = calloc(1, sizeof(*held));
     char error[128];
     if (!held) return PURE_ALLOCATION;
@@ -1897,7 +1965,7 @@ static PureResult register_query(const Host *host, const Job *job) {
         free(held);
         return PURE_INVALID;
     }
-    PureResult status = !same_states(&held->module, host->module)          ? PURE_CONFLICT
+    PureResult status = !same_states(&held->module, &app->module)          ? PURE_CONFLICT
                         : pure_module_view(&held->module, job->effect.key) < 0 ? PURE_NOT_FOUND
                                                                                : PURE_OK;
     Held *old = NULL;
@@ -1906,12 +1974,13 @@ static PureResult register_query(const Host *host, const Job *job) {
         pthread_mutex_lock(&queries_lock);
         int slot = -1;
         for (int i = 0; i < QUERIES && slot < 0; ++i)
-            if (queries[i].held && !strcmp(queries[i].name, job->effect.key)) slot = i;
+            if (queries[i].held && queries[i].app == app && !strcmp(queries[i].name, job->effect.key)) slot = i;
         for (int i = 0; i < QUERIES && slot < 0; ++i)
             if (!queries[i].held) slot = i;
         if (slot < 0) status = PURE_LIMIT;
         else {
             old = queries[slot].held;
+            queries[slot].app = app;
             snprintf(queries[slot].name, sizeof(queries[slot].name), "%s", job->effect.key);
             queries[slot].held = held;
         }
@@ -1926,7 +1995,8 @@ static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) 
     Held *held = NULL;
     pthread_mutex_lock(&queries_lock);
     for (int i = 0; i < QUERIES && !held; ++i)
-        if (queries[i].held && !strcmp(queries[i].name, job->effect.key)) (held = queries[i].held)->refs++;
+        if (queries[i].held && queries[i].app == job->route.app && !strcmp(queries[i].name, job->effect.key))
+            (held = queries[i].held)->refs++;
     pthread_mutex_unlock(&queries_lock);
     if (!held) return PURE_NOT_FOUND;
     if (!snapshot) {
@@ -1935,7 +2005,7 @@ static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) 
     }
     PureApp reader = {0};
     pure_app_read(&reader, snapshot);
-    pure_app_work(&reader, work_budget);
+    pure_app_work(&reader, job->route.app->work);
     reader.module = &held->module; /* the app's states, the query's views */
     Route route = job->route;
     route.target = (uint32_t)pure_module_view(&held->module, job->effect.key);
@@ -1943,6 +2013,12 @@ static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) 
     pure_app_stop(&reader);
     let_go_query(held);
     return status;
+}
+
+/* Whether a job of the round is shown on this thread: a query, or a view
+ * whose app has a snapshot to show it from. */
+static bool shown_here(const Host *host, const Job *job) {
+    return job->route.kind == ROUTE_QUERY || (job->route.kind == ROUTE_VIEW && host->snapshots[job->route.app - apps]);
 }
 
 /* Every request made ready since the last round: run here, or handed to the
@@ -1956,47 +2032,72 @@ static void serve_bursts(Host *host) {
         while (pure_runtime_take(&host->runtime, &effect) == PURE_TAKE_EFFECT)
             host->jobs[count++] = (Job){host, effect, host->routes[effect.ticket.slot], NULL, NULL};
         if (!count) return;
-        if (!host->owner) {
+        if (!apps[0].owned) { /* the one app of the host, of documents alone: run here */
             execute(&host->local, host->jobs, count, answer_burst, NULL);
             continue;
         }
-        PureSnapshot *snapshot = NULL;
-        size_t views = 0, queried = 0;
+        /* Each app with a view or a query in the round: its snapshot, read
+         * once (NULL: none yet, and its owner shows its views). */
+        ++host->round;
+        size_t touched = 0;
         for (size_t i = 0; i < count; ++i) {
-            views += host->jobs[i].route.kind == ROUTE_VIEW;
-            queried += host->jobs[i].route.kind == ROUTE_QUERY;
+            const Route *route = &host->jobs[i].route;
+            unsigned a = (unsigned)(route->app - apps);
+            if ((route->kind != ROUTE_VIEW && route->kind != ROUTE_QUERY) || host->read_in[a] == host->round) continue;
+            host->read_in[a] = host->round;
+            host->snapshots[a] = read_published(host, route->app);
+            host->touched[touched++] = a;
         }
-        if ((views || queried) && !(snapshot = read_published(host))) views = 0; /* the owner shows them */
-        size_t handed = count - views - queried; /* queries are all this thread's */
-        if (handed) {
-            Owner *owner = host->owner;
+        /* The rest go to their apps' owners, an owner's all at once; past an
+         * app's queue budget they are refused (503 busy). */
+        if (!grow(&host->views, &host->views_capacity, count, sizeof(*host->views))) abort();
+        size_t answers = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const Job *job = &host->jobs[i];
+            App *app = job->route.app;
+            unsigned a = (unsigned)(app - apps);
+            if (shown_here(host, job) || host->handed_in[a] == host->round) continue;
+            host->handed_in[a] = host->round;
+            Owner *owner = &app->owner;
+            size_t handed = 0;
             pthread_mutex_lock(&owner->lock);
-            if (!grow(&owner->jobs, &owner->capacity, owner->count + handed, sizeof(*owner->jobs))) abort();
-            for (size_t i = 0; i < count; ++i)
-                if ((!snapshot || host->jobs[i].route.kind != ROUTE_VIEW) && host->jobs[i].route.kind != ROUTE_QUERY)
-                    owner->jobs[owner->count++] = host->jobs[i];
+            for (size_t k = i; k < count; ++k) {
+                const Job *mine = &host->jobs[k];
+                if (mine->route.app != app || shown_here(host, mine)) continue;
+                if (owner->queue && owner->count >= owner->queue) {
+                    host->views[answers++] = (Applied){.host = host, .ticket = mine->effect.ticket, .input = mine->effect.input,
+                                                       .route = mine->route.kind, .status = PURE_BUSY, .refused = "busy"};
+                    ++owner->busy;
+                    continue;
+                }
+                if (!grow(&owner->jobs, &owner->capacity, owner->count + 1, sizeof(*owner->jobs))) abort();
+                owner->jobs[owner->count++] = *mine;
+                ++handed;
+            }
             owner->arrivals += handed;
-            pthread_cond_signal(&owner->waiting);
+            pthread_cond_signal(&owner->waiting); /* it may be gathering */
             pthread_mutex_unlock(&owner->lock);
+            if (handed) schedule(owner);
             host->pending += handed;
         }
-        if (!views && !queried) return;
         /* Shown first and answered after, as a burst is. */
-        if (!grow(&host->views, &host->views_capacity, views + queried, sizeof(*host->views))) abort();
         size_t shown = 0;
         for (size_t i = 0; i < count; ++i) {
             const Job *job = &host->jobs[i];
-            if (job->route.kind != ROUTE_QUERY && (job->route.kind != ROUTE_VIEW || !snapshot)) continue;
-            Applied *a = &host->views[shown++];
+            if (!shown_here(host, job)) continue;
+            unsigned a = (unsigned)(job->route.app - apps);
+            Applied *applied = &host->views[answers++];
             bool registering = job->route.kind == ROUTE_QUERY && job->effect.input == PURE_INPUT_WRITE;
-            *a = (Applied){.host = host, .ticket = job->effect.ticket, .input = job->effect.input,
-                           .route = registering ? ROUTE_QUERY : ROUTE_VIEW};
-            a->status = job->route.kind == ROUTE_VIEW ? show_view(&host->reader, &job->route, job->effect.available, a)
-                        : registering              ? register_query(host, job)
-                                                   : run_query(job, snapshot, a);
+            *applied = (Applied){.host = host, .ticket = job->effect.ticket, .input = job->effect.input,
+                                 .route = registering ? ROUTE_QUERY : ROUTE_VIEW};
+            applied->status = job->route.kind == ROUTE_VIEW ? show_view(&host->readers[a], &job->route, job->effect.available, applied)
+                              : registering                ? register_query(job)
+                                                           : run_query(job, host->snapshots[a], applied);
+            ++shown;
         }
-        pure_snapshot_release(snapshot); /* what answers lend holds its own mapping */
-        for (size_t i = 0; i < shown; ++i) answer_applied(host, &host->views[i]);
+        for (size_t i = 0; i < touched; ++i) pure_snapshot_release(host->snapshots[host->touched[i]]); /* answers lend their own */
+        if (!answers) return;
+        for (size_t i = 0; i < answers; ++i) answer_applied(host, &host->views[i]);
         host->shown += shown;
     }
 }
@@ -2014,84 +2115,161 @@ static bool before(struct timespec a, struct timespec b) {
     return a.tv_sec < b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec < b.tv_nsec);
 }
 
-static void *run_owner(void *context) {
-    Owner *owner = context;
-    Job *spare = NULL;
-    size_t spare_capacity = 0;
-    bool gather = false;
-    uint64_t answered_at = 0; /* arrivals when the last round's answers were handed back */
-    for (;;) {
-        pthread_mutex_lock(&owner->lock);
-        /* Wait for requests, or until the next timer is due; trim what the
-         * wires delivered meanwhile. */
-        for (;;) {
-            bool delivered = owner->delivered;
-            owner->delivered = false;
-            pthread_mutex_unlock(&owner->lock);
-            long due = run_timers(&owner->executor);
-            bool answered = (delivered || owner->executor.answers_wait) && take_deliveries(&owner->executor);
-            if (owner->executor.answers_wait && (due < 0 || due > ANSWER_WAIT_MS)) due = ANSWER_WAIT_MS;
-            pthread_mutex_lock(&owner->lock);
-            /* Answers are saved with the next round, or now if none waits. */
-            if (answered && !owner->count && !owner->stopping) {
-                pthread_mutex_unlock(&owner->lock);
-                if (pure_app_save(&owner->executor.app) == PURE_OK) after_save(&owner->executor);
-                pthread_mutex_lock(&owner->lock);
-            }
-            if (owner->count || owner->stopping) break;
-            if (owner->delivered) continue;
-            if (due < 0) {
-                pthread_cond_wait(&owner->waiting, &owner->lock);
-                continue;
-            }
-            struct timespec wake = pure_wait_until(due * 1000000LL);
-            pthread_cond_timedwait(&owner->waiting, &owner->lock, &wake);
-        }
-        /* After a round that saved, its answers bring requests back from the
-         * connection threads: gather them until none has come for 100 µs (a
-         * millisecond at most), so they share one save as they would on a
-         * single thread, where answering takes that long anyway. The quiet
-         * counts only once a request came after the answers: requests that
-         * waited out the save alone would otherwise start the next round
-         * without the clients just answered, and the clients would settle
-         * into two halves taking turns, each save carrying half of them.
-         * Gathering never outlasts the time the last save waited for its
-         * device, nor does the quiet: waiting pays only while it costs less
-         * than the wait a save of the late requests would take on its own
-         * (a sync of milliseconds on a flash card; in RAM next to none, and
-         * there gathering would only leave the owner idle). */
-        uint64_t waited = owner->executor.save_waited, budget = waited < 1000000 ? waited : 1000000;
-        struct timespec now, end;
-        clock_gettime(PURE_WAIT_CLOCK, &now);
-        end = later(now, (long)budget);
-        while (gather && owner->count && !owner->stopping && before(now, end)) {
-            size_t seen = owner->count;
-            bool returned = owner->arrivals != answered_at;
-            struct timespec quiet = later(now, budget < 100000 ? (long)budget : 100000);
-            pthread_cond_timedwait(&owner->waiting, &owner->lock, returned && before(quiet, end) ? &quiet : &end);
-            if (returned && owner->count == seen) break;
-            clock_gettime(PURE_WAIT_CLOCK, &now);
-        }
-        if (!owner->count) {
-            pthread_mutex_unlock(&owner->lock);
-            break;
-        }
-        Job *jobs = owner->jobs;
-        size_t count = owner->count, capacity = owner->capacity;
-        owner->jobs = spare;
-        owner->capacity = spare_capacity;
-        owner->count = 0;
+/* The workers' queue of apps with work to do (docs/design/017): an app
+ * takes its turns in order, on one worker at a time. */
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t wake; /* a worker waits for an app, or for the soonest timer due (on the monotonic clock) */
+    Owner *head, *tail;
+    bool stopping;
+} turns = {.lock = PTHREAD_MUTEX_INITIALIZER};
+
+static void enqueue(Owner *owner) {
+    owner->queued = true;
+    owner->next = NULL;
+    if (turns.tail) turns.tail->next = owner;
+    else turns.head = owner;
+    turns.tail = owner;
+    pthread_cond_signal(&turns.wake);
+}
+
+/* Work came for an app: a turn, unless it waits for one or has one (then
+ * another after it). Any thread, holding none of the owner's locks. */
+static void schedule(Owner *owner) {
+    pthread_mutex_lock(&turns.lock);
+    if (owner->running) owner->again = true;
+    else if (!owner->queued) enqueue(owner);
+    pthread_mutex_unlock(&turns.lock);
+}
+
+/* The most requests a turn takes when other apps wait for a worker (all
+ * of them when none does): a connection thread's round. */
+enum { TURN = BATCH };
+
+/* An app's turn: its timers due, what its wires delivered, and the
+ * requests waiting for it, applied and saved once, their answers handed
+ * back. Alone (no other app waits for a worker), it first gathers the
+ * clients its last save answered. Whether it has requests left at once;
+ * due, its next timer's milliseconds (-1: none). */
+static bool owner_turn(Owner *owner, bool alone, long *due) {
+    Executor *ex = &owner->executor;
+    pthread_mutex_lock(&owner->lock);
+    bool delivered = owner->delivered;
+    owner->delivered = false;
+    pthread_mutex_unlock(&owner->lock);
+    *due = run_timers(ex);
+    bool answered = (delivered || ex->answers_wait) && take_deliveries(ex);
+    if (ex->answers_wait && (*due < 0 || *due > ANSWER_WAIT_MS)) *due = ANSWER_WAIT_MS;
+    pthread_mutex_lock(&owner->lock);
+    /* Answers are saved with the requests waiting, or now if none waits. */
+    if (answered && !owner->count) {
         pthread_mutex_unlock(&owner->lock);
-        owner->executor.wrote = false;
-        execute(&owner->executor, jobs, count, hand_back, owner);
-        gather = owner->executor.wrote;
+        if (pure_app_save(&ex->app) == PURE_OK) after_save(ex);
         pthread_mutex_lock(&owner->lock);
-        answered_at = owner->arrivals;
-        pthread_mutex_unlock(&owner->lock);
-        spare = jobs;
-        spare_capacity = capacity;
     }
-    free(spare);
+    /* After a turn that saved, its answers bring requests back from the
+     * connection threads: gather them until none has come for 100 µs (a
+     * millisecond at most), so they share one save as they would on a
+     * single thread, where answering takes that long anyway. The quiet
+     * counts only once a request came after the answers: requests that
+     * waited out the save alone would otherwise start the next turn
+     * without the clients just answered, and the clients would settle
+     * into two halves taking turns, each save carrying half of them.
+     * Gathering never outlasts the time the last save waited for its
+     * device, nor does the quiet: waiting pays only while it costs less
+     * than the wait a save of the late requests would take on its own (a
+     * sync of milliseconds on a flash card; in RAM next to none, and there
+     * gathering would only leave the worker idle). It gathers only when no
+     * other app waits for the worker. */
+    uint64_t waited = ex->save_waited, budget = waited < 1000000 ? waited : 1000000;
+    struct timespec now, end;
+    clock_gettime(PURE_WAIT_CLOCK, &now);
+    end = later(now, (long)budget);
+    while (alone && owner->gather && owner->count && !owner->stopping && before(now, end)) {
+        size_t seen = owner->count;
+        bool returned = owner->arrivals != owner->answered_at;
+        struct timespec quiet = later(now, budget < 100000 ? (long)budget : 100000);
+        pthread_cond_timedwait(&owner->waiting, &owner->lock, returned && before(quiet, end) ? &quiet : &end);
+        if (returned && owner->count == seen) break;
+        clock_gettime(PURE_WAIT_CLOCK, &now);
+    }
+    size_t count = owner->count, take = alone || count <= TURN ? count : TURN;
+    if (!take) {
+        pthread_mutex_unlock(&owner->lock);
+        return false;
+    }
+    Job *jobs = owner->jobs;
+    size_t capacity = owner->capacity;
+    if (take == count) { /* all of them: the arrays trade places */
+        owner->jobs = owner->spare;
+        owner->capacity = owner->spare_capacity;
+        owner->count = 0;
+    } else { /* a turn's worth into the spare array; the rest wait for the next */
+        if (!grow(&owner->spare, &owner->spare_capacity, take, sizeof(*owner->spare))) abort();
+        memcpy(owner->spare, jobs, take * sizeof(*jobs));
+        memmove(jobs, jobs + take, (count - take) * sizeof(*jobs));
+        owner->count = count - take;
+        jobs = owner->spare;
+        capacity = owner->spare_capacity;
+    }
+    owner->spare = NULL; /* it is the turn's now, until it is over */
+    owner->spare_capacity = 0;
+    pthread_mutex_unlock(&owner->lock);
+    ex->wrote = false;
+    execute(ex, jobs, take, hand_back, owner);
+    owner->gather = ex->wrote;
+    pthread_mutex_lock(&owner->lock);
+    owner->answered_at = owner->arrivals;
+    owner->spare = jobs;
+    owner->spare_capacity = capacity;
+    bool more = owner->count > 0;
+    pthread_mutex_unlock(&owner->lock);
+    return more;
+}
+
+/* A worker: the next app in the queue takes its turn; an app whose timer
+ * is due joins the queue; with none, it sleeps until the soonest is due.
+ * It stops once the host stops and no app waits. */
+static void *run_worker(void *context) {
+    (void)context;
+    pthread_mutex_lock(&turns.lock);
+    for (;;) {
+        uint64_t now = now_ms(), soonest = UINT64_MAX;
+        for (unsigned i = 0; i < app_count; ++i) {
+            Owner *o = &apps[i].owner;
+            if (!apps[i].running || !apps[i].owned || !o->due || o->queued || o->running) continue;
+            if (o->due <= now) {
+                o->due = 0;
+                enqueue(o);
+            } else if (o->due < soonest) soonest = o->due;
+        }
+        Owner *owner = turns.head;
+        if (!owner) {
+            if (turns.stopping) break;
+            if (soonest == UINT64_MAX) pthread_cond_wait(&turns.wake, &turns.lock);
+            else {
+                struct timespec wake = pure_wait_until((long long)(soonest - now) * 1000000LL);
+                pthread_cond_timedwait(&turns.wake, &turns.lock, &wake);
+            }
+            continue;
+        }
+        turns.head = owner->next;
+        if (!turns.head) turns.tail = NULL;
+        owner->queued = false;
+        owner->running = true;
+        owner->again = false;
+        bool alone = !turns.head;
+        pthread_mutex_unlock(&turns.lock);
+        long due;
+        bool more = owner_turn(owner, alone, &due);
+        pthread_mutex_lock(&turns.lock);
+        owner->running = false;
+        ++owner->turns;
+        owner->due = due < 0 ? 0 : now_ms() + (uint64_t)due;
+        if (more || owner->again) enqueue(owner);
+    }
+    pthread_cond_broadcast(&turns.wake); /* the other workers stop too */
+    pthread_mutex_unlock(&turns.lock);
     return NULL;
 }
 
@@ -2134,6 +2312,7 @@ static PureResult surface_event(PureSurfaceHost *s, uint32_t input, PureSpan tex
         pthread_cond_signal(&owner->waiting);
     }
     pthread_mutex_unlock(&owner->lock);
+    if (queued) schedule(owner);
     pthread_mutex_lock(&s->lock);
     while (queued && !waiter.done) pthread_cond_wait(&s->applied, &s->lock);
     pthread_mutex_unlock(&s->lock);
@@ -2206,10 +2385,14 @@ static bool replies_borrow(const PureModule *m, uint32_t input) {
 
 /* ---- Main ------------------------------------------------------------- */
 
-static bool load_module(PureModule *m, const char *path, bool *documents, uint32_t *show_out, uint32_t *edit_out) {
+/* An app's module from its file, and whether it serves documents; false,
+ * with why, when it does not load or cannot be served. */
+static bool load_module(App *app, const char *path) {
+    PureModule *m = &app->module;
+    bool *documents = &app->documents;
     char error[160];
     if (pure_module_read(path, m, error, sizeof(error)) != PURE_OK) {
-        fprintf(stderr, "Module: %s\n", error);
+        snprintf(app->why, sizeof(app->why), "Module: %s", error);
         return false;
     }
     /* Documents are served when the module keeps a keyed collection: its keyed
@@ -2219,18 +2402,18 @@ static bool load_module(PureModule *m, const char *path, bool *documents, uint32
     *documents = m->collections > 0;
     if (*documents && (show < 0 || edit < 0 || m->input[show].kind != PURE_KIND_MESSAGE || !m->input[show].keyed ||
                        m->input[edit].kind != PURE_KIND_MESSAGE || !m->input[edit].keyed)) {
-        fputs("Module: documents need keyed messages named show and edit\n", stderr);
+        snprintf(app->why, sizeof(app->why), "Module: documents need keyed messages named show and edit");
         return false;
     }
     for (uint32_t i = 0; i < m->inputs; ++i) {
         bool served = (*documents && i == (uint32_t)edit) || (m->input[i].kind == PURE_KIND_MESSAGE && !m->input[i].keyed);
         if (served && !replies_borrow(m, i)) {
-            fprintf(stderr, "Module: %s may reply only a field of its message\n", m->input_names[i]);
+            snprintf(app->why, sizeof(app->why), "Module: %s may reply only a field of its message", m->input_names[i]);
             return false;
         }
     }
-    *show_out = (uint32_t)(show >= 0 ? show : 0);
-    *edit_out = (uint32_t)(edit >= 0 ? edit : 0);
+    app->show = (uint32_t)(show >= 0 ? show : 0);
+    app->edit = (uint32_t)(edit >= 0 ? edit : 0);
     return true;
 }
 
@@ -2274,18 +2457,26 @@ static void accept_all(Host *host) {
 }
 
 
-static bool start_executor(Executor *ex, const PureModule *module, uint32_t show, uint32_t edit, const char *store) {
-    ex->module = module;
-    ex->show = show;
-    ex->edit = edit;
-    if (pure_store_open(store, &ex->store) != PURE_OK) { fputs("Cannot open the store\n", stderr); return false; }
-    if (pure_app_start(&ex->app, module, pure_store_data(ex->store)) != PURE_OK || !pure_app_defer(&ex->app, true)) {
-        fprintf(stderr, "Cannot start the module on the store%s%s\n", ex->app.why[0] ? ": " : "", ex->app.why);
+/* An app's module on its store, with its budgets; false (why says why)
+ * when the store does not open or the module does not start on it. */
+static bool start_executor(Executor *ex, App *app) {
+    ex->module = &app->module;
+    ex->show = app->show;
+    ex->edit = app->edit;
+    if (pure_store_open(app->store, &ex->store) != PURE_OK) {
+        snprintf(app->why, sizeof(app->why), "Cannot open the store");
+        return false;
+    }
+    if (pure_app_start(&ex->app, &app->module, pure_store_data(ex->store)) != PURE_OK || !pure_app_defer(&ex->app, true)) {
+        snprintf(app->why, sizeof(app->why), "Cannot start the module on the store%s%s", ex->app.why[0] ? ": " : "",
+                 ex->app.why);
+        pure_store_close(ex->store);
+        ex->store = NULL;
         return false;
     }
     pure_app_background_checkpoints(&ex->app, true);
-    pure_app_memory(&ex->app, memory_budget);
-    pure_app_work(&ex->app, work_budget);
+    pure_app_memory(&ex->app, app->memory);
+    pure_app_work(&ex->app, app->work);
     return true;
 }
 
@@ -2300,13 +2491,18 @@ static void stop_executor(Executor *ex) {
 /* One connection thread: its own listener on the shared port, epoll set,
  * runtime domain and, unless an owner runs the app for all of them, app and
  * store handle. */
-static bool start_shard(Host *host, const PureModule *module, bool documents, uint32_t show, uint32_t edit,
-                        const char *store, size_t budget, unsigned *port) {
-    host->module = module;
-    host->documents = documents;
+static bool start_shard(Host *host, size_t budget, unsigned *port) {
     host->wake = -1;
-    pure_app_work(&host->reader, work_budget); /* the views it shows from snapshots */
-    if (!host->owner && !start_executor(&host->local, module, show, edit, store)) return false;
+    if (!apps[0].owned && !start_executor(&host->local, &apps[0])) {
+        fprintf(stderr, "%s\n", apps[0].why);
+        return false;
+    }
+    host->readers = calloc(app_count, sizeof(*host->readers));
+    host->snapshots = calloc(app_count, sizeof(*host->snapshots));
+    host->read_in = calloc(app_count, sizeof(*host->read_in));
+    host->handed_in = calloc(app_count, sizeof(*host->handed_in));
+    host->touched = calloc(app_count, sizeof(*host->touched));
+    if (!host->readers || !host->snapshots || !host->read_in || !host->handed_in || !host->touched) return false;
     host->work = calloc(host->capacity, sizeof(*host->work));
     host->table = calloc(host->capacity, sizeof(*host->table));
     host->by_slot = calloc(host->capacity, sizeof(*host->by_slot));
@@ -2339,8 +2535,8 @@ static bool start_shard(Host *host, const PureModule *module, bool documents, ui
         perror("epoll");
         return false;
     }
-    /* The owner says it handed requests back through an eventfd. */
-    if (host->owner) {
+    /* The owners say they handed requests back through an eventfd. */
+    if (apps[0].owned) {
         struct epoll_event wake_event = {.events = EPOLLIN, .data.ptr = &host->wake};
         if (pthread_mutex_init(&host->lock, NULL) || (host->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)) < 0 ||
             epoll_ctl(host->epoll, EPOLL_CTL_ADD, host->wake, &wake_event)) {
@@ -2358,7 +2554,7 @@ static void *run_shard(void *context) {
     uint64_t next_sweep = host->now + 1000;
     while (!atomic_load(&stopping)) {
         /* A thread that runs the app ticks its timers on time. */
-        long due = host->owner ? -1 : run_timers(&host->local);
+        long due = apps[0].owned ? -1 : run_timers(&host->local);
         int ready = epoll_wait(host->epoll, events, EVENTS, due >= 0 && due < 1000 ? (int)due : 1000);
         host->now = now_ms();
         for (int e = 0; e < ready; ++e) {
@@ -2401,8 +2597,13 @@ static void *run_shard(void *context) {
 }
 
 static void stop_shard(Host *host) {
-    if (!host->owner) stop_executor(&host->local);
-    pure_app_stop(&host->reader);
+    if (!apps[0].owned) stop_executor(&host->local);
+    for (unsigned i = 0; host->readers && i < app_count; ++i) pure_app_stop(&host->readers[i]);
+    free(host->readers);
+    free(host->snapshots);
+    free(host->read_in);
+    free(host->handed_in);
+    free(host->touched);
     if (host->listener >= 0) close(host->listener);
     if (host->epoll >= 0) close(host->epoll);
     if (host->wake >= 0) close(host->wake);
@@ -2473,7 +2674,7 @@ static bool link_deliver(void *context, const PureLinkDelivery *d) {
     if (!queued) {
         free(ingress);
         free(link);
-    }
+    } else schedule(owner);
     return queued;
 }
 
@@ -2484,6 +2685,7 @@ static void wire_delivered(void *context) {
     owner->delivered = true;
     pthread_cond_signal(&owner->waiting);
     pthread_mutex_unlock(&owner->lock);
+    schedule(owner);
 }
 
 /* --send OUTPUT=URL: that output's saved sends go to url, from NAME.OUTPUT. */
@@ -2649,17 +2851,112 @@ static bool wire_replies(Executor *ex, const PureModule *m, const char *const *r
 
 /* --threads auto: a connection thread for each CPU this process may run on,
  * less the one the owner of an app with states takes. */
-static unsigned auto_threads(bool owner) {
+/* An app's owner, its executor started on the app's store, its snapshot
+ * published; false (why says why) when the app cannot start. */
+static bool start_owner(App *app, Host *hosts, unsigned threads) {
+    Owner *owner = &app->owner;
+    if (!start_executor(&owner->executor, app)) return false;
+    if (pthread_mutex_init(&owner->lock, NULL) || pure_cond_monotonic(&owner->waiting) ||
+        pthread_mutex_init(&owner->executor.published_lock, NULL)) {
+        snprintf(app->why, sizeof(app->why), "Cannot make the owner's locks");
+        return false;
+    }
+    owner->executor.reads_first = true;
+    owner->executor.publishes = true;
+    owner->hosts = hosts;
+    owner->host_count = threads;
+    return true;
+}
+
+/* --apps FILE: an app a line, NAME MODULE STORE and its budgets
+ * (memory=BYTES work=N queue=N), # beginning a comment. An app whose
+ * module does not load is kept, stopped, with why; false (and why on
+ * stderr) when the file cannot be read or a line is not an app. */
+static bool read_apps(const char *path) {
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        fprintf(stderr, "--apps %s: %s\n", path, strerror(errno));
+        return false;
+    }
+    char line[4096];
+    unsigned at = 0;
+    bool ok = true;
+    while (ok && fgets(line, sizeof(line), file)) {
+        ++at;
+        char *hash = strchr(line, '#'), *words[8], *rest = NULL;
+        if (hash) *hash = 0;
+        unsigned count = 0;
+        for (char *word = strtok_r(line, " \t\r\n", &rest); word && count < 8; word = strtok_r(NULL, " \t\r\n", &rest))
+            words[count++] = word;
+        if (!count) continue;
+        App *grown = count >= 3 && count <= 6 ? realloc(apps, (app_count + 1) * sizeof(*apps)) : NULL;
+        if (!grown) {
+            fprintf(stderr, "--apps %s:%u: NAME MODULE STORE [memory=BYTES] [work=N] [queue=N]\n", path, at);
+            ok = false;
+            break;
+        }
+        apps = grown;
+        App *app = &apps[app_count];
+        memset(app, 0, sizeof(*app));
+        size_t length = strlen(words[0]);
+        bool named = length <= APP_NAME;
+        for (size_t i = 0; named && i < length; ++i) {
+            char c = words[0][i];
+            named = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        }
+        for (unsigned i = 0; named && i < app_count; ++i) named = strcmp(apps[i].name, words[0]) != 0;
+        if (!named) {
+            fprintf(stderr, "--apps %s:%u: a name is 1-32 of a-z 0-9 _ -, each app's its own\n", path, at);
+            ok = false;
+            break;
+        }
+        memcpy(app->name, words[0], length + 1);
+        for (unsigned w = 3; ok && w < count; ++w) {
+            char *value = strchr(words[w], '=');
+            uint64_t n;
+            if (value) *value++ = 0;
+            if (value && !strcmp(words[w], "memory") && number(value, SIZE_MAX, &n)) app->memory = (size_t)n;
+            else if (value && !strcmp(words[w], "work") && number(value, UINT64_MAX, &n)) app->work = n;
+            else if (value && !strcmp(words[w], "queue") && number(value, SIZE_MAX, &n)) app->owner.queue = (size_t)n;
+            else {
+                fprintf(stderr, "--apps %s:%u: budgets are memory=BYTES, work=N and queue=N\n", path, at);
+                ok = false;
+            }
+        }
+        app->store = strdup(words[2]);
+        app->owned = true; /* every app of a host of apps takes turns on the workers */
+        if (!app->store) ok = false;
+        else ++app_count;
+        if (ok && !load_module(app, words[1])) app->module = (PureModule){0}; /* stopped, with why */
+        else if (ok) app->running = true; /* until its store says otherwise */
+    }
+    fclose(file);
+    if (ok && !app_count) fprintf(stderr, "--apps %s: no app\n", path);
+    return ok && app_count;
+}
+
+/* A JSON string's quotes and escapes around text. */
+static void print_json(FILE *out, const char *text) {
+    fputc('"', out);
+    for (const unsigned char *c = (const unsigned char *)text; *c; ++c)
+        if (*c == '"' || *c == '\\') fprintf(out, "\\%c", *c);
+        else if (*c < 0x20) fprintf(out, "\\u%04x", *c);
+        else fputc(*c, out);
+    fputc('"', out);
+}
+
+static unsigned online_cpus(void) {
     cpu_set_t set;
     long cpus = sched_getaffinity(0, sizeof(set), &set) ? sysconf(_SC_NPROCESSORS_ONLN) : CPU_COUNT(&set);
-    if (cpus < 1) cpus = 1;
-    if (owner && cpus > 1) --cpus;
-    return cpus > 256 ? 256 : (unsigned)cpus;
+    return cpus < 1 ? 1 : cpus > 256 ? 256 : (unsigned)cpus;
+}
+
+static unsigned auto_threads(bool owner) {
+    unsigned cpus = online_cpus();
+    return owner && cpus > 1 ? cpus - 1 : cpus;
 }
 
 int main(int argc, char **argv) {
-    static PureModule module;
-    static Owner owner;
     static PureSurfaceHost surface;
     /* What follows -- is the surface's: its library first, then its arguments. */
     int options = argc, surface_argc = 0;
@@ -2670,9 +2967,9 @@ int main(int argc, char **argv) {
             break;
         }
     const char *surface_path = NULL, *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
-    const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL, *senders_path = NULL;
+    const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL, *senders_path = NULL, *apps_path = NULL;
     unsigned send_count = 0, reply_count = 0, seal_count = 0, named_count = 0;
-    unsigned port = 8767, threads = 1, link_port = 0;
+    unsigned port = 8767, threads = 1, link_port = 0, workers = 0;
     size_t budget = 64u << 20, capacity = 1024;
     uint64_t timeout_ms = 10000, link_idle_ms = 0;
     for (int i = 1; i < options; i += 2) {
@@ -2680,6 +2977,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--sealed-only")) { sealed_only = true; --i; continue; }
         if (i + 1 == options) goto usage;
         if (!strcmp(argv[i], "--module")) module_path = argv[i + 1];
+        else if (!strcmp(argv[i], "--apps")) apps_path = argv[i + 1];
         else if (!strcmp(argv[i], "--surface")) surface_path = argv[i + 1];
         else if (!strcmp(argv[i], "--key")) key_path = argv[i + 1];
         else if (!strcmp(argv[i], "--seal") && seal_count < PURE_MODULE_INPUTS) seals[seal_count++] = argv[i + 1];
@@ -2700,6 +2998,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--connections") && number(argv[i + 1], 1u << 20, &value) && value) capacity = (size_t)value;
         else if (!strcmp(argv[i], "--threads") && !strcmp(argv[i + 1], "auto")) threads = 0;
         else if (!strcmp(argv[i], "--threads") && number(argv[i + 1], 256, &value) && value) threads = (unsigned)value;
+        else if (!strcmp(argv[i], "--workers") && number(argv[i + 1], 256, &value) && value) workers = (unsigned)value;
         else if (!strcmp(argv[i], "--timeout-ms") && number(argv[i + 1], 3600000, &value) && value) timeout_ms = value;
         else goto usage;
     }
@@ -2707,10 +3006,33 @@ int main(int argc, char **argv) {
     for (int i = options + 1; i < argc && surface_argc < 63; ++i) surface_argv[surface_argc++] = argv[i];
     surface_argv[surface_argc] = NULL;
     if (options < argc && !surface_path) goto usage;
-    uint32_t show, edit;
-    bool documents;
-    if (!module_path || !store || !load_module(&module, module_path, &documents, &show, &edit)) goto usage;
-    if (!threads) threads = auto_threads(module.states);
+    if (apps_path) { /* a host of apps: each its own module, store and budgets; none sends yet (017, stage 1) */
+        if (module_path || store || name || send_count || reply_count || seal_count || link_port || surface_path ||
+            memory_budget || work_budget) {
+            fputs("--apps gives each app its module, store and budgets; --send, --reply, --seal, --link-port, --name "
+                  "and --surface are for a host of one app (--module)\n", stderr);
+            return 2;
+        }
+        if (!read_apps(apps_path)) return 2;
+        named_apps = true;
+    } else {
+        if (!module_path || !store || !(apps = calloc(1, sizeof(*apps)))) goto usage;
+        app_count = 1;
+        apps[0].store = store;
+        apps[0].memory = memory_budget;
+        apps[0].work = work_budget;
+        if (!load_module(&apps[0], module_path)) {
+            fprintf(stderr, "%s\n", apps[0].why);
+            goto usage;
+        }
+        /* States (and outputs, whose sends are the app's state) have one
+         * owner, whose snapshots the connection threads read. */
+        bool outputs = false;
+        for (uint32_t i = 0; i < apps[0].module.inputs; ++i) outputs = outputs || apps[0].module.input[i].kind == PURE_KIND_OUTPUT;
+        apps[0].owned = apps[0].module.states || outputs;
+        apps[0].running = true;
+    }
+    if (!threads) threads = auto_threads(apps[0].owned);
     char public_key[2 * PURE_SEAL_KEY + 1] = "";
     if (key_path) {
         char error[256];
@@ -2719,68 +3041,92 @@ int main(int argc, char **argv) {
     if ((sealed_only || named_count) && !seal_key) { fputs("--sealed-only and --sender need --key\n", stderr); return 2; }
     if (!name_senders(named, named_count)) return 2;
     if (seal_key && !pure_seal_peer(public_key, own_public)) return 2;
-    if (pure_store_init(store) != PURE_OK) { fputs("Cannot initialize the store directory\n", stderr); return 1; }
     signal(SIGPIPE, SIG_IGN);
     struct sigaction stop_action = {.sa_handler = stop};
     sigemptyset(&stop_action.sa_mask);
     sigaction(SIGINT, &stop_action, NULL);
     sigaction(SIGTERM, &stop_action, NULL);
     Host *hosts = calloc(threads, sizeof(*hosts));
-    pthread_t *thread = calloc(threads, sizeof(*thread)), owner_thread;
-    if (!hosts || !thread) return 1;
-    /* States (and outputs, whose sends are the app's state) have one owner on
-     * a thread of its own, whose snapshots the connection threads read. */
-    bool outputs = false;
-    for (uint32_t i = 0; i < module.inputs; ++i) outputs = outputs || module.input[i].kind == PURE_KIND_OUTPUT;
-    bool owned = module.states || outputs;
+    pthread_t *thread = calloc(threads, sizeof(*thread));
+    if (!hosts || !thread || pure_cond_monotonic(&turns.wake)) return 1;
+    /* Each app's store, and its owner: an app that cannot start stops alone
+     * (in a host of apps; the one app of a host stops the host). Two apps
+     * never share a store. */
+    unsigned owners = 0;
+    for (unsigned a = 0; a < app_count; ++a) {
+        App *app = &apps[a];
+        if (!app->running) continue;
+        struct stat mine, theirs;
+        bool shared = false;
+        if (pure_store_init(app->store) != PURE_OK) snprintf(app->why, sizeof(app->why), "Cannot initialize the store directory");
+        else if (stat(app->store, &mine)) snprintf(app->why, sizeof(app->why), "Cannot read the store directory");
+        else
+            for (unsigned b = 0; b < a && !shared; ++b)
+                if (apps[b].running && !stat(apps[b].store, &theirs) && theirs.st_dev == mine.st_dev && theirs.st_ino == mine.st_ino) {
+                    snprintf(app->why, sizeof(app->why), "The store is %s's", apps[b].name);
+                    shared = true;
+                }
+        app->running = !app->why[0] && (!app->owned || start_owner(app, hosts, threads));
+        if (!app->running && !named_apps) {
+            fprintf(stderr, "%s\n", app->why);
+            return 1;
+        }
+        owners += app->running && app->owned;
+    }
     /* The sender's name: --name, or the module file's name without .pmod. */
     char stem[PURE_SOURCE + 1];
-    if (!name) {
+    if (!named_apps && !name) {
         const char *base = strrchr(module_path, '/') ? strrchr(module_path, '/') + 1 : module_path;
         size_t length = strlen(base);
         if (length > 5 && !strcmp(base + length - 5, ".pmod")) length -= 5;
         snprintf(stem, sizeof(stem), "%.*s", (int)length, base);
         name = stem;
     }
-    if (owned) {
-        if (!start_executor(&owner.executor, &module, show, edit, store) || pthread_mutex_init(&owner.lock, NULL) ||
-            pure_cond_monotonic(&owner.waiting) || pthread_mutex_init(&owner.executor.published_lock, NULL))
-            return 1;
-        owner.executor.reads_first = true;
-        owner.executor.publishes = true;
-        if (!open_wires(&owner.executor, &module, sends, send_count, name) ||
-            !wire_replies(&owner.executor, &module, replies, reply_count) ||
-            !wire_seals(&owner.executor, &module, seals, seal_count, seal_key ? own_public : NULL)) return 2;
-        after_save(&owner.executor); /* the snapshot, and the sends stored before */
-        for (unsigned i = 0; i < owner.executor.wire_count; ++i)
-            if (!pure_wire_start(owner.executor.wires[i], wire_delivered, &owner)) { fputs("Cannot start a wire\n", stderr); return 1; }
-        for (unsigned i = 0; i < owner.executor.link_count; ++i) {
+    Owner *owner = &apps[0].owner; /* the one app's, in a host of one */
+    if (!named_apps && apps[0].owned &&
+        (!open_wires(&owner->executor, &apps[0].module, sends, send_count, name) ||
+         !wire_replies(&owner->executor, &apps[0].module, replies, reply_count) ||
+         !wire_seals(&owner->executor, &apps[0].module, seals, seal_count, seal_key ? own_public : NULL))) return 2;
+    for (unsigned a = 0; a < app_count; ++a)
+        if (apps[a].running && apps[a].owned) after_save(&apps[a].owner.executor); /* the snapshot, and the sends stored before */
+    if (!named_apps && apps[0].owned) {
+        for (unsigned i = 0; i < owner->executor.wire_count; ++i)
+            if (!pure_wire_start(owner->executor.wires[i], wire_delivered, owner)) { fputs("Cannot start a wire\n", stderr); return 1; }
+        for (unsigned i = 0; i < owner->executor.link_count; ++i) {
             char error[256];
-            if (!pure_link_start(owner.executor.links[i], wire_delivered, &owner, error, sizeof(error))) {
+            if (!pure_link_start(owner->executor.links[i], wire_delivered, owner, error, sizeof(error))) {
                 fprintf(stderr, "--send %s\n", error);
                 return 2;
             }
         }
-        owner.hosts = hosts;
-        owner.host_count = threads;
     }
     for (unsigned i = 0; i < threads; ++i) {
         hosts[i].capacity = capacity;
         hosts[i].timeout_ms = timeout_ms;
         hosts[i].listener = hosts[i].epoll = -1;
-        hosts[i].owner = owned ? &owner : NULL;
-        if (!start_shard(&hosts[i], &module, documents, show, edit, store, budget, &port)) return 1;
+        if (!start_shard(&hosts[i], budget, &port)) return 1;
     }
-    if (owned && pthread_create(&owner_thread, NULL, run_owner, &owner)) { fputs("Cannot start the owner\n", stderr); return 1; }
-    if (owned) pthread_setname_np(owner_thread, "pure-owner"); /* its CPU, seen apart: one core at most */
+    /* The workers: an app's owner takes its turns on them, none its own
+     * thread. One for the one app of a host; for apps, as many as run, at
+     * most a CPU each. */
+    if (!workers) workers = named_apps ? (owners < online_cpus() ? owners : online_cpus()) : 1;
+    if (!workers) workers = 1;
+    pthread_t *worker = calloc(workers, sizeof(*worker));
+    if (!worker) return 1;
+    for (unsigned i = 0; owners && i < workers; ++i) {
+        if (pthread_create(&worker[i], NULL, run_worker, NULL)) { fputs("Cannot start a worker\n", stderr); return 1; }
+        pthread_setname_np(worker[i], "pure-owner"); /* their CPU, seen apart */
+    }
+    for (unsigned a = 0; a < app_count; ++a)
+        if (apps[a].running && apps[a].owned) schedule(&apps[a].owner); /* a first turn: its timers begin */
     if (link_port) { /* records from the senders named, over UDP */
         char error[256];
-        if (!owned || !seal_key) {
+        if (named_apps || !apps[0].owned || !seal_key) {
             fputs("--link-port needs an app with states and the node's --key\n", stderr);
             return 2;
         }
         PureLinkReceiver *receiver =
-            pure_link_receiver(seal_key, own_public, &(PureLinkHost){link_input, link_deliver, &owner}, error, sizeof(error));
+            pure_link_receiver(seal_key, own_public, &(PureLinkHost){link_input, link_deliver, owner}, error, sizeof(error));
         bool allowed = receiver != NULL && allow_senders(receiver, senders_path, error, sizeof(error));
         for (unsigned i = 0; allowed && i < sender_count; ++i)
             allowed = pure_link_allow(receiver, senders[i].name, senders[i].key, error, sizeof(error));
@@ -2794,15 +3140,29 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    /* Its name too: its sends' sources are NAME.OUTPUT, which a receiver's --sender must name. */
-    printf("{\"port\":%u,\"threads\":%u,\"name\":\"", port, threads);
-    for (const char *c = name; *c; ++c) printf(*c == '"' || *c == '\\' ? "\\%c" : "%c", *c);
-    if (*public_key) printf("\",\"public_key\":\"%s\"}\n", public_key);
-    else printf("\"}\n");
+    if (named_apps) { /* each app, and why one stopped */
+        printf("{\"port\":%u,\"threads\":%u,\"workers\":%u,\"apps\":[", port, threads, owners ? workers : 0);
+        for (unsigned a = 0; a < app_count; ++a) {
+            printf("%s{\"name\":", a ? "," : "");
+            print_json(stdout, apps[a].name);
+            printf(",\"running\":%s", apps[a].running ? "true" : "false");
+            if (!apps[a].running) {
+                printf(",\"why\":");
+                print_json(stdout, apps[a].why);
+            }
+            printf("}");
+        }
+        printf("]%s%s%s}\n", *public_key ? ",\"public_key\":\"" : "", public_key, *public_key ? "\"" : "");
+    } else { /* its name too: its sends' sources are NAME.OUTPUT, which a receiver's --sender must name */
+        printf("{\"port\":%u,\"threads\":%u,\"name\":\"", port, threads);
+        for (const char *c = name; *c; ++c) printf(*c == '"' || *c == '\\' ? "\\%c" : "%c", *c);
+        if (*public_key) printf("\",\"public_key\":\"%s\"}\n", public_key);
+        else printf("\"}\n");
+    }
     fflush(stdout);
     /* A surface reads the owner's snapshots and gives it events. */
-    if (surface_path && !owned) { fputs("--surface needs an app with states\n", stderr); return 2; }
-    if (surface_path && !start_surface(&surface, &owner, surface_argc, surface_argv)) return 1;
+    if (surface_path && (named_apps || !apps[0].owned)) { fputs("--surface needs an app with states\n", stderr); return 2; }
+    if (surface_path && !start_surface(&surface, owner, surface_argc, surface_argv)) return 1;
     for (unsigned i = 1; i < threads; ++i)
         if (pthread_create(&thread[i], NULL, run_shard, &hosts[i])) { fputs("Cannot start a thread\n", stderr); return 1; }
     run_shard(&hosts[0]);
@@ -2811,19 +3171,24 @@ int main(int argc, char **argv) {
         surface_changed(&surface);
         pthread_join(surface.thread, NULL);
     }
-    if (owned) {
-        pthread_mutex_lock(&owner.lock);
-        owner.stopping = true;
-        pthread_cond_signal(&owner.waiting);
-        pthread_mutex_unlock(&owner.lock);
-        pthread_join(owner_thread, NULL);
+    for (unsigned a = 0; a < app_count; ++a) { /* no gathering from now on */
+        Owner *o = &apps[a].owner;
+        if (!apps[a].running || !apps[a].owned) continue;
+        pthread_mutex_lock(&o->lock);
+        o->stopping = true;
+        pthread_cond_signal(&o->waiting);
+        pthread_mutex_unlock(&o->lock);
     }
+    pthread_mutex_lock(&turns.lock);
+    turns.stopping = true;
+    pthread_cond_broadcast(&turns.wake);
+    pthread_mutex_unlock(&turns.lock);
+    for (unsigned i = 0; owners && i < workers; ++i) pthread_join(worker[i], NULL);
     PureLinkCounts sent = {0}, heard = {0}; /* what links sent, and what the listener took */
     pure_link_listener_close(link_listener, &heard); /* after the owner, which tells it what it stored */
-    size_t active = 0, retained = 0;
-    uint64_t accepted = 0, requests = 0, bursts = owner.executor.bursts, events = owner.executor.burst_events, expired = 0,
-             ticks = owner.executor.ticks, shown = 0, checkpoints = 0, memory_refused = owner.executor.memory_refused,
-             windows_full = owner.executor.windows_full;
+    size_t active = 0, retained = 0, state_bytes = 0;
+    uint64_t accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0, ticks = 0, shown = 0, checkpoints = 0,
+             memory_refused = 0, windows_full = 0, publications = 0, answers = 0, delivered = 0, attempts = 0;
     for (unsigned i = 0; i < threads; ++i) {
         shown += hosts[i].shown;
         active += hosts[i].active;
@@ -2837,28 +3202,36 @@ int main(int argc, char **argv) {
         expired += hosts[i].expired;
         stop_shard(&hosts[i]);
     }
-    uint64_t delivered = 0, attempts = 0;
-    for (unsigned i = 0; i < owner.executor.wire_count; ++i) {
-        uint64_t d, a;
-        pure_wire_counts(owner.executor.wires[i], &d, &a);
-        delivered += d;
-        attempts += a;
-        pure_wire_close(owner.executor.wires[i]); /* what was not delivered stays in the outbox */
-    }
-    for (unsigned i = 0; i < owner.executor.link_count; ++i) {
-        PureLinkCounts c;
-        pure_link_counts(owner.executor.links[i], &c);
-        sent.packets += c.packets, sent.records += c.records, sent.resent += c.resent, sent.lost += c.lost;
-        sent.acknowledged += c.acknowledged, sent.received += c.received, sent.stored += c.stored;
-        sent.refused += c.refused;
-        pure_link_close(owner.executor.links[i]); /* what was not stored stays in the outbox */
-    }
-    size_t state_bytes = owned ? pure_app_state_bytes(&owner.executor.app) : 0;
-    if (owned) {
-        checkpoints = owner.executor.checkpoints;
-        stop_executor(&owner.executor);
-        checkpoints = owner.executor.checkpoints;
-        free(owner.jobs);
+    for (unsigned a = 0; a < app_count; ++a) {
+        Executor *ex = &apps[a].owner.executor;
+        if (!apps[a].running || !apps[a].owned) continue;
+        bursts += ex->bursts;
+        events += ex->burst_events;
+        ticks += ex->ticks;
+        memory_refused += ex->memory_refused;
+        windows_full += ex->windows_full;
+        publications += ex->publications;
+        answers += ex->answers;
+        for (unsigned i = 0; i < ex->wire_count; ++i) {
+            uint64_t d, t;
+            pure_wire_counts(ex->wires[i], &d, &t);
+            delivered += d;
+            attempts += t;
+            pure_wire_close(ex->wires[i]); /* what was not delivered stays in the outbox */
+        }
+        for (unsigned i = 0; i < ex->link_count; ++i) {
+            PureLinkCounts c;
+            pure_link_counts(ex->links[i], &c);
+            sent.packets += c.packets, sent.records += c.records, sent.resent += c.resent, sent.lost += c.lost;
+            sent.acknowledged += c.acknowledged, sent.received += c.received, sent.stored += c.stored;
+            sent.refused += c.refused;
+            pure_link_close(ex->links[i]); /* what was not stored stays in the outbox */
+        }
+        state_bytes += pure_app_state_bytes(&ex->app);
+        stop_executor(ex);
+        checkpoints += ex->checkpoints;
+        free(apps[a].owner.jobs);
+        free(apps[a].owner.spare);
     }
     unsigned long groups, grouped;
     pure_store_group_counts(&groups, &grouped);
@@ -2873,15 +3246,29 @@ int main(int argc, char **argv) {
             ",\"listener_deliveries\":%" PRIu64 ",\"listener_woken\":%" PRIu64 ",\"listener_remembered\":%" PRIu64
             ",\"listener_swept\":%" PRIu64 ",\"listener_active\":%" PRIu64 ",\"listener_keyed\":%" PRIu64
             ",\"listener_secrets\":%" PRIu64 ",\"listener_epochs\":%" PRIu64 ",\"listener_refused\":%" PRIu64
-            ",\"state_bytes\":%zu,\"memory_refused\":%" PRIu64 ",\"windows_full\":%" PRIu64 "}\n",
-            active, retained, accepted, requests, bursts, events, ticks, expired, threads, owned ? "true" : "false",
-            owner.executor.publications, shown, delivered, attempts, owner.executor.answers, groups, grouped,
+            ",\"state_bytes\":%zu,\"memory_refused\":%" PRIu64 ",\"windows_full\":%" PRIu64,
+            active, retained, accepted, requests, bursts, events, ticks, expired, threads, apps[0].owned ? "true" : "false",
+            publications, shown, delivered, attempts, answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
             sent.refused, heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept,
             heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused,
             windows_full);
+    if (named_apps) { /* what each app did */
+        fprintf(stderr, ",\"workers\":%u,\"apps\":[", owners ? workers : 0);
+        for (unsigned a = 0; a < app_count; ++a) {
+            const Owner *o = &apps[a].owner;
+            fprintf(stderr, "%s{\"name\":", a ? "," : "");
+            print_json(stderr, apps[a].name);
+            fprintf(stderr, ",\"running\":%s,\"turns\":%" PRIu64 ",\"bursts\":%" PRIu64 ",\"events\":%" PRIu64
+                    ",\"busy\":%" PRIu64 ",\"memory_refused\":%" PRIu64 "}", apps[a].running ? "true" : "false",
+                    o->turns, o->executor.bursts, o->executor.burst_events, o->busy, o->executor.memory_refused);
+        }
+        fputc(']', stderr);
+    }
+    fputs("}\n", stderr);
     free(hosts);
     free(thread);
+    free(worker);
     return 0;
 usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
@@ -2889,6 +3276,11 @@ usage:
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
           "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] [--work N] "
           "[--window 4194304] [--surface LIBRARY [-- ARGUMENTS]]\n"
+          "pure-serve --apps FILE [--port 8767] [--threads 1|N|auto] [--workers N] [--budget BYTES] [--connections 1024] "
+          "[--timeout-ms 10000]\n"
+          "  --apps FILE: a host of apps (docs/design/017-apps-on-one-host.md), a line each:\n"
+          "      NAME MODULE.pmod STORE [memory=BYTES] [work=N] [queue=N]; its routes start /NAME/\n"
+          "  --workers N: the threads the apps' owners take turns on (1 for one app; for apps, one a CPU at most)\n"
           "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
           "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"
           "  --send OUTPUT=http[s]://host:port/path: to anything else, over HTTP\n"

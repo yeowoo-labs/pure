@@ -3726,6 +3726,122 @@ def server_work(aup, pure, work):
     return first
 
 
+APPS_SOURCE = """record Item {
+  n = 0
+}
+state n = 0
+state items: list of Item
+input add = message { step: number }
+input fill = message { k: number }
+input walk = message { step: number }
+on add {
+  n = n + add.step
+}
+on fill {
+  items.append(Item { n: fill.k })
+}
+on walk {
+  for i in items {
+    i.n = i.n + walk.step
+  }
+}
+view total = n
+view count = count(i in items where i.n > 0)
+"""
+
+
+def server_apps(aup, pure, work):
+    """One host, many apps (docs/design/017): each app's routes start with its
+    name and reach its own states (two apps of one module share nothing); an
+    app whose module does not load, or whose store is another app's, stops
+    alone (503 stopped) while the others run; past an app's queue budget its
+    requests are refused (503 busy) and another app answers meanwhile; past
+    its work budget an event is refused (422 work) where the same event runs
+    in an app without one; an app whose store another process holds cannot
+    save (503 store_busy, nothing applied) while the others save; and after a
+    restart each app has its states back."""
+    import fcntl
+    import socket
+    source = work / 'apps.aup'
+    source.write_text(APPS_SOURCE)
+    compile_module(aup, source, work / 'apps.pmod')
+    (work / 'broken.pmod').write_bytes(b'PUREMOD6 not a module')
+    manifest = work / 'apps.conf'
+    manifest.write_text(f"""# name module store budgets
+a      {work / 'apps.pmod'}   {work / 'store-a'}
+b      {work / 'apps.pmod'}   {work / 'store-b'}
+busy   {work / 'apps.pmod'}   {work / 'store-busy'}   queue=2
+tight  {work / 'apps.pmod'}   {work / 'store-tight'}  work=55
+broken {work / 'broken.pmod'} {work / 'store-broken'}
+twin   {work / 'apps.pmod'}   {work / 'store-a'}
+""")
+    serve = pure / 'build/pure-serve'
+
+    def get(port, path):
+        status, why, _, body = http(port, 'GET', path)
+        return status, why, body
+
+    def post(port, path):
+        status, why, _, _ = http(port, 'POST', path)
+        return status, why
+
+    host = HttpHost([serve, '--apps', manifest, '--workers', 2])
+    try:
+        running = {app['name']: app for app in host.info['apps']}
+        assert [name for name, app in running.items() if app['running']] == ['a', 'b', 'busy', 'tight'], running
+        assert running['broken']['why'].startswith('Module:') and running['twin']['why'] == "The store is a's", running
+        port = host.port
+        assert post(port, '/a/inputs/add?step=2') == (200, 'none')
+        assert get(port, '/a/views/total')[::2] == (200, b'2') and get(port, '/b/views/total')[::2] == (200, b'0')
+        assert get(port, '/broken/views/total')[:2] == (503, 'stopped') and post(port, '/twin/inputs/add?step=1')[0] == 503
+        assert get(port, '/nobody/views/total')[:2] == (404, 'no_app') and get(port, '/views/total')[:2] == (404, 'no_app')
+        # Work: ten items to walk; the tight app refuses the walk and changes nothing, a's runs it.
+        for app in ('a', 'tight'):
+            for k in range(10):
+                assert post(port, f'/{app}/inputs/fill?k={k}') == (200, 'none')
+        assert post(port, '/tight/inputs/walk?step=1') == (422, 'work') and get(port, '/tight/views/count')[::2] == (200, b'9')
+        assert post(port, '/a/inputs/walk?step=1') == (200, 'none') and get(port, '/a/views/count')[::2] == (200, b'10')
+        # Queue: requests at once, from as many connections; b answers meanwhile.
+        flood = []
+        for _ in range(120):
+            connection = socket.create_connection(('127.0.0.1', port))
+            flood.append(connection)
+        for connection in flood:
+            connection.sendall(b'POST /busy/inputs/add?step=1 HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n')
+        assert post(port, '/b/inputs/add?step=5') == (200, 'none')
+        answers = []
+        for connection in flood:
+            head = b''
+            while b'\r\n\r\n' not in head:
+                head += connection.recv(4096)
+            answers.append(head.split(b' ', 2)[1])
+            connection.close()
+        ok, busy = answers.count(b'200'), answers.count(b'503')
+        assert ok + busy == len(flood) and busy > 0 and ok > 0, (ok, busy)
+        assert get(port, '/busy/views/total')[::2] == (200, str(ok).encode())  # the refused changed nothing
+        # The store of b held by another process: b cannot save, a can.
+        with open(work / 'store-b' / '.writer.lock', 'r+b') as held:
+            fcntl.lockf(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert post(port, '/b/inputs/add?step=1') == (503, 'store_busy')
+            assert post(port, '/a/inputs/add?step=1') == (200, 'none')
+            assert get(port, '/b/views/total')[::2] == (200, b'5')
+            fcntl.lockf(held, fcntl.LOCK_UN)
+        assert post(port, '/b/inputs/add?step=1') == (200, 'none')
+    finally:
+        stats = host.stop()[-1]
+    by_name = {app['name']: app for app in stats['apps']}
+    assert by_name['busy']['busy'] == busy and by_name['a']['events'] > 0 and stats['workers'] == 2, stats['apps']
+    # Restarted: each app's states are back.
+    host = HttpHost([serve, '--apps', manifest])
+    try:
+        assert get(host.port, '/a/views/total')[::2] == (200, b'3') and get(host.port, '/b/views/total')[::2] == (200, b'6')
+        assert get(host.port, '/a/views/count')[::2] == (200, b'10') and get(host.port, '/busy/views/total')[::2] == \
+            (200, str(ok).encode())
+    finally:
+        host.stop()
+    return {'apps': len(running), 'stopped': 2, 'flooded': len(flood), 'busy': busy}
+
+
 def main():
     global EDITOR
     parser = argparse.ArgumentParser()
@@ -3775,6 +3891,7 @@ def main():
         report['server_answers_memory'] = server_answers_memory(aup, pure, work)
         report['server_meaning'] = server_meaning(aup, pure, work)
         report['server_work'] = server_work(aup, pure, work)
+        report['server_apps'] = server_apps(aup, pure, work)
     print(json.dumps(report))
 
 
