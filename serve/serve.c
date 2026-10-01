@@ -1829,6 +1829,7 @@ static void feed_outlets(Executor *ex) {
                  delivered = wire ? pure_wire_delivered(wire) : link ? pure_link_delivered(link) : local_delivered(local);
         size_t held = wire ? pure_wire_held(wire) : link ? pure_link_held(link) : local_held(local), at = ex->outlet_from[i];
         at = at > gone ? at - (size_t)gone : 0;
+        uint64_t before = queued;
         for (; at < ex->app.sent_saved; ++at) {
             uint32_t of;
             uint64_t seq;
@@ -1844,6 +1845,7 @@ static void feed_outlets(Executor *ex) {
             queued = seq;
             held += payload.size;
         }
+        if (link && queued != before) pure_link_push(link); /* the turn's together */
         ex->outlet_from[i] = at;
     }
     uint64_t now = ex->local_count ? now_ms() : 0;

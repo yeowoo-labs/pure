@@ -3,9 +3,9 @@
 #include "link-protocol.h"
 
 /* Links over UDP: the two sides of link/link-protocol.h (what goes on the
- * wire, and what each side keeps) with sockets and threads. A sender sends
- * on a thread of its own, packets in bursts with UDP GSO; a listener takes
- * a receiver's packets on a port, with UDP GRO. */
+ * wire, and what each side keeps) with sockets and threads. The process's
+ * senders send on one thread, packets in bursts with UDP GSO; a listener
+ * takes a receiver's packets on a port, with UDP GRO. */
 
 /* The sending side: one output's saved sends to url, pure://host:port/INPUT,
  * as source (a Pure receiver's name for it), their messages of shape (the
@@ -22,7 +22,10 @@ void pure_link_peer(PureLink *, const unsigned char peer[PURE_SEAL_KEY]);
  * pure_module_fields): a receiver whose input takes another shape may take
  * them by name (docs/design/014-fields-by-name.md). */
 bool pure_link_fields(PureLink *, const unsigned char *fields, size_t size);
+/* Sends are queued, then pushed: what was queued goes out once pushed, so
+ * the owner's sends of a turn go together, in full packets. */
 bool pure_link_queue(PureLink *, uint64_t seq, const unsigned char *bytes, size_t size);
+void pure_link_push(PureLink *);
 uint64_t pure_link_queued(PureLink *);
 /* The last number the receiver saved; any thread. */
 uint64_t pure_link_delivered(PureLink *);
@@ -32,7 +35,9 @@ size_t pure_link_held(PureLink *);
  * off, each in a call of its own: for a path whose queues take a burst as
  * one packet (netem does). Before pure_link_start. */
 void pure_link_gso(PureLink *, bool on);
-/* Send on a thread of the link's own, calling notify when more was saved. */
+/* Send on the process's sending loop (its thread made with the first link
+ * started, stopped with the last closed), calling notify (on that thread)
+ * when more was saved. */
 bool pure_link_start(PureLink *, void (*notify)(void *), void *context, char *error, size_t size);
 void pure_link_counts(PureLink *, PureLinkCounts *);
 void pure_link_close(PureLink *);

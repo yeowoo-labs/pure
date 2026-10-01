@@ -191,6 +191,7 @@ int main(int argc, char **argv) {
     if (!window) /* a backlog: all queued before the link starts */
         for (; first <= count; ++first)
             if (!pure_link_queue(link, first, payload, payload_size)) return fputs("transport: cannot queue\n", stderr), 1;
+    if (!window) pure_link_push(link);
     began = now_ns();
     uint64_t cpu_link = 0, cpu_listen = thread_cpu("pure-listen"), cpu_all = thread_cpu(NULL);
     uint64_t end = limit > 0 ? began + (uint64_t)(limit * 1e9) : UINT64_MAX;
@@ -204,13 +205,14 @@ int main(int argc, char **argv) {
         if (now_ns() >= end) break;
         if (queued_at) queued_at[seq] = now_ns();
         if (!pure_link_queue(link, seq, payload, payload_size)) return fputs("transport: cannot queue\n", stderr), 1;
+        pure_link_push(link);
     }
     while (pure_link_delivered(link) < count && now_ns() < end) {
         struct timespec pause = {0, 50000};
         nanosleep(&pause, NULL);
     }
     double seconds = (double)((end < now_ns() ? end : now_ns()) - began) / 1e9;
-    uint64_t link_ns = thread_cpu("pure-link") - cpu_link, listen_ns = thread_cpu("pure-listen") - cpu_listen,
+    uint64_t link_ns = thread_cpu("pure-send") - cpu_link, listen_ns = thread_cpu("pure-listen") - cpu_listen,
              all_ns = thread_cpu(NULL) - cpu_all;
     PureLinkCounts sent, got;
     pure_link_counts(link, &sent);

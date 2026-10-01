@@ -490,7 +490,7 @@ def drain_pure(work, n, size):
     b, _ = start([ROOT / 'build/pure-serve', '--module', receiver_module, '--store', work / 'drain-b', '--port', port_b,
                   '--threads', '2', '--key', work / 'b.key', '--link-port', link_port, '--senders', work / 'drain-senders'])
     cpu = {name: (thread_cpu(pid, None), thread_cpu(pid, thread)) for name, pid, thread in
-           (('sender', a.pid, 'pure-link'), ('receiver', b.pid, 'pure-listen'))}
+           (('sender', a.pid, 'pure-send'), ('receiver', b.pid, 'pure-listen'))}
     import http.client
     connection = http.client.HTTPConnection('127.0.0.1', port_b, timeout=30)
     first = None
@@ -507,7 +507,7 @@ def drain_pure(work, n, size):
     seconds = now - first[0]
     row = {'messages': n, 'item_bytes': size, 'first_seen': first[1], 'seconds': round(seconds, 4),
            'per_second': round((n - first[1]) / seconds) if seconds else None}
-    for name, pid, thread in (('sender', a.pid, 'pure-link'), ('receiver', b.pid, 'pure-listen')):
+    for name, pid, thread in (('sender', a.pid, 'pure-send'), ('receiver', b.pid, 'pure-listen')):
         total, link = thread_cpu(pid, None) - cpu[name][0], thread_cpu(pid, thread) - cpu[name][1]
         row[f'{name}_cpu_us_per_message'] = round(total * 1000 / n, 2)
         row[f'{name}_link_cpu_us_per_message'] = round(link * 1000 / n, 2)

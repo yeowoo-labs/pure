@@ -118,15 +118,16 @@ struct PureLink {
     bool peered, keyed; /* given the receiver's key; the keys made from it */
     pthread_mutex_t lock;
     bool started;
-    bool queued_new; /* records were queued since it last sent */
-    uint64_t told;   /* the last stored the owner was told of */
+    uint64_t told; /* the last stored the owner was told of */
     int fd;
     void (*notify)(void *);
     void *context;
     /* The sending loop's own (below). */
     struct PureLink *next; /* in the loop */
     uint64_t id;           /* its epoll events' */
+    _Atomic bool pushed;   /* records were queued and pushed since its last round */
     bool readable;         /* its socket said so this round */
+    uint64_t due;          /* when it wants its next round (0: when told) */
     unsigned char *burst;  /* packets sealed and not yet sent (BURST datagrams) */
     size_t burst_size;
     unsigned burst_count;
@@ -187,9 +188,11 @@ static void wake(int fd) {
 /* The sending loop: every link of the process sends on one thread
  * (docs/design/017-apps-on-one-host.md, 2b), an epoll over their sockets
  * and one wake, sleeping until the soonest link's next time. Made with the
- * first link started, stopped with the last closed. A queue wakes it only
- * when it sleeps, once: queued tells it records came (it then does not
- * sleep), sleeping that it is about to, signaled that it was woken. */
+ * first link started, stopped with the last closed. A round goes to the
+ * links that want one: answers on its socket, records pushed, or its time
+ * come. A push wakes it only when it sleeps, once: queued tells it records
+ * came (it then does not sleep), sleeping that it is about to, signaled
+ * that it was woken. */
 static struct {
     pthread_mutex_t lock; /* the links, and its making and stopping */
     PureLink *first;
@@ -204,13 +207,14 @@ static struct {
 bool pure_link_queue(PureLink *l, uint64_t seq, const unsigned char *bytes, size_t size) {
     pthread_mutex_lock(&l->lock);
     bool ok = pure_link_sender_queue(l->sender, seq, bytes, size);
-    if (ok) l->queued_new = true;
     pthread_mutex_unlock(&l->lock);
-    if (ok) {
-        atomic_store(&loop.queued, true);
-        if (atomic_load(&loop.sleeping) && !atomic_exchange(&loop.signaled, true)) wake(loop.wake);
-    }
     return ok;
+}
+
+void pure_link_push(PureLink *l) {
+    atomic_store(&l->pushed, true);
+    atomic_store(&loop.queued, true);
+    if (atomic_load(&loop.sleeping) && !atomic_exchange(&loop.signaled, true)) wake(loop.wake);
 }
 
 uint64_t pure_link_queued(PureLink *l) {
@@ -297,7 +301,6 @@ static void flush(PureLink *l) {
 /* Packets while the sender has them (up to 128 a turn), into bursts: a
  * short packet ends one, and a probe of a larger datagram goes alone. */
 static void send_packets(PureLink *l, uint64_t now) {
-    l->queued_new = false; /* all queued is looked at now */
     l->segment = pure_link_sender_datagram(l->sender); /* larger once the path is found to carry it */
     unsigned most = BURST_BYTES / l->segment < BURST ? (unsigned)(BURST_BYTES / l->segment) : BURST;
     for (unsigned n = 0; n < 128; ++n) {
@@ -365,7 +368,7 @@ enum { LOOK_PROBES = 3 };
 /* A link's round in the loop (its lock not held): answers taken when its
  * socket had them, its times kept, the receiver looked for again when
  * probes go unanswered, packets sent, and the owner told of what was
- * stored. When it wants its next round (ns on now's clock; 0: none). */
+ * stored. When it wants its next round (ns on now's clock; 0: when told). */
 static uint64_t link_round(PureLink *l) {
     pthread_mutex_lock(&l->lock);
     uint64_t now = now_ns();
@@ -386,7 +389,7 @@ static uint64_t link_round(PureLink *l) {
     }
     l->looked = probes;
     send_packets(l, now);
-    uint64_t stored = pure_link_sender_stored(l->sender), due = l->queued_new ? now : pure_link_sender_due(l->sender);
+    uint64_t stored = pure_link_sender_stored(l->sender), due = pure_link_sender_due(l->sender);
     bool told = stored != l->told;
     l->told = stored;
     unsigned refusal = pure_link_sender_refusal(l->sender), before = l->refusal;
@@ -430,8 +433,9 @@ static void *run_sending(void *context) {
         }
         uint64_t soonest = 0, now = now_ns();
         for (PureLink *l = loop.first; l; l = l->next) {
-            uint64_t due = link_round(l);
-            if (due && (!soonest || due < soonest)) soonest = due;
+            bool pushed = atomic_exchange(&l->pushed, false); /* pushed after: the next round's */
+            if (l->readable || pushed || (l->due && l->due <= now)) l->due = link_round(l);
+            if (l->due && (!soonest || l->due < soonest)) soonest = l->due;
         }
         pthread_mutex_unlock(&loop.lock);
         timeout = !soonest ? -1 : soonest <= now ? 0 : (int)((soonest - now) / MS) + 1;
@@ -471,7 +475,8 @@ bool pure_link_start(PureLink *l, void (*notify)(void *), void *context, char *e
         l->next = loop.first;
         loop.first = l;
         l->started = true;
-        atomic_store(&loop.queued, true); /* a first round for it */
+        atomic_store(&l->pushed, true); /* a first round for it */
+        atomic_store(&loop.queued, true);
     }
     pthread_mutex_unlock(&loop.lock);
     if (!ok) {
