@@ -38,7 +38,7 @@ static void *write_after_signal(void *context) {
                                      worker->effect.value, &worker->reply,
                                      &worker->revision);
     }
-    (void)write(worker->done, &byte, 1);
+    if (write(worker->done, &byte, 1) < 0) { /* full: its reader is woken already */ }
     return NULL;
 }
 

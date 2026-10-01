@@ -55,7 +55,7 @@ static void wake_signal(int signal_number) {
     else stopping = 1;
     if (wake_write >= 0) {
         const char byte = 1;
-        (void)write((int)wake_write, &byte, 1);
+        if (write((int)wake_write, &byte, 1) < 0) { /* full: its reader is woken already */ }
     }
     errno = saved_errno;
 }

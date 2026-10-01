@@ -88,7 +88,7 @@ static void stop_server(int sig) {
     stopping = 1;
     if (wake_write >= 0) {
         const char byte = 1;
-        (void)write((int)wake_write, &byte, 1);
+        if (write((int)wake_write, &byte, 1) < 0) { /* full: its reader is woken already */ }
     }
     errno = saved_errno;
 }
@@ -217,7 +217,7 @@ static void *effect_worker(void *context) {
         job->state = JOB_DONE;
         pthread_mutex_unlock(&server->job_mutex);
         const char byte = 1;
-        (void)write(server->effect_wake, &byte, 1);
+        if (write(server->effect_wake, &byte, 1) < 0) { /* full: its reader is woken already */ }
     }
 }
 
