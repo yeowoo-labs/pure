@@ -6,8 +6,8 @@
 
 ## 현재 앱 모델과 근거 (2026-09-26)
 
-아래 표의 문서 앱·scalar 앱 기록 뒤로, 앱 모델은 하나가 됐다. 앱은 [aup](/srv/git/aup.git)로 쓰고 Pure가 검증해
-실행하는 모듈([008 모듈 형식 v6](docs/design/008-module-format.md))이며, 인터페이스는 [Vega](/srv/git/vega.git)가 같은
+아래 표의 문서 앱·scalar 앱 기록 뒤로, 앱 모델은 하나가 됐다. 앱은 [aup](/aup)로 쓰고 Pure가 검증해
+실행하는 모듈([008 모듈 형식 v6](docs/design/008-module-format.md))이며, 인터페이스는 [Vega](/vega)가 같은
 명세에서 만든다. 이 절은 그 뒤에 확인한 것만 적는다.
 
 | 영역 | 확인한 것 | 근거 |

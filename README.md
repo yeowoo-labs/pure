@@ -1,10 +1,10 @@
 # Pure
 
-**Current app model (2026-09-27).** Apps are written in [aup](/srv/git/aup.git) and run as Pure modules
+**Current app model (2026-09-27).** Apps are written in [aup](/aup) and run as Pure modules
 ([format v6](docs/design/008-module-format.md)), verified completely before they execute: declared states persist
 in Pure's store (lists as images and a log of their changes, the rest in its tree), every event is a transaction,
 views are pure functions of state. The same spec becomes a
-terminal UI, a CLI, spoken sentences and a web page through [Vega](/srv/git/vega.git), and an HTTP service through
+terminal UI, a CLI, spoken sentences and a web page through [Vega](/vega), and an HTTP service through
 `pure-serve`: views are GETs and inputs are POSTs, with JSON bodies (groups included) read in place; answers are
 durable, a save being one log entry (and a tree commit when more than lists changed), each one write and one sync;
 views are read from a snapshot of the last save, so
@@ -46,7 +46,7 @@ The source follows the principle below, a small core with the rest selected arou
 
 `make` builds the library and the hosts; `make check` runs the store's and the app model's unit tests (beside
 their parts) and then `tests/check.py`. Interfaces for
-people are [Vega](/srv/git/vega.git), which links `libpure.a`. The text below records the earlier document runtime
+people are [Vega](/vega), which links `libpure.a`. The text below records the earlier document runtime
 this grew from.
 
 A standalone native micro runtime being designed as a small operating
