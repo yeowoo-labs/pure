@@ -1,0 +1,5 @@
+{"at_s": 20.85, "monotonic": 828.23, "wall_moved_ms": -1993.1, "monotonic_moved_ms": 22.6}
+{"at_s": 53.34, "monotonic": 860.72, "wall_moved_ms": -2089.8, "monotonic_moved_ms": 20.1}
+{"at_s": 85.87, "monotonic": 893.25, "wall_moved_ms": -1847.6, "monotonic_moved_ms": 20.3}
+{"at_s": 118.36, "monotonic": 925.74, "wall_moved_ms": -1971.7, "monotonic_moved_ms": 20.5}
+{"seconds": 150.0, "jumps": 4, "wall_minus_monotonic_ms": -7985.7}

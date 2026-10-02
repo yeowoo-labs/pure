@@ -1,0 +1,11 @@
+{"at_s": 8.55, "wall_moved_ms": 1654.1, "monotonic_moved_ms": 20.3}
+{"at_s": 8.82, "wall_moved_ms": -1616.0, "monotonic_moved_ms": 20.3}
+{"at_s": 18.2, "wall_moved_ms": 1945.4, "monotonic_moved_ms": 20.3}
+{"at_s": 18.47, "wall_moved_ms": -1903.0, "monotonic_moved_ms": 20.2}
+{"at_s": 28.14, "wall_moved_ms": 1832.4, "monotonic_moved_ms": 20.3}
+{"at_s": 28.4, "wall_moved_ms": -1792.5, "monotonic_moved_ms": 20.2}
+{"at_s": 60.83, "wall_moved_ms": -1725.5, "monotonic_moved_ms": 20.3}
+{"at_s": 93.3, "wall_moved_ms": -2226.8, "monotonic_moved_ms": 20.3}
+{"at_s": 125.82, "wall_moved_ms": -1217.3, "monotonic_moved_ms": 20.4}
+{"at_s": 158.32, "wall_moved_ms": -1982.8, "monotonic_moved_ms": 20.6}
+{"seconds": 180.0, "jumps": 10, "wall_minus_monotonic_ms": -7235.2}

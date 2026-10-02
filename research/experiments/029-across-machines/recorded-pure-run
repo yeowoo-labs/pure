@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""pure-run, recorded: runs the real one (PURE_RUN) with the same
+arguments and input, passes its output and exit on, and appends a JSON line
+to PURE_RUN_LOG: the module's bytes, the arguments, the input, the output
+and the errors, each as a SHA-256 with the check's temporary directory
+written as $W, and the exit code. Given to aup's check as --pure-run."""
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+
+TEMP = re.compile(rb'/[^\s"\'\\]*?/(?:aup-check|pure-check)-[A-Za-z0-9_]+')
+
+
+def digest(data):
+    return hashlib.sha256(TEMP.sub(b'$W', data)).hexdigest()[:24]
+
+
+given = sys.stdin.buffer.read()
+args = sys.argv[1:]
+done = subprocess.run([os.environ['PURE_RUN'], *args], input=given, capture_output=True)
+sys.stdout.buffer.write(done.stdout)
+sys.stderr.buffer.write(done.stderr)
+module = next((a for a in args if a.endswith('.pmod') and os.path.exists(a)), None)
+line = {'module': hashlib.sha256(open(module, 'rb').read()).hexdigest()[:24] if module else None,
+        'args': digest('\0'.join(args).encode()), 'input': digest(given), 'output': digest(done.stdout),
+        'errors': digest(done.stderr), 'exit': done.returncode}
+with open(os.environ['PURE_RUN_LOG'], 'a') as log:
+    log.write(json.dumps(line) + '\n')
+sys.exit(done.returncode)

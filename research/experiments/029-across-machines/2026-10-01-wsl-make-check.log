@@ -1,0 +1,121 @@
+make: Entering directory '/home/user/pure-029/pure'
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -c core/module.c -o build/obj/core/module.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -c core/module-list.c -o build/obj/core/module-list.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -c core/module-save.c -o build/obj/core/module-save.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -c core/module-text.c -o build/obj/core/module-text.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -c core/module-store.c -o build/obj/core/module-store.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -c core/flow.c -o build/obj/core/flow.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -c store/store-tree.c -o build/obj/store/store-tree.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -c store/store-log.c -o build/obj/store/store-log.o
+rm -f build/libpure.a
+ar rcs build/libpure.a build/obj/core/module.o build/obj/core/module-list.o build/obj/core/module-save.o build/obj/core/module-text.o build/obj/core/module-store.o build/obj/core/flow.o build/obj/store/store-tree.o build/obj/store/store-log.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -c link/link-protocol.c -o build/obj/link/link-protocol.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -c link/link.c -o build/obj/link/link.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -c link/sending.c -o build/obj/link/sending.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -c link/crypto.c -o build/obj/link/crypto.o
+rm -f build/libpure-link.a
+ar rcs build/libpure-link.a build/obj/link/link-protocol.o build/obj/link/link.o build/obj/link/sending.o build/obj/link/crypto.o
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -Ilink -Iserve -DPURE_ASYNC_EFFECTS serve/serve.c serve/deliver.c serve/message-json.c build/libpure-link.a \
+	build/libpure.a core/runtime.c \
+	-L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -Wl,--export-dynamic-symbol='pure_*' -lm -pthread  -o build/pure-serve
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -fPIC -shared link/crypto-openssl.c -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -lssl -lcrypto \
+	 -o build/pure-crypto.so
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore cli/pure-run.c build/libpure.a -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -lm  -o build/pure-run
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore cli/edit-module.c build/libpure.a -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -lm  -o build/pure-edit-module
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -DPURE_STORE_TEST core/test-module.c core/module.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c store/store-tree.c store/store-log.c -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -pthread -lm  -o build/test-module
+cc -I/home/user/pure-029/opt/openssl/include -std=c17 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
+	-fsanitize=address,undefined -fno-sanitize-recover=all -Icore -DPURE_STORE_TEST core/test-module.c \
+	core/module.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c store/store-tree.c store/store-log.c -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -pthread -lm  -o build/test-module-sanitized
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -DPURE_STORE_TEST store/test-tree-store.c store/store-tree.c store/store-log.c -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64  -o build/test-tree-store
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -DPURE_STORE_TEST store/test-log.c store/store-log.c -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64  -o build/test-log
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror link/test-link.c build/libpure-link.a -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -lm -pthread -ldl  -o build/test-link
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore -Iserve serve/test-message-json.c serve/message-json.c build/libpure.a \
+	-L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -lm  -o build/test-message-json
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -Icore tests/module-probe.c build/libpure.a -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -lm  -o build/module-probe
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -fPIC -shared tests/clock-back.c -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64 -ldl  -o build/clock-back.so
+build/test-tree-store
+{"oracle_steps":6000,"splices":5880,"max_document_bytes":333510,"max_height":2}
+{"one_byte_edit_max_appended_bytes":5040,"height":2,"leaves":258}
+{"draft_steps":20000,"draft_commits":20,"draft_bytes":419324}
+{"typing_keystrokes":30000,"peak_arena_bytes":47339,"commit_appended_bytes":15080}
+{"tree_store":"random-oracle-balance-held-views-one-byte-amplification-faults-process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-atomic-batch-runtime-keys-store-handle-threads-group-commit-lost-commit-pending-head-stores-apart-one-sync-records-cycles"}
+build/test-log
+{"log_steps":6000,"reopened":1045,"retracted":166,"ended":259,"most_segment_files":15}
+{"images":"written-read-kept-on-failure-refused-when-damaged"}
+build/test-module
+{"number_texts":300000}
+{"module_mutations":20000,"accepted_after_damage":1501}
+{"message_module_mutations":20000,"accepted_after_damage":921}
+{"text_module_mutations":20000,"accepted_after_damage":905}
+{"journal_saves":2000,"journal_rewrites":25}
+{"list_tree_events":6000,"undone":1195,"largest":8983,"keyed_items":13959}
+{"lane_folds":3600,"planned":3900,"groups":177,"ranks":128,"passes":103,"faults_alike":1102,"cells":30414}
+{"walks":{"orders":997,"failed":1322,"cleaned":586,"removed_while_walking":83,"removed_before":32}}
+{"walk_module_mutations":20000,"accepted_after_damage":890}
+{"view_arguments":{"accounts":30,"branches":3}}
+{"locals":{"events":80}}
+{"ranges":{"compared":4320,"walks":231}}
+{"keyed_module_mutations":20000,"accepted_after_damage":932}
+{"snapshots":6600,"items_retired":572,"reads_on_threads":9106259,"held_growth_bytes":0}
+{"bools":{"refused":28}}
+{"integers":{"cases":28,"refused":14,"checkpoints":46}}
+{"work_budget":"events-views-cells-rows-rolled-back"}
+{"fold_module_mutations":20000,"accepted_after_damage":582}
+{"filter_module_mutations":20000,"accepted_after_damage":539}
+{"list_module_mutations":20000,"accepted_after_damage":601}
+{"table_module_mutations":20000,"accepted_after_damage":535}
+{"sizeof_module":18760,"sizeof_app":6216}
+{"module_tests":"verified-load-atomic-events-faults-signed-zero-if-else-bools-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields-timers-now-snapshots-links"}
+ASAN_OPTIONS=detect_leaks=1 build/test-module-sanitized > /dev/null
+build/test-link
+{"case":"clean","records":3000,"virtual_ms":108,"packets":3614,"resent":0,"lost":0,"deliveries":654,"woken":1,"remembered":0,"swept":0,"changed":0,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":1,"opened_later":2,"full_tries":0}
+{"case":"rough","records":3000,"virtual_ms":24734,"packets":4118,"resent":825,"lost":143,"deliveries":515,"woken":3,"remembered":2,"swept":1,"changed":0,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":2,"opened_later":20,"full_tries":0}
+{"case":"rough","records":3000,"virtual_ms":23427,"packets":4069,"resent":789,"lost":133,"deliveries":540,"woken":3,"remembered":2,"swept":1,"changed":0,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":2,"opened_later":17,"full_tries":0}
+{"case":"rough","records":3000,"virtual_ms":26708,"packets":4189,"resent":808,"lost":140,"deliveries":571,"woken":4,"remembered":3,"swept":2,"changed":0,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":2,"opened_later":14,"full_tries":0}
+{"case":"rough","records":3000,"virtual_ms":25619,"packets":4101,"resent":767,"lost":112,"deliveries":567,"woken":3,"remembered":2,"swept":1,"changed":0,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":2,"opened_later":17,"full_tries":0}
+{"case":"changed","records":1500,"virtual_ms":3490,"packets":1893,"resent":131,"lost":73,"deliveries":317,"woken":1,"remembered":1,"swept":0,"changed":11544,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":1,"opened_later":4,"full_tries":0}
+{"case":"replayed","records":3000,"virtual_ms":17830,"packets":4073,"resent":524,"lost":85,"deliveries":477,"woken":3,"remembered":2,"swept":1,"changed":0,"replayed":2318,"attacker_in":713789,"attacker_out":0,"epochs":3,"opened_later":17,"full_tries":0}
+{"case":"replayed","records":3000,"virtual_ms":17359,"packets":3981,"resent":564,"lost":82,"deliveries":514,"woken":3,"remembered":2,"swept":1,"changed":0,"replayed":2440,"attacker_in":781336,"attacker_out":0,"epochs":2,"opened_later":16,"full_tries":0}
+{"case":"epochs","records":3000,"virtual_ms":16346,"packets":4024,"resent":478,"lost":86,"deliveries":522,"woken":3,"remembered":2,"swept":1,"changed":0,"replayed":912,"attacker_in":334303,"attacker_out":0,"epochs":16,"opened_later":183,"full_tries":0}
+{"case":"forgetful","records":3000,"virtual_ms":15788,"packets":3842,"resent":429,"lost":258,"deliveries":547,"woken":2,"remembered":0,"swept":0,"changed":0,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":2,"opened_later":9,"full_tries":0}
+{"case":"cut","records":3000,"virtual_ms":18907,"packets":3849,"resent":227,"lost":170,"deliveries":608,"woken":1,"remembered":0,"swept":0,"changed":0,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":11,"opened_later":15,"full_tries":0}
+{"case":"black hole","records":3000,"virtual_ms":1179,"packets":4449,"resent":29,"lost":21,"deliveries":903,"woken":1,"remembered":0,"swept":0,"changed":0,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":1,"opened_later":2,"full_tries":0}
+{"case":"full","records":3000,"virtual_ms":5314,"packets":3614,"resent":0,"lost":0,"deliveries":200,"woken":1,"remembered":0,"swept":0,"changed":0,"replayed":0,"attacker_in":0,"attacker_out":0,"epochs":1,"opened_later":2,"full_tries":12}
+{"case":"impostors","opened":3,"answers":3,"deliveries":0}
+{"case":"flood","packets":10000,"keyed":282,"secrets":1,"to_attacker":12282,"heard_after":200}
+{"case":"outputs","runs":3,"records":3000,"stored_ms":14,"keyed":3,"keyed_again":3,"secrets_again":0,"fallbacks":0}
+{"case":"refused","source":"other.source","input":"order","why":3,"refused":7,"packets":9,"stored":0}
+{"case":"refused","source":"test.ordered","input":"nothing","why":1,"refused":7,"packets":9,"stored":0}
+{"case":"refused","source":"test.ordered","input":"order","why":2,"refused":7,"packets":9,"stored":0}
+{"case":"refused","source":"test.ordered","input":"later","why":0,"refused":4,"packets":257,"stored":200}
+{"case":"refused_restarted","refused":4,"stored":200,"taken_ms":18187}
+{"case":"named","takes":1,"why":0,"refused":1,"packets":266,"stored":200,"stored_ms":47,"named_deliveries":7}
+{"case":"named","takes":0,"why":4,"refused":6,"packets":8,"stored":0,"stored_ms":0,"named_deliveries":0}
+{"case":"largest","bytes":16777216,"virtual_ms":59}
+build/test-message-json
+{"json_numbers":1200000}
+make -C /home/user/pure-029/aup build/aup
+make[1]: Entering directory '/home/user/pure-029/aup'
+mkdir -p build
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror compiler/main.c compiler/compile.c -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64  -o build/aup
+make[1]: Leaving directory '/home/user/pure-029/aup'
+make -C prototypes/connections BUILD=build/tree STORE=store-tree.c build/tree/pure-connections
+make[1]: Entering directory '/home/user/pure-029/pure/prototypes/connections'
+mkdir -p build/tree
+cc -I/home/user/pure-029/opt/openssl/include -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Werror -I../../core -DPURE_RUNTIME_METRICS server.c ../../store/store-tree.c store-port.c evaluate.c ../../core/flow.c program.c ../../core/runtime.c -L/home/user/pure-029/opt/openssl/lib64 -Wl,-rpath,/home/user/pure-029/opt/openssl/lib64  -o build/tree/pure-connections
+make[1]: Leaving directory '/home/user/pure-029/pure/prototypes/connections'
+python3 tests/check.py --aup /home/user/pure-029/aup/build/aup --aup-root /home/user/pure-029/aup
+Traceback (most recent call last):
+  File "/home/user/pure-029/pure/tests/check.py", line 4030, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/user/pure-029/pure/tests/check.py", line 4001, in main
+    report['server_timer_beats'] = server_timers(aup, pure, work)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/pure-029/pure/tests/check.py", line 3054, in server_timers
+    assert before - 1000 < last <= after and posted - 50 <= stamped <= before, (last, stamped, posted, before)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: (1790869637794.0, 1790869639565.0, 1790869639565.5264, 1790869637848.543)
+make: *** [Makefile:126: check] Error 1
+make: Leaving directory '/home/user/pure-029/pure'
+EXIT 2
