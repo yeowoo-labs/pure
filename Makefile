@@ -38,6 +38,12 @@ $(BUILD)/obj/%.o: %.c $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+# The lists' searches count a node's keys and positions whole, and move
+# items in a leaf column by column: -O3 makes vector instructions of them
+# (docs/design/020: 8% of a breadth first search).
+LIST_OPTIMIZE ?= -O3
+$(BUILD)/obj/core/module-list.o: CFLAGS += $(LIST_OPTIMIZE)
+
 # The links know nothing of the core: they build without its headers.
 $(BUILD)/obj/link/%.o: link/%.c $(wildcard link/*.h)
 	@mkdir -p $(dir $@)

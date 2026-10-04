@@ -354,6 +354,11 @@ static unsigned char state_type(const PureModule *m, uint32_t state) {
     return m->state_type[state] == PURE_STATE_BOOL ? T_BOOL : m->state_type[state] == PURE_STATE_I64 ? T_I64 : T_NUM;
 }
 
+/* Whether a list's record field is a text. */
+static bool text_field(const PureModule *m, uint32_t list, uint32_t field) {
+    return m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_TEXT;
+}
+
 /* What a local holds (its argument's bits 8-15): a number, an index, a bool or an i64. */
 static unsigned char local_type(uint32_t arg) {
     static const unsigned char types[] = {T_NUM, T_INDEX, T_BOOL, T_I64};
@@ -1336,6 +1341,13 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         plan_folds(out, out->handler[i].code, input);
         range_code(out, out->handler[i].code, input);
     }
+    /* What a cell is, read once here: an item's field, or a keyed list's key, a text (plan) or not. */
+    for (uint32_t pc = 0; pc < out->code_count; ++pc) {
+        PureOp *op = &out->code[pc];
+        if (op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET) op->plan = text_field(out, list_of(op->arg), item_field(op->arg));
+        else if (op->op == PURE_OP_LIST_FIND || op->op == PURE_OP_LIST_HAS)
+            op->plan = text_field(out, op->arg, out->state_key[op->arg] - 1u);
+    }
     return PURE_OK;
 refused:
     if (error_size) snprintf(error, error_size, "%s (%u)", why, bad);
@@ -1477,6 +1489,18 @@ static bool related(uint32_t relation, int order) {
 /* A walk (EACH): the list, the item it runs for, where it ends (items the
  * walk removes move it), and whether that item left. */
 typedef struct { uint32_t list; size_t at, end; bool removed; } Walk;
+/* A loop that runs in its block's run (LOOP, EACH): its block, the arena as
+ * it began, a walk's walk and the event's walk and row around it, a
+ * count's values (low + k of count) and slot. */
+typedef struct {
+    uint32_t start, end;
+    size_t mark;
+    bool walking, integer;
+    Walk walk, *around;
+    size_t row;
+    uint64_t count, k;
+    PureValue low, *slot;
+} Loop;
 typedef struct {
     PureApp *app;
     const PureInputShape *shape; /* message, or NULL */
@@ -1490,7 +1514,6 @@ typedef struct {
     PureValue *locals; /* the event's locals (a handler's, and what runs in it), or NULL */
     bool arguments; /* FIELD reads the arguments given for a view, not the message */
     bool modified, exists;
-    bool broke; /* a BREAK ended the loop whose block this runs */
     uint32_t (*spans)[2]; /* a message's variable fields: start and size in the payload */
 } Event;
 
@@ -1517,7 +1540,7 @@ static inline bool charge(PureApp *app, uint64_t instructions) {
 typedef struct { size_t stored, kept; } Held;
 
 static inline Held list_held(const PureApp *app, const PureList *list) {
-    return (Held){pure_list_size(list), pure_list_changes(list).size + pure_undo_size(&app->undo)};
+    return (Held){pure_list_size(list), pure_list_changes(list).size + pure_undo_size(&app->undo) + pure_list_extra(list)};
 }
 
 static inline Held text_held(const PureApp *app, uint32_t text) { return (Held){pure_draft_size(app->texts[text]), 0}; }
@@ -1643,9 +1666,7 @@ static void move_indices(const PureModule *m, PureValue *values, uint32_t list, 
     }
 }
 
-static bool text_field(const PureModule *m, uint32_t list, uint32_t field) {
-    return m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_TEXT;
-}
+
 
 /* Append bytes to the arena as a value of it. */
 static PureResult keep_bytes(PureArena *arena, const void *bytes, size_t length, PureBytes *out) {
@@ -1904,7 +1925,8 @@ static bool run_lanes(const PureModule *m, const PureValue *values, PureBlock bl
             if (uniform(top)) {
                 double value;
                 if (!recalled(memo, pc - block.start, &value)) {
-                    size_t at = pure_list_seek(keyed, key, (PureCell){.num = top->value}, &found);
+                    size_t at = find || !pure_list_contains(keyed, top->value, &found) ?
+                                pure_list_seek(keyed, key, (PureCell){.num = top->value}, &found) : 0;
                     if (find && !found) return false;
                     remember(memo, pc - block.start, value = find ? (double)at : found);
                 }
@@ -1913,7 +1935,8 @@ static bool run_lanes(const PureModule *m, const PureValue *values, PureBlock bl
             }
             const double *keys = lanes_of(top, scratch[0], items);
             for (unsigned i = 0; i < n; ++i) {
-                size_t at = pure_list_seek(keyed, key, (PureCell){.num = keys[i]}, &found);
+                size_t at = find || !pure_list_contains(keyed, keys[i], &found) ?
+                            pure_list_seek(keyed, key, (PureCell){.num = keys[i]}, &found) : 0;
                 if (find && !found) return false;
                 out[i] = find ? (double)at : found;
             }
@@ -2415,7 +2438,40 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
     PureResult status;
     PureFault kind;
     const PureOp *op = NULL;
-    for (uint32_t pc = block.start, end = block.start + block.length; pc < end;) {
+    /* The loops open here (LOOP, EACH), innermost last, and where the innermost's block ends. */
+    Loop loops[PURE_MODULE_NESTING];
+    unsigned depth = 0;
+    uint32_t loop_end = UINT32_MAX;
+    for (uint32_t pc = block.start, end = block.start + block.length;;) {
+        if (pc == loop_end) { /* a loop's block ran once: again, or the loop ends (its end may be the block's) */
+            Loop *loop = &loops[depth - 1];
+            arena->used = loop->mark;
+            if (loop->walking) {
+                Walk *walk = &loop->walk;
+                if (!walk->removed) ++walk->at;
+                walk->removed = false;
+                if (walk->at < walk->end && walk->at < pure_list_count(app->lists[walk->list])) {
+                    ev->row = walk->at;
+                    pc = loop->start;
+                    continue;
+                }
+                ev->walk = loop->around, ev->row = loop->row;
+            } else if (++loop->k < loop->count) {
+                if (!charge(app, (uint64_t)(loop->end - loop->start) + 1)) {
+                    kind = PURE_FAULT_WORK;
+                    op = &m->code[loop->start - 1];
+                    goto failed;
+                }
+                if (loop->integer) loop->slot->i64 = (int64_t)((uint64_t)loop->low.i64 + loop->k);
+                else loop->slot->num = loop->low.num + (double)loop->k;
+                pc = loop->start;
+                continue;
+            }
+            --depth;
+            loop_end = depth ? loops[depth - 1].end : UINT32_MAX;
+            continue;
+        }
+        if (pc >= end) break;
         op = &m->code[pc++];
         uint32_t arg = op->arg;
         Slot *top = sp ? &stack[sp - 1] : stack;
@@ -2622,14 +2678,17 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
                     return status;
                 cells[f] = (PureCell){.i64 = stack[base + f].i64, .text = (unsigned char *)span.data, .size = span.size};
             }
-            if (m->state_key[arg]) { /* a keyed list places the item by its key */
+            Held before = list_held(app, list);
+            status = PURE_INVALID;
+            if (m->state_key[arg]) { /* a keyed list places the item by its key: found and placed at once when kept by a number */
                 bool found;
-                unsigned key = m->state_key[arg] - 1u;
-                at = pure_list_seek(list, key, cells[key], &found);
+                if ((status = pure_list_add(list, cells, undo_for(app, arg), &at, &found)) == PURE_INVALID) {
+                    unsigned key = m->state_key[arg] - 1u;
+                    at = pure_list_seek(list, key, cells[key], &found);
+                }
                 if (found) { arena->used = mark; kind = PURE_FAULT_EXISTS; goto failed; }
             }
-            Held before = list_held(app, list);
-            status = pure_list_insert(list, at, cells, undo_for(app, arg));
+            if (status == PURE_INVALID) status = pure_list_insert(list, at, cells, undo_for(app, arg));
             arena->used = mark;
             if (status != PURE_OK) goto refused;
             move_indices(m, values, arg, pure_list_count(list), at, true);
@@ -2656,7 +2715,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             if (at >= pure_list_count(app->lists[list])) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
             PureCell cell = pure_list_get(app->lists[list], at, field);
             /* A text is copied: the item may change or go before the value is used. */
-            if (!text_field(m, list, field)) top->i64 = cell.i64; /* the bits: a number's, a bool's or an i64's */
+            if (!op->plan) top->i64 = cell.i64; /* the bits: a number's, a bool's or an i64's (plan: a text, set at load) */
             else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) return status;
             continue;
         }
@@ -2666,7 +2725,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             size_t at = (size_t)stack[--sp].num, mark = arena->used;
             Held before = list_held(app, app->lists[list]);
             PureSpan span = {0};
-            status = text_field(m, list, field) ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
+            status = op->plan ? contiguous(app, arena, value.bytes, &span) : PURE_OK; /* plan: a text */
             if (status == PURE_OK)
                 status = pure_list_set(app->lists[list], at, field,
                                        (PureCell){.i64 = value.i64, .text = (unsigned char *)span.data, .size = span.size},
@@ -2722,44 +2781,37 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
         }
         case PURE_OP_EACH: {
             /* The block that follows runs for each item the list has, as the
-             * handler's code with ROW the item; the list only shrinks meanwhile. */
-            PureBlock inner = {pc, arg >> 16};
-            Walk walk = {arg >> 8 & 0xFF, 0, SIZE_MAX, false};
-            pc += inner.length;
-            Event per = *ev;
-            per.walk = &walk;
+             * handler's code with ROW the item; the list only shrinks meanwhile.
+             * It runs here, a loop opened (its end takes pc back), not by recursion. */
+            uint32_t length = arg >> 16;
+            Loop *loop = &loops[depth];
+            loop->walking = true;
+            loop->walk = (Walk){arg >> 8 & 0xFF, 0, SIZE_MAX, false};
             if (arg & PURE_EACH_SLICED) { /* the items with keys from low up to before high */
                 Slot high = stack[--sp], low = stack[--sp];
-                slice_of(app->lists[walk.list], m->state_key[walk.list] - 1u, low, high, &walk.at, &walk.end);
+                slice_of(app->lists[loop->walk.list], m->state_key[loop->walk.list] - 1u, low, high, &loop->walk.at,
+                         &loop->walk.end);
             }
-            size_t items = pure_list_count(app->lists[walk.list]); /* as written: what it starts with, the list only shrinking */
-            if (!charge(app, (uint64_t)inner.length * ((walk.end < items ? walk.end : items) - walk.at))) {
+            size_t items = pure_list_count(app->lists[loop->walk.list]); /* as written: what it starts with, the list only shrinking */
+            if (!charge(app, (uint64_t)length * ((loop->walk.end < items ? loop->walk.end : items) - loop->walk.at))) {
                 kind = PURE_FAULT_WORK;
                 goto failed;
             }
             if (!(arg & PURE_EACH_SLICED) && op->range) /* a where that bounds the key: only the items in bounds */
-                range_bounds(m, values, &m->range[op->range - 1], app->lists[walk.list], m->state_key[walk.list] - 1u, &per,
-                             &walk.at, &walk.end);
-            per.broke = false;
-            while (walk.at < walk.end && walk.at < pure_list_count(app->lists[walk.list])) {
-                size_t mark = arena->used;
-                per.row = walk.at;
-                walk.removed = false;
-                status = run(m, values, inner, &per, NULL);
-                arena->used = mark;
-                if (status != PURE_OK) return status;
-                if (per.broke) break;
-                if (!walk.removed) ++walk.at;
-            }
-            ev->modified = per.modified;
-            ev->exists = per.exists;
+                range_bounds(m, values, &m->range[op->range - 1], app->lists[loop->walk.list], m->state_key[loop->walk.list] - 1u,
+                             ev, &loop->walk.at, &loop->walk.end);
+            if (!(loop->walk.at < loop->walk.end && loop->walk.at < items)) { pc += length; continue; } /* none */
+            loop->start = pc, loop->end = pc + length, loop->mark = arena->used;
+            loop->around = ev->walk, loop->row = ev->row;
+            ev->walk = &loop->walk;
+            ev->row = loop->walk.at;
+            loop_end = loops[depth++].end;
             continue;
         }
         case PURE_OP_LOOP: {
             /* The block that follows runs once for each value from low up to before high, the slot holding it; its
-             * work counts as it runs (the LOOP too, so an empty block counts). */
-            PureBlock inner = {pc, arg >> 16};
-            pc += inner.length;
+             * work counts as it runs (the LOOP too, so an empty block counts). It runs here, as a walk does. */
+            uint32_t length = arg >> 16;
             Slot high = stack[--sp], low = stack[--sp];
             bool integer = arg & PURE_LOOP_INTEGER;
             uint64_t count = 0;
@@ -2767,23 +2819,28 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             else if (!(fabs(low.num) <= 0x1p53 && fabs(high.num) <= 0x1p53 && low.num == floor(low.num) &&
                        high.num == floor(high.num))) { kind = PURE_FAULT_LIMIT; goto failed; }
             else count = high.num > low.num ? (uint64_t)(high.num - low.num) : 0;
-            Event per = *ev;
-            per.broke = false;
-            PureValue *slot = &ev->locals[arg & 0xFF];
-            for (uint64_t k = 0; k < count && !per.broke; ++k) {
-                if (!charge(app, (uint64_t)inner.length + 1)) { kind = PURE_FAULT_WORK; goto failed; }
-                if (integer) slot->i64 = (int64_t)((uint64_t)low.i64 + k);
-                else slot->num = low.num + (double)k;
-                size_t mark = arena->used;
-                status = run(m, values, inner, &per, NULL);
-                arena->used = mark;
-                if (status != PURE_OK) return status;
-            }
-            ev->modified = per.modified;
-            ev->exists = per.exists;
+            if (!count) { pc += length; continue; }
+            if (!charge(app, (uint64_t)length + 1)) { kind = PURE_FAULT_WORK; goto failed; }
+            Loop *loop = &loops[depth];
+            loop->walking = false;
+            loop->integer = integer;
+            loop->count = count, loop->k = 0;
+            loop->low = (PureValue){.i64 = low.i64};
+            loop->slot = &ev->locals[arg & 0xFF];
+            if (integer) loop->slot->i64 = low.i64;
+            else loop->slot->num = low.num;
+            loop->start = pc, loop->end = pc + length, loop->mark = arena->used;
+            loop_end = loops[depth++].end;
             continue;
         }
-        case PURE_OP_BREAK: ev->broke = true; return PURE_OK; /* the loop that runs this block ends */
+        case PURE_OP_BREAK: { /* the innermost loop ends: the code after its block runs next */
+            Loop *loop = &loops[--depth];
+            arena->used = loop->mark;
+            if (loop->walking) ev->walk = loop->around, ev->row = loop->row;
+            pc = loop->end;
+            loop_end = depth ? loops[depth - 1].end : UINT32_MAX;
+            continue;
+        }
         case PURE_OP_TEXT_COMPARE: {
             /* Texts order by their bytes: a shorter text before a longer one it begins. */
             PureBytes right = stack[--sp].bytes, left = stack[sp - 1].bytes;
@@ -2804,12 +2861,17 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             unsigned key = m->state_key[arg] - 1u;
             size_t mark = arena->used;
             PureCell cell = {.i64 = top->i64};
-            if (text_field(m, arg, key)) {
+            if (op->plan) { /* a text key (set at load) */
                 PureSpan span;
                 if ((status = contiguous(app, arena, top->bytes, &span)) != PURE_OK) return status;
                 cell = (PureCell){.text = (unsigned char *)span.data, .size = span.size};
             }
             bool found;
+            /* An event's list keeps its keys as a set: HAS asks it alone (020). */
+            if (op->op == PURE_OP_LIST_HAS && pure_list_contains(app->lists[arg], cell.num, &found)) {
+                top->num = found;
+                continue;
+            }
             size_t at = pure_list_seek(app->lists[arg], key, cell, &found);
             arena->used = mark;
             if (op->op == PURE_OP_LIST_HAS) { top->num = found; continue; }
@@ -3604,6 +3666,7 @@ static bool own_lists(PureApp *app, uint32_t lists) {
         if (!app->own[i]) {
             if (!(app->own[i] = new_list(m, m->state_ref[i]))) return false;
             (void)pure_list_keyed(app->own[i], m->state_key[i] ? (int)m->state_key[i] - 1 : -1);
+            if (m->state_key[i]) (void)pure_list_hashed(app->own[i]);
         }
         app->lists[i] = app->own[i];
     }
@@ -4267,9 +4330,11 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         /* A stored list's changes are recorded from now on; a transient one's never. */
         if (lists_stored && module->state_type[i] == PURE_STATE_LIST && !(module->state_flags[i] & PURE_LIST_ROWS >> 8))
             pure_list_journal(lists[i], !pure_state_transient(module, i));
-        /* Without memory for its keys a keyed list is still searched, only slower. */
+        /* Without memory for its keys a keyed list is still searched, only slower; an event's keeps them as a set too (020). */
         if (module->state_type[i] == PURE_STATE_LIST)
             (void)pure_list_keyed(lists[i], module->state_key[i] ? (int)module->state_key[i] - 1 : -1);
+        if (module->state_type[i] == PURE_STATE_LIST && module->state_key[i] && module->state_flags[i] & PURE_LIST_ROWS >> 8)
+            (void)pure_list_hashed(lists[i]);
     }
     if (old) remap_outputs(app, old, module, true, NULL, NULL);
     if (recast) { /* in the place of the outbox, its sends now the new module's */

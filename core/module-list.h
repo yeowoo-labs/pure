@@ -101,6 +101,12 @@ void pure_retired_free(PureRetired *);
 /* Insert a copy of cells (text bytes are copied) before position at. A NULL
  * log means the change is not undone. */
 PureResult pure_list_insert(PureList *, size_t at, const PureCell *cells, PureUndo *);
+/* An item into a list kept in order of a number field, where its key goes,
+ * found and placed in one descent (docs/design/020): at says where, exists
+ * whether an item had the key (then nothing changes). Its change is logged
+ * and journaled as pure_list_insert's. PURE_INVALID when the list is not
+ * such a one (search it and insert then). */
+PureResult pure_list_add(PureList *, const PureCell *cells, PureUndo *, size_t *at, bool *exists);
 PureResult pure_list_remove(PureList *, size_t at, PureUndo *);
 PureResult pure_list_set(PureList *, size_t at, unsigned field, PureCell value, PureUndo *);
 PureCell pure_list_get(const PureList *, size_t at, unsigned field);
@@ -117,6 +123,17 @@ size_t pure_list_seek(const PureList *, unsigned field, PureCell key, bool *foun
  * field, seek by it reads each level's keys from one node (field -1, or a
  * text field: none). ALLOCATION leaves the list searched as if it had none. */
 PureResult pure_list_keyed(PureList *, int field);
+/* A list keyed by a number keeps its keys as a set too, beside its tree
+ * (docs/design/020): pure_list_contains answers whether a key is there
+ * without a search. Its changes and their undoing keep the set; a share of
+ * it has none. For the lists an event searches most (its own). False when
+ * it is not keyed by a number, is a copy, or memory runs out (it is
+ * searched as before). */
+bool pure_list_hashed(PureList *);
+/* Whether key is there, by the set: false when the list keeps none (search it then). */
+bool pure_list_contains(const PureList *, double key, bool *found);
+/* The bytes it keeps beside its items for that. */
+size_t pure_list_extra(const PureList *);
 /* The list's items ordered by field, as a keyed list keeps them: *out is NULL
  * when they already are, or a new list in that order with moved[position
  * before] = position after for every item. CONFLICT when two items have the

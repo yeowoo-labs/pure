@@ -74,6 +74,13 @@ struct PureList {
     unsigned needed[2];   /* inner nodes and leaves it made lately: halved each time the retired come back */
     unsigned refs;        /* a shared copy's references */
     bool copy;            /* a shared copy: it owns none of its nodes or texts */
+    /* Its keys as a set, beside the tree (pure_list_hashed; NULL: none):
+     * while every key is a whole number below BITMAP_KEYS, a bit per number
+     * (member_capacity words); else a key's bits (-0 as +0) by open
+     * addressing (member_capacity slots), VACANT where none is. */
+    uint64_t *members;
+    size_t member_capacity, member_count;
+    bool bitmap;
 };
 
 /* The log of an event's changes: a removed item's cells wait in the log's
@@ -100,31 +107,176 @@ typedef struct {
 
 static uint64_t lists_made;
 
-/* The leaf a thread read last, and where it starts: a list read position by
- * position (a view's rows, a fold) finds each next item there. It holds for
- * the list (its id) as it was (its version) and no other. */
-static _Thread_local struct { uint64_t id, version; const Node *leaf; size_t start; } finger;
+/* The leaves a thread read last, and where they start, a few lists' (one
+ * each): a list read position by position (a view's rows, a fold, a walk)
+ * finds each next item there, and an item found by key is read there, while
+ * the thread reads other lists between (a search reads three). Each holds
+ * for its list (its id) as it was (its version) and no other. */
+enum { FINGERS = 4 };
+typedef struct { uint64_t id, version; const Node *leaf; size_t start; } Finger;
+static _Thread_local Finger fingers[FINGERS];
+static _Thread_local unsigned finger_turn;
+
+/* The leaf a finger keeps that holds position at of the list as it is, or NULL. */
+static const Node *fingered(const PureList *list, size_t at, size_t *within) {
+    for (unsigned i = 0; i < FINGERS; ++i) {
+        const Finger *f = &fingers[i];
+        if (f->leaf && f->id == list->id && f->version == list->version && at >= f->start && at < f->start + f->leaf->count) {
+            *within = at - f->start;
+            if (i) { Finger hit = *f; fingers[i] = fingers[0]; fingers[0] = hit; } /* first looked at next */
+            return fingers[0].leaf;
+        }
+    }
+    return NULL;
+}
+
+/* A leaf of the list as it is, from start: kept in the list's finger, or the one used longest ago. */
+static void finger_keep(const PureList *list, const Node *leaf, size_t start) {
+    unsigned at = FINGERS;
+    for (unsigned i = 0; i < FINGERS && at == FINGERS; ++i) if (fingers[i].id == list->id) at = i;
+    if (at == FINGERS) at = finger_turn++ % FINGERS;
+    fingers[at] = (Finger){list->id, list->version, leaf, start};
+}
+
+/* ---- A keyed list's keys as a set
+ * Node numbers, ranks and counts are small whole numbers: as bits they fit
+ * the caches (100,000 keys in 12.5 KB), where a table of them does not. */
+
+enum { BITMAP_KEYS = 1 << 22, BITMAP_KEPT = 1 << 13 /* words a cleared bitmap keeps (64 KiB) */ };
+static const uint64_t VACANT = UINT64_C(0x7FF8000000000001); /* a NaN: never a key */
+
+static uint64_t key_bits(double key) {
+    if (key == 0) key = 0; /* -0 and +0 are one key */
+    uint64_t bits;
+    memcpy(&bits, &key, sizeof(bits));
+    return bits;
+}
+
+static bool small_key(double key) { return key >= 0 && key < BITMAP_KEYS && (double)(uint32_t)key == key; }
+
+static size_t member_slot(uint64_t bits, size_t mask) {
+    bits ^= bits >> 33;
+    bits *= UINT64_C(0xff51afd7ed558ccd);
+    bits ^= bits >> 33;
+    return (size_t)bits & mask;
+}
+
+/* The set given up (memory ran out growing it): the list is searched without it. */
+static void members_drop(PureList *list) {
+    free(list->members);
+    list->members = NULL;
+    list->member_capacity = list->member_count = 0;
+}
+
+/* A new set, empty, as bits. */
+static bool members_start(PureList *list) {
+    list->members = calloc(1, sizeof(*list->members));
+    list->member_capacity = list->members ? 1 : 0;
+    list->member_count = 0;
+    list->bitmap = true;
+    return list->members != NULL;
+}
+
+static void member_put(PureList *list, uint64_t bits) {
+    size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+    while (list->members[at] != VACANT && list->members[at] != bits) at = (at + 1) & mask;
+    if (list->members[at] == VACANT) list->members[at] = bits, ++list->member_count;
+}
+
+/* A table of capacity slots holding the keys the set holds. False when memory runs out. */
+static bool members_table(PureList *list, size_t capacity) {
+    uint64_t *old = list->members, *table = malloc(capacity * sizeof(*table));
+    if (!table) return false;
+    size_t was = list->member_capacity;
+    bool bits = list->bitmap;
+    for (size_t i = 0; i < capacity; ++i) table[i] = VACANT;
+    list->members = table, list->member_capacity = capacity, list->member_count = 0, list->bitmap = false;
+    for (size_t i = 0; i < was; ++i) {
+        if (!bits) { if (old[i] != VACANT) member_put(list, old[i]); continue; }
+        for (uint64_t word = old[i]; word; word &= word - 1)
+            member_put(list, key_bits((double)(i * 64 + (size_t)__builtin_ctzll(word))));
+    }
+    free(old);
+    return true;
+}
+
+static void member_add(PureList *list, double key) {
+    if (!list->members) return;
+    if (list->bitmap && small_key(key)) {
+        size_t bit = (size_t)key, word = bit / 64;
+        if (word >= list->member_capacity) { /* the bits grown to hold it */
+            size_t capacity = list->member_capacity;
+            while (capacity <= word) capacity *= 2;
+            uint64_t *grown = realloc(list->members, capacity * sizeof(*grown));
+            if (!grown) { members_drop(list); return; }
+            memset(grown + list->member_capacity, 0, (capacity - list->member_capacity) * sizeof(*grown));
+            list->members = grown, list->member_capacity = capacity;
+        }
+        uint64_t mask = UINT64_C(1) << (bit % 64);
+        list->member_count += !(list->members[word] & mask);
+        list->members[word] |= mask;
+        return;
+    }
+    size_t need = 2 * (list->member_count + 1), capacity = list->bitmap ? 64 : list->member_capacity;
+    while (capacity < need) capacity *= 2;
+    if ((list->bitmap || capacity != list->member_capacity) && !members_table(list, capacity)) { members_drop(list); return; }
+    member_put(list, key_bits(key));
+}
+
+/* A key out of the set; in a table the keys after it in its run moved back (no gap left behind them). */
+static void member_remove(PureList *list, double key) {
+    if (!list->members) return;
+    if (list->bitmap) {
+        if (!small_key(key) || (size_t)key / 64 >= list->member_capacity) return;
+        uint64_t *word = &list->members[(size_t)key / 64], mask = UINT64_C(1) << ((size_t)key % 64);
+        list->member_count -= (*word & mask) != 0;
+        *word &= ~mask;
+        return;
+    }
+    uint64_t bits = key_bits(key);
+    size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+    while (list->members[at] != bits) {
+        if (list->members[at] == VACANT) return;
+        at = (at + 1) & mask;
+    }
+    for (size_t next = (at + 1) & mask; list->members[next] != VACANT; next = (next + 1) & mask) {
+        size_t home = member_slot(list->members[next], mask);
+        /* next may fill the gap at when its home is not cyclically within (at, next] */
+        bool stays = at <= next ? (home > at && home <= next) : (home > at || home <= next);
+        if (!stays) list->members[at] = list->members[next], at = next;
+    }
+    list->members[at] = VACANT;
+    --list->member_count;
+}
 
 static Node *child(const Node *node, unsigned i) { return node->child[i]; }
 static Guide *guide(const Node *node) { return (Guide *)((char *)node + sizeof(Node) + FANOUT * sizeof(Node *)); }
 
-/* How many of n (at least one) ascending values are at or below key (upper)
- * or below it (lower). */
-static unsigned upper(const double *values, unsigned n, double key) {
-    const double *base = values;
-    for (; n > 1; n -= n / 2) base = base[n / 2] <= key ? base + n / 2 : base;
-    return (unsigned)(base - values) + (*base <= key);
-}
+/* How many of n (at least one) ascending values are below key. */
 static unsigned lower(const double *values, unsigned n, double key) {
     const double *base = values;
     for (; n > 1; n -= n / 2) base = base[n / 2] < key ? base + n / 2 : base;
     return (unsigned)(base - values) + (*base < key);
 }
-/* The child of an inner node holding its item at (counted from the node's first). */
+/* The child of an inner node holding its item at (counted from the node's
+ * first): its children after the first whose items begin at or before at,
+ * counted rather than halved (no load waits for another; past the last
+ * child the counts are above any position). The end is in the last child. */
 static unsigned child_at(const Node *node, size_t at) {
-    const uint32_t *before = guide(node)->before + 1, *base = before;
-    for (unsigned n = FANOUT - 1; n > 1; n -= n / 2) base = base[n / 2] <= at ? base + n / 2 : base;
-    return (unsigned)(base - before) + (*base <= at);
+    if (at >= node->items) return node->count - 1;
+    const uint32_t *before = guide(node)->before;
+    uint32_t n = 0, position = (uint32_t)at; /* every child, the first's 0 at or below any: a whole number of vectors */
+    for (unsigned i = 0; i < FANOUT; ++i) n += before[i] <= position;
+    return n - 1;
+}
+/* An inner node's last child whose lead is at or below key (the first when
+ * none is): its leads after the first at or below key, counted (past the
+ * last child they are above any key). */
+static unsigned child_by_key(const Node *node, double key) {
+    const double *keys = guide(node)->keys;
+    uint64_t n = 0; /* every child's (a whole number of vectors), less the first's */
+    for (unsigned i = 0; i < FANOUT; ++i) n += keys[i] <= key;
+    return (unsigned)n - (keys[0] <= key);
 }
 static double *numbers(const Layout *l, const Node *leaf, unsigned f) { return (double *)((char *)leaf + l->column[f]); }
 static int64_t *integers(const Layout *l, const Node *leaf, unsigned f) { return (int64_t *)((char *)leaf + l->column[f]); }
@@ -345,11 +497,8 @@ typedef struct { Node *node; unsigned index; } Step; /* a node on the way, and t
 /* The leaf holding position at (the end is in the last leaf), and at's
  * place in it. */
 static const Node *leaf_of(const PureList *list, size_t at, size_t *within) {
-    if (finger.leaf && finger.id == list->id && finger.version == list->version && at >= finger.start &&
-        at < finger.start + finger.leaf->count) {
-        *within = at - finger.start;
-        return finger.leaf;
-    }
+    const Node *kept = fingered(list, at, within);
+    if (kept) return kept;
     const Node *node = list->root;
     size_t start = 0;
     while (!node->leaf) {
@@ -357,7 +506,7 @@ static const Node *leaf_of(const PureList *list, size_t at, size_t *within) {
         start += guide(node)->before[i];
         node = child(node, i);
     }
-    finger.id = list->id, finger.version = list->version, finger.leaf = node, finger.start = start;
+    finger_keep(list, node, start);
     *within = at - start;
     return node;
 }
@@ -441,11 +590,8 @@ typedef struct {
     Node *extra[DEPTH + 1];
 } Place;
 
-static bool prepare(PureList *list, size_t at, Place *p) {
-    if (!list->root && !(list->root = new_node(list, true))) return false;
-    p->extras = p->used = 0;
-    p->appending = at == list->count;
-    if (!(p->depth = descend(list, at, p->path, &p->within))) return false;
+/* The nodes a split may take, made now so that placing cannot fail. */
+static bool prepare_extras(PureList *list, Place *p) {
     if (p->path[p->depth - 1].node->count < FANOUT) return true;
     for (; p->extras <= p->depth; ++p->extras)
         if (!(p->extra[p->extras] = new_node(list, !p->extras))) {
@@ -453,6 +599,44 @@ static bool prepare(PureList *list, size_t at, Place *p) {
             return false;
         }
     return true;
+}
+
+static bool prepare(PureList *list, size_t at, Place *p) {
+    if (!list->root && !(list->root = new_node(list, true))) return false;
+    p->extras = p->used = 0;
+    p->appending = at == list->count;
+    if (!(p->depth = descend(list, at, p->path, &p->within))) return false;
+    return prepare_extras(list, p);
+}
+
+/* The path to where key goes in a list kept in order of a number field (its
+ * key), the nodes on it the list's own; where in the list that is, and
+ * whether an item has the key there. False when memory runs out. */
+static bool descend_key(PureList *list, double key, Place *p, size_t *at, bool *found) {
+    const Layout *l = &list->layout;
+    Node **place = &list->root;
+    size_t start = 0;
+    for (unsigned depth = 0; depth < DEPTH; ++depth) {
+        Node *node = own(list, place);
+        if (!node) return false;
+        if (node->leaf) {
+            const double *keys = numbers(l, node, (unsigned)l->key);
+            unsigned low = node->count ? lower(keys, node->count, key) : 0;
+            *found = low < node->count && keys[low] == key;
+            p->path[depth] = (Step){node, 0};
+            p->depth = depth + 1;
+            p->within = low;
+            *at = start + low;
+            for (unsigned d = depth; d-- > 0;) p->path[d].node->first = child(p->path[d].node, 0)->first;
+            return true;
+        }
+        const Guide *g = guide(node);
+        unsigned taken = child_by_key(node, key);
+        start += g->before[taken];
+        p->path[depth] = (Step){node, taken};
+        place = &node->child[taken];
+    }
+    return false;
 }
 
 static void release_extras(PureList *list, Place *p) {
@@ -468,6 +652,7 @@ static void release_extras(PureList *list, Place *p) {
 static void place(PureList *list, Place *p, const PureCell *cells) {
     const Layout *l = &list->layout;
     unsigned index = p->within;
+    if (list->members) member_add(list, cells[l->key].num);
     Node *pointer = NULL; /* above the leaf: the node that goes in */
     for (unsigned d = p->depth; d-- > 0;) {
         Node *node = p->path[d].node;
@@ -520,6 +705,7 @@ static void place(PureList *list, Place *p, const PureCell *cells) {
 static void take_out(PureList *list, Step *path, unsigned depth, unsigned within) {
     const Layout *l = &list->layout;
     Node *leaf = path[depth - 1].node;
+    if (list->members) member_remove(list, numbers(l, leaf, (unsigned)l->key)[within]);
     move_items(l, leaf, within, leaf, within + 1, leaf->count - within - 1);
     --leaf->count;
     unsigned d = depth - 1;
@@ -624,6 +810,7 @@ void pure_list_free(PureList *list) {
         if (__atomic_sub_fetch(&list->refs, 1, __ATOMIC_ACQ_REL)) return;
     } else {
         free(list->journal);
+        free(list->members);
         let_go_tree(list, list->root);
         for (unsigned kind = 0; kind < 2; ++kind) {
             while (list->spares[kind]) free(list->spare[kind][--list->spares[kind]]);
@@ -639,7 +826,40 @@ void pure_list_clear(PureList *list) {
     list->root = NULL;
     list->count = list->bytes = 0;
     ++list->version;
+    if (!list->members) return;
+    if (list->bitmap && list->member_capacity <= BITMAP_KEPT) { /* small bits are kept for the next event */
+        memset(list->members, 0, list->member_capacity * sizeof(*list->members));
+        list->member_count = 0;
+        return;
+    }
+    members_drop(list); /* else bits again, from few */
+    (void)members_start(list);
 }
+
+bool pure_list_hashed(PureList *list) {
+    const Layout *l = &list->layout;
+    if (list->members) return true;
+    if (l->key < 0 || list->copy || !members_start(list)) return false;
+    for (size_t at = 0; at < list->count && list->members; ++at) /* the keys it has now, once */
+        member_add(list, pure_list_get(list, at, (unsigned)l->key).num);
+    return list->members != NULL;
+}
+
+bool pure_list_contains(const PureList *list, double key, bool *found) {
+    if (!list->members) return false;
+    if (list->bitmap) {
+        *found = small_key(key) && (size_t)key / 64 < list->member_capacity &&
+                 list->members[(size_t)key / 64] >> ((size_t)key % 64) & 1;
+        return true;
+    }
+    uint64_t bits = key_bits(key);
+    size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+    while (list->members[at] != VACANT && list->members[at] != bits) at = (at + 1) & mask;
+    *found = list->members[at] == bits;
+    return true;
+}
+
+size_t pure_list_extra(const PureList *list) { return list->member_capacity * sizeof(*list->members); }
 
 size_t pure_list_count(const PureList *list) { return list->count; }
 
@@ -1005,6 +1225,49 @@ PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, Pu
     return PURE_OK;
 }
 
+PureResult pure_list_add(PureList *list, const PureCell *cells, PureUndo *undo, size_t *at, bool *exists) {
+    const Layout *l = &list->layout;
+    *exists = false;
+    if (l->key < 0) return PURE_INVALID; /* searched and inserted apart, then */
+    if (list->members) { /* the set says at once when the key is there */
+        bool found;
+        if (pure_list_contains(list, cells[l->key].num, &found) && found) {
+            *at = pure_list_seek(list, (unsigned)l->key, cells[l->key], exists);
+            return PURE_OK;
+        }
+    }
+    if (list->count == PURE_LIST_ITEMS) return PURE_LIMIT;
+    if (!list->root && !(list->root = new_node(list, true))) return PURE_ALLOCATION;
+    Place p = {.extras = 0, .used = 0};
+    if (!descend_key(list, cells[l->key].num, &p, at, exists)) return PURE_ALLOCATION;
+    if (*exists) return PURE_OK;
+    p.appending = *at == list->count;
+    PureCell item[16];
+    unsigned owned = 0;
+    for (; owned < l->fields; ++owned)
+        if (!own_cell(list, owned, cells[owned], &item[owned])) break;
+    size_t size = RECORD_HEAD;
+    for (unsigned f = 0; list->journaled && f < l->fields; ++f) size += compact_bound(l, f, cells[f]);
+    unsigned char *record = list->journaled ? journal_room(list, size) : NULL;
+    if (owned < l->fields || (list->journaled && !record) || !prepare_extras(list, &p)) {
+        for (unsigned f = 0; f < owned; ++f) free_text(item[f].text);
+        return PURE_ALLOCATION;
+    }
+    if (undo && !log_change(undo, (Entry){.change = INSERTED, .list = list, .at = *at})) {
+        release_extras(list, &p);
+        for (unsigned f = 0; f < l->fields; ++f) free_text(item[f].text);
+        return PURE_ALLOCATION;
+    }
+    if (record) {
+        unsigned char *end = record_head(record, RECORD_INSERT, *at);
+        for (unsigned f = 0; f < l->fields; ++f) end = put_compact(l, f, item[f], end);
+        list->journal_size += (size_t)(end - record);
+    }
+    list->bytes += cells_bytes(l, item);
+    place(list, &p, item);
+    return PURE_OK;
+}
+
 /* Room for one more item's cells in the log. */
 static PureCell *log_cells(PureUndo *undo, unsigned fields) {
     if (undo->cell_count + fields > undo->cell_capacity) {
@@ -1051,10 +1314,11 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
     unsigned within, depth = 0;
     bool keyed = (int)field == l->key;
     Node *leaf;
-    if (!keyed && finger.leaf && finger.id == list->id && finger.version == list->version && at >= finger.start &&
-        at < finger.start + finger.leaf->count && !shared_node(list, finger.leaf)) {
-        leaf = (Node *)finger.leaf;
-        within = (unsigned)(at - finger.start);
+    size_t found_within;
+    const Node *kept = keyed ? NULL : fingered(list, at, &found_within);
+    if (kept && !shared_node(list, kept)) {
+        leaf = (Node *)kept;
+        within = (unsigned)found_within;
     } else {
         if (!(depth = descend(list, at, path, &within))) return PURE_ALLOCATION;
         leaf = path[depth - 1].node;
@@ -1079,9 +1343,12 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
     else if (l->kinds[field] == PURE_CELL_INTEGER) integers(l, leaf, field)[within] = copy.i64;
     else numbers(l, leaf, field)[within] = copy.num;
     if (!undo) let_go_text(list, old.text);
-    if (keyed) sum_path(list, path, depth);
+    if (keyed) {
+        sum_path(list, path, depth);
+        if (list->members) member_remove(list, old.num), member_add(list, copy.num);
+    }
     ++list->version;
-    finger.id = list->id, finger.version = list->version, finger.leaf = leaf, finger.start = at - within;
+    finger_keep(list, leaf, at - within);
     return PURE_OK;
 }
 
@@ -1165,11 +1432,22 @@ size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *
     *found = false;
     if (!node || !list->count) return 0;
     if ((int)field == l->key) {
+        /* A leaf a finger keeps whose keys reach round key holds its place
+         * (a slice's high bound is near its low one, found just before). */
+        for (unsigned i = 0; i < FINGERS; ++i) {
+            const Finger *f = &fingers[i];
+            if (!f->leaf || f->id != list->id || f->version != list->version || !f->leaf->count) continue;
+            const double *keys = numbers(l, f->leaf, field);
+            if (!(keys[0] <= key.num && key.num <= keys[f->leaf->count - 1])) continue;
+            unsigned low = lower(keys, f->leaf->count, key.num);
+            *found = low < f->leaf->count && keys[low] == key.num;
+            return f->start + low;
+        }
         /* Each level: the last child whose lead is at or below key (the
          * first when none is); then the leaf's items below key. */
         while (!node->leaf) {
             const Guide *g = guide(node);
-            unsigned taken = upper(g->keys + 1, FANOUT - 1, key.num);
+            unsigned taken = child_by_key(node, key.num);
             start += g->before[taken];
             node = child(node, taken);
         }
@@ -1178,6 +1456,7 @@ size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *
             for (unsigned i = 0; i < node->count; i += 8) __builtin_prefetch(keys + i);
         unsigned low = lower(keys, node->count, key.num);
         *found = low < node->count && keys[low] == key.num;
+        finger_keep(list, node, start); /* the item found is read there next */
         return start + low;
     }
     while (!node->leaf) {
@@ -1305,8 +1584,11 @@ void pure_undo_rollback(PureUndo *undo, size_t mark) {
             *text = (PureSpan){e->old.text, e->old.size};
         } else if (l->kinds[e->field] == PURE_CELL_INTEGER)
             integers(l, leaf, e->field)[within] = e->old.i64;
-        else
+        else {
+            double now = numbers(l, leaf, e->field)[within];
             numbers(l, leaf, e->field)[within] = e->old.num;
+            if (list->members && (int)e->field == l->key) member_remove(list, now), member_add(list, e->old.num);
+        }
         sum_path(list, path, depth);
         ++list->version;
     }

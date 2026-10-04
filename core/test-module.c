@@ -1031,7 +1031,7 @@ static bool collect_bytes(void *context, PureSpan span) {
         b->bytes = realloc(b->bytes, b->capacity);
         CHECK(b->bytes);
     }
-    memcpy(b->bytes + b->size, span.data, span.size);
+    if (span.size) memcpy(b->bytes + b->size, span.data, span.size); /* none: a save of changes all undone */
     b->size += span.size;
     return true;
 }
@@ -1097,6 +1097,281 @@ static void retired_come_back(void) {
     pure_list_free(list);
     pure_retired_free(&retired[0]);
     pure_retired_free(&retired[1]);
+}
+
+/* ---- A keyed list's keys as a set, and fingers (docs/design/020): a list
+ * keeping its keys as a set beside its tree answers as a model array does at
+ * every step of a random run of adds, removes and key changes (some undone),
+ * searches by key, reads by position and clears. Its keys go from bits to a
+ * table (a key not a small whole number), leave a table's runs from their
+ * middle, and grow bits past what a clear keeps; shares (a snapshot's copies,
+ * the same list as it was) and other lists read between, so a finger kept
+ * for one is never taken for another. */
+
+static size_t model_lower(const Model *m, double key) {
+    size_t low = 0, high = m->count;
+    while (low < high) {
+        size_t middle = (low + high) / 2;
+        if (m->items[middle].key < key) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
+/* A key the set keeps as a bit. */
+static bool small_whole(double key) { return key >= 0 && key < 4194304 && floor(key) == key; }
+
+static bool model_has(const Model *m, double key) {
+    size_t at = model_lower(m, key);
+    return at < m->count && m->items[at].key == key;
+}
+
+/* Position at read as the model has it, by get, and the search for its key. */
+static bool reads_as(const PureList *list, const Model *m, size_t at) {
+    PureCell key = pure_list_get(list, at, 0), text = pure_list_get(list, at, 1);
+    bool found;
+    return same_item(m, at, key.num, (PureSpan){text.text, text.size}) &&
+           pure_list_seek(list, 0, (PureCell){.num = m->items[at].key}, &found) == at && found;
+}
+
+static void key_sets(void) {
+    static const uint8_t fields[2] = {PURE_CELL_NUMBER, PURE_CELL_TEXT};
+    enum { ROUNDS = 120000, OTHERS = 4 };
+    uint32_t seed = 0x6b657973u;
+    PureList *list = pure_list_new(2, fields), *others[OTHERS], *copy = NULL;
+    PureRetired retired = {0};
+    PureUndo undo = {0};
+    Model model = {0}, shared = {0};
+    CHECK(list && pure_list_keyed(list, 0) == PURE_OK);
+    /* Items there before it keeps a set: the set starts with them. */
+    for (unsigned i = 0; i < 300; ++i) {
+        double key = (double)(i * 7);
+        PureCell cells[2] = {{.num = key}, {.text = (unsigned char *)"a", .size = 1}};
+        CHECK(pure_list_insert(list, i, cells, NULL) == PURE_OK);
+        model_insert(&model, i, (ModelItem){key, "a", 1});
+    }
+    CHECK(pure_list_hashed(list) && pure_list_hashed(list) && pure_list_extra(list) > 0);
+    bool found;
+    CHECK(pure_list_contains(list, 7, &found) && found && pure_list_contains(list, 8, &found) && !found);
+    CHECK(pure_list_contains(list, -0.0, &found) && found); /* -0 is the key 0 */
+    for (unsigned o = 0; o < OTHERS; ++o) { /* other lists, read between: key i at i */
+        CHECK((others[o] = pure_list_new(2, fields)) && pure_list_keyed(others[o], 0) == PURE_OK);
+        for (unsigned i = 0; i < 2000; ++i)
+            CHECK(pure_list_insert(others[o], i, (PureCell[]){{.num = i + o}, {.size = 0}}, NULL) == PURE_OK);
+    }
+    {
+        PureList *texts = pure_list_new(2, (const uint8_t[]){PURE_CELL_TEXT, PURE_CELL_NUMBER});
+        CHECK(texts && pure_list_keyed(texts, 0) == PURE_OK && !pure_list_hashed(texts) && !pure_list_contains(texts, 1, &found));
+        pure_list_free(texts);
+    }
+    size_t adds = 0, removes = 0, changes = 0, undone = 0, clears = 0, tables = 0, shares = 0;
+    bool table = false;
+    for (unsigned round = 0; round < ROUNDS; ++round) {
+        /* The keys: small whole ones (bits); some past what a clear keeps;
+         * then quarters too (a table), dense, so runs are long and removes
+         * from their middle many; then whole ones past the bits. */
+        unsigned phase = round / (ROUNDS / 4), r = next_random(&seed);
+        double key = phase == 0   ? (double)(r % 30000)
+                     : phase == 1 ? (r % 997 ? (double)(r % 30000) : (double)(r % 4000000))
+                     : phase == 2 ? (double)(r % 24000) / 4
+                                  : (r % 5 ? (double)(r % 30000) : 4194304.0 + (double)(r % 100000));
+        if (phase == 2 && r % 7 == 0) key = -key; /* negative keys too */
+        CHECK(pure_list_contains(list, key, &found) && found == model_has(&model, key));
+        unsigned op = next_random(&seed) % 16;
+        bool undoing = next_random(&seed) % 9 == 0;
+        if (op < 7) { /* add */
+            char text[12];
+            size_t size = (size_t)snprintf(text, sizeof(text), "%u", round % 100000);
+            PureCell cells[2] = {{.num = key}, {.text = (unsigned char *)text, .size = size}};
+            size_t at, low = model_lower(&model, key);
+            bool exists;
+            CHECK(pure_list_add(list, cells, undoing ? &undo : NULL, &at, &exists) == PURE_OK);
+            CHECK(at == low && exists == found);
+            if (!exists && undoing) {
+                pure_undo_rollback(&undo, 0);
+                ++undone;
+                CHECK(pure_list_contains(list, key, &found) && !found && pure_list_count(list) == model.count);
+            } else if (!exists) {
+                ModelItem item = {key, {0}, size};
+                memcpy(item.text, text, size);
+                model_insert(&model, at, item);
+                ++adds;
+                if (!table && !small_whole(key)) {
+                    table = true, ++tables; /* a table: at most half full */
+                    CHECK(pure_list_extra(list) >= 2 * model.count * sizeof(uint64_t));
+                }
+            }
+            pure_undo_commit(&undo);
+        } else if (op < 10 && model.count) { /* remove */
+            size_t at = next_random(&seed) % model.count;
+            double gone = model.items[at].key;
+            CHECK(pure_list_remove(list, at, undoing ? &undo : NULL) == PURE_OK);
+            CHECK(pure_list_contains(list, gone, &found) && !found);
+            if (undoing) {
+                pure_undo_rollback(&undo, 0);
+                ++undone;
+                CHECK(pure_list_contains(list, gone, &found) && found && reads_as(list, &model, at));
+            } else {
+                memmove(model.items + at, model.items + at + 1, (model.count - at - 1) * sizeof(*model.items));
+                --model.count;
+                ++removes;
+            }
+            pure_undo_commit(&undo);
+        } else if (op < 12 && model.count) { /* a key changed to one between its neighbours */
+            size_t at = next_random(&seed) % model.count;
+            double was = model.items[at].key, low = at ? model.items[at - 1].key : was - 4,
+                   high = at + 1 < model.count ? model.items[at + 1].key : was + 4;
+            double to = phase == 2 ? low + (high - low) * (double)(1 + next_random(&seed) % 3) / 4
+                                   : floor(low) + 1 + (double)(next_random(&seed) % 3);
+            if (to > low && to < high && (phase == 2 || to >= 0)) {
+                CHECK(pure_list_set(list, at, 0, (PureCell){.num = to}, undoing ? &undo : NULL) == PURE_OK);
+                CHECK(pure_list_contains(list, to, &found) && found);
+                CHECK(to == was || (pure_list_contains(list, was, &found) && !found));
+                if (undoing) {
+                    pure_undo_rollback(&undo, 0);
+                    ++undone;
+                    CHECK(pure_list_contains(list, was, &found) && found);
+                    CHECK(to == was || (pure_list_contains(list, to, &found) && !found));
+                } else {
+                    model.items[at].key = to;
+                    ++changes;
+                    if (!table && !small_whole(to)) table = true, ++tables;
+                }
+                CHECK(reads_as(list, &model, at));
+                pure_undo_commit(&undo);
+            }
+        } else if (op < 14) { /* a search, and the items around what it found */
+            size_t at = pure_list_seek(list, 0, (PureCell){.num = key}, &found);
+            CHECK(at == model_lower(&model, key) && found == model_has(&model, key));
+            for (size_t i = at ? at - 1 : 0; i < at + 2 && i < model.count; ++i) CHECK(reads_as(list, &model, i));
+        } else if (model.count) { /* items read in order from one */
+            size_t at = next_random(&seed) % model.count;
+            for (size_t i = at; i < at + 40 && i < model.count; ++i) {
+                PureCell k = pure_list_get(list, i, 0), t = pure_list_get(list, i, 1);
+                CHECK(same_item(&model, i, k.num, (PureSpan){t.text, t.size}));
+            }
+        }
+        /* Another list read between (fingers for five lists, four kept). */
+        unsigned o = next_random(&seed) % OTHERS, i = next_random(&seed) % 2000;
+        CHECK(pure_list_get(others[o], i, 0).num == i + o);
+        CHECK(pure_list_seek(others[o], 0, (PureCell){.num = i + o + 0.5}, &found) == i + 1 && !found);
+        /* A share: the list as it was, read beside it while it changes. */
+        if (copy) {
+            CHECK(pure_list_count(copy) == shared.count && !pure_list_contains(copy, key, &found));
+            if (shared.count) CHECK(reads_as(copy, &shared, next_random(&seed) % shared.count));
+            size_t at = pure_list_seek(copy, 0, (PureCell){.num = key}, &found);
+            CHECK(at == model_lower(&shared, key) && found == model_has(&shared, key));
+        }
+        if (round % 6000 == 3000) {
+            if (copy) {
+                CHECK(same_items(copy, &shared));
+                pure_list_free(copy);
+            }
+            CHECK((copy = pure_list_share(list, &retired, round + 1)) && !pure_list_hashed(copy));
+            model_copy(&shared, &model);
+            ++shares;
+        }
+        if (round % 9973 == 9972) { /* cleared: an event's list begins each event empty */
+            CHECK(same_items(list, &model));
+            for (size_t k = 0; k < model.count; ++k) CHECK(pure_list_contains(list, model.items[k].key, &found) && found);
+            pure_list_clear(list);
+            model.count = 0, table = false, ++clears;
+            CHECK(pure_list_count(list) == 0 && pure_list_contains(list, key, &found) && !found);
+        }
+    }
+    CHECK(same_items(list, &model));
+    for (size_t k = 0; k < model.count; ++k) CHECK(pure_list_contains(list, model.items[k].key, &found) && found);
+    CHECK(adds > 10000 && removes > 5000 && changes > 1000 && undone > 1000 && tables >= 2 && clears >= 10);
+    if (copy) pure_list_free(copy);
+    pure_list_free(list);
+    for (unsigned o = 0; o < OTHERS; ++o) pure_list_free(others[o]);
+    pure_retired_free(&retired);
+    pure_undo_free(&undo);
+    free(model.items);
+    free(shared.items);
+    printf("{\"key_sets\":{\"adds\":%zu,\"removes\":%zu,\"changes\":%zu,\"undone\":%zu,\"tables\":%zu,\"clears\":%zu,\"shares\":%zu}}\n",
+           adds, removes, changes, undone, tables, clears, shares);
+}
+
+/* A stored keyed list adds by key too (an append to it, as an event's):
+ * what it journals after the items stored whole makes the list again, with
+ * adds of keys it has (no record), adds undone (their records forgotten),
+ * removes and key changes among them. */
+static void keyed_journal(void) {
+    static const uint8_t fields[2] = {PURE_CELL_NUMBER, PURE_CELL_TEXT};
+    uint32_t seed = 0x6a6f7572u;
+    PureList *list = pure_list_new(2, fields);
+    CHECK(list && pure_list_keyed(list, 0) == PURE_OK);
+    pure_list_journal(list, true);
+    Grown stored = {0};
+    size_t stored_items = 0, adds = 0, had = 0, undone = 0, restarts = 0;
+    PureUndo undo = {0};
+    Model model = {0}, before = {0};
+    for (unsigned event = 0; event < 3000; ++event) {
+        size_t mark = undo.count, journal = pure_list_changes(list).size;
+        model_copy(&before, &model);
+        for (unsigned change = 1 + (unsigned)(next_random(&seed) % 12); change--;) {
+            unsigned roll = (unsigned)(next_random(&seed) % 100);
+            if (roll < 60 || !model.count) {
+                ModelItem item = {(double)(next_random(&seed) % 20000) / 2 - 2000, "", next_random(&seed) % 11};
+                for (size_t k = 0; k < item.size; ++k) item.text[k] = (char)('a' + next_random(&seed) % 26);
+                PureCell cells[2] = {{.num = item.key}, {.text = (unsigned char *)item.text, .size = item.size}};
+                size_t at;
+                bool exists;
+                CHECK(pure_list_add(list, cells, &undo, &at, &exists) == PURE_OK);
+                CHECK(at == model_lower(&model, item.key) && exists == model_has(&model, item.key));
+                if (exists) ++had;
+                else model_insert(&model, at, item), ++adds;
+            } else if (roll < 85) {
+                size_t at = next_random(&seed) % model.count;
+                CHECK(pure_list_remove(list, at, &undo) == PURE_OK);
+                memmove(model.items + at, model.items + at + 1, (model.count - at - 1) * sizeof(*model.items));
+                --model.count;
+            } else { /* a key changed to one between its neighbours */
+                size_t at = next_random(&seed) % model.count;
+                double low = at ? model.items[at - 1].key : model.items[at].key - 1,
+                       high = at + 1 < model.count ? model.items[at + 1].key : model.items[at].key + 1;
+                double to = low + (high - low) / 2;
+                if (to > low && to < high) {
+                    CHECK(pure_list_set(list, at, 0, (PureCell){.num = to}, &undo) == PURE_OK);
+                    model.items[at].key = to;
+                }
+            }
+        }
+        if (next_random(&seed) % 5 == 0) { /* undone: the list and its journal as before */
+            pure_undo_rollback(&undo, mark);
+            pure_list_forget(list, journal);
+            model_copy(&model, &before);
+            ++undone;
+        } else
+            pure_undo_commit(&undo);
+        if (event % 3 == 0) { /* a save: its records after the stored ones, or now and then the items whole */
+            if (event % 120 == 0) {
+                stored.size = 0;
+                Grown whole = {malloc(pure_list_size(list) + 1), 0, 0};
+                CHECK(whole.bytes);
+                pure_list_encode(list, whole.bytes);
+                collect_bytes(&stored, (PureSpan){whole.bytes, pure_list_size(list)});
+                free(whole.bytes);
+                stored_items = pure_list_size(list);
+            } else
+                collect_bytes(&stored, pure_list_changes(list));
+            pure_list_forget(list, 0);
+            if (event % 17 == 0) { /* what a restart finds is the list as it is */
+                PureList *restarted = stored_list(&stored, stored_items);
+                CHECK(restarted && same_items(restarted, &model));
+                pure_list_free(restarted);
+                ++restarts;
+            }
+        }
+    }
+    CHECK(same_items(list, &model) && adds > 5000 && had > 500 && undone > 400 && restarts > 40);
+    pure_list_free(list);
+    pure_undo_free(&undo);
+    free(stored.bytes);
+    free(model.items);
+    free(before.items);
+    printf("{\"keyed_journal\":{\"adds\":%zu,\"had\":%zu,\"undone\":%zu,\"restarts\":%zu}}\n", adds, had, undone, restarts);
 }
 
 static void list_trees(void) {
@@ -5573,6 +5848,8 @@ int main(void) {
     lists();
     retired_come_back();
     list_trees();
+    key_sets();
+    keyed_journal();
     folds();
     filters();
     lane_folds();
@@ -5601,6 +5878,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-bools-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-text-order-message-fields-timers-now-snapshots-links\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-bools-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-key-sets-text-order-message-fields-timers-now-snapshots-links\"}");
     return 0;
 }

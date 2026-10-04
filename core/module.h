@@ -198,7 +198,8 @@ const char *pure_fault_name(PureFault);
 
 /* plan, shape and range are the runtime's, set at load: a fold whose block
  * has a form for every instruction that works on a leaf of its list at once
- * runs so (plan), one in a column may be answered for every row from one
+ * runs so (plan; for an item's field, or a keyed list's key, read or set:
+ * whether it is a text), one in a column may be answered for every row from one
  * pass over its list (shape: its PureShape + 1), and a fold or a walk whose
  * test bounds a keyed list's key reads only the items in bounds (range: its
  * PureRange + 1). */
