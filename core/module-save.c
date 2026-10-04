@@ -260,7 +260,8 @@ static int read_outputs(const unsigned char *at, size_t size, SentShape *shapes,
 static PureList *stored_list(const PureApp *app, uint32_t i) {
     if (i == PURE_LIST_HEARD) return app->heard;
     if (i == PURE_LIST_OUTBOX) return app->outbox;
-    return i < app->module->states && app->module->state_type[i] == PURE_STATE_LIST ? app->lists[i] : NULL;
+    return i < app->module->states && app->module->state_type[i] == PURE_STATE_LIST &&
+                   !pure_state_transient(app->module, i) ? app->lists[i] : NULL;
 }
 
 static const char *stored_name(const PureApp *app, uint32_t i) {
@@ -696,7 +697,7 @@ static size_t encode_values(const PureModule *m, const PureValue *values, unsign
     size_t at = 4;
     memcpy(out, values_magic, 4);
     for (uint32_t i = 0; i < m->states; ++i) {
-        if (!scalar(m->state_type[i])) continue;
+        if (!scalar(m->state_type[i]) || pure_state_transient(m, i)) continue;
         size_t length = strlen(m->state_names[i]);
         uint64_t bits;
         memcpy(&bits, &values[i], sizeof(bits));
@@ -715,7 +716,7 @@ PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, Pu
                                  PureDraft *const *texts, PureList *const *lists) {
     bool scalars = false, fresh = false;
     for (uint32_t i = 0; i < m->states; ++i)
-        if (scalar(m->state_type[i])) {
+        if (scalar(m->state_type[i]) && !pure_state_transient(m, i)) {
             scalars = true;
             fresh = fresh || kept[i] < 0;
         }
@@ -734,7 +735,7 @@ PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, Pu
         for (unsigned b = 0; b < 8; ++b) bits |= (uint64_t)bytes[at + b] << (8 * b);
         at += 8;
         int state = pure_module_state(m, name);
-        if (state < 0 || kept[state] >= 0 || !scalar(type)) continue;
+        if (state < 0 || kept[state] >= 0 || !scalar(type) || pure_state_transient(m, (uint32_t)state)) continue;
         /* A number, a bool or an i64, each as the state's type holds it when it fits (pure_cell_as); a position where it fits. */
         uint8_t from = pure_value_kind(type), to = pure_value_kind(m->state_type[state]);
         PureCell cell = {.i64 = (int64_t)bits};
@@ -1016,7 +1017,8 @@ PureResult pure_save_commit(PureApp *app, const PureValue *values, void *const *
     uint32_t states[2 * PURE_MODULE_STATES + 3];
     size_t count = 0;
     for (uint32_t i = 0; i < m->states; ++i) {
-        PureDraft *draft = m->state_type[i] == PURE_STATE_TEXT ? app->texts[i] :
+        PureDraft *draft = pure_state_transient(m, i) ? NULL :
+                           m->state_type[i] == PURE_STATE_TEXT ? app->texts[i] :
                            m->state_type[i] == PURE_STATE_LIST ? app->list_drafts[i] : NULL;
         if (draft && !same_version(pure_draft_version(draft), app->saved[i])) {
             states[count] = i;

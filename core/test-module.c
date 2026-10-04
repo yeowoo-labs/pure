@@ -52,6 +52,7 @@ typedef struct { uint8_t op; uint32_t arg; double value; } O;
  * 32-bit two's complement) states follow the number states; text views
  * follow the number views. */
 typedef struct { const char *name; uint32_t type, ref; } T; /* type: the state type, its flags from bit 8 */
+#define TR (1u << 24) /* in a T's type: a transient state */
 /* A record field: a number and its default, text (text = 1) whose default
  * is the constant numbered initial, a bool (text = 2) or an i64 (text = 3)
  * and its default. */
@@ -130,7 +131,7 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.ns; ++i) { p = put32(p, offset[n++]); p = put32(p, 0); p = put_double(p, spec.s[i].initial); }
     for (size_t i = 0; i < spec.nt; ++i) {
         p = put32(p, offset[n++]);
-        p = put32(p, spec.t[i].type & 0xFF);
+        p = put32(p, (spec.t[i].type & 0xFF) | (spec.t[i].type & TR ? PURE_STATE_TRANSIENT : 0));
         if ((spec.t[i].type & 0xFF) == PURE_STATE_BOOL) { p = put_double(p, spec.t[i].ref); continue; }
         if ((spec.t[i].type & 0xFF) == PURE_STATE_I64) {
             int64_t initial = (int32_t)spec.t[i].ref;
@@ -139,7 +140,7 @@ static size_t build(unsigned char *out, Spec spec) {
             continue;
         }
         p = put32(p, spec.t[i].ref);
-        p = put32(p, spec.t[i].type >> 8);
+        p = put32(p, (spec.t[i].type & ~TR) >> 8);
     }
     for (size_t i = 0; i < spec.nc; ++i) { p = put32(p, offset[n++]); p = put32(p, 1); p = put32(p, 1); }
     uint32_t field_offsets[64], field_start = 0;
@@ -2045,6 +2046,91 @@ static void stored_migration(void) {
 
 extern unsigned long pure_save_test_checkpoints;
 
+/* Transient states (018) are the app's while it runs, undone with a failed
+ * event, never stored: a start begins them anew. Replacing the module moves
+ * a state between stored and transient: one stored from then on is saved,
+ * and one no longer stored is to the store as a dropped state. */
+static void transient_states(void) {
+    enum { N, T_, NOTE_, LOG, I_, KEEP, PICK, REQ = PURE_OP_REQUIRE, TSET_ = PURE_OP_TEXT_SET };
+    static const S nums[] = {{"n", 0}};
+    static const T a_states[] = {{"t", 0 | TR, 0}, {"note", 1 | TR, 1}, {"log", 3 | TR, 0}, {"i", 4 | TR, LOG},
+                                 {"keep", 3, 0}, {"pick", 4 | TR, KEEP}};
+    static const T b_states[] = {{"t", 0, 0}, {"note", 1, 1}, {"log", 3, 0}, {"i", 4 | TR, LOG},
+                                 {"keep", 3 | TR, 0}, {"pick", 4 | TR, KEEP}};
+    static const T stored_index[] = {{"t", 0 | TR, 0}, {"note", 1 | TR, 1}, {"log", 3 | TR, 0}, {"i", 4, LOG},
+                                     {"keep", 3, 0}, {"pick", 4 | TR, KEEP}};
+    static const RF fields[] = {{"value", 0, 0}};
+    static const R records[] = {{"row", fields, 1}};
+    static const char *const constants[] = {"", "x"};
+    static const I inputs[] = {KEY("inc", "KeyI"), KEY("fail", "KeyF"), KEY("touch", "KeyT")};
+    static const O code[] = {
+        {L, N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, N, 0},                 /* n = n + 1 */
+        {L, T_, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, T_, 0},               /* t = t + 1 */
+        {L, T_, 0}, {LA, LOG, 0}, {L, N, 0}, {LA, KEEP, 0},            /* log.append(row { t }), keep.append(row { n }) */
+        {XE, LOG, 0}, {XS, I_, 0}, {XE, KEEP, 0}, {XS, PICK, 0},       /* i = log.last, pick = keep.last */
+        {TL, NOTE_, 0}, {TK, 1, 0}, {CAT, 0, 0}, {TSET_, NOTE_, 0},     /* note = note + "x" */
+        /* fail: the transient changes, then a require that fails */
+        {L, T_, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, T_, 0}, {L, T_, 0}, {LA, LOG, 0},
+        {TL, NOTE_, 0}, {TK, 1, 0}, {CAT, 0, 0}, {TSET_, NOTE_, 0}, {C, 1, 0}, {REQ, 0, 0},
+        /* touch: only transient states */
+        {L, T_, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, T_, 0}, {L, T_, 0}, {LA, LOG, 0},
+    };
+    static const H handlers[] = {{1, 0, 20}, {3, 20, 12}, {5, 32, 6}};
+    Spec a = {nums, 1, inputs, 3, NULL, 0, handlers, 3, code, LEN(code), NULL, 0, a_states, 6, constants, 2, NULL, 0,
+              records, 1, NULL, 0};
+    Spec b = a, c = a;
+    b.t = b_states;
+    c.t = stored_index;
+    PureModule refused = {0};
+    CHECK(load(c, &refused) != PURE_OK && strstr(error, "stored position in a transient state"));
+    CHECK(load(a, &module_a) == PURE_OK && load(b, &module_b) == PURE_OK);
+    CHECK(pure_state_transient(&module_a, T_) && !pure_state_transient(&module_a, KEEP) && !pure_state_transient(&module_b, T_));
+    char *path = new_store();
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(app.values[N].num == 2 && app.values[T_].num == 2 && pure_list_count(app.lists[LOG]) == 2 &&
+          pure_list_count(app.lists[KEEP]) == 2 && app.values[I_].num == 1 && app.values[PICK].num == 1 &&
+          pure_draft_size(app.texts[NOTE_]) == 3);
+    /* A snapshot copies a transient text, and shares its lists as any other. */
+    PureSnapshot *snapshot = pure_app_snapshot(&app);
+    PureApp reader = {0};
+    CHECK(snapshot);
+    pure_app_read(&reader, snapshot);
+    CHECK(pure_draft_size(reader.texts[NOTE_]) == 3 && pure_list_count(reader.lists[LOG]) == 2 && reader.values[T_].num == 2);
+    pure_app_stop(&reader);
+    pure_snapshot_release(snapshot);
+    /* A failed event undoes transient states too. */
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) != PURE_OK && app.values[T_].num == 2 &&
+          pure_list_count(app.lists[LOG]) == 2 && pure_draft_size(app.texts[NOTE_]) == 3);
+    /* Changing only transient states stores nothing. */
+    uint64_t seq = app.seq;
+    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(app.seq == seq && app.values[T_].num == 5 && pure_list_count(app.lists[LOG]) == 5);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(app.values[N].num == 2 && pure_list_count(app.lists[KEEP]) == 2 && app.values[T_].num == 0 &&
+          !pure_list_count(app.lists[LOG]) && app.values[I_].num == 0 && app.values[PICK].num == 0 &&
+          pure_draft_size(app.texts[NOTE_]) == 1);
+    /* Into b: t, note and log are stored from now on, keep is not. */
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.values[T_].num == 2 && pure_list_count(app.lists[LOG]) == 2 &&
+          pure_list_count(app.lists[KEEP]) == 4 && pure_draft_size(app.texts[NOTE_]) == 3);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK);
+    CHECK(app.values[N].num == 5 && app.values[T_].num == 3 && pure_list_count(app.lists[LOG]) == 3 &&
+          pure_list_get(app.lists[LOG], 2, 0).num == 3 && pure_draft_size(app.texts[NOTE_]) == 4 &&
+          !pure_list_count(app.lists[KEEP]));
+    pure_app_stop(&app);
+    /* Back in a, keep is stored again: what the store has of it is what it held when it stopped being stored. */
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(app.values[N].num == 5 && pure_list_count(app.lists[KEEP]) == 4 && app.values[T_].num == 0 &&
+          !pure_list_count(app.lists[LOG]) && pure_draft_size(app.texts[NOTE_]) == 1);
+    pure_app_stop(&app);
+    remove_store(path);
+}
+
 static void stored_states(void) {
     static const char *const list_words[] = {"a", "\xea\xb0\x80", "", "\n", "\xf0\x9f\x98\x80"};
     static const char *const text_words[] = {"a", "\xea\xb0\x80", "\n", "\xf0\x9f\x98\x80", "xy\nz", ""};
@@ -2057,6 +2143,7 @@ static void stored_states(void) {
     stored_frames();
     stored_messages();
     stored_migration();
+    transient_states();
 }
 
 /* ---- Deferred saving ---------------------------------------------------- */

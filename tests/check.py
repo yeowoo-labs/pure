@@ -4271,6 +4271,96 @@ on put {
 """
 
 
+TRANSIENT_SOURCE = """record Hit {
+  n = 0
+}
+state count = 0
+transient state online = 0
+transient state recent: list of Hit
+state hits: list of Hit
+transient state status: text = "idle"
+input tap = text
+input peek = text
+input say = text
+on say {
+  status = say
+}
+on tap {
+  count = count + 1
+  online = online + 1
+  recent.append(Hit { n: online })
+  hits.append(Hit { n: count })
+}
+on peek {
+  online = online + 10
+  recent.append(Hit { n: online })
+}
+view total = count
+view live = online
+view seen = recent.count
+view kept = hits.count
+view said = status
+"""
+
+
+def server_transient(aup, pure, work):
+    """Transient states (docs/design/018) are served as any other, and
+    never stored: requests that change only them write nothing to the store,
+    a store written with them between the same stored events is byte for
+    byte the one written without, and a host killed and started again begins
+    them anew while the stored states are back."""
+    import signal
+    module, source = work / 'transient.pmod', work / 'transient.aup'
+    source.write_text(TRANSIENT_SOURCE)
+    compile_module(aup, source, module)
+
+    def files(store):
+        return {str(p.relative_to(store)): p.read_bytes() for p in sorted(store.rglob('*')) if p.is_file()}
+
+    def views(port):
+        return {v: int(http(port, 'GET', f'/views/{v}')[3]) for v in ('total', 'live', 'seen', 'kept')}
+
+    plain, mixed = work / 'transient-plain', work / 'transient-mixed'
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', plain])
+    try:
+        for _ in range(5):
+            assert http(host.port, 'POST', '/inputs/tap', b'x')[0] == 200
+    finally:
+        host.stop()
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', mixed])
+    quiet = 0
+    try:
+        for k in range(5):
+            before = files(mixed)
+            for _ in range(20):
+                assert http(host.port, 'POST', '/inputs/peek', b'x')[0] == 200
+            assert http(host.port, 'POST', '/inputs/say', f'busy {k}'.encode())[0] == 200
+            assert http(host.port, 'GET', '/views/said')[3] == f'busy {k}'.encode()  # read from a snapshot
+            assert files(mixed) == before, k  # only transient states changed: nothing written
+            quiet += 20
+            assert http(host.port, 'POST', '/inputs/tap', b'x')[0] == 200
+        assert views(host.port) == {'total': 5, 'live': 1005, 'seen': 105, 'kept': 5}, views(host.port)
+    finally:
+        host.stop()
+    stored_plain, stored_mixed = files(plain), files(mixed)
+    assert stored_plain.keys() == stored_mixed.keys() and stored_plain == stored_mixed, \
+        [name for name in stored_plain if stored_plain[name] != stored_mixed.get(name)]
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', mixed])
+    assert views(host.port) == {'total': 5, 'live': 0, 'seen': 0, 'kept': 5}, views(host.port)
+    assert http(host.port, 'GET', '/views/said')[3] == b'idle'
+    for _ in range(3):
+        assert http(host.port, 'POST', '/inputs/peek', b'x')[0] == 200
+    assert http(host.port, 'POST', '/inputs/tap', b'x')[0] == 200
+    host.process.send_signal(signal.SIGKILL)
+    host.process.communicate(timeout=30)
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', mixed])
+    try:
+        assert views(host.port) == {'total': 6, 'live': 0, 'seen': 0, 'kept': 6}, views(host.port)
+    finally:
+        host.stop()
+    return {'quiet_requests': quiet, 'store_files_compared': len(stored_plain)}
+
+
 def server_tokens(aup, pure, work):
     """An app's routes take tokens (docs/design/017, 3b). With a tokens file
     an app answers no request without a token (401, WWW-Authenticate:
@@ -4494,6 +4584,7 @@ def main():
         report['server_apps_links'] = server_apps_links(aup, pure, work)
         report['server_apps_lifecycle'] = server_apps_lifecycle(aup, pure, work)
         report['server_tokens'] = server_tokens(aup, pure, work)
+        report['server_transient'] = server_transient(aup, pure, work)
     print(json.dumps(report))
 
 

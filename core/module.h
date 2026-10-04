@@ -144,6 +144,12 @@ typedef union { double num; int64_t i64; } PureValue;
  * message's rows field fills it as the message arrives, it is emptied when
  * every event ends, and it is never saved nor logged for undoing. */
 enum { PURE_CURSOR_STAYS = 1, PURE_LIST_ROWS = 256 };
+/* A transient state (bit 8 of its type word in a module, a bit of
+ * PureModule.transient): the app holds it while it runs, and undoes it with
+ * a failed event, but never saves it: each start begins it at its initial
+ * value (docs/design/018). A stored cursor or index is of a stored text or
+ * list. */
+enum { PURE_STATE_TRANSIENT = 256 };
 /* A table view has one row per item of a list, or per item its filter
  * keeps; its columns are number, bool, i64 or text views evaluated for one
  * row at a time. */
@@ -217,6 +223,7 @@ typedef struct {
     uint8_t state_type[PURE_MODULE_STATES];
     uint16_t state_ref[PURE_MODULE_STATES]; /* text: constant; cursor: text; list: record; index: list */
     uint8_t state_flags[PURE_MODULE_STATES]; /* cursor: PURE_CURSOR_STAYS; list: PURE_LIST_ROWS >> 8 */
+    uint32_t transient; /* a bit per transient state */
     /* A keyed list: its key field + 1 (0: none). Its items stay in key order
      * (numbers by value, texts by bytes), each key once, and keys do not change. */
     uint8_t state_key[PURE_MODULE_STATES];
@@ -247,6 +254,9 @@ typedef struct {
     uint8_t record_field_type[PURE_MODULE_RECORD_FIELDS]; /* PureRecordType */
     PureValue record_field_default[PURE_MODULE_RECORD_FIELDS]; /* a number (a bool's 0 or 1), an i64, or a text constant's index */
 } PureModule;
+
+/* Whether a state of m is transient (PURE_STATE_TRANSIENT). */
+static inline bool pure_state_transient(const PureModule *m, uint32_t state) { return m->transient >> state & 1; }
 
 /* Decode and verify into out, which must be zeroed (a static one is) or hold
  * a loaded module: what it held is given back first. On failure out holds

@@ -1035,8 +1035,10 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     const unsigned char *text = p + size - constant_bytes - strings;
     if (constant_bytes) memcpy(out->constant_data, p + size - constant_bytes, constant_bytes);
     for (uint32_t i = 0; i < out->states; ++i, at += STATE_BYTES) {
-        out->state_type[i] = (uint8_t)read32(at + 4);
-        if (read32(at + 4) > PURE_STATE_I64) REFUSE("state type", i);
+        uint32_t type = read32(at + 4);
+        out->state_type[i] = (uint8_t)type;
+        if ((type & ~(uint32_t)PURE_STATE_TRANSIENT) > PURE_STATE_I64) REFUSE("state type", i);
+        if (type & PURE_STATE_TRANSIENT) out->transient |= UINT32_C(1) << i;
         /* A number's, a bool's or an i64's value is its 8 bytes; others have flags:
          * a mark (cursor), a keyed list's key field + 1, or a list of a message's rows. */
         bool value = out->state_type[i] == PURE_STATE_NUM || out->state_type[i] == PURE_STATE_BOOL ||
@@ -1044,6 +1046,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         uint32_t flags = value ? 0 : read32(at + 12);
         bool cursor = out->state_type[i] == PURE_STATE_CURSOR, list = out->state_type[i] == PURE_STATE_LIST;
         bool rows = list && flags == PURE_LIST_ROWS;
+        if (rows && type & PURE_STATE_TRANSIENT) REFUSE("state type", i); /* an event's own, saved or not */
         /* A list of a message's rows is named by the field's path (input.field), no other state. */
         if (!name_at(text, strings, read32(at), rows ? NAME_PATH : NAME_IDENTIFIER, out->state_names[i]) ||
             (rows && !strchr(out->state_names[i], '.')))
@@ -1182,6 +1185,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_BOOL))) ||
             (out->state_type[i] == PURE_STATE_INDEX && !state_of(out, out->state_ref[i], PURE_STATE_LIST)))
             REFUSE("state reference", i);
+    /* A stored position into what is not stored would come back meaning nothing. */
+    for (uint32_t i = 0; i < out->states; ++i)
+        if ((out->state_type[i] == PURE_STATE_CURSOR || out->state_type[i] == PURE_STATE_INDEX) &&
+            !(out->transient >> i & 1) && out->transient >> out->state_ref[i] & 1)
+            REFUSE("stored position in a transient state", i);
     /* A table names its list in place of code; its columns follow it. */
     for (uint32_t i = 0; i < out->views; ++i, at += VIEW_BYTES) {
         if (!name_at(text, strings, read32(at), NAME_IDENTIFIER, out->view_names[i])) REFUSE("view name", i);
@@ -2791,6 +2799,30 @@ PURE_COLD static PureResult new_text(PureDraft **out, const PureModule *m, uint3
     return result;
 }
 
+/* A stored draft given a transient text's bytes, to be saved (saved: none yet). */
+PURE_COLD static PureResult copy_text(PureDraft *to, const PureDraft *from, PureVersion *saved) {
+    size_t size = pure_draft_size(from);
+    unsigned char *bytes = size ? malloc(size) : NULL;
+    if (size && !bytes) return PURE_ALLOCATION;
+    Copy copy = {bytes};
+    PureResult result = size ? pure_draft_read(from, 0, size, copy_out, &copy) : PURE_OK;
+    if (result == PURE_OK) result = pure_draft_splice(to, 0, pure_draft_size(to), (PureSpan){bytes, size});
+    free(bytes);
+    *saved = (PureVersion){UINT64_MAX, UINT64_MAX};
+    return result;
+}
+
+/* A draft in memory with a text's bytes, or NULL. */
+static PureDraft *text_copy(const PureDraft *from) {
+    PureDraft *copy = pure_draft_new();
+    PureVersion unused;
+    if (copy && copy_text(copy, from, &unused) != PURE_OK) {
+        pure_draft_close(copy);
+        copy = NULL;
+    }
+    return copy;
+}
+
 PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record) {
     const PureRecord *r = &m->record[record];
     uint8_t kinds[PURE_RECORD_FIELDS];
@@ -3674,7 +3706,10 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
     memcpy(made->values, app->values, sizeof(made->values));
     bool ok = true;
     for (uint32_t i = 0; i < m->states && ok; ++i) {
-        if (app->texts[i]) ok = (made->texts[i] = pure_draft_freeze(app->texts[i])) != NULL;
+        /* A stored text is shared as its store holds it; a transient one, never stored, is copied. */
+        if (app->texts[i])
+            ok = (made->texts[i] = pure_state_transient(m, i) ? text_copy(app->texts[i]) : pure_draft_freeze(app->texts[i])) !=
+                 NULL;
         if (!ok || !app->lists[i]) continue;
         if (last && last->lists[i] && pure_list_current(last->lists[i], app->lists[i])) {
             pure_list_hold(last->lists[i]);
@@ -3921,22 +3956,29 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         bool valued = pure_value_kind(was) != 0xFF && pure_value_kind(now) != 0xFF;
         kept[i] = previous >= 0 && (was == now || valued) ? previous : -1;
         if (kept[i] >= 0) saved[i] = app->saved[kept[i]];
+        /* A transient state is never stored (018): one that was stored is now as a dropped one is. */
+        bool transient = pure_state_transient(module, i), was_transient = kept[i] >= 0 && pure_state_transient(old, kept[i]);
         if (module->state_type[i] == PURE_STATE_TEXT) {
-            if (kept[i] >= 0) texts[i] = app->texts[kept[i]];
+            if (kept[i] >= 0 && (transient || !was_transient || !stored)) texts[i] = app->texts[kept[i]];
+            else if (result == PURE_OK && kept[i] >= 0 && /* a text stored from now on: its draft in the store holds it */
+                     (result = pure_save_open_text(app, module, i, &texts[i], &saved[i])) == PURE_OK)
+                result = copy_text(texts[i], app->texts[kept[i]], &saved[i]);
             else if (result == PURE_OK)
-                result = stored ? pure_save_open_text(app, module, i, &texts[i], &saved[i]) :
+                result = stored && !transient ? pure_save_open_text(app, module, i, &texts[i], &saved[i]) :
                          new_text(&texts[i], module, module->state_ref[i]);
         } else if (module->state_type[i] == PURE_STATE_LIST) {
             if (result != PURE_OK) continue;
             bool rows = module->state_flags[i] & PURE_LIST_ROWS >> 8; /* rows are never stored */
+            bool saving = lists_stored && !rows && !transient;
             if (kept[i] >= 0) {
                 result = keep_list(&lists[i], app->lists[kept[i]], old, old->state_ref[kept[i]], module,
                                    module->state_ref[i]);
                 list_drafts[i] = app->list_drafts[kept[i]];
-                listed[i] = (PureSaved){app->image_seq[kept[i]], app->logged_since[kept[i]], app->logged[kept[i]], false};
-                /* Its record changed: its image, in the new fields, holds it before any change is logged. */
-                rewrite[i] = result == PURE_OK && lists_stored && !rows && lists[i] != app->lists[kept[i]];
-            } else if (lists_stored && !rows) {
+                if (!transient && !was_transient)
+                    listed[i] = (PureSaved){app->image_seq[kept[i]], app->logged_since[kept[i]], app->logged[kept[i]], false};
+                /* Its record changed, or it is stored from now on: its image, in the new fields, holds it before any change is logged. */
+                rewrite[i] = result == PURE_OK && saving && (lists[i] != app->lists[kept[i]] || was_transient);
+            } else if (saving) {
                 result = pure_save_open_list(app, module, i, &lists[i], &list_drafts[i], &listed[i]);
                 rewrite[i] = result == PURE_OK && listed[i].rewrite;
             } else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
@@ -3963,7 +4005,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         }
         if (kept[i] < 0 || lists[i] != app->lists[kept[i]]) pure_list_free(lists[i]);
         lists[i] = sorted;
-        rewrite[i] = lists_stored && !(module->state_flags[i] & PURE_LIST_ROWS >> 8);
+        rewrite[i] = lists_stored && !(module->state_flags[i] & PURE_LIST_ROWS >> 8) && !pure_state_transient(module, i);
     }
     /* A cursor or index keeps its position only while its text or list is the
      * one it belonged to. */
@@ -3999,7 +4041,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     bool imaged = result == PURE_OK;
     for (uint32_t j = 0; result == PURE_OK && old && j < old->states; ++j) {
         bool dropped = old->state_type[j] == PURE_STATE_LIST && app->logged_since[j];
-        for (uint32_t i = 0; dropped && i < module->states; ++i) dropped = kept[i] != (int)j;
+        for (uint32_t i = 0; dropped && i < module->states; ++i) dropped = kept[i] != (int)j || pure_state_transient(module, i);
         if (dropped) result = pure_save_image(app, old, j, app->lists[j]);
     }
     for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i)
@@ -4022,6 +4064,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         for (uint32_t i = 0; i < module->states; ++i) {
             if (kept[i] >= 0) {
                 if (lists[i] && lists[i] != app->lists[kept[i]]) pure_list_free(lists[i]);
+                if (texts[i] && texts[i] != app->texts[kept[i]]) pure_draft_close(texts[i]);
                 continue;
             }
             pure_draft_close(texts[i]);
@@ -4063,9 +4106,9 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     }
     pure_save_release(app);
     for (uint32_t i = 0; i < module->states; ++i) {
-        /* A stored list's changes are recorded from now on. */
+        /* A stored list's changes are recorded from now on; a transient one's never. */
         if (lists_stored && module->state_type[i] == PURE_STATE_LIST && !(module->state_flags[i] & PURE_LIST_ROWS >> 8))
-            pure_list_journal(lists[i], true);
+            pure_list_journal(lists[i], !pure_state_transient(module, i));
         /* Without memory for its keys a keyed list is still searched, only slower. */
         if (module->state_type[i] == PURE_STATE_LIST)
             (void)pure_list_keyed(lists[i], module->state_key[i] ? (int)module->state_key[i] - 1 : -1);
