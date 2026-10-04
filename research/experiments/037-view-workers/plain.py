@@ -2,8 +2,9 @@
 """A view of one expression read, before and after (docs/design/020's stage
 2, research 122): the scoreboard (benchmarks/http/scores.aup) on pure-serve
 BEFORE and AFTER in turns (connection threads 3, store in RAM, cores 0-2,
-a fresh host each run), 1,000 points posted first, then benchmarks/http/load
-(core 3) reads GET /views/total on 64 connections for SECONDS. ROUNDS
+a fresh host each run), points posted on 8 connections for a second first,
+then benchmarks/http/load (core 3) reads GET /views/total on 64 connections
+for SECONDS. ROUNDS
 pairs, the first in each even round the after one.
 
 plain.py BEFORE AFTER AUP SECONDS ROUNDS   a JSON line per run, then medians

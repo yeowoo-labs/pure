@@ -11,7 +11,7 @@
 #                               connection threads, as before)
 #   runs.sh scaling ROUND       views.py, connection threads 1: one asker, two
 #   runs.sh plain               plain.py: GET /views/total (64 connections,
-#                               10 s), before (9484700) and after, 6 pairs
+#                               10 s), before (dde73e4, stage 1) and after, 6 pairs
 set -e
 here=research/experiments/037-view-workers
 builds=$HOME/.cache/pure-037

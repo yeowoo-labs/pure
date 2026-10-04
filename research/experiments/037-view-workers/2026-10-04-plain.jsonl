@@ -1,0 +1,13 @@
+{"round": 1, "version": "before", "reads_per_second": 148378, "p50_us": 416, "p99_us": 640}
+{"round": 1, "version": "after", "reads_per_second": 148600, "p50_us": 416, "p99_us": 640}
+{"round": 2, "version": "after", "reads_per_second": 148824, "p50_us": 416, "p99_us": 640}
+{"round": 2, "version": "before", "reads_per_second": 148867, "p50_us": 416, "p99_us": 640}
+{"round": 3, "version": "before", "reads_per_second": 149299, "p50_us": 416, "p99_us": 640}
+{"round": 3, "version": "after", "reads_per_second": 148556, "p50_us": 416, "p99_us": 640}
+{"round": 4, "version": "after", "reads_per_second": 148503, "p50_us": 416, "p99_us": 640}
+{"round": 4, "version": "before", "reads_per_second": 148976, "p50_us": 416, "p99_us": 640}
+{"round": 5, "version": "before", "reads_per_second": 147896, "p50_us": 416, "p99_us": 640}
+{"round": 5, "version": "after", "reads_per_second": 148133, "p50_us": 416, "p99_us": 640}
+{"round": 6, "version": "after", "reads_per_second": 148499, "p50_us": 416, "p99_us": 640}
+{"round": 6, "version": "before", "reads_per_second": 148866, "p50_us": 416, "p99_us": 640}
+{"before_median": 148866.5, "after_median": 148529.5, "change": -0.2}

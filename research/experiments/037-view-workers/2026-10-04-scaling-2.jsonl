@@ -1,0 +1,7 @@
+{"round": 1, "way": "one", "views_per_second": 37.8}
+{"round": 1, "way": "many", "views_per_second": 73.5}
+{"round": 2, "way": "many", "views_per_second": 73.3}
+{"round": 2, "way": "one", "views_per_second": 37.8}
+{"round": 3, "way": "one", "views_per_second": 37.8}
+{"round": 3, "way": "many", "views_per_second": 73.3}
+{"nodes": 20000, "edges": 100000, "threads": 1, "askers": 2, "medians": {"one": 37.8, "many": 73.3}, "write_p99_medians_us": {}, "write_max_medians_us": {}, "serve_args": [], "scaling": 1.94}

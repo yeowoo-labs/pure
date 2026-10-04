@@ -1,0 +1,10 @@
+{"round": 1, "way": "writes", "writes_per_second": 113527, "write_p50_us": 120, "write_p99_us": 384, "write_max_us": 9216, "views_per_second": 0.0}
+{"round": 1, "way": "both", "writes_per_second": 14652, "write_p50_us": 108, "write_p99_us": 28672, "write_max_us": 131072, "views_per_second": 70.5}
+{"round": 1, "way": "apart", "writes_per_second": 52102, "write_p50_us": 232, "write_p99_us": 2304, "write_max_us": 9216, "views_per_second": 63.1}
+{"round": 2, "way": "apart", "writes_per_second": 50586, "write_p50_us": 240, "write_p99_us": 2176, "write_max_us": 9216, "views_per_second": 64.8}
+{"round": 2, "way": "both", "writes_per_second": 28232, "write_p50_us": 168, "write_p99_us": 28672, "write_max_us": 59392, "views_per_second": 70.0}
+{"round": 2, "way": "writes", "writes_per_second": 122103, "write_p50_us": 120, "write_p99_us": 240, "write_max_us": 5888, "views_per_second": 0.0}
+{"round": 3, "way": "writes", "writes_per_second": 122828, "write_p50_us": 120, "write_p99_us": 240, "write_max_us": 5888, "views_per_second": 0.0}
+{"round": 3, "way": "both", "writes_per_second": 70782, "write_p50_us": 104, "write_p99_us": 448, "write_max_us": 118784, "views_per_second": 35.7}
+{"round": 3, "way": "apart", "writes_per_second": 50748, "write_p50_us": 256, "write_p99_us": 1792, "write_max_us": 7936, "views_per_second": 66.9}
+{"nodes": 20000, "edges": 100000, "threads": 3, "askers": 2, "medians": {"writes": 122103, "both": 28232, "apart": 50748}, "write_p99_medians_us": {"writes": 240, "both": 28672, "apart": 2176}, "write_max_medians_us": {"writes": 5888, "both": 118784, "apart": 9216}, "serve_args": ["--view-workers", "0"], "writes_kept": {"both": 23.1, "apart": 41.6}, "p99_both_over_apart": 13.18, "max_both_over_apart": 12.89}
