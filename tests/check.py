@@ -3980,6 +3980,258 @@ def server_apps_links(aup, pure, work):
     return {'sent': sent, 'killed_at': killed_at, 'handed': near_stats['handed'], 'small_held': held}
 
 
+LIFE_SOURCE = """state n = 0
+state hits = 0
+input add = message { step: number }
+on add {
+  n = n + add.step
+  hits = hits + 1
+}
+view total = n
+view count = hits
+"""
+# Its next version: another input before add (add's number moves), and a state more.
+LIFE_NEXT = """state twice = 0
+state n = 0
+state hits = 0
+input reset = message { to: number }
+input add = message { step: number }
+on reset {
+  n = reset.to
+}
+on add {
+  n = n + add.step
+  hits = hits + 1
+  twice = twice + 2 * add.step
+}
+view total = n
+view count = hits
+view doubled = twice
+"""
+LIFE_SENDER = """state n = 0
+input put = message { k: u32 }
+output here = message { k: u32 }
+output far = message { k: u32 }
+on put {
+  n = n + 1
+  send here { k: put.k }
+  send far { k: put.k }
+}
+view count = n
+"""
+# A taker's next version: an input before take, which takes a field more (the sends by name).
+LIFE_TAKER_NEXT = LINKS_TAKER.replace('input take = message { k: u32 }', """state pokes = 0
+input poke = message { x: u32 }
+input take = message {
+  note: text
+  k: u32
+}
+on poke {
+  pokes = pokes + poke.x
+}""")
+
+
+def server_apps_lifecycle(aup, pure, work):
+    """Apps start, stop and change on a running host (docs/design/017,
+    stage 3): on SIGHUP it reads its --apps file again and says what it did
+    on a line. An app added answers; an app removed goes (404 no_app) and
+    another process opens its store; apps change module while requests,
+    another app's local sends and another node's link records come to them,
+    the new modules' inputs at other numbers and taking the sends by name:
+    a write answered 200 is applied once and one answered 503 stopped not at
+    all, every send arrives once and in order, and the app left alone
+    answers every request. An app that could not open its store starts at
+    the next reading once it can; a file with a wrong line changes nothing;
+    after a kill -9 the host starts as the file says, the states as saved."""
+    import os
+    import signal
+    import select
+    import socket
+    import threading
+    import time
+    for name, text in (('life', LIFE_SOURCE), ('life-next', LIFE_NEXT), ('life-sender', LIFE_SENDER),
+                       ('life-taker', LINKS_TAKER), ('life-taker-next', LIFE_TAKER_NEXT)):
+        (work / f'{name}.aup').write_text(text)
+        compile_module(aup, work / f'{name}.aup', work / f'{name}.pmod')
+    serve = pure / 'build/pure-serve'
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(('127.0.0.1', 0))
+        link_port = probe.getsockname()[1]
+    keys = {}
+    for side in ('host', 'far'):
+        (work / f'life-{side}-key.conf').write_text(f"x {work / 'life.pmod'} {work / f'life-keys-{side}'}\n")
+        host = HttpHost([serve, '--apps', work / f'life-{side}-key.conf', '--key', work / f'life-{side}.key'])
+        keys[side] = host.info['public_key']
+        host.stop()
+    module = {name: work / f'{name}.pmod' for name in ('life', 'life-next', 'life-sender', 'life-taker', 'life-taker-next')}
+    store = {name: work / f'life-store-{name}' for name in ('a', 'b', 'c', 'src', 'dst', 'dstl', 'e', 'srcf')}
+    (work / 'life-ro').mkdir()
+    store['e'] = work / 'life-ro' / 'e'
+    lines = {'a': f"a {module['life']} {store['a']}", 'b': f"b {module['life']} {store['b']}",
+             'src': f"src {module['life-sender']} {store['src']} send=here=dst/take",
+             'dst': f"dst {module['life-taker']} {store['dst']}", 'dstl': f"dstl {module['life-taker']} {store['dstl']}"}
+    conf = work / 'life.conf'
+
+    def write(names):
+        conf.write_text(''.join(lines[name] + '\n' for name in names))
+
+    write(['a', 'b', 'src', 'dst', 'dstl'])
+    args = [serve, '--apps', conf, '--key', work / 'life-host.key', '--link-port', link_port, '--threads', 2,
+            '--sender', f"srcf.far={keys['far']}"]
+    host = HttpHost(args)
+    (work / 'life-far.conf').write_text(f"srcf {module['life-sender']} {store['srcf']} "
+                                       f"send=far=pure://127.0.0.1:{link_port}/dstl/take seal=far={keys['host']}\n")
+    far = HttpHost([serve, '--apps', work / 'life-far.conf', '--key', work / 'life-far.key'])
+
+    def reading(names=None):
+        """The host reads its file again: what it said."""
+        if names is not None:
+            write(names)
+        host.process.send_signal(signal.SIGHUP)
+        ready, _, _ = select.select([host.process.stdout], [], [], 30)
+        assert ready, 'no reading'
+        said = json.loads(host.process.stdout.readline())
+        return said, {app['name']: app for app in said.get('apps', [])}
+
+    def number(port, path):
+        status, why, _, body = http(port, 'GET', path)
+        assert status == 200, (path, status, why)
+        return int(body) if body not in (b'true', b'false') else body == b'true'
+
+    sent = 600
+    try:
+        # Added: it answers. Removed: its routes go, and its store is let go.
+        assert http(host.port, 'POST', '/a/inputs/add?step=5')[0] == 200
+        assert http(host.port, 'POST', '/b/inputs/add?step=7')[0] == 200
+        lines['c'] = f"c {module['life']} {store['c']}"
+        _, did = reading(['a', 'b', 'src', 'dst', 'dstl', 'c'])
+        assert did['c'] == {'name': 'c', 'running': True, 'did': 'started'} and did['a']['did'] == 'kept', did
+        assert http(host.port, 'POST', '/c/inputs/add?step=2')[0] == 200 and number(host.port, '/c/views/total') == 2
+        _, did = reading(['a', 'src', 'dst', 'dstl', 'c'])
+        assert did['b'] == {'name': 'b', 'running': False, 'did': 'removed'}, did
+        assert http(host.port, 'GET', '/b/views/total')[:2] == (404, 'no_app')
+        other = HttpHost([serve, '--module', module['life'], '--store', store['b']])
+        try:
+            assert number(other.port, '/views/total') == 7
+        finally:
+            other.stop()
+        # Changed under load: a, dst (another app's local sends) and dstl (another node's link records) take
+        # modules whose inputs are at other numbers, the takers' by name; then the senders start again, src
+        # (its local outlet) and, on the far node, srcf (its link); c, left alone, answers every request. Each
+        # change comes while the sends go (as far as each putter got: more than none, less than all).
+        answered, refused, done = [0], [0], threading.Event()
+        progress, trouble = {'src': 0, 'srcf': 0}, []
+
+        def adder():
+            while not done.is_set():
+                status, why, _, _ = http(host.port, 'POST', '/a/inputs/add?step=1')
+                if status == 200:
+                    answered[0] += 1
+                elif (status, why) == (503, 'stopped'):
+                    refused[0] += 1
+                else:
+                    trouble.append(('a', status, why))
+
+        def putter(port, app):
+            for k in range(1, sent + 1):
+                status, why, _, _ = http(port, 'POST', f'/{app}/inputs/put?k={k}')
+                while (status, why) == (503, 'stopped'):  # its app starting again: not applied, sent again
+                    time.sleep(0.005)
+                    status, why, _, _ = http(port, 'POST', f'/{app}/inputs/put?k={k}')
+                if status != 200:
+                    trouble.append((app, k, status, why))
+                    return
+                progress[app] = k
+                time.sleep(0.002)
+
+        def watcher():
+            while not done.is_set():
+                status, why, _, _ = http(host.port, 'GET', '/c/views/total')
+                if status != 200:
+                    trouble.append(('c', status, why))
+
+        def once(app, k):
+            deadline = time.time() + 30
+            while progress[app] < k and time.time() < deadline and not trouble:
+                time.sleep(0.005)
+            return dict(progress), answered[0]
+
+        workers = [threading.Thread(target=adder), threading.Thread(target=putter, args=(host.port, 'src')),
+                   threading.Thread(target=putter, args=(far.port, 'srcf')), threading.Thread(target=watcher)]
+        for thread in workers:
+            thread.start()
+        during = []
+        during.append(once('src', 100))
+        lines['a'] = f"a {module['life-next']} {store['a']}"
+        lines['dst'] = f"dst {module['life-taker-next']} {store['dst']}"
+        lines['dstl'] = f"dstl {module['life-taker-next']} {store['dstl']}"
+        _, did = reading(['a', 'src', 'dst', 'dstl', 'c'])
+        assert [did[name]['did'] for name in ('a', 'dst', 'dstl', 'c', 'src')] == \
+            ['restarted', 'restarted', 'restarted', 'kept', 'kept'], did
+        during.append(once('src', 200))
+        lines['dst'] = f"dst {module['life-taker']} {store['dst']}"  # and back: take's number moves again
+        _, did = reading(['a', 'src', 'dst', 'dstl', 'c'])
+        assert did['dst']['did'] == 'restarted' and did['a']['did'] == 'kept', did
+        during.append(once('src', 300))
+        lines['src'] += ' queue=100000'  # the sender starts again (its module as it was), its outbox going on
+        _, did = reading(['a', 'src', 'dst', 'dstl', 'c'])
+        assert did['src']['did'] == 'restarted' and did['dst']['did'] == 'kept', did
+        during.append(once('srcf', 400))
+        (work / 'life-far.conf').write_text((work / 'life-far.conf').read_text().replace('\n', ' queue=100000\n'))
+        far.process.send_signal(signal.SIGHUP)  # the far node's sender starts again, its link with it
+        ready, _, _ = select.select([far.process.stdout], [], [], 30)
+        assert ready and json.loads(far.process.stdout.readline())['apps'][0]['did'] == 'restarted'
+        for thread in workers[1:3]:
+            thread.join()
+        done.set()
+        for thread in (workers[0], workers[3]):
+            thread.join()
+        assert not trouble, trouble[:5]
+        for put, adds in during:  # each change came while the sends went
+            assert 0 < put['src'] < sent and 0 < put['srcf'] < sent and adds > 0, during
+        whole = [sent, sent * (sent + 1) // 2, True]
+        deadline = time.time() + 30
+        while time.time() < deadline and ([number(host.port, f'/dst/views/{v}') for v in ('count', 'sum', 'in_order')] != whole or
+                                          [number(host.port, f'/dstl/views/{v}') for v in ('count', 'sum', 'in_order')] != whole):
+            time.sleep(0.05)
+        for app in ('dst', 'dstl'):
+            got = [number(host.port, f'/{app}/views/{v}') for v in ('count', 'sum', 'in_order')]
+            assert got == whole, (app, got)
+        total = 5 + answered[0]
+        assert number(host.port, '/a/views/total') == total and number(host.port, '/a/views/count') == 1 + answered[0], \
+            (number(host.port, '/a/views/total'), answered[0], refused[0])
+        # An app whose store cannot be made yet stops alone; once it can, the next reading starts it.
+        lines['e'] = f"e {module['life']} {store['e']}"
+        os.chmod(work / 'life-ro', 0o500)
+        try:
+            _, did = reading(['a', 'src', 'dst', 'dstl', 'c', 'e'])
+        finally:
+            os.chmod(work / 'life-ro', 0o700)
+        assert not did['e']['running'] and 'store' in did['e']['why'] and did['c']['did'] == 'kept', did
+        _, did = reading()
+        assert did['e'] == {'name': 'e', 'running': True, 'did': 'started'}, did
+        assert http(host.port, 'POST', '/e/inputs/add?step=3')[0] == 200
+        # A file with a wrong line changes nothing.
+        good = conf.read_text()
+        conf.write_text(good + 'two words\n')  # NAME MODULE STORE at least
+        said, _ = reading()
+        assert 'error' in said and number(host.port, '/a/views/total') == total, said
+        conf.write_text(good)
+        # After a kill -9 the host starts as the file says, its states as saved.
+        host.process.send_signal(signal.SIGKILL)
+        host.process.wait()
+        host = HttpHost(args)
+        assert all(app['running'] for app in host.info['apps']), host.info
+        assert sorted(app['name'] for app in host.info['apps']) == ['a', 'c', 'dst', 'dstl', 'e', 'src'], host.info
+        assert number(host.port, '/a/views/total') == total and number(host.port, '/e/views/total') == 3
+        assert [number(host.port, f'/dst/views/{v}') for v in ('count', 'sum', 'in_order')] == whole
+    finally:
+        host.stop()
+        far.stop()
+    return {'readings': 8, 'far_readings': 1, 'sent': sent, 'answered_while_changing': answered[0],
+            'refused_while_changing': refused[0], 'puts_at_changes': [put['src'] for put, _ in during]}
+
+
 def main():
     global EDITOR
     parser = argparse.ArgumentParser()
@@ -4031,6 +4283,7 @@ def main():
         report['server_work'] = server_work(aup, pure, work)
         report['server_apps'] = server_apps(aup, pure, work)
         report['server_apps_links'] = server_apps_links(aup, pure, work)
+        report['server_apps_lifecycle'] = server_apps_lifecycle(aup, pure, work)
     print(json.dumps(report))
 
 
