@@ -4424,6 +4424,74 @@ def server_runaway(aup, pure, work):
     return ended
 
 
+def server_view_bodies(aup, pure, work):
+    """Views that compute (docs/design/018's stage 3): aup's routes example
+    served, its distance view (a breadth first search in the view's body,
+    in its own lists) asked by 64 connections at once with random
+    arguments, each answer as a model's; its reach view without arguments.
+    A body past the work budget answers 422 work, past the memory budget 503
+    memory, and changes nothing."""
+    import random
+    import threading
+    module = work / 'routes-view.pmod'
+    compile_module(aup, EDITOR.parent / 'routes.aup', module)
+    rng = random.Random(18)
+    n, edges = 300, set()
+    while len(edges) < 1200:
+        a, b = rng.randrange(n), rng.randrange(n)
+        if a != b:
+            edges.add((a, b))
+    out = {v: [] for v in range(n)}
+    for a, b in edges:
+        out[a].append(b)
+
+    def far(a, b):
+        depth, frontier = {a: 0}, [a]
+        for v in frontier:
+            for t in out[v]:
+                if t not in depth:
+                    depth[t] = depth[v] + 1
+                    frontier.append(t)
+        return depth.get(b, -1), depth
+
+    store = work / 'routes-view'
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store, '--threads', 3])
+    asked, wrong = [0], []
+    try:
+        for a, b in sorted(edges):
+            assert http(host.port, 'POST', f'/inputs/link?from={a}&to={b}&w=1')[0] == 200
+        first = min(v for edge in edges for v in edge)
+        _, depth = far(first, first)
+        assert int(http(host.port, 'GET', '/views/reach')[3]) == len(depth) * 1000 + max(depth.values())
+
+        def ask(seed):
+            r = random.Random(seed)
+            for _ in range(20):
+                a, b = r.randrange(n), r.randrange(n)
+                status, _, _, body = http(host.port, 'GET', f'/views/distance?start={a}&goal={b}')
+                if status != 200 or int(body) != far(a, b)[0]:
+                    wrong.append((a, b, status, body))
+                asked[0] += 1
+
+        threads = [threading.Thread(target=ask, args=(k,)) for k in range(64)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not wrong and asked[0] == 64 * 20, wrong[:5]
+    finally:
+        host.stop()
+    for budget, status, error in (('--work', 422, 'work'), ('--memory', 503, 'memory')):
+        host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store, budget, 2000])
+        try:
+            got = http(host.port, 'GET', '/views/distance?start=0&goal=1')
+            assert got[0] == status and got[1] == error, (budget, got)
+            assert http(host.port, 'GET', '/views/graph')[3] == f'{n} nodes, {len(edges)} edges'.encode()
+        finally:
+            host.stop()
+    return {'answers': asked[0], 'connections': 64}
+
+
 def server_tokens(aup, pure, work):
     """An app's routes take tokens (docs/design/017, 3b). With a tokens file
     an app answers no request without a token (401, WWW-Authenticate:
@@ -4649,6 +4717,7 @@ def main():
         report['server_tokens'] = server_tokens(aup, pure, work)
         report['server_transient'] = server_transient(aup, pure, work)
         report['server_runaway'] = server_runaway(aup, pure, work)
+        report['server_view_bodies'] = server_view_bodies(aup, pure, work)
     print(json.dumps(report))
 
 

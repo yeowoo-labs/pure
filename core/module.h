@@ -175,7 +175,10 @@ enum { PURE_CURSOR_STAYS = 1, PURE_LIST_ROWS = 256 };
 enum { PURE_STATE_TRANSIENT = 256 };
 /* A table view has one row per item of a list, or per item its filter
  * keeps; its columns are number, bool, i64 or text views evaluated for one
- * row at a time. */
+ * row at a time. A view outside a table may compute (docs/design/018): its
+ * code may hold LOOP, EACH, BREAK and locals, and change an event's lists,
+ * but no state; each evaluation begins with its locals 0 and those lists
+ * empty (a reader's own: readers of one snapshot compute apart). */
 typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2, PURE_VIEW_BOOL = 3, PURE_VIEW_I64 = 4 } PureViewType;
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
@@ -259,6 +262,9 @@ typedef struct {
     PureBlock view_code[PURE_MODULE_VIEWS];
     uint8_t view_plan[PURE_MODULE_VIEWS]; /* a table's filter runs a leaf of its list at once (as a fold may) */
     uint8_t view_arguments[PURE_MODULE_VIEWS]; /* the input of a view's arguments + 1 (a column's: its table's), or 0 */
+    /* Set at load: a view's code computes (its locals and loops: a body), and the event's lists it changes, a bit each. */
+    bool view_body[PURE_MODULE_VIEWS];
+    uint32_t view_lists[PURE_MODULE_VIEWS];
     PureShape shape[PURE_MODULE_SHAPES];
     uint8_t shapes;
     PureRange range[PURE_MODULE_RANGES];
@@ -413,6 +419,7 @@ typedef struct {
     size_t memory; /* the budget of what the states hold (0: none): pure_app_memory */
     uint64_t work_budget, work; /* pure_app_work's budget (0: PURE_WORK_DEFAULT), and what the unit running has used */
     int64_t grown, spent; /* what the event running has added to the states (and its lists), as stored and in all */
+    PureList *own[PURE_MODULE_STATES]; /* a reader's: the event's lists its views compute in, its own */
     size_t room;          /* what it may hold for that in all: PURE_GROWTH_DEFAULT, or the memory budget if larger */
     PureFault view_fault; /* why the last view evaluated had no value (pure_app_view_fault) */
     char why[128]; /* why the last start or replace was refused, when it says (else empty; a failed start keeps it) */

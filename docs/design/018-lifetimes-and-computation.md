@@ -2,7 +2,7 @@
 
 작성일: 2026-10-04. 상태: 설계와 착수 기준. 1단계(transient) 구현, 검사로 고정하고 쟀다
 ([117](../research/117-transient-states.md)). 2단계(핸들러의 계산) 구현, 검사로 고정하고 쟀다
-([118](../research/118-computing-in-one-event.md)).
+([118](../research/118-computing-in-one-event.md)). 3단계(보기의 본문) 구현, 검사로 고정했다.
 [외부 리뷰 005](../outside-feedback/feedback-005.md)의 (1) "순수 인메모리 연산 및 알고리즘의 단절"과, 상태의 영속성과 상태성을 aup
 안에서 정할 수단이 필요하다는 요청에서 시작한다.
 
@@ -71,10 +71,10 @@ on route {
   if seen.has(route.to) { reached = reached + 1 }
 }
 
-view distance(from: u32, to: u32) = {    # 보기의 본문(3단계): 스냅숏에서 돈다
+view distance(start: u32, goal: u32) {   # 보기의 본문(3단계): 스냅숏에서 돈다
   let seen: list of Seen by node
   ...
-  if seen.has(to) { seen[to].depth } else { -1 }   # 마지막 줄이 보기의 값
+  return if seen.has(goal) { seen[goal].depth } else { -1 }   # 마지막 줄이 보기의 값
 }
 ```
 
@@ -129,8 +129,9 @@ view distance(from: u32, to: u32) = {    # 보기의 본문(3단계): 스냅숏�
 
 ### 보기의 본문 (3단계)
 
-- `view 이름(인자…) = { 문장… 식 }`: 수, bool, i64, text 보기의 값을 블록으로 쓴다. 블록 안에 `let`(값과 리스트), `for`,
-  `break`, `if`, 걷기를 쓴다. 마지막 줄의 식이 값이다. 표 보기의 열과 필터는 지금처럼 식이다.
+- `view 이름(인자…) { 문장… return 식 }`: 수, bool, i64, text 보기의 값을 블록으로 쓴다. 블록 안에 `let`(값과 리스트), `for`,
+  `break`, `if`, 걷기를 쓴다. 마지막 줄의 `return 식`이 보기의 값이다(처음 적은 `= { 문장… 식 }`은 구현하며 바꿨다: 마지막 줄의
+  `if 식 { … } else { … }`가 문장인지 값인지 파서가 그 줄을 읽기 전에 가를 수 없다). 표 보기의 열과 필터는 지금처럼 식이다.
 - 본문은 상태를 바꾸지 못한다. 바꾸는 것은 지역 칸과 이벤트의 리스트뿐이다(검증기가 보기 안의 다른 효과를 거절한다).
 - 스냅숏을 읽는 쪽(`pure_app_read`)은 이벤트의 리스트를 자기 것으로 따로 가진다. 그래서 여러 연결 스레드가 같은 보기를 다른
   인자로 동시에 평가한다. 소유자에서 평가하는 보기(`pure-run`, Vega의 호스트)는 평가가 끝나면 그 리스트를 비운다.

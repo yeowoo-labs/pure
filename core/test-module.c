@@ -1429,7 +1429,7 @@ static void lists(void) {
     static const V append_view[] = {{"v", 0, 3}};
     bad = (Spec){nums, 1, inputs, 0, append_view, 1, NULL, 0, (O[]){{TK, 0, 0}, {C, 0, 0}, {LA, 1, 0}}, 3, NULL, 0,
                  two_lists, 3, constants, 3, NULL, 0, records, 1, NULL, 0};
-    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view with an effect"));
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view changes a state")); /* a body changes its event's lists alone */
     static const T index_of_number[] = {{"ia", 4, 0}};
     bad = (Spec){nums, 1, inputs, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, index_of_number, 1, constants, 3, NULL, 0,
                  records, 1, NULL, 0};
@@ -3262,8 +3262,10 @@ static void locals(void) {
     static const O other_list[] = {{XF, L_XS, 0}, {LOCAL_S, LOCAL(0, 3), 0}};
     static const O far_slot[] = {{C, 0, 1}, {LOCAL_S, LOCAL(64, -1), 0}};
     static const H first2[] = {{1, 0, 2}}, first4[] = {{1, 0, 4}}, first5[] = {{1, 0, 5}};
+    /* A view outside a table computes (018): its locals begin at 0. */
+    CHECK(load(local_spec(view_local, 1, NULL, 0, local_view, 1), &module_b) == PURE_OK && module_b.view_body[0]);
+    pure_module_release(&module_b);
     const struct { Spec spec; const char *reason; } refused[] = {
-        {local_spec(view_local, 1, NULL, 0, local_view, 1), "local outside a handler"},
         {local_spec(fold_store, LEN(fold_store), first5, 1, NULL, 0), "fold with an effect"},
         {local_spec(two_things, LEN(two_things), first4, 1, NULL, 0), "local used as two things"},
         {local_spec(other_list, LEN(other_list), first2, 1, NULL, 0), "no such state"},
@@ -5453,6 +5455,108 @@ static void loops(void) {
     puts("{\"loops\":\"count-break-nested-walks-event-lists-work-memory-refusals\"}");
 }
 
+/* Views that compute (docs/design/018): a body's locals begin at 0 and
+ * the event's lists it fills begin empty at each evaluation, on the app and
+ * on readers of one snapshot at once (each its own lists); its loops count
+ * as a view's work, its lists as an event's growth. */
+typedef struct { PureSnapshot *snapshot; double total, distinct; unsigned rounds; } BodyReads;
+
+static void *read_bodies(void *context) {
+    BodyReads *r = context;
+    PureApp reader = {0};
+    for (unsigned k = 0; k < r->rounds; ++k) {
+        pure_app_read(&reader, r->snapshot);
+        double total, distinct;
+        CHECK(pure_app_view(&reader, 1, &distinct) && distinct == r->distinct);
+        CHECK(pure_app_view(&reader, 0, &total) && total == r->total);
+    }
+    CHECK(reader.own[3] && !pure_list_count(reader.own[3]));
+    pure_app_stop(&reader);
+    return NULL;
+}
+
+static void view_bodies(void) {
+    enum { N, XS = 2, SEEN, LOOP = PURE_OP_LOOP, LL = PURE_OP_LOCAL_LOAD, LS = PURE_OP_LOCAL_STORE, HAS_ = PURE_OP_LIST_HAS,
+           EACH_ = PURE_OP_EACH, MOD_ = PURE_OP_MOD };
+    static const S nums[] = {{"n", 0}, {"m", 0}};
+    static const T states[] = {{"xs", 3, 0}, {"let.seen", 3 | (uint32_t)(PURE_LIST_ROWS | 1) << 8, 0}};
+    static const RF fields[] = {{"value", 0, 0}};
+    static const R records[] = {{"row", fields, 1}};
+    static const I inputs[] = {KEY("add", "KeyA")};
+    static const O code[] = {
+        /* add: xs.append(row { n mod 7 }); n = n + 1 (8) */
+        {L, N, 0}, {C, 0, 7}, {MOD_, 0, 0}, {LA, XS, 0}, {L, N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, N, 0},
+        /* total at 8: s = 0; for i in 0 .. xs.count { s = s + (xs.first + i).value }; s (13) */
+        {C, 0, 0}, {LS, 1, 0}, {C, 0, 0}, {LC, XS, 0}, {LOOP, 0 | 7u << 16, 0},
+        {LL, 1, 0}, {XF, XS, 0}, {LL, 0, 0}, {XM, 0, 0}, {IG, XS, 0}, {ADD, 0, 0}, {LS, 1, 0}, {LL, 1, 0},
+        /* distinct at 21: for x in xs { if !seen.has(x.value) { seen.add(row { x.value }) } }; seen.count (10) */
+        {EACH_, WALKING(XS, 8), 0}, {ROW, XS, 0}, {IG, XS, 0}, {HAS_, SEEN, 0}, {NOT, 0, 0}, {JZ, 30, 0}, {ROW, XS, 0},
+        {IG, XS, 0}, {LA, SEEN, 0}, {LC, SEEN, 0},
+        /* spin at 31: for i in 0 .. 1e15 { }; 1 (4) */
+        {C, 0, 0}, {C, 0, 1e15}, {LOOP, 0, 0}, {C, 0, 1},
+        /* fill at 35: for i in 0 .. 1e6 { seen.add(row { i }) }; seen.count (6) */
+        {C, 0, 0}, {C, 0, 1e6}, {LOOP, 0 | 2u << 16, 0}, {LL, 0, 0}, {LA, SEEN, 0}, {LC, SEEN, 0},
+    };
+    static const H handlers[] = {{1, 0, 8}};
+    static const V views[] = {{"total", 8, 13}, {"distinct", 21, 10}, {"spin", 31, 4}, {"fill", 35, 6}};
+    Spec spec = {nums, 2, inputs, 1, views, 4, handlers, 1, code, LEN(code), NULL, 0, states, 2, NULL, 0, NULL, 0,
+                 records, 1, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    CHECK(module_a.view_body[0] && module_a.view_body[1] && !module_a.view_lists[0] && module_a.view_lists[1] == 1u << SEEN);
+    char *path = new_store();
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    double total = 0, value;
+    for (int k = 0; k < 20; ++k) {
+        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+        total += k % 7;
+    }
+    for (int round = 0; round < 2; ++round) /* each evaluation begins anew */
+        CHECK(number_view(&app, 0) == total && number_view(&app, 1) == 7 && !pure_list_count(app.lists[SEEN]));
+    CHECK(!pure_app_view(&app, 2, &value) && pure_app_view_fault(&app) == PURE_FAULT_WORK);
+    CHECK(number_view(&app, 3) == 1e6 && !pure_list_count(app.lists[SEEN]));
+    pure_app_memory(&app, 4096);
+    CHECK(!pure_app_view(&app, 3, &value) && pure_app_view_fault(&app) == PURE_FAULT_MEMORY && !pure_list_count(app.lists[SEEN]));
+    pure_app_memory(&app, 0);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK); /* the app goes on */
+    total += 20 % 7;
+    /* Readers of one snapshot compute at once, each in its own lists. */
+    BodyReads reads = {pure_app_snapshot(&app), total, 7, 2000};
+    CHECK(reads.snapshot);
+    pthread_t threads[3];
+    for (int t = 0; t < 3; ++t) CHECK(!pthread_create(&threads[t], NULL, read_bodies, &reads));
+    for (int t = 0; t < 3; ++t) pthread_join(threads[t], NULL);
+    pure_snapshot_release(reads.snapshot);
+    pure_app_stop(&app);
+    remove_store(path);
+
+    /* A body changes no state. */
+    static const O stores[] = {{C, 0, 0}, {C, 0, 2}, {LOOP, 0 | 2u << 16, 0}, {C, 0, 1}, {ST, N, 0}, {C, 0, 1}};
+    static const O appends[] = {{C, 0, 1}, {LA, XS, 0}, {C, 0, 1}};
+    static const O breaks[] = {{PURE_OP_BREAK, 0, 0}, {C, 0, 1}};
+    const struct { const O *code; size_t count; const char *why; } refused[] = {
+        {stores, LEN(stores), "view with an effect"},
+        {appends, LEN(appends), "view changes a state"},
+        {breaks, LEN(breaks), "break outside a loop"},
+    };
+    for (size_t i = 0; i < LEN(refused); ++i) {
+        V one[] = {{"v", 0, (uint32_t)refused[i].count}};
+        Spec bad = spec;
+        bad.o = refused[i].code;
+        bad.no = refused[i].count;
+        bad.h = NULL;
+        bad.nh = 0;
+        bad.v = one;
+        bad.nv = 1;
+        if (load(bad, &module_b) == PURE_OK || !strstr(error, refused[i].why)) {
+            fprintf(stderr, "body case %zu: expected '%s', got '%s'\n", i, refused[i].why, error);
+            abort();
+        }
+    }
+    pure_module_release(&module_a);
+    puts("{\"view_bodies\":\"locals-loops-own-lists-readers-work-memory-refusals\"}");
+}
+
 int main(void) {
     number_texts();
     behaviour();
@@ -5477,6 +5581,7 @@ int main(void) {
     view_arguments();
     locals();
     loops();
+    view_bodies();
     ranges();
     keyed();
     keyed_mutations();

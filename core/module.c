@@ -21,8 +21,9 @@ enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_AR
 /* Where an opcode may appear. */
 /* IN_ARGUMENTS: fields read where nothing is done with them (a view's arguments, a message's fields in a fold). */
 /* IN_LOCALS: a handler's locals, read in its walks and the folds in them. */
+/* IN_COMPUTE: what a view's body may do too (018): loops, locals, and changes to an event's lists alone. */
 enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64, IN_ARGUMENTS = 128,
-       IN_LOCALS = 256 };
+       IN_LOCALS = 256, IN_COMPUTE = 512 };
 enum { READ = IN_VIEW | IN_HANDLER };
 /* What an argument names: nothing (it is 0), a state of one type (A_STATE +
  * the type), a list and one of its record's fields, a message field, the
@@ -37,8 +38,10 @@ enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_COLLEC
  * or a value and whether to include it (a bool): a number (FOLD_TWO) or an
  * i64 (FOLD_I64). A table's filter is verified as a column that leaves a
  * bool: these stand for a view type. A walk's block (EACH) is verified as
- * its handler's code that may read the item it runs for (WALK). */
-enum { FOLD_ONE = 100, FOLD_TWO, FOLD_I64, FILTER, WALK };
+ * its handler's code that may read the item it runs for (WALK). In a view's
+ * body a loop's block leaves nothing either (STEPS), and a walk's reads its
+ * item (STEPS_WALK); neither changes a state. */
+enum { FOLD_ONE = 100, FOLD_TWO, FOLD_I64, FILTER, WALK, STEPS, STEPS_WALK };
 /* The text or list an opcode works on: its cursor and index operands belong
  * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_OPERAND:
  * it pushes a position in its operand's text or list. O_ARG: the argument.
@@ -94,11 +97,11 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_CUR_COUNT] = {1, {T_CURSOR}, T_NUM, READ, A_UNIT, O_ANY},
     /* Record operations also take as many values as the list's record has fields. */
     [PURE_OP_LIST_COUNT] = {0, {0}, T_NUM, READ, STATE(LIST), O_ANY},
-    [PURE_OP_LIST_APPEND] = {0, {0}, 0, IN_HANDLER, STATE(LIST), O_ANY},
-    [PURE_OP_LIST_INSERT] = {1, {T_INDEX}, 0, IN_HANDLER, STATE(LIST), O_ARG},
-    [PURE_OP_LIST_REMOVE] = {1, {T_INDEX}, 0, IN_HANDLER, STATE(LIST), O_ARG},
+    [PURE_OP_LIST_APPEND] = {0, {0}, 0, IN_HANDLER | IN_COMPUTE, STATE(LIST), O_ANY},
+    [PURE_OP_LIST_INSERT] = {1, {T_INDEX}, 0, IN_HANDLER | IN_COMPUTE, STATE(LIST), O_ARG},
+    [PURE_OP_LIST_REMOVE] = {1, {T_INDEX}, 0, IN_HANDLER | IN_COMPUTE, STATE(LIST), O_ARG},
     [PURE_OP_ITEM_GET] = {1, {T_INDEX}, T_ITEM, READ, A_ITEM, O_LIST},
-    [PURE_OP_ITEM_SET] = {1, {T_INDEX}, 0, IN_HANDLER, A_ITEM, O_LIST},
+    [PURE_OP_ITEM_SET] = {1, {T_INDEX}, 0, IN_HANDLER | IN_COMPUTE, A_ITEM, O_LIST},
     [PURE_OP_INDEX_LOAD] = {0, {0}, T_INDEX, READ, STATE(INDEX), O_REF},
     [PURE_OP_INDEX_STORE] = {1, {T_INDEX}, 0, IN_HANDLER, STATE(INDEX), O_REF},
     [PURE_OP_INDEX_MOVE] = {2, {T_INDEX, T_NUM}, T_INDEX, READ, A_NONE, O_OPERAND},
@@ -117,12 +120,12 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_LIST_HAS] = {1, {T_KEY}, T_BOOL, READ, A_KEYED, O_ANY},
     [PURE_OP_NOW] = {0, {0}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
     [PURE_OP_SEND] = {0, {0}, 0, IN_HANDLER, A_OUTPUT, O_ANY},
-    [PURE_OP_EACH] = {0, {0}, 0, IN_HANDLER, A_EACH, O_ANY},
+    [PURE_OP_EACH] = {0, {0}, 0, IN_HANDLER | IN_COMPUTE, A_EACH, O_ANY},
     [PURE_OP_LOCAL_LOAD] = {0, {0}, T_LOCAL, IN_LOCALS, A_LOCAL, O_ANY},
-    [PURE_OP_LOCAL_STORE] = {1, {T_LOCAL}, 0, IN_HANDLER, A_LOCAL, O_ANY},
+    [PURE_OP_LOCAL_STORE] = {1, {T_LOCAL}, 0, IN_HANDLER | IN_COMPUTE, A_LOCAL, O_ANY},
     /* LOOP takes its low and high, two numbers or two i64s (the operands are its argument's). */
-    [PURE_OP_LOOP] = {0, {0}, 0, IN_HANDLER, A_LOOP, O_ANY},
-    [PURE_OP_BREAK] = {0, {0}, 0, IN_HANDLER, A_NONE, O_ANY},
+    [PURE_OP_LOOP] = {0, {0}, 0, IN_HANDLER | IN_COMPUTE, A_LOOP, O_ANY},
+    [PURE_OP_BREAK] = {0, {0}, 0, IN_HANDLER | IN_COMPUTE, A_NONE, O_ANY},
     [PURE_OP_FLOOR] = NUMS(1), [PURE_OP_MOD] = NUMS(2),
     [PURE_OP_I64_ADD] = I64S(2), [PURE_OP_I64_SUB] = I64S(2), [PURE_OP_I64_MUL] = I64S(2), [PURE_OP_I64_DIV] = I64S(2),
     [PURE_OP_I64_MOD] = I64S(2), [PURE_OP_I64_NEG] = I64S(1), [PURE_OP_I64_MIN] = I64S(2), [PURE_OP_I64_MAX] = I64S(2),
@@ -422,16 +425,21 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
                                          uint32_t event, bool locals, unsigned nest, uint32_t walked, uint32_t *at,
                                          unsigned char *target) {
 #define REFUSE(why) do { *at = pc; return why; } while (0)
-    bool handler = view < 0 || view == WALK, folding = view == FOLD_ONE || view == FOLD_TWO || view == FOLD_I64;
+    bool steps = view == STEPS || view == STEPS_WALK, handler = view < 0 || view == WALK || steps;
+    bool folding = view == FOLD_ONE || view == FOLD_TWO || view == FOLD_I64;
+    /* A view outside a table computes (locals: its code reads them): a body, and the loops in it. */
+    bool body = steps || (!handler && !folding && view != FILTER && row < 0 && locals);
     if (!handler && !block.length) return "empty view";
     /* A handler's message or text; a view's arguments, or the message of the handler a fold is in. */
     int input = event_input(event);
     const PureInputShape *shape = input >= 0 ? &m->input[input] : NULL;
-    unsigned where = !handler ? IN_VIEW | (row >= 0 ? IN_ROW : 0) | (folding && outer >= 0 ? IN_OUTER : 0)
+    unsigned where = steps ? IN_VIEW | IN_COMPUTE | (view == STEPS_WALK ? IN_ROW : 0)
+                   : !handler ? IN_VIEW | (row >= 0 ? IN_ROW : 0) | (folding && outer >= 0 ? IN_OUTER : 0) | (body ? IN_COMPUTE : 0)
                               : IN_HANDLER | (view == WALK ? IN_ROW : 0);
-    if (shape && handler && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE | (shape->keyed ? IN_KEYED : 0);
-    if (shape && handler && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
-    if (shape && !handler && (shape->kind == PURE_KIND_MESSAGE || shape->kind == PURE_KIND_ARGUMENTS)) where |= IN_ARGUMENTS;
+    if (shape && handler && !steps && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE | (shape->keyed ? IN_KEYED : 0);
+    if (shape && handler && !steps && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
+    if (shape && (!handler || steps) && (shape->kind == PURE_KIND_MESSAGE || shape->kind == PURE_KIND_ARGUMENTS))
+        where |= IN_ARGUMENTS;
     if (locals) where |= IN_LOCALS;
     unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK];
     Join joins[PURE_MODULE_JOINS];
@@ -467,7 +475,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             if (allowed & IN_LOCALS) REFUSE("local outside a handler");
             if (view == FILTER) REFUSE("filter with an effect");
             if (folding) REFUSE("fold with an effect");
-            if (!handler) REFUSE("view with an effect");
+            if (!handler || steps) REFUSE("view with an effect");
             if (allowed & IN_KEYED) REFUSE("document operation outside a keyed message handler");
             if (allowed & IN_TEXT) REFUSE("text input outside a text handler");
             REFUSE("message operation outside a message handler");
@@ -492,6 +500,11 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (op->op == PURE_OP_BREAK && height) REFUSE("break with values on the stack");
         if (op->op == PURE_OP_ITEM_SET && m->state_key[list_of(arg)] == item_field(arg) + 1)
             REFUSE("change of a keyed list's key");
+        /* A view's body changes an event's lists alone: its states are a snapshot's. */
+        if (body && (op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT || op->op == PURE_OP_LIST_REMOVE ||
+                     op->op == PURE_OP_ITEM_SET) &&
+            !(m->state_flags[op->op == PURE_OP_ITEM_SET ? list_of(arg) : arg] & PURE_LIST_ROWS >> 8))
+            REFUSE("view changes a state");
         /* PICK copies the value arg below the top; SLIDE drops arg values under the top. */
         if (kind == A_DEPTH) {
             bool pick = op->op == PURE_OP_PICK;
@@ -515,10 +528,10 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             unsigned how = arg & PURE_FOLD_KIND;
             uint32_t list = arg >> 8 & 0xFF;
             /* A fold in a walk reads the walk's item as a fold in a column reads its row; a loop's block is its block's code. */
-            const char *why = kind == A_EACH ? verify_block(m, (PureBlock){pc + 1, skip}, WALK, (int)list, -1, event, locals,
-                                                            nest + 1, walked | UINT32_C(1) << (list & 31), &inner)
-                            : kind == A_LOOP ? verify_block(m, (PureBlock){pc + 1, skip}, view, row, outer, event, locals,
-                                                            nest + 1, walked, &inner)
+            const char *why = kind == A_EACH ? verify_block(m, (PureBlock){pc + 1, skip}, body ? STEPS_WALK : WALK, (int)list, -1,
+                                                            event, locals, nest + 1, walked | UINT32_C(1) << (list & 31), &inner)
+                            : kind == A_LOOP ? verify_block(m, (PureBlock){pc + 1, skip}, body && !steps ? STEPS : view, row,
+                                                            outer, event, locals, nest + 1, walked, &inner)
                                              : verify_block(m, (PureBlock){pc + 1, skip},
                                                             how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? FOLD_ONE :
                                                             arg & PURE_FOLD_INTEGER ? FOLD_I64 : FOLD_TWO,
@@ -1280,10 +1293,21 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         bad = i;
         bool table = out->view_type[i] == PURE_VIEW_TABLE;
         uint32_t event = out->view_arguments[i] ? 2u * out->view_arguments[i] - 1u : 0; /* the arguments' input, as an arrival */
+        bool computes = !table && !out->view_table[i]; /* a view outside a table may have a body */
         if ((!table || out->view_code[i].length) &&
             (why = verify_block(out, out->view_code[i], table ? FILTER : out->view_type[i],
-                                table || out->view_table[i] ? out->view_list[i] : -1, -1, event, false, 0, 0, &bad)))
+                                table || out->view_table[i] ? out->view_list[i] : -1, -1, event, computes, 0, 0, &bad)))
             goto refused;
+        if (computes && !locals_agree(out, out->view_code[i])) { why = "local used as two things"; goto refused; }
+        for (uint32_t pc = out->view_code[i].start; computes && pc < out->view_code[i].start + out->view_code[i].length; ++pc) {
+            const PureOp *op = &out->code[pc];
+            if (op->op == PURE_OP_LOCAL_LOAD || op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH)
+                out->view_body[i] = true;
+            if (op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT || op->op == PURE_OP_LIST_REMOVE)
+                out->view_lists[i] |= UINT32_C(1) << (op->arg & 31);
+            if (op->op == PURE_OP_ITEM_SET) out->view_lists[i] |= UINT32_C(1) << (list_of(op->arg) & 31);
+        }
+        if (out->view_lists[i]) out->view_body[i] = true;
     }
     for (uint32_t i = 0; i < out->handlers; ++i) {
         bad = i;
@@ -3102,9 +3126,12 @@ void pure_snapshot_release(PureSnapshot *snapshot) {
     }
 }
 
+static void let_own_go(PureApp *app);
+
 void pure_app_stop(PureApp *app) {
     pure_app_finish(app);
     close_burst(app, true); /* unsaved changes are dropped with the app */
+    let_own_go(app);
     for (uint32_t i = 0; i < PURE_MODULE_STATES && !app->reading; ++i) {
         pure_draft_close(app->texts[i]);
         pure_list_free(app->lists[i]);
@@ -3567,22 +3594,47 @@ static bool argue(const PureApp *app, uint32_t view, Event *ev) {
     return true;
 }
 
+/* The event's lists a view's body changes, empty: a reader's own (its
+ * states are a snapshot's, which other readers read), the app's otherwise
+ * (empty between events). */
+static bool own_lists(PureApp *app, uint32_t lists) {
+    const PureModule *m = app->module;
+    for (uint32_t left = lists; app->reading && left; left &= left - 1) {
+        unsigned i = (unsigned)__builtin_ctz(left);
+        if (!app->own[i]) {
+            if (!(app->own[i] = new_list(m, m->state_ref[i]))) return false;
+            (void)pure_list_keyed(app->own[i], m->state_key[i] ? (int)m->state_key[i] - 1 : -1);
+        }
+        app->lists[i] = app->own[i];
+    }
+    return true;
+}
+
 static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
-    PureValue values[PURE_MODULE_STATES];
+    const PureModule *m = app->module;
+    PureValue values[PURE_MODULE_STATES], locals[PURE_MODULE_LOCALS];
     memcpy(values, app->values, sizeof(values));
     app->view_arena.used = 0;
     Event ev = {.app = app, .arena = &app->view_arena, .row = row};
     if (!argue(app, view, &ev)) return PURE_INVALID;
+    if (m->view_body[view]) { /* a body computes: its locals from 0, its lists its own, its additions counted */
+        memset(locals, 0, sizeof(locals));
+        ev.locals = locals;
+        if (!own_lists(app, m->view_lists[view])) return PURE_ALLOCATION;
+        app->grown = app->spent = 0;
+        app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
+    }
     PureFault fault = app->fault;
     uint32_t fault_pc = app->fault_pc;
-    PureBlock code = app->module->view_code[view];
+    PureBlock code = m->view_code[view];
     app->fault = PURE_FAULT_NONE;
     app->work = 0;
     bool counted = charge(app, code.length);
-    PureResult result = counted ? run(app->module, values, code, &ev, out) : PURE_LIMIT;
+    PureResult result = counted ? run(m, values, code, &ev, out) : PURE_LIMIT;
     if (result != PURE_OK) app->view_fault = counted ? app->fault : PURE_FAULT_WORK; /* why it has no value */
     app->fault = fault;
     app->fault_pc = fault_pc;
+    for (uint32_t left = m->view_lists[view]; left; left &= left - 1) pure_list_clear(app->lists[__builtin_ctz(left)]);
     return result;
 }
 
@@ -3843,8 +3895,16 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
     return made;
 }
 
+/* A reader's own lists go: its next views compute in new ones. */
+static void let_own_go(PureApp *app) {
+    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
+        pure_list_free(app->own[i]);
+        app->own[i] = NULL;
+    }
+}
+
 void pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
-    if (reader->module != snapshot->module) drop_passes(reader);
+    if (reader->module != snapshot->module) drop_passes(reader), let_own_go(reader); /* laid out for its module */
     reader->module = snapshot->module;
     reader->reading = true;
     reader->changes = snapshot->changes; /* what the row cache is fresh for */

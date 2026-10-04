@@ -424,7 +424,7 @@ struct App {
     bool documents; /* the module serves /objects: it has show and edit */
     bool owned;     /* an owner runs it (states or outputs, or any of --apps); else the connection threads */
     uint32_t show, edit;
-    size_t memory;  /* its budgets (0: none): what its states hold, */
+    _Atomic size_t memory; /* its budgets (0: none): what its states hold (read by its views' readers too), */
     _Atomic uint64_t work; /* what an event or a view's evaluation may run */
     size_t queue;   /* the requests that may wait for its turn */
     bool running;   /* started (the main thread's word); else why says why */
@@ -1588,6 +1588,9 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
     if (status != PURE_OK && pure_app_view_fault(app) == PURE_FAULT_WORK) { /* past the work budget: 422 work */
         answer->fault = PURE_FAULT_WORK;
         status = PURE_LIMIT;
+    } else if (status != PURE_OK && pure_app_view_fault(app) == PURE_FAULT_MEMORY) { /* a body's lists past it: 503 memory */
+        answer->fault = PURE_FAULT_MEMORY;
+        status = PURE_BUDGET;
     }
     if (status == PURE_OK && !o.bytes && !(o.bytes = malloc(1))) o.failed = true; /* an empty value has a buffer too */
     if (status == PURE_OK && o.failed) status = PURE_ALLOCATION;
@@ -2285,6 +2288,7 @@ static PureSnapshot *read_published(Host *host, App *app) {
     PureApp *reader = &host->readers[app - apps];
     if (snapshot) pure_app_read(reader, snapshot);
     reader->work_budget = atomic_load_explicit(&app->work, memory_order_relaxed);
+    reader->memory = atomic_load_explicit(&app->memory, memory_order_relaxed); /* what a view's body may add to its own lists */
     return snapshot;
 }
 
@@ -2389,6 +2393,7 @@ static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) 
         return PURE_CONFLICT;
     }
     pure_app_work(&reader, atomic_load_explicit(&job->route.app->work, memory_order_relaxed));
+    reader.memory = atomic_load_explicit(&job->route.app->memory, memory_order_relaxed);
     reader.module = &held->module; /* the app's states, the query's views */
     Route route = job->route;
     route.target = (uint32_t)pure_module_view(&held->module, job->effect.key);
