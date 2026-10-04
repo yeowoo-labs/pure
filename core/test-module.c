@@ -1251,7 +1251,7 @@ static void key_sets(void) {
                 CHECK(same_item(&model, i, k.num, (PureSpan){t.text, t.size}));
             }
         }
-        /* Another list read between (fingers for five lists, four kept). */
+        /* Another list read between: the finger is another's then. */
         unsigned o = next_random(&seed) % OTHERS, i = next_random(&seed) % 2000;
         CHECK(pure_list_get(others[o], i, 0).num == i + o);
         CHECK(pure_list_seek(others[o], 0, (PureCell){.num = i + o + 0.5}, &found) == i + 1 && !found);

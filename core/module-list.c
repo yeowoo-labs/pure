@@ -107,35 +107,25 @@ typedef struct {
 
 static uint64_t lists_made;
 
-/* The leaves a thread read last, and where they start, a few lists' (one
- * each): a list read position by position (a view's rows, a fold, a walk)
- * finds each next item there, and an item found by key is read there, while
- * the thread reads other lists between (a search reads three). Each holds
- * for its list (its id) as it was (its version) and no other. */
-enum { FINGERS = 4 };
+/* The leaf a thread read last, and where it starts: a list read position
+ * by position (a view's rows, a fold, a walk) finds each next item there,
+ * and an item found by key is read there. It holds for its list (its id) as
+ * it was (its version) and no other. (Four, one a list, cost the bank's
+ * queries more than they saved and a search no time: research 121.) */
 typedef struct { uint64_t id, version; const Node *leaf; size_t start; } Finger;
-static _Thread_local Finger fingers[FINGERS];
-static _Thread_local unsigned finger_turn;
+static _Thread_local Finger finger;
 
-/* The leaf a finger keeps that holds position at of the list as it is, or NULL. */
+/* The finger's leaf when it holds position at of the list as it is, or NULL. */
 static const Node *fingered(const PureList *list, size_t at, size_t *within) {
-    for (unsigned i = 0; i < FINGERS; ++i) {
-        const Finger *f = &fingers[i];
-        if (f->leaf && f->id == list->id && f->version == list->version && at >= f->start && at < f->start + f->leaf->count) {
-            *within = at - f->start;
-            if (i) { Finger hit = *f; fingers[i] = fingers[0]; fingers[0] = hit; } /* first looked at next */
-            return fingers[0].leaf;
-        }
-    }
-    return NULL;
+    if (!finger.leaf || finger.id != list->id || finger.version != list->version || at < finger.start ||
+        at >= finger.start + finger.leaf->count)
+        return NULL;
+    *within = at - finger.start;
+    return finger.leaf;
 }
 
-/* A leaf of the list as it is, from start: kept in the list's finger, or the one used longest ago. */
 static void finger_keep(const PureList *list, const Node *leaf, size_t start) {
-    unsigned at = FINGERS;
-    for (unsigned i = 0; i < FINGERS && at == FINGERS; ++i) if (fingers[i].id == list->id) at = i;
-    if (at == FINGERS) at = finger_turn++ % FINGERS;
-    fingers[at] = (Finger){list->id, list->version, leaf, start};
+    finger = (Finger){list->id, list->version, leaf, start};
 }
 
 /* ---- A keyed list's keys as a set
@@ -1432,16 +1422,15 @@ size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *
     *found = false;
     if (!node || !list->count) return 0;
     if ((int)field == l->key) {
-        /* A leaf a finger keeps whose keys reach round key holds its place
+        /* The finger's leaf, when its keys reach round key, holds its place
          * (a slice's high bound is near its low one, found just before). */
-        for (unsigned i = 0; i < FINGERS; ++i) {
-            const Finger *f = &fingers[i];
-            if (!f->leaf || f->id != list->id || f->version != list->version || !f->leaf->count) continue;
-            const double *keys = numbers(l, f->leaf, field);
-            if (!(keys[0] <= key.num && key.num <= keys[f->leaf->count - 1])) continue;
-            unsigned low = lower(keys, f->leaf->count, key.num);
-            *found = low < f->leaf->count && keys[low] == key.num;
-            return f->start + low;
+        if (finger.leaf && finger.id == list->id && finger.version == list->version && finger.leaf->count) {
+            const double *keys = numbers(l, finger.leaf, field);
+            if (keys[0] <= key.num && key.num <= keys[finger.leaf->count - 1]) {
+                unsigned low = lower(keys, finger.leaf->count, key.num);
+                *found = low < finger.leaf->count && keys[low] == key.num;
+                return finger.start + low;
+            }
         }
         /* Each level: the last child whose lead is at or below key (the
          * first when none is); then the leaf's items below key. */
