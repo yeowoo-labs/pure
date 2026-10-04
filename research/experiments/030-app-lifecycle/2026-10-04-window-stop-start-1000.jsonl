@@ -1,0 +1,31 @@
+{"items": 1024, "way": "changed", "gap_ms": 0.7, "reading_ms": 0.69}
+{"items": 1024, "way": "changed", "gap_ms": 5.06, "reading_ms": 1.65}
+{"items": 1024, "way": "changed", "gap_ms": 1.65, "reading_ms": 0.63}
+{"items": 1024, "way": "changed", "gap_ms": 2.97, "reading_ms": 0.63}
+{"items": 1024, "way": "changed", "gap_ms": 0.49, "reading_ms": 0.53}
+{"items": 1024, "way": "changed", "gap_ms": 0.59, "reading_ms": 0.61}
+{"items": 1024, "way": "changed", "gap_ms": 5.67, "reading_ms": 1.59}
+{"items": 1024, "way": "changed", "gap_ms": 0.59, "reading_ms": 0.6}
+{"items": 1024, "way": "changed", "gap_ms": 1.68, "reading_ms": 1.67}
+{"items": 1024, "way": "changed", "gap_ms": 1.58, "reading_ms": 1.67}
+{"items": 1024, "way": "changed", "gap_ms": 2.04, "reading_ms": 0.62}
+{"items": 1024, "way": "changed", "gap_ms": 0.49, "reading_ms": 0.54}
+{"items": 1024, "way": "changed", "gap_ms": 1.46, "reading_ms": 1.63}
+{"items": 1024, "way": "changed", "gap_ms": 0.57, "reading_ms": 0.57}
+{"items": 1024, "way": "changed", "gap_ms": 1.59, "reading_ms": 1.7}
+{"items": 1024, "way": "changed", "gap_ms": 1.72, "reading_ms": 1.65}
+{"items": 1024, "way": "changed", "gap_ms": 1.85, "reading_ms": 0.66}
+{"items": 1024, "way": "changed", "gap_ms": 0.53, "reading_ms": 0.57}
+{"items": 1024, "way": "changed", "gap_ms": 1.58, "reading_ms": 1.66}
+{"items": 1024, "way": "changed", "gap_ms": 2.13, "reading_ms": 1.6}
+{"items": 1024, "way": "restarted", "gap_ms": 2.58}
+{"items": 1024, "way": "restarted", "gap_ms": 4.15}
+{"items": 1024, "way": "restarted", "gap_ms": 3.09}
+{"items": 1024, "way": "restarted", "gap_ms": 2.44}
+{"items": 1024, "way": "restarted", "gap_ms": 3.52}
+{"items": 1024, "way": "restarted", "gap_ms": 2.71}
+{"items": 1024, "way": "restarted", "gap_ms": 3.01}
+{"items": 1024, "way": "restarted", "gap_ms": 4.08}
+{"items": 1024, "way": "restarted", "gap_ms": 3.9}
+{"items": 1024, "way": "restarted", "gap_ms": 2.44}
+{"items": 1024, "changed_median_ms": 1.59, "restarted_median_ms": 3.05, "refused": 172, "answered": 62355}
