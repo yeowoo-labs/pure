@@ -12,3 +12,4 @@ __pycache__/
 /benchmarks/bank/sqlite-bank
 /benchmarks/http/*.pmod
 /build/
+/benchmarks/http/watch

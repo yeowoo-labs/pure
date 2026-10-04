@@ -2369,6 +2369,15 @@ static char *copied(const char *bytes, size_t size) {
     return copy;
 }
 
+/* A subscriber's socket in the epoll set: told when it can be read (it
+ * closed), and when it can be written only while it keeps something to
+ * send (otherwise every acknowledgment would wake the thread). */
+static void watch_subscriber(Host *host, Subscriber *s, int op) {
+    struct epoll_event event = {.events = EPOLLIN | EPOLLRDHUP | EPOLLET | (s->out ? EPOLLOUT : 0),
+                                .data.u64 = (uintptr_t)s | 1u};
+    if (epoll_ctl(host->epoll, op, s->fd, &event)) abort();
+}
+
 /* An event to a subscriber: sent now as far as its socket takes it, the
  * rest kept; while one is kept, the newest waits after it, replacing what
  * waited. False when its socket failed. */
@@ -2389,12 +2398,14 @@ static bool subscriber_send(Host *host, Subscriber *s, const char *event, size_t
         s->out_size = size - (size_t)n;
         s->out_at = 0;
         s->stalled = host->now;
+        watch_subscriber(host, s, EPOLL_CTL_MOD); /* and now when it can be written */
     }
     return true;
 }
 
 /* What a subscriber kept, sent as far as its socket takes it. False when its socket failed. */
 static bool subscriber_flush(Host *host, Subscriber *s) {
+    bool kept = s->out != NULL;
     while (s->out && s->writable) {
         ssize_t n = send(s->fd, s->out + s->out_at, s->out_size - s->out_at, MSG_NOSIGNAL | MSG_DONTWAIT);
         if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return false;
@@ -2406,6 +2417,7 @@ static bool subscriber_flush(Host *host, Subscriber *s) {
         s->out = s->waiting, s->out_size = s->waiting_size, s->out_at = 0;
         s->waiting = NULL;
     }
+    if (kept && !s->out) watch_subscriber(host, s, EPOLL_CTL_MOD); /* all sent: no more told when it can be written */
     return true;
 }
 
@@ -2589,8 +2601,7 @@ static void subscribe(Connection *c, const Route *route, const char *raw, size_t
     if ((s->token = c->bearer_given && c->hashed_valid)) memcpy(s->digest, c->hashed_digest, sizeof(s->digest));
     s->next = g->first;
     g->first = s;
-    struct epoll_event event = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.u64 = (uintptr_t)s | 1u};
-    if (epoll_ctl(host->epoll, EPOLL_CTL_MOD, s->fd, &event)) abort();
+    watch_subscriber(host, s, EPOLL_CTL_MOD);
     c->fd = -1; /* the socket is the subscriber's now */
     close_connection(c);
     atomic_fetch_add_explicit(&route->app->owner.published.subscribers, 1, memory_order_relaxed);
