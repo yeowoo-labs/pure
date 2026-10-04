@@ -1,0 +1,33 @@
+{"mode": "keep-alive", "round": 1, "way": "open", "requests_per_second": 152428, "completed": 1524282, "2xx": 1524282, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 368, "p99_us": 576, "max_us": 21504}
+{"mode": "keep-alive", "round": 1, "way": "bearing", "requests_per_second": 150441, "completed": 1504408, "2xx": 1504408, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 512, "max_us": 3712}
+{"mode": "keep-alive", "round": 1, "way": "held", "requests_per_second": 150050, "completed": 1500509, "2xx": 1500509, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 480, "max_us": 1792}
+{"mode": "keep-alive", "round": 2, "way": "held", "requests_per_second": 147988, "completed": 1479885, "2xx": 1479885, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 608, "max_us": 5376}
+{"mode": "keep-alive", "round": 2, "way": "bearing", "requests_per_second": 151377, "completed": 1513777, "2xx": 1513777, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 480, "max_us": 1792}
+{"mode": "keep-alive", "round": 2, "way": "open", "requests_per_second": 153512, "completed": 1535126, "2xx": 1535126, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 368, "p99_us": 576, "max_us": 2176}
+{"mode": "keep-alive", "round": 3, "way": "open", "requests_per_second": 154031, "completed": 1540330, "2xx": 1540330, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 368, "p99_us": 576, "max_us": 1728}
+{"mode": "keep-alive", "round": 3, "way": "bearing", "requests_per_second": 150391, "completed": 1503917, "2xx": 1503917, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 496, "max_us": 1792}
+{"mode": "keep-alive", "round": 3, "way": "held", "requests_per_second": 149007, "completed": 1490066, "2xx": 1490066, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 576, "max_us": 2304}
+{"mode": "keep-alive", "round": 4, "way": "held", "requests_per_second": 149336, "completed": 1493362, "2xx": 1493362, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 544, "max_us": 3456}
+{"mode": "keep-alive", "round": 4, "way": "bearing", "requests_per_second": 150868, "completed": 1508682, "2xx": 1508682, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 480, "max_us": 2176}
+{"mode": "keep-alive", "round": 4, "way": "open", "requests_per_second": 153821, "completed": 1538220, "2xx": 1538220, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 368, "p99_us": 576, "max_us": 1728}
+{"mode": "keep-alive", "round": 5, "way": "open", "requests_per_second": 157154, "completed": 1571538, "2xx": 1571538, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 400, "p99_us": 544, "max_us": 1856}
+{"mode": "keep-alive", "round": 5, "way": "bearing", "requests_per_second": 149931, "completed": 1499311, "2xx": 1499311, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 512, "max_us": 3456}
+{"mode": "keep-alive", "round": 5, "way": "held", "requests_per_second": 150122, "completed": 1501220, "2xx": 1501220, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 416, "p99_us": 496, "max_us": 1792}
+{"mode": "close", "round": 1, "way": "open", "requests_per_second": 22893, "completed": 228933, "2xx": 228933, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 896, "max_us": 6656}
+{"mode": "close", "round": 1, "way": "bearing", "requests_per_second": 22754, "completed": 227538, "2xx": 227538, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 896, "max_us": 4864}
+{"mode": "close", "round": 1, "way": "held", "requests_per_second": 22567, "completed": 225673, "2xx": 225673, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 928, "max_us": 7680}
+{"mode": "close", "round": 2, "way": "held", "requests_per_second": 22338, "completed": 223380, "2xx": 223380, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 992, "max_us": 4864}
+{"mode": "close", "round": 2, "way": "bearing", "requests_per_second": 22806, "completed": 228062, "2xx": 228062, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 928, "max_us": 5376}
+{"mode": "close", "round": 2, "way": "open", "requests_per_second": 22868, "completed": 228679, "2xx": 228679, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 896, "max_us": 1344}
+{"mode": "close", "round": 3, "way": "open", "requests_per_second": 22714, "completed": 227151, "2xx": 227151, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 928, "max_us": 5376}
+{"mode": "close", "round": 3, "way": "bearing", "requests_per_second": 22713, "completed": 227134, "2xx": 227134, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 928, "max_us": 3456}
+{"mode": "close", "round": 3, "way": "held", "requests_per_second": 22812, "completed": 228123, "2xx": 228123, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 896, "max_us": 5120}
+{"mode": "close", "round": 4, "way": "held", "requests_per_second": 22660, "completed": 226607, "2xx": 226607, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 928, "max_us": 4864}
+{"mode": "close", "round": 4, "way": "bearing", "requests_per_second": 22707, "completed": 227074, "2xx": 227074, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 928, "max_us": 4864}
+{"mode": "close", "round": 4, "way": "open", "requests_per_second": 22912, "completed": 229117, "2xx": 229117, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 896, "max_us": 3456}
+{"mode": "close", "round": 5, "way": "open", "requests_per_second": 22707, "completed": 227074, "2xx": 227074, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 928, "max_us": 5120}
+{"mode": "close", "round": 5, "way": "bearing", "requests_per_second": 22705, "completed": 227051, "2xx": 227051, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 896, "max_us": 6400}
+{"mode": "close", "round": 5, "way": "held", "requests_per_second": 22775, "completed": 227749, "2xx": 227749, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 736, "p99_us": 896, "max_us": 5376}
+{"mode": "keep-alive", "open_median": 153821, "bearing_median": 150441, "held_median": 149336, "bearing_change": -2.2, "held_change": -2.92}
+{"mode": "close", "open_median": 22868, "bearing_median": 22713, "held_median": 22660, "bearing_change": -0.68, "held_change": -0.91}
+{"unauthorized": 0, "forbidden": 0}
