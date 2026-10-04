@@ -1,6 +1,6 @@
 # 020 — 계산을 빠르게, 긴 보기를 연결 스레드 밖에서
 
-작성일: 2026-10-04. 상태: 설계와 착수 기준. 1단계 구현(아래 "1단계에서 달라진 것"), 검사로 고정했다.
+작성일: 2026-10-04. 상태: 설계와 착수 기준. 두 단계 모두 구현해 검사로 고정하고 쟀다(1단계 [121](../research/121-computing-faster.md), 2단계 [122](../research/122-views-off-the-connection-threads.md)). 만들며 달라진 것과 정한 것은 아래에 적었다.
 [018](018-lifetimes-and-computation.md)이 계산을 들였지만 그 값이 컸다: BFS(노드 10만, 간선 100만) 한 이벤트가 396 ms로 CPython과
 비슷하고 C의 44배였다([118](../research/118-computing-in-one-event.md)). 계산하는 보기는 연결 스레드에서 돌아 그동안 그 스레드의 다른
 연결을 기다리게 했다([119](../research/119-views-that-compute.md)).
