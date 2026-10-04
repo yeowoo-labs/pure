@@ -76,7 +76,17 @@ typedef enum { ROUTE_NONE, ROUTE_OBJECT, ROUTE_VIEW, ROUTE_INPUT, ROUTE_QUERY } 
 /* A view's (or a query's) arguments come as the request's query: argued
  * says so, and given is its text, kept on the request's work slot. */
 typedef struct App App;
-typedef struct { RouteKind kind; uint32_t target; size_t from, count; bool argued; const char *given; App *app; } Route;
+/* And the module it was resolved with: not applied under another (its app
+ * changed module meanwhile, docs/design/017's stage 3). */
+typedef struct {
+    RouteKind kind;
+    uint32_t target;
+    size_t from, count;
+    bool argued;
+    const char *given;
+    App *app;
+    const PureModule *module;
+} Route;
 
 /* This node's key, for deliveries sealed to it (--key), and whether it
  * takes only those (--sealed-only), or only those from the senders named,
@@ -118,6 +128,7 @@ typedef struct Connection {
     char key[65]; /* the document's key, or the view's or input's name */
     RouteKind route;
     App *app; /* the app the path names (NULL: none of the host's) */
+    const PureModule *module; /* the module its request was resolved with */
     /* An app input's message: its fixed fields from the query, which fields
      * were given there, and whether the body is a JSON object of the rest.
      * Its ingress is [u32le payload size][payload]; with JSON it is [u32le
@@ -175,6 +186,14 @@ typedef struct {
     bool gap;             /* and whether they stopped at a gap */
 } Applied;
 
+/* The last save's snapshot an owner published, the connection threads'
+ * to show views from (NULL: none, or its app does not run). The owner's,
+ * so it outlasts the executors its app runs on. */
+typedef struct Published {
+    pthread_mutex_t lock;
+    PureSnapshot *snapshot;
+} Published;
+
 /* The app and its store. A connection thread runs it itself (an app of
  * documents only), or one owner thread runs it for all connection threads.
  * The owner publishes a snapshot of the states after each save, and the
@@ -195,11 +214,9 @@ typedef struct {
     uint64_t ticks;
     uint64_t memory_refused; /* events refused for the app's memory budget */
     bool answers_wait; /* an answer the app had no room for: tried again after ANSWER_WAIT_MS */
-    /* The owner's: the last save's snapshot (NULL: the owner shows views),
-     * taken under the lock, and the app's changes it shows. */
-    bool publishes;
-    pthread_mutex_t published_lock;
-    PureSnapshot *published;
+    /* The owner's: where its snapshots go (NULL: it shows its views
+     * itself), and the app's changes the last one shows. */
+    Published *published;
     uint64_t published_changes, publications;
     struct PureSurfaceHost *surface; /* told of each snapshot published */
     /* The owner's: outputs wired to HTTP receivers, and how far each was trimmed. */
@@ -322,6 +339,11 @@ typedef struct Owner {
     Executor executor;
     pthread_mutex_t lock;
     pthread_cond_t waiting;
+    bool made;      /* its locks, made once (its app may start again) */
+    Published published;
+    /* Under lock: the module its executor runs (NULL: none). A request
+     * resolved with another is not taken (503 stopped). */
+    const PureModule *module;
     Job *jobs;
     size_t count, capacity;
     uint64_t arrivals; /* requests handed to the owner, ever */
@@ -333,6 +355,7 @@ typedef struct Owner {
      * with work to do, or running on one; again when work came while it ran;
      * due when its next timer is (the monotonic clock in ms, 0: none). */
     struct Owner *next;
+    bool live; /* it takes turns: its app runs */
     bool queued, running, again;
     uint64_t due, turns;
     size_t queue; /* how many requests may wait for its turn (0: any number) */
@@ -353,15 +376,21 @@ typedef struct Owner {
  * --apps has its own, the first segment of its routes. */
 enum { APP_NAME = 32 };
 struct App {
-    char name[APP_NAME + 1];
-    PureModule module;
+    char name[APP_NAME + 1]; /* never changed once the app is in its place: threads find it by name */
+    PureModule *module; /* the module it runs, or ran or was given last (NULL: none loaded) */
+    /* The module its requests are resolved with, any thread's to read: NULL
+     * while it does not run (its routes answer 503 stopped, 404 no_app once
+     * gone). A module an app ran is kept as long as the host runs: requests
+     * and snapshots may still point to it. */
+    _Atomic(const PureModule *) live;
+    _Atomic bool gone;
     const char *store;
     bool documents; /* the module serves /objects: it has show and edit */
     bool owned;     /* an owner runs it (states or outputs, or any of --apps); else the connection threads */
     uint32_t show, edit;
     size_t memory;  /* its budgets (0: none): what its states hold, */
-    uint64_t work;  /* what an event or a view's evaluation may run */
-    bool running;   /* started; else its routes answer 503 stopped, and why says why */
+    _Atomic uint64_t work; /* what an event or a view's evaluation may run */
+    bool running;   /* started (the main thread's word); else why says why */
     char why[256];
     unsigned home;  /* the connection thread its connections move to (a host of apps) */
     /* Its wiring in --apps (send=, seal=, reply=), as --send, --seal and --reply give the one app's. */
@@ -370,7 +399,14 @@ struct App {
     Owner owner;
 };
 static App *apps;
-static unsigned app_count;
+/* The places taken: an app's place is its own, never another name's, so a
+ * thread finds an app by name while others start and stop (docs/design/017's
+ * stage 3). app_slots is how many there are, made when the host starts. */
+static _Atomic unsigned app_count;
+static unsigned app_slots = 1;
+static unsigned places(void) { return atomic_load_explicit(&app_count, memory_order_acquire); }
+/* The modules apps ran before the one they run, kept as long as the host runs. */
+static struct Retired { PureModule *module; struct Retired *next; } *retired_modules;
 static bool named_apps; /* --apps: a route's first segment names its app */
 static Host *all_hosts;  /* the connection threads, for moving a connection to its app's home */
 static bool moved_home(Connection *c, size_t head_size);
@@ -670,7 +706,7 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     if (named_apps && *path == '/') {
         const char *end = strchr(path + 1, '/');
         size_t length = end ? (size_t)(end - path - 1) : 0;
-        for (unsigned i = 0; end && i < app_count && !c->app; ++i)
+        for (unsigned i = 0, count = places(); end && i < count && !c->app; ++i)
             if (strlen(apps[i].name) == length && !memcmp(apps[i].name, path + 1, length)) c->app = &apps[i];
         if (end) path += 1 + length;
     }
@@ -803,13 +839,15 @@ static const char *resolve(Connection *c, char *query, Route *route, int *status
     c->field_bytes = 0;
     memset(c->given, 0, sizeof(c->given));
     if (!app) return "no_app";
-    if (!app->running) {
+    const PureModule *m = atomic_load_explicit(&app->live, memory_order_acquire);
+    if (!m && atomic_load_explicit(&app->gone, memory_order_relaxed)) return "no_app";
+    if (!m) {
         *status = 503;
         return "stopped";
     }
-    const PureModule *m = &app->module;
     route->app = app;
-    if (route->kind == ROUTE_NONE || (route->kind == ROUTE_OBJECT && !app->documents) ||
+    route->module = c->module = m;
+    if (route->kind == ROUTE_NONE || (route->kind == ROUTE_OBJECT && !m->collections) ||
         (route->kind == ROUTE_QUERY && !app->owned)) return "route"; /* a query reads an app's states */
     if (route->kind == ROUTE_OBJECT) return NULL;
     if (route->kind == ROUTE_QUERY) { /* the view is the query module's, found when shown */
@@ -916,14 +954,14 @@ enum { DELIVERY = 80 };
  * into the prefix; strings stay in the body, and the table says where.
  * NULL, or the error to answer. */
 static const char *convert(Connection *c) {
-    const PureInputShape *shape = &(&c->app->module)->input[c->input];
+    const PureInputShape *shape = &c->module->input[c->input];
     uint32_t delivered = get_u32(c->ingress) & DELIVERED;
     size_t table = 8 * (size_t)shape->field_count, payload = c->batch * c->field_bytes + c->body_size;
     unsigned char *tables = c->ingress + 4 + (delivered ? DELIVERY : 0), *prefixes = tables + c->batch * table;
     unsigned char *json = c->body;
     size_t size = c->body_size, at = pure_json_space(json, 0, size);
     /* A message's rows go after the body: they are encoded, then placed. */
-    PureJsonMessage b = {.module = (&c->app->module), .shape = shape, .given = c->given, .rows_base = payload};
+    PureJsonMessage b = {.module = c->module, .shape = shape, .given = c->given, .rows_base = payload};
     const char *why = NULL;
     /* A batch is an array of its messages' objects. */
     if (c->batch > 1) {
@@ -943,7 +981,7 @@ static const char *convert(Connection *c) {
          * member naming no field is refused all the same: it would be dropped. */
         for (uint32_t f = 0; !why && f < shape->field_count; ++f) {
             if (b.seen[f] || c->given[f]) continue;
-            const PureField *field = &(&c->app->module)->field[shape->field_start + f];
+            const PureField *field = &c->module->field[shape->field_start + f];
             if (!delivered || field->type == PURE_FIELD_ROWS) why = "missing_field";
             else if (pure_field_fixed(field->type))
                 memset(b.payload + field->offset, 0, pure_field_size(field->type));
@@ -1062,7 +1100,7 @@ static void start_request(Connection *c, size_t head_size) {
     /* A document's PUT carries its body; an input's event its payload's size,
      * the payload (the fixed fields, then the body), and room for its JSON. */
     bool write = route.kind == ROUTE_INPUT || c->put;
-    size_t table = route.kind == ROUTE_INPUT && c->json ? 8 * (size_t)c->app->module.input[c->input].field_count : 0;
+    size_t table = route.kind == ROUTE_INPUT && c->json ? 8 * (size_t)route.module->input[c->input].field_count : 0;
     size_t lead = 4 + (route.kind == ROUTE_INPUT && *c->source ? DELIVERY : 0);
     /* A batch has a table and a prefix for each of its messages. */
     size_t input_size = route.kind == ROUTE_INPUT ? lead + c->batch * (table + c->field_bytes) + c->body_size :
@@ -1630,12 +1668,12 @@ static void surface_changed(PureSurfaceHost *s) {
  * saved, so a read made after a write's answer sees the write. A failed save
  * returns the app to the last save's states, which the snapshot still shows. */
 static void publish(Executor *ex) {
-    if (!ex->publishes || (ex->published && ex->published_changes == ex->app.changes)) return;
+    if (!ex->published || (ex->publications && ex->published_changes == ex->app.changes)) return;
     PureSnapshot *made = pure_app_snapshot(&ex->app), *old;
-    pthread_mutex_lock(&ex->published_lock);
-    old = ex->published;
-    ex->published = made;
-    pthread_mutex_unlock(&ex->published_lock);
+    pthread_mutex_lock(&ex->published->lock);
+    old = ex->published->snapshot;
+    ex->published->snapshot = made;
+    pthread_mutex_unlock(&ex->published->lock);
     pure_snapshot_release(old);
     ex->published_changes = ex->app.changes;
     ++ex->publications;
@@ -1661,6 +1699,8 @@ enum { LOCAL_RETRY_MS = 100 };
 typedef struct Local {
     Owner *from, *to;
     uint32_t output, input; /* the sender's output, the receiver's input */
+    const PureModule *sender, *module; /* the sender's module; the receiver's, which input is in */
+    char input_name[PURE_MODULE_NAME + 1], why[160]; /* the input by name; why it holds its sends, as last said */
     char source[PURE_SOURCE + 1];
     unsigned char fields[PURE_FIELDS_NAMED]; /* the sender's, when the input takes them by name */
     size_t fields_size;
@@ -1710,14 +1750,56 @@ static bool local_queue(Local *l, uint64_t seq, PureSpan payload) {
     return room;
 }
 
+/* The receiver's input the outlet hands to, found by name in its module r:
+ * one taking messages of the output's shape or, by name, its fields. False,
+ * why in error, when r has none. */
+static bool local_bind(Local *l, const PureModule *r, char *error, size_t size) {
+    int input = pure_module_input(r, l->input_name);
+    if (input < 0 || r->input[input].kind != PURE_KIND_MESSAGE || r->input[input].keyed) {
+        snprintf(error, size, "no input '%s' taking messages", l->input_name);
+        return false;
+    }
+    size_t fields_size = 0;
+    if (pure_module_shape(r, (uint32_t)input) != pure_module_shape(l->sender, l->output)) { /* taken by name, or not at all */
+        fields_size = pure_module_fields(l->sender, l->output, l->fields);
+        if (!pure_module_takes(r, (uint32_t)input, l->fields, fields_size)) {
+            snprintf(error, size, "its input %s does not take the output's fields", l->input_name);
+            return false;
+        }
+    }
+    l->input = (uint32_t)input;
+    l->fields_size = fields_size;
+    l->module = r;
+    return true;
+}
+
 /* The batch queued goes to the receiver, unless one is there or it waits
- * to try again; as a link's delivery is laid out (link_deliver). */
+ * to try again; as a link's delivery is laid out (link_deliver). A
+ * receiver that does not run holds it (LOCAL_RETRY_MS), and one that runs
+ * another module now has its input found again first. */
 static void local_hand(Executor *ex, Local *l, uint64_t now) {
     pthread_mutex_lock(&l->lock);
-    if (l->out || !l->count || (l->retry && now < l->retry)) {
+    bool waits = l->out || !l->count || (l->retry && now < l->retry);
+    pthread_mutex_unlock(&l->lock);
+    if (waits) return;
+    Owner *to = l->to;
+    pthread_mutex_lock(&to->lock);
+    const PureModule *runs = to->stopping ? NULL : to->module;
+    pthread_mutex_unlock(&to->lock);
+    char error[160] = "its receiver does not run";
+    if (!runs || (runs != l->module && !local_bind(l, runs, error, sizeof(error)))) {
+        if (strcmp(error, l->why)) { /* said once a cause */
+            snprintf(l->why, sizeof(l->why), "%s", error);
+            fprintf(stderr, "{\"local\":\"%s\",\"input\":\"%s\",\"error\":\"%s; its sends wait\"}\n", l->source,
+                    l->input_name, error);
+        }
+        pthread_mutex_lock(&l->lock);
+        l->retry = now + LOCAL_RETRY_MS;
         pthread_mutex_unlock(&l->lock);
         return;
     }
+    l->why[0] = 0;
+    pthread_mutex_lock(&l->lock);
     size_t length = strlen(l->source), size = 4 + DELIVERY + l->batch_size + l->fields_size;
     unsigned char *ingress = malloc(size);
     LinkJob *link = malloc(sizeof(*link));
@@ -1743,11 +1825,10 @@ static void local_hand(Executor *ex, Local *l, uint64_t now) {
     l->count = 0;
     l->retry = 0;
     pthread_mutex_unlock(&l->lock);
-    Job job = {.route = {.kind = ROUTE_INPUT, .target = l->input}, .link = link,
+    Job job = {.route = {.kind = ROUTE_INPUT, .target = l->input, .module = l->module}, .link = link,
                .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {ingress, size}}};
-    Owner *to = l->to;
     pthread_mutex_lock(&to->lock);
-    bool queued = !to->stopping && grow(&to->jobs, &to->capacity, to->count + 1, sizeof(*to->jobs));
+    bool queued = !to->stopping && to->module == l->module && grow(&to->jobs, &to->capacity, to->count + 1, sizeof(*to->jobs));
     if (queued) {
         to->jobs[to->count++] = job;
         ++to->arrivals;
@@ -1763,7 +1844,8 @@ static void local_hand(Executor *ex, Local *l, uint64_t now) {
     free(link);
     pthread_mutex_lock(&l->lock);
     l->out = false;
-    l->rewind = true; /* queued again from the outbox */
+    l->rewind = true; /* queued again from the outbox, after a pause */
+    l->retry = now + LOCAL_RETRY_MS;
     pthread_mutex_unlock(&l->lock);
 }
 
@@ -2102,14 +2184,14 @@ static void answer_handed(Host *host) {
  * when there is none. Taken for each round, after the round's answers from
  * the owner: those were handed back after their saves' snapshots. */
 static PureSnapshot *read_published(Host *host, App *app) {
-    Executor *ex = &app->owner.executor;
-    pthread_mutex_lock(&ex->published_lock);
-    PureSnapshot *snapshot = ex->published;
+    Published *published = &app->owner.published;
+    pthread_mutex_lock(&published->lock);
+    PureSnapshot *snapshot = published->snapshot;
     if (snapshot) pure_snapshot_hold(snapshot);
-    pthread_mutex_unlock(&ex->published_lock);
+    pthread_mutex_unlock(&published->lock);
     PureApp *reader = &host->readers[app - apps];
     if (snapshot) pure_app_read(reader, snapshot);
-    reader->work_budget = app->work;
+    reader->work_budget = atomic_load_explicit(&app->work, memory_order_relaxed);
     return snapshot;
 }
 
@@ -2121,7 +2203,7 @@ static PureSnapshot *read_published(Host *host, App *app) {
  * holds up, the owner's writes. */
 enum { QUERIES = 64 };
 typedef struct { PureModule module; unsigned refs; } Held;
-static struct { const App *app; char name[65]; Held *held; } queries[QUERIES];
+static struct { const App *app; char name[65]; Held *held; const PureModule *checked; } queries[QUERIES];
 static pthread_mutex_t queries_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void let_go_query(Held *held) {
@@ -2164,7 +2246,7 @@ static PureResult register_query(const Job *job) {
         free(held);
         return PURE_INVALID;
     }
-    PureResult status = !same_states(&held->module, &app->module)          ? PURE_CONFLICT
+    PureResult status = !same_states(&held->module, job->route.module)     ? PURE_CONFLICT
                         : pure_module_view(&held->module, job->effect.key) < 0 ? PURE_NOT_FOUND
                                                                                : PURE_OK;
     Held *old = NULL;
@@ -2180,6 +2262,7 @@ static PureResult register_query(const Job *job) {
         else {
             old = queries[slot].held;
             queries[slot].app = app;
+            queries[slot].checked = job->route.module;
             snprintf(queries[slot].name, sizeof(queries[slot].name), "%s", job->effect.key);
             queries[slot].held = held;
         }
@@ -2192,10 +2275,13 @@ static PureResult register_query(const Job *job) {
 
 static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) {
     Held *held = NULL;
+    const PureModule *checked = NULL;
     pthread_mutex_lock(&queries_lock);
     for (int i = 0; i < QUERIES && !held; ++i)
-        if (queries[i].held && queries[i].app == job->route.app && !strcmp(queries[i].name, job->effect.key))
+        if (queries[i].held && queries[i].app == job->route.app && !strcmp(queries[i].name, job->effect.key)) {
             (held = queries[i].held)->refs++;
+            checked = queries[i].checked;
+        }
     pthread_mutex_unlock(&queries_lock);
     if (!held) return PURE_NOT_FOUND;
     if (!snapshot) {
@@ -2204,7 +2290,12 @@ static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) 
     }
     PureApp reader = {0};
     pure_app_read(&reader, snapshot);
-    pure_app_work(&reader, job->route.app->work);
+    if (reader.module != checked && !same_states(&held->module, reader.module)) { /* its app's states are laid out anew */
+        pure_app_stop(&reader);
+        let_go_query(held);
+        return PURE_CONFLICT;
+    }
+    pure_app_work(&reader, atomic_load_explicit(&job->route.app->work, memory_order_relaxed));
     reader.module = &held->module; /* the app's states, the query's views */
     Route route = job->route;
     route.target = (uint32_t)pure_module_view(&held->module, job->effect.key);
@@ -2263,6 +2354,11 @@ static void serve_bursts(Host *host) {
             for (size_t k = i; k < count; ++k) {
                 const Job *mine = &host->jobs[k];
                 if (mine->route.app != app || shown_here(host, mine)) continue;
+                if (owner->stopping || mine->route.module != owner->module) { /* its app stopped, or runs another module now */
+                    host->views[answers++] = (Applied){.host = host, .ticket = mine->effect.ticket, .input = mine->effect.input,
+                                                       .route = mine->route.kind, .status = PURE_CLOSED, .refused = "stopped"};
+                    continue;
+                }
                 if (owner->queue && owner->count >= owner->queue) {
                     host->views[answers++] = (Applied){.host = host, .ticket = mine->effect.ticket, .input = mine->effect.input,
                                                        .route = mine->route.kind, .status = PURE_BUSY, .refused = "busy"};
@@ -2289,6 +2385,11 @@ static void serve_bursts(Host *host) {
             bool registering = job->route.kind == ROUTE_QUERY && job->effect.input == PURE_INPUT_WRITE;
             *applied = (Applied){.host = host, .ticket = job->effect.ticket, .input = job->effect.input,
                                  .route = registering ? ROUTE_QUERY : ROUTE_VIEW};
+            if (job->route.kind == ROUTE_VIEW && host->readers[a].module != job->route.module) { /* another module's view now */
+                applied->status = PURE_CLOSED;
+                applied->refused = "stopped";
+                continue;
+            }
             applied->status = job->route.kind == ROUTE_VIEW ? show_view(&host->readers[a], &job->route, job->effect.available, applied)
                               : registering                ? register_query(job)
                                                            : run_query(job, host->snapshots[a], applied);
@@ -2336,7 +2437,8 @@ static void enqueue(Owner *owner) {
  * another after it). Any thread, holding none of the owner's locks. */
 static void schedule(Owner *owner) {
     pthread_mutex_lock(&turns.lock);
-    if (owner->running) owner->again = true;
+    if (!owner->live) { /* its app stopped: what it did not take waits for its next start */ }
+    else if (owner->running) owner->again = true;
     else if (!owner->queued) enqueue(owner);
     pthread_mutex_unlock(&turns.lock);
 }
@@ -2433,9 +2535,9 @@ static bool owner_turn(Owner *owner, bool alone, long *due) {
  * due of the others (UINT64_MAX: none). */
 static uint64_t enqueue_due(uint64_t now) {
     uint64_t soonest = UINT64_MAX;
-    for (unsigned i = 0; i < app_count; ++i) {
+    for (unsigned i = 0, count = places(); i < count; ++i) {
         Owner *o = &apps[i].owner;
-        if (!apps[i].running || !apps[i].owned || !o->due || o->queued || o->running) continue;
+        if (!o->live || !o->due || o->queued || o->running) continue;
         if (o->due <= now) {
             o->due = 0;
             enqueue(o);
@@ -2499,11 +2601,11 @@ static void *run_worker(void *context) {
 
 /* The surface's table (serve/surface.h). */
 static PureSnapshot *surface_read(PureSurfaceHost *s, PureApp *reader) {
-    Executor *ex = &s->owner->executor;
-    pthread_mutex_lock(&ex->published_lock);
-    PureSnapshot *snapshot = ex->published;
+    Published *published = &s->owner->published;
+    pthread_mutex_lock(&published->lock);
+    PureSnapshot *snapshot = published->snapshot;
     if (snapshot) pure_snapshot_hold(snapshot);
-    pthread_mutex_unlock(&ex->published_lock);
+    pthread_mutex_unlock(&published->lock);
     if (snapshot) pure_app_read(reader, snapshot);
     return snapshot;
 }
@@ -2609,33 +2711,53 @@ static bool replies_borrow(const PureModule *m, uint32_t input) {
 
 /* ---- Main ------------------------------------------------------------- */
 
-/* An app's module from its file, and whether it serves documents; false,
- * with why, when it does not load or cannot be served. */
+/* A module from its file for an app, which serves documents when it keeps
+ * a keyed collection; false, with why, when it does not load or cannot be
+ * served. The module the app had is kept (see retired_modules). */
 static bool load_module(App *app, const char *path) {
-    PureModule *m = &app->module;
-    bool *documents = &app->documents;
+    PureModule *m = calloc(1, sizeof(*m));
+    bool documents;
     char error[160];
+    if (!m) {
+        snprintf(app->why, sizeof(app->why), "Module: out of memory");
+        return false;
+    }
     if (pure_module_read(path, m, error, sizeof(error)) != PURE_OK) {
         snprintf(app->why, sizeof(app->why), "Module: %s", error);
+        free(m);
         return false;
     }
     /* Documents are served when the module keeps a keyed collection: its keyed
      * messages show and edit read and write one by key. Without one, inputs
      * named show and edit are messages as any other. */
     int show = pure_module_input(m, "show"), edit = pure_module_input(m, "edit");
-    *documents = m->collections > 0;
-    if (*documents && (show < 0 || edit < 0 || m->input[show].kind != PURE_KIND_MESSAGE || !m->input[show].keyed ||
-                       m->input[edit].kind != PURE_KIND_MESSAGE || !m->input[edit].keyed)) {
-        snprintf(app->why, sizeof(app->why), "Module: documents need keyed messages named show and edit");
-        return false;
-    }
-    for (uint32_t i = 0; i < m->inputs; ++i) {
-        bool served = (*documents && i == (uint32_t)edit) || (m->input[i].kind == PURE_KIND_MESSAGE && !m->input[i].keyed);
-        if (served && !replies_borrow(m, i)) {
+    documents = m->collections > 0;
+    bool served = !documents || (show >= 0 && edit >= 0 && m->input[show].kind == PURE_KIND_MESSAGE && m->input[show].keyed &&
+                                 m->input[edit].kind == PURE_KIND_MESSAGE && m->input[edit].keyed);
+    if (!served) snprintf(app->why, sizeof(app->why), "Module: documents need keyed messages named show and edit");
+    for (uint32_t i = 0; served && i < m->inputs; ++i) {
+        bool replied = (documents && i == (uint32_t)edit) || (m->input[i].kind == PURE_KIND_MESSAGE && !m->input[i].keyed);
+        if (replied && !replies_borrow(m, i)) {
             snprintf(app->why, sizeof(app->why), "Module: %s may reply only a field of its message", m->input_names[i]);
-            return false;
+            served = false;
         }
     }
+    struct Retired *kept = served && app->module ? malloc(sizeof(*kept)) : NULL;
+    if (served && app->module && !kept) {
+        snprintf(app->why, sizeof(app->why), "Module: out of memory");
+        served = false;
+    }
+    if (!served) {
+        pure_module_release(m);
+        free(m);
+        return false;
+    }
+    if (kept) { /* requests and snapshots may still point to it */
+        *kept = (struct Retired){app->module, retired_modules};
+        retired_modules = kept;
+    }
+    app->module = m;
+    app->documents = documents;
     app->show = (uint32_t)(show >= 0 ? show : 0);
     app->edit = (uint32_t)(edit >= 0 ? edit : 0);
     return true;
@@ -2703,7 +2825,7 @@ static bool moved_home(Connection *c, size_t head_size) {
     while (end < c->in + head_size && *end != '/' && *end != ' ' && *end != '?') ++end;
     size_t length = (size_t)(end - path - 1);
     App *app = NULL;
-    for (unsigned i = 0; i < app_count && !app; ++i)
+    for (unsigned i = 0, count = places(); i < count && !app; ++i)
         if (strlen(apps[i].name) == length && !memcmp(apps[i].name, path + 1, length)) app = &apps[i];
     Host *home = app ? &all_hosts[app->home] : NULL;
     if (!home || home == c->host) return false;
@@ -2756,14 +2878,14 @@ static void take_moved(Host *host) {
 /* An app's module on its store, with its budgets; false (why says why)
  * when the store does not open or the module does not start on it. */
 static bool start_executor(Executor *ex, App *app) {
-    ex->module = &app->module;
+    ex->module = app->module;
     ex->show = app->show;
     ex->edit = app->edit;
     if (pure_store_open(app->store, &ex->store) != PURE_OK) {
         snprintf(app->why, sizeof(app->why), "Cannot open the store");
         return false;
     }
-    if (pure_app_start(&ex->app, &app->module, pure_store_data(ex->store)) != PURE_OK || !pure_app_defer(&ex->app, true)) {
+    if (pure_app_start(&ex->app, app->module, pure_store_data(ex->store)) != PURE_OK || !pure_app_defer(&ex->app, true)) {
         snprintf(app->why, sizeof(app->why), "Cannot start the module on the store%s%s", ex->app.why[0] ? ": " : "",
                  ex->app.why);
         pure_store_close(ex->store);
@@ -2778,7 +2900,13 @@ static bool start_executor(Executor *ex, App *app) {
 
 static void stop_executor(Executor *ex) {
     stop_writer(ex);
-    pure_snapshot_release(ex->published);
+    if (ex->published) { /* views are the owner's again, which shows none */
+        pthread_mutex_lock(&ex->published->lock);
+        PureSnapshot *last = ex->published->snapshot;
+        ex->published->snapshot = NULL;
+        pthread_mutex_unlock(&ex->published->lock);
+        pure_snapshot_release(last);
+    }
     pure_app_stop(&ex->app);
     pure_store_close(ex->store);
     free(ex->applied);
@@ -2793,11 +2921,12 @@ static bool start_shard(Host *host, size_t budget, unsigned *port) {
         fprintf(stderr, "%s\n", apps[0].why);
         return false;
     }
-    host->readers = calloc(app_count, sizeof(*host->readers));
-    host->snapshots = calloc(app_count, sizeof(*host->snapshots));
-    host->read_in = calloc(app_count, sizeof(*host->read_in));
-    host->handed_in = calloc(app_count, sizeof(*host->handed_in));
-    host->touched = calloc(app_count, sizeof(*host->touched));
+    /* By app place: the places not taken are memory never touched. */
+    host->readers = calloc(app_slots, sizeof(*host->readers));
+    host->snapshots = calloc(app_slots, sizeof(*host->snapshots));
+    host->read_in = calloc(app_slots, sizeof(*host->read_in));
+    host->handed_in = calloc(app_slots, sizeof(*host->handed_in));
+    host->touched = calloc(app_slots, sizeof(*host->touched));
     if (!host->readers || !host->snapshots || !host->read_in || !host->handed_in || !host->touched) return false;
     host->work = calloc(host->capacity, sizeof(*host->work));
     host->table = calloc(host->capacity, sizeof(*host->table));
@@ -2898,7 +3027,7 @@ static void *run_shard(void *context) {
 
 static void stop_shard(Host *host) {
     if (!apps[0].owned) stop_executor(&host->local);
-    for (unsigned i = 0; host->readers && i < app_count; ++i) pure_app_stop(&host->readers[i]);
+    for (unsigned i = 0, count = places(); host->readers && i < count; ++i) pure_app_stop(&host->readers[i]);
     free(host->readers);
     free(host->snapshots);
     free(host->read_in);
@@ -2932,25 +3061,36 @@ static void stop_shard(Host *host) {
 /* The input a link's stream goes to: one taking messages (not keyed) of the
  * sender's shape, or, named its fields, one that takes them by name
  * (pure_module_takes: each record is laid out anew for it). */
-/* In a host of apps the name is APP/INPUT; the input found is the app's
- * place times PURE_MODULE_INPUTS, plus the input's. */
+/* In a host of apps the name is APP/INPUT. What it finds is a binding: the
+ * app's place, the module it runs and the input in it, the listener
+ * thread's alone. A delivery whose app runs another module now, or none, is
+ * not taken: the receiver keeps it and finds the input again once told
+ * (pure_link_listener_rebind, when the app starts). */
+static struct Binding { unsigned app; const PureModule *module; uint32_t input; } *bindings;
+static size_t binding_count, binding_capacity;
 static int link_input(void *context, const char *name, uint32_t shape, const unsigned char *fields, size_t size) {
     (void)context;
     unsigned a = 0;
     if (named_apps) {
         const char *slash = strchr(name, '/');
         size_t length = slash ? (size_t)(slash - name) : 0;
-        for (a = 0; a < app_count && (strlen(apps[a].name) != length || memcmp(apps[a].name, name, length)); ++a) {}
-        if (a == app_count || !apps[a].running) return -PURE_LINK_NO_INPUT;
+        unsigned count = places();
+        for (a = 0; a < count && (strlen(apps[a].name) != length || memcmp(apps[a].name, name, length)); ++a) {}
+        if (a == count) return -PURE_LINK_NO_INPUT;
         name = slash + 1;
     }
-    const PureModule *m = &apps[a].module;
-    int index = pure_module_input(m, name);
+    const PureModule *m = atomic_load_explicit(&apps[a].live, memory_order_acquire);
+    int index = m ? pure_module_input(m, name) : -1;
     if (index < 0 || m->input[index].kind != PURE_KIND_MESSAGE || m->input[index].keyed) return -PURE_LINK_NO_INPUT;
-    int found = (int)(a * PURE_MODULE_INPUTS) + index;
-    if (pure_module_shape(m, (uint32_t)index) == shape) return found;
-    if (!fields) return -PURE_LINK_OTHER_SHAPE;
-    return pure_module_takes(m, (uint32_t)index, fields, size) ? found : -PURE_LINK_FIELDS_LACKED;
+    if (pure_module_shape(m, (uint32_t)index) != shape && !fields) return -PURE_LINK_OTHER_SHAPE;
+    if (pure_module_shape(m, (uint32_t)index) != shape && !pure_module_takes(m, (uint32_t)index, fields, size))
+        return -PURE_LINK_FIELDS_LACKED;
+    for (size_t b = 0; b < binding_count; ++b)
+        if (bindings[b].app == a && bindings[b].module == m && bindings[b].input == (uint32_t)index) return (int)b;
+    if (binding_count > INT32_MAX - 1 || !grow(&bindings, &binding_capacity, binding_count + 1, sizeof(*bindings)))
+        return -PURE_LINK_NO_INPUT;
+    bindings[binding_count] = (struct Binding){a, m, (uint32_t)index};
+    return (int)binding_count++;
 }
 
 /* Records a link delivered, queued at the owner as a request is: applied
@@ -2958,7 +3098,8 @@ static int link_input(void *context, const char *name, uint32_t shape, const uns
 static PureLinkListener *link_listener;
 static bool link_deliver(void *context, const PureLinkDelivery *d) {
     (void)context;
-    Owner *owner = &apps[d->input / PURE_MODULE_INPUTS].owner;
+    const struct Binding *bound = &bindings[d->input];
+    Owner *owner = &apps[bound->app].owner;
     size_t size = 4 + DELIVERY + d->size + d->fields_size, length = strlen(d->source);
     unsigned char *ingress = malloc(size);
     LinkJob *link = malloc(sizeof(*link));
@@ -2976,10 +3117,11 @@ static bool link_deliver(void *context, const PureLinkDelivery *d) {
     memcpy(ingress + 4 + DELIVERY, d->records, d->size);
     if (d->fields_size) memcpy(ingress + 4 + DELIVERY + d->size, d->fields, d->fields_size); /* laid out with those */
     *link = (LinkJob){.listener = link_listener, .token = d->token, .ingress = ingress};
-    Job job = {.route = {.kind = ROUTE_INPUT, .target = d->input % PURE_MODULE_INPUTS}, .link = link,
+    Job job = {.route = {.kind = ROUTE_INPUT, .target = bound->input, .module = bound->module}, .link = link,
                .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {ingress, size}}};
     pthread_mutex_lock(&owner->lock);
-    bool queued = !owner->stopping && grow(&owner->jobs, &owner->capacity, owner->count + 1, sizeof(*owner->jobs));
+    bool queued = !owner->stopping && owner->module == bound->module &&
+                  grow(&owner->jobs, &owner->capacity, owner->count + 1, sizeof(*owner->jobs));
     if (queued) {
         owner->jobs[owner->count++] = job;
         ++owner->arrivals;
@@ -3009,19 +3151,15 @@ static unsigned char own_public[PURE_SEAL_KEY]; /* this node's key's public half
  * another app of it (Local), its input taking the output's shape or, by
  * name, its fields. */
 static bool open_local(App *app, uint32_t output, const char *to, const char *source, char *error, size_t size) {
+    *error = 0;
     const char *slash = strchr(to, '/');
     size_t length = slash ? (size_t)(slash - to) : 0;
     App *receiver = NULL;
-    for (unsigned a = 0; named_apps && slash && a < app_count && !receiver; ++a)
-        if (strlen(apps[a].name) == length && !memcmp(apps[a].name, to, length)) receiver = &apps[a];
-    if (!receiver || !receiver->running || !receiver->owned) {
-        snprintf(error, size, "no running app '%.*s' in this host", (int)length, to);
-        return false;
-    }
-    const PureModule *m = &app->module, *r = &receiver->module;
-    int input = pure_module_input(r, slash + 1);
-    if (input < 0 || r->input[input].kind != PURE_KIND_MESSAGE || r->input[input].keyed) {
-        snprintf(error, size, "%s has no input '%s' taking messages", receiver->name, slash + 1);
+    for (unsigned a = 0, count = places(); named_apps && slash && a < count && !receiver; ++a)
+        if (strlen(apps[a].name) == length && !memcmp(apps[a].name, to, length) && !atomic_load(&apps[a].gone))
+            receiver = &apps[a];
+    if (!receiver || !receiver->owned || strlen(slash + 1) > PURE_MODULE_NAME) {
+        snprintf(error, size, "no app '%.*s' in this host", (int)length, to);
         return false;
     }
     Executor *ex = &app->owner.executor;
@@ -3030,23 +3168,17 @@ static bool open_local(App *app, uint32_t output, const char *to, const char *so
         snprintf(error, size, "no memory");
         return false;
     }
-    *l = (Local){.from = &app->owner, .to = &receiver->owner, .output = output, .input = (uint32_t)input};
-    if (pthread_mutex_init(&l->lock, NULL)) {
-        free(l);
-        snprintf(error, size, "no lock");
-        return false;
-    }
+    *l = (Local){.from = &app->owner, .to = &receiver->owner, .output = output, .sender = app->module};
+    strcpy(l->input_name, slash + 1);
     size_t named = strnlen(source, PURE_SOURCE);
     memcpy(l->source, source, named);
     l->source[named] = 0;
-    if (pure_module_shape(r, (uint32_t)input) != pure_module_shape(m, output)) { /* taken by name, or not at all */
-        l->fields_size = pure_module_fields(m, output, l->fields);
-        if (!pure_module_takes(r, (uint32_t)input, l->fields, l->fields_size)) {
-            pthread_mutex_destroy(&l->lock);
-            free(l);
-            snprintf(error, size, "%s's input %s does not take the output's fields", receiver->name, slash + 1);
-            return false;
-        }
+    /* A receiver that runs is checked now; one that does not, when it does
+     * (its sends wait meanwhile, as a link's wait for its node). */
+    if ((receiver->running && !local_bind(l, receiver->module, error, size)) || pthread_mutex_init(&l->lock, NULL)) {
+        if (!*error) snprintf(error, size, "no lock");
+        free(l);
+        return false;
     }
     ex->locals[ex->local_count++] = l;
     return true;
@@ -3054,7 +3186,7 @@ static bool open_local(App *app, uint32_t output, const char *to, const char *so
 
 static bool open_wires(App *app, const char *name) {
     Executor *ex = &app->owner.executor;
-    const PureModule *m = &app->module;
+    const PureModule *m = app->module;
     const char *const *sends = app->sends;
     unsigned count = app->send_count;
     for (unsigned i = 0; i < count; ++i) {
@@ -3239,14 +3371,15 @@ static bool wire_replies(Executor *ex, const PureModule *m, const char *const *r
  * published; false (why says why) when the app cannot start. */
 static bool start_owner(App *app, Host *hosts, unsigned threads) {
     Owner *owner = &app->owner;
-    if (!start_executor(&owner->executor, app)) return false;
-    if (pthread_mutex_init(&owner->lock, NULL) || pure_cond_monotonic(&owner->waiting) ||
-        pthread_mutex_init(&owner->executor.published_lock, NULL)) {
+    if (!owner->made && (pthread_mutex_init(&owner->lock, NULL) || pure_cond_monotonic(&owner->waiting) ||
+                         pthread_mutex_init(&owner->published.lock, NULL))) {
         snprintf(app->why, sizeof(app->why), "Cannot make the owner's locks");
         return false;
     }
+    owner->made = true;
+    if (!start_executor(&owner->executor, app)) return false;
     owner->executor.reads_first = true;
-    owner->executor.publishes = true;
+    owner->executor.published = &owner->published;
     owner->hosts = hosts;
     owner->host_count = threads;
     return true;
@@ -3320,8 +3453,7 @@ static bool read_apps(const char *path) {
         app->owned = true; /* every app of a host of apps takes turns on the workers */
         if (!app->store) ok = false;
         else ++app_count;
-        if (ok && !load_module(app, words[1])) app->module = (PureModule){0}; /* stopped, with why */
-        else if (ok) app->running = true; /* until its store says otherwise */
+        if (ok && load_module(app, words[1])) app->running = true; /* until its store says otherwise; else stopped, with why */
     }
     fclose(file);
     if (ok && !app_count) fprintf(stderr, "--apps %s: no app\n", path);
@@ -3362,7 +3494,7 @@ int main(int argc, char **argv) {
     const char *surface_path = NULL, *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
     const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL, *senders_path = NULL, *apps_path = NULL;
     unsigned send_count = 0, reply_count = 0, seal_count = 0, named_count = 0;
-    unsigned port = 8767, threads = 1, link_port = 0, workers = 0;
+    unsigned port = 8767, threads = 1, link_port = 0, workers = 0, slots = 256;
     size_t budget = 64u << 20, capacity = 1024;
     uint64_t timeout_ms = 10000, link_idle_ms = 0;
     for (int i = 1; i < options; i += 2) {
@@ -3392,6 +3524,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--threads") && !strcmp(argv[i + 1], "auto")) threads = 0;
         else if (!strcmp(argv[i], "--threads") && number(argv[i + 1], 256, &value) && value) threads = (unsigned)value;
         else if (!strcmp(argv[i], "--workers") && number(argv[i + 1], 256, &value) && value) workers = (unsigned)value;
+        else if (!strcmp(argv[i], "--app-slots") && number(argv[i + 1], 65536, &value) && value) slots = (unsigned)value;
         else if (!strcmp(argv[i], "--timeout-ms") && number(argv[i + 1], 3600000, &value) && value) timeout_ms = value;
         else goto usage;
     }
@@ -3407,6 +3540,13 @@ int main(int argc, char **argv) {
             return 2;
         }
         if (!read_apps(apps_path)) return 2;
+        /* Each app in a place of its own, room left for apps started later. */
+        app_slots = slots > app_count ? slots : app_count;
+        App *placed = calloc(app_slots, sizeof(*placed));
+        if (!placed) return 1;
+        memcpy(placed, apps, app_count * sizeof(*apps));
+        free(apps);
+        apps = placed;
         named_apps = true;
     } else {
         if (!module_path || !store || !(apps = calloc(1, sizeof(*apps)))) goto usage;
@@ -3421,8 +3561,8 @@ int main(int argc, char **argv) {
         /* States (and outputs, whose sends are the app's state) have one
          * owner, whose snapshots the connection threads read. */
         bool outputs = false;
-        for (uint32_t i = 0; i < apps[0].module.inputs; ++i) outputs = outputs || apps[0].module.input[i].kind == PURE_KIND_OUTPUT;
-        apps[0].owned = apps[0].module.states || outputs;
+        for (uint32_t i = 0; i < apps[0].module->inputs; ++i) outputs = outputs || apps[0].module->input[i].kind == PURE_KIND_OUTPUT;
+        apps[0].owned = apps[0].module->states || outputs;
         apps[0].running = true;
     }
     if (!threads) threads = auto_threads(apps[0].owned);
@@ -3491,8 +3631,8 @@ int main(int argc, char **argv) {
         Executor *ex = &app->owner.executor;
         if (!app->running || !app->owned) continue;
         if (open_wires(app, named_apps ? app->name : name) &&
-            wire_replies(ex, &app->module, app->replies, app->reply_count) &&
-            wire_seals(ex, &app->module, app->seals, app->seal_count, seal_key ? own_public : NULL))
+            wire_replies(ex, app->module, app->replies, app->reply_count) &&
+            wire_seals(ex, app->module, app->seals, app->seal_count, seal_key ? own_public : NULL))
             continue;
         if (!named_apps) return 2;
         snprintf(app->why, sizeof(app->why), "Its sends are wired wrong (said above)");
@@ -3504,8 +3644,16 @@ int main(int argc, char **argv) {
         app->running = false;
         --owners;
     }
-    for (unsigned a = 0; a < app_count; ++a)
-        if (apps[a].running && apps[a].owned) after_save(&apps[a].owner.executor); /* the snapshot, and the sends stored before */
+    for (unsigned a = 0; a < app_count; ++a) {
+        App *app = &apps[a];
+        if (!app->running) continue;
+        if (app->owned) { /* it takes requests resolved with its module, and turns */
+            app->owner.module = app->module;
+            app->owner.live = true;
+            after_save(&app->owner.executor); /* the snapshot, and the sends stored before */
+        }
+        atomic_store(&app->live, app->module);
+    }
     for (unsigned a = 0; a < app_count; ++a) {
         Owner *o = &apps[a].owner;
         if (!apps[a].running || !apps[a].owned) continue;
