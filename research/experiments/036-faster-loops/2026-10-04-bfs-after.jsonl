@@ -1,0 +1,16 @@
+{"system": "c", "from": 42224, "to": 57393, "hops": 6, "reached": 99996, "us": 9070.0}
+{"system": "c", "from": 5153, "to": 48368, "hops": 6, "reached": 99996, "us": 9028.9}
+{"system": "c", "from": 73314, "to": 58793, "hops": 5, "reached": 99996, "us": 9052.0}
+{"system": "c", "from": 47063, "to": 90963, "hops": 5, "reached": 99996, "us": 9025.9}
+{"system": "c", "from": 67811, "to": 96464, "hops": 5, "reached": 99996, "us": 9086.1}
+{"system": "python", "from": 42224, "to": 57393, "us": 451246.8}
+{"system": "python", "from": 5153, "to": 48368, "us": 446590.6}
+{"system": "python", "from": 73314, "to": 58793, "us": 447737.8}
+{"system": "python", "from": 47063, "to": 90963, "us": 452924.2}
+{"system": "python", "from": 67811, "to": 96464, "us": 448822.6}
+{"system": "pure", "from": 42224, "to": 57393, "hops": 6, "reached": 99996, "us": 191634.5}
+{"system": "pure", "from": 5153, "to": 48368, "hops": 6, "reached": 99996, "us": 191495.9}
+{"system": "pure", "from": 73314, "to": 58793, "hops": 5, "reached": 99996, "us": 190854.3}
+{"system": "pure", "from": 47063, "to": 90963, "hops": 5, "reached": 99996, "us": 190901.5}
+{"system": "pure", "from": 67811, "to": 96464, "hops": 5, "reached": 99996, "us": 189952.5}
+{"nodes": 100000, "edges": 1000000, "median_us": {"c": 9052.0, "python": 448822.6, "pure": 190901.5}, "pure_over_c": 21.1, "pure_over_python": 0.43}

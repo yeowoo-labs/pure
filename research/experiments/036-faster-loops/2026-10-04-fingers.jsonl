@@ -1,0 +1,19 @@
+{"build": "9484700 with FINGERS 1", "round": 1, "median_ms": 183.19}
+{"build": "9484700 with FINGERS 2", "round": 1, "median_ms": 185.33}
+{"build": "9484700 with FINGERS 4", "round": 1, "median_ms": 185.96}
+{"build": "9484700 with FINGERS 1", "round": 2, "median_ms": 185.02}
+{"build": "9484700 with FINGERS 2", "round": 2, "median_ms": 184.99}
+{"build": "9484700 with FINGERS 4", "round": 2, "median_ms": 184.77}
+{"build": "9484700 with FINGERS 1", "round": 3, "median_ms": 182.89}
+{"build": "9484700 with FINGERS 2", "round": 3, "median_ms": 185.00}
+{"build": "9484700 with FINGERS 4", "round": 3, "median_ms": 183.92}
+{"build": "316d701", "round": 1, "median_ms": 183.79}
+{"build": "316d701 + dde73e4's module.c", "round": 1, "median_ms": 186.69}
+{"build": "316d701", "round": 2, "median_ms": 183.76}
+{"build": "316d701 + dde73e4's module.c", "round": 2, "median_ms": 189.79}
+{"build": "316d701", "round": 3, "median_ms": 183.67}
+{"build": "316d701 + dde73e4's module.c", "round": 3, "median_ms": 187.09}
+{"build": "316d701", "counted": 1, "median_ms": 183.34, "instructions_per_search_m": 887.65, "cycles_per_search_m": 440.1}
+{"build": "316d701 + dde73e4's module.c", "counted": 1, "median_ms": 186.95, "instructions_per_search_m": 866.65, "cycles_per_search_m": 448.35}
+{"build": "316d701", "counted": 2, "median_ms": 184.12, "instructions_per_search_m": 888.05, "cycles_per_search_m": 439.69}
+{"build": "316d701 + dde73e4's module.c", "counted": 2, "median_ms": 186.46, "instructions_per_search_m": 866.65, "cycles_per_search_m": 446.75}
