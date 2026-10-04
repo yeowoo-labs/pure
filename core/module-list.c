@@ -1323,6 +1323,8 @@ void pure_undo_commit(PureUndo *undo) {
     undo->count = undo->cell_count = 0;
 }
 
+size_t pure_undo_size(const PureUndo *undo) { return undo->count * sizeof(Entry) + undo->cell_count * sizeof(PureCell); }
+
 void pure_undo_free(PureUndo *undo) {
     free(undo->entries);
     free(undo->cells);

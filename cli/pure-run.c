@@ -11,7 +11,8 @@
  * states live in that tree store: it starts from them, and frame changes are
  * saved at the end of input or by save. --batch N defers saving and saves
  * every N commands (and at the end), so N events share one commit.
- *   down NAME | up NAME | frame [N] | type NAME HEX|- | tick NAME | time MS | replace PATH | save | show
+ *   down NAME | up NAME | frame [N] | type NAME HEX|- | message NAME HEX|- | tick NAME | time MS | replace PATH | save | show
+ * (type gives a text input its bytes, message a message input its payload, laid out as the module says.)
  * Text states and text views print as JSON strings; cursors as byte positions;
  * lists as arrays of objects; indices as positions; a table view as an array
  * with an object of its columns per row. A failed view or cell is null. */
@@ -165,13 +166,16 @@ int main(int argc, char **argv) {
             if (input < 0) failure = "unknown input";
             else if (pure_app_input(&app, (uint32_t)input, command[0] == 'd' ? PURE_EDGE_DOWN : PURE_EDGE_UP) != PURE_OK)
                 failure = "event failed";
-        } else if (!strcmp(command, "type")) {
+        } else if (!strcmp(command, "type") || !strcmp(command, "message")) {
             int input = pure_module_input(app.module, argument);
             size_t length = strcmp(data, "-") ? strlen(data) / 2 : 0;
             for (size_t i = 0; i < length && length * 2 == strlen(data); ++i)
                 text[i] = (unsigned char)(hex(data[2 * i]) << 4 | hex(data[2 * i + 1]));
+            PureSpan given = {text, length};
             if (input < 0) failure = "unknown input";
-            else if (pure_app_text(&app, (uint32_t)input, (PureSpan){text, length}) != PURE_OK) failure = "event failed";
+            else if ((command[0] == 't' ? pure_app_text(&app, (uint32_t)input, given)
+                                        : pure_app_message(&app, (uint32_t)input, NULL, -1, given)) != PURE_OK)
+                failure = "event failed";
         } else if (!strcmp(command, "tick")) {
             int input = pure_module_input(app.module, argument);
             if (input < 0) failure = "unknown input";

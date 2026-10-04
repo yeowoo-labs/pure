@@ -151,5 +151,7 @@ PureResult pure_list_replay(PureList *, const unsigned char *bytes, size_t size)
 /* Undo the changes logged after mark (a count taken earlier), newest first. */
 void pure_undo_rollback(PureUndo *, size_t mark);
 void pure_undo_commit(PureUndo *);
+/* What the changes logged hold, in bytes (their entries and the cells kept). */
+size_t pure_undo_size(const PureUndo *);
 void pure_undo_free(PureUndo *);
 #endif

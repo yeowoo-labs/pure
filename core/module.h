@@ -42,6 +42,7 @@ typedef enum {
     PURE_OP_LOCAL_LOAD, PURE_OP_LOCAL_STORE,
     PURE_OP_I64_ADD, PURE_OP_I64_SUB, PURE_OP_I64_MUL, PURE_OP_I64_DIV, PURE_OP_I64_MOD, PURE_OP_I64_NEG,
     PURE_OP_I64_COMPARE, PURE_OP_I64_MIN, PURE_OP_I64_MAX, PURE_OP_I64_FROM, PURE_OP_NUM_FROM,
+    PURE_OP_LOOP, PURE_OP_BREAK,
     PURE_OP_COUNT
 } PureOpcode;
 /* A bool is its own type (docs/design/016-bool-and-i64.md), held as a
@@ -86,6 +87,27 @@ enum { PURE_FOLD_KIND = 0x3F, PURE_FOLD_INTEGER = 0x40 };
  * runs for the items of its list (keyed by a number) whose keys are from
  * low up to before high, found by key. */
 enum { PURE_FOLD_SLICED = 0x80, PURE_EACH_SLICED = 1 };
+/* LOOP's argument: a local slot (bits 0-7), PURE_LOOP_INTEGER (an i64's
+ * loop, else a number's) and the length of the block that follows (16-31).
+ * It takes a low and a high value, both whole numbers within 2^53 (else it
+ * fails as LIMIT) or both i64s, and runs the block once for each value from
+ * low up to before high, in order, with the slot holding it; none when high
+ * is not above low. The block is a handler's code (or a walk's, in one),
+ * and its work counts as it runs: the block's length each time. BREAK, at
+ * an empty stack in the block of a LOOP or an EACH (in an if within it
+ * too), ends the innermost of them: the code after it runs next.
+ * Loops (LOOP and EACH) nest 8 deep. Within a walk, code that a loop runs
+ * may change the items of any list but not add to or remove from a list an
+ * outer walk walks; the innermost walk may remove from its own. */
+enum { PURE_LOOP_INTEGER = 256, PURE_MODULE_NESTING = 8 };
+/* What a unit (an event, or a view's evaluation) may run when its app sets
+ * no work budget (pure_app_work), and what an event may hold for what it
+ * adds (its lists' and texts' bytes, and their records to save and undo)
+ * unless a larger memory budget allows more: 2^28 instructions, 2^28 bytes.
+ * With a budget, what an event adds (as stored) fails it once it passes the
+ * budget, as it adds it. */
+#define PURE_WORK_DEFAULT (UINT64_C(1) << 28)
+#define PURE_GROWTH_DEFAULT ((size_t)1 << 28)
 /* TEXT_COMPARE's argument: the relation, in the order of the number
  * comparisons (LT LE GT GE EQ NE); texts order by their bytes. */
 typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PURE_EQUAL, PURE_NOT_EQUAL } PureRelation;
@@ -139,10 +161,11 @@ typedef enum { PURE_RECORD_NUMBER = 0, PURE_RECORD_TEXT = 1, PURE_RECORD_BOOL = 
  * computes reads them as one or the other. */
 typedef union { double num; int64_t i64; } PureValue;
 /* A cursor that stays before text inserted at it (a mark); other cursors go
- * after it (a caret). A list of a message's rows (its state's flags hold
- * PURE_LIST_ROWS beside the key byte; its name is the field's path): a
- * message's rows field fills it as the message arrives, it is emptied when
- * every event ends, and it is never saved nor logged for undoing. */
+ * after it (a caret). An event's list (its state's flags hold
+ * PURE_LIST_ROWS beside the key byte; its name a path, input.field or
+ * let.name): it is emptied when every event ends, and it is never saved
+ * nor logged for undoing. A message's rows field fills the one its path
+ * names (unkeyed) as the message arrives; code fills a let's (docs/design/018). */
 enum { PURE_CURSOR_STAYS = 1, PURE_LIST_ROWS = 256 };
 /* A transient state (bit 8 of its type word in a module, a bit of
  * PureModule.transient): the app holds it while it runs, and undoes it with
@@ -388,7 +411,9 @@ typedef struct {
     PureFault fault;
     uint32_t fault_pc;
     size_t memory; /* the budget of what the states hold (0: none): pure_app_memory */
-    uint64_t work_budget, work; /* pure_app_work's budget (0: none), and what the unit running has used */
+    uint64_t work_budget, work; /* pure_app_work's budget (0: PURE_WORK_DEFAULT), and what the unit running has used */
+    int64_t grown, spent; /* what the event running has added to the states (and its lists), as stored and in all */
+    size_t room;          /* what it may hold for that in all: PURE_GROWTH_DEFAULT, or the memory budget if larger */
     PureFault view_fault; /* why the last view evaluated had no value (pure_app_view_fault) */
     char why[128]; /* why the last start or replace was refused, when it says (else empty; a failed start keeps it) */
     uint32_t counted; /* the states it counts, a bit each: lists (not a message's rows) and texts */
@@ -564,7 +589,8 @@ size_t pure_app_state_bytes(const PureApp *);
  * item of its list (of its slice, when it takes one) it goes over, all
  * counted as the fold or walk begins. Past it the event fails with the fault
  * PURE_FAULT_WORK (PURE_LIMIT) and changes nothing, and a view has no value.
- * 0: no budget, at first, and then nothing is counted (PureApp.work stays). */
+ * A LOOP counts its block's length + 1 each time round, as it goes round.
+ * 0, as at first: PURE_WORK_DEFAULT (docs/design/018: every unit ends). */
 void pure_app_work(PureApp *, uint64_t instructions);
 /* Why the last view evaluated on this app (or a table's rows asked for)
  * had no value, once it had none: PURE_FAULT_WORK past the work budget,

@@ -3000,12 +3000,15 @@ static void walks(void) {
     static const F note_fields[] = {{"lines", PURE_FIELD_ROWS | W_LINES << 8}, {"text", 4}};
     static const I note_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, note_fields, 2}};
     static const O into_walked[] = {{EACH, WALKING(W_STOCK, 3), 0}, {C, 0, 1}, {C, 0, 2}, {LA, W_STOCK, 0}};
-    static const O nested[] = {{EACH, WALKING(W_STOCK, 3), 0}, {EACH, WALKING(W_LOG, 2), 0}, {C, 0, 1}, {ST, W_N, 0}};
+    static const O nested[] = {{EACH, WALKING(W_STOCK, 4), 0}, {EACH, WALKING(W_LOG, 3), 0}, {C, 0, 1}, {C, 0, 2},
+                               {LA, W_STOCK, 0}};
+    static const O nested_remove[] = {{EACH, WALKING(W_STOCK, 3), 0}, {EACH, WALKING(W_LOG, 2), 0}, {XF, W_STOCK, 0},
+                                      {LR, W_STOCK, 0}};
     static const O replied[] = {{EACH, WALKING(W_STOCK, 2), 0}, {FIELD, 1, 0}, {REPLY, 0, 0}};
     static const O rows_read[] = {{FIELD, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {REPLY, 0, 0}};
     static const O into_each[] = {{C, 1, 1}, {JZ, 3, 0}, {EACH, WALKING(W_STOCK, 2), 0}, {C, 0, 1}, {ST, W_N, 0}};
     static const O view_each[] = {{EACH, WALKING(W_STOCK, 2), 0}, {C, 0, 1}, {ST, W_N, 0}, {C, 0, 1}};
-    static const H first3[] = {{1, 0, 4}}, first3b[] = {{1, 0, 3}}, first5[] = {{1, 0, 5}};
+    static const H first3[] = {{1, 0, 4}}, first3b[] = {{1, 0, 3}}, first4[] = {{1, 0, 4}}, first5[] = {{1, 0, 5}};
     static const V walk_view[] = {{"v", 0, 4}};
     static const T unnamed[] = {{"stock", 3 | 1 << 8, 0}, {"lines", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}, {"log", 3, 2}};
     static const F logged_rows[] = {{"lines", PURE_FIELD_ROWS | W_LOG << 8}};
@@ -3013,8 +3016,10 @@ static void walks(void) {
     static const I sent_rows[] = {{"order", NULL, PURE_KIND_OUTPUT, false, order_fields, 1}};
     const struct { Spec spec; const char *reason; } refused[] = {
         {walk_spec(into_walked, LEN(into_walked), note_inputs, 1, first3, 1, walk_lists, NULL, 0), "insert into the list walked"},
-        {walk_spec(nested, LEN(nested), note_inputs, 1, first3, 1, walk_lists, NULL, 0), "each inside each"},
-        {walk_spec(replied, LEN(replied), note_inputs, 1, first3b, 1, walk_lists, NULL, 0), "reply inside each"},
+        {walk_spec(nested, LEN(nested), note_inputs, 1, first5, 1, walk_lists, NULL, 0), "insert into the list walked"},
+        {walk_spec(nested_remove, LEN(nested_remove), note_inputs, 1, first4, 1, walk_lists, NULL, 0),
+         "remove from a list an outer walk walks"},
+        {walk_spec(replied, LEN(replied), note_inputs, 1, first3b, 1, walk_lists, NULL, 0), "reply inside a loop"},
         {walk_spec(rows_read, LEN(rows_read), note_inputs, 1, first3b, 1, walk_lists, NULL, 0), "no such state, field"},
         {walk_spec(into_each, LEN(into_each), note_inputs, 1, first5, 1, walk_lists, NULL, 0), "branch into an each"},
         {walk_spec(view_each, LEN(view_each), note_inputs, 1, NULL, 0, walk_lists, walk_view, 1), "view with an effect"},
@@ -4460,7 +4465,7 @@ static void work_budget(void) {
     put32(put32(payload, 9), 1);
     CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8}) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
     CHECK(pure_list_count(app.lists[W_STOCK]) == 5);
-    pure_app_work(&app, 0); /* none */
+    pure_app_work(&app, 0); /* the default */
     CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8}) == PURE_OK && pure_list_count(app.lists[W_STOCK]) == 6);
     pure_app_stop(&app);
     pure_module_release(&module_a);
@@ -5302,6 +5307,152 @@ static void number_texts(void) {
     printf("{\"number_texts\":%zu}\n", checked);
 }
 
+/* Loops (docs/design/018): LOOP counts from low up to before high with a
+ * local holding the value, BREAK ends the innermost loop, walks nest, and
+ * an event's list (let.name) is the event's alone. Work counts as a loop
+ * goes round, and what an event adds counts as it adds it: a loop that
+ * would not end, or would fill the memory, fails and changes nothing. */
+static void loops(void) {
+    enum { N, S_, XS, SEEN, PAGES, LOOP = PURE_OP_LOOP, BREAK = PURE_OP_BREAK, LL = PURE_OP_LOCAL_LOAD,
+           EQ_ = PURE_OP_EQ, MOD_ = PURE_OP_MOD, HAS_ = PURE_OP_LIST_HAS, EACH_ = PURE_OP_EACH, REQ = PURE_OP_REQUIRE };
+#define BODY(slot, length) ((uint32_t)(slot) | (uint32_t)(length) << 16)
+    static const S nums[] = {{"n", 0}, {"s", 0}};
+    static const T states[] = {{"xs", 3, 0}, {"let.seen", 3 | (uint32_t)(PURE_LIST_ROWS | 1) << 8, 0},
+                               {"let.pages", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}};
+    static const RF row_fields[] = {{"value", 0, 0}}, page_fields[] = {{"body", 1, 0}};
+    static const R records[] = {{"row", row_fields, 1}, {"page", page_fields, 1}};
+    static char page[4001];
+    memset(page, 'p', 4000);
+    static const char *constants[2];
+    constants[0] = "";
+    constants[1] = page;
+    static const I inputs[] = {KEY("sum", "KeyS"), KEY("brk", "KeyB"), KEY("nest", "KeyN"), KEY("seen", "KeyE"),
+                               KEY("huge", "KeyH"), KEY("pages", "KeyP"), KEY("wide", "KeyI"), KEY("frac", "KeyF"),
+                               KEY("idle", "KeyZ"), KEY("add", "KeyA")};
+    O code[] = {
+        /* sum: s = 0; for i in 0 .. n { s = s + i } (9) */
+        {C, 0, 0}, {ST, S_, 0}, {C, 0, 0}, {L, N, 0}, {LOOP, BODY(0, 4), 0}, {L, S_, 0}, {LL, 0, 0}, {ADD, 0, 0}, {ST, S_, 0},
+        /* brk at 9: s = 0; for i in 0 .. 100 { if i == 5 { break }; s = s + 1 } (14) */
+        {C, 0, 0}, {ST, S_, 0}, {C, 0, 0}, {C, 0, 100}, {LOOP, BODY(0, 9), 0},
+        {LL, 0, 0}, {C, 0, 5}, {EQ_, 0, 0}, {JZ, 19, 0}, {BREAK, 0, 0}, {L, S_, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, S_, 0},
+        /* nest at 23: s = 0; for a in xs { for b in xs { s = s + 1 } };
+         * for i in 0 .. 3 { for j in 0 .. 10 { if j == 2 { break }; s = s + 100 } } (23) */
+        {C, 0, 0}, {ST, S_, 0}, {EACH_, WALKING(XS, 5), 0}, {EACH_, WALKING(XS, 4), 0}, {L, S_, 0}, {C, 0, 1}, {ADD, 0, 0},
+        {ST, S_, 0},
+        {C, 0, 0}, {C, 0, 3}, {LOOP, BODY(0, 12), 0}, {C, 0, 0}, {C, 0, 10}, {LOOP, BODY(1, 9), 0},
+        {LL, 1, 0}, {C, 0, 2}, {EQ_, 0, 0}, {JZ, 42, 0}, {BREAK, 0, 0}, {L, S_, 0}, {C, 0, 100}, {ADD, 0, 0}, {ST, S_, 0},
+        /* seen at 46: for i in 0 .. 10 { if !seen.has(i mod 3) { seen.add(row { i mod 3 }) } };
+         * s = seen.count (15) */
+        {C, 0, 0}, {C, 0, 10}, {LOOP, BODY(0, 10), 0}, {LL, 0, 0}, {C, 0, 3}, {MOD_, 0, 0}, {HAS_, SEEN, 0}, {NOT, 0, 0},
+        {JZ, 59, 0}, {LL, 0, 0}, {C, 0, 3}, {MOD_, 0, 0}, {LA, SEEN, 0}, {LC, SEEN, 0}, {ST, S_, 0},
+        /* huge at 61: for i in 0 .. 1e15 { s = s + 1 } (7) */
+        {C, 0, 0}, {C, 0, 1e15}, {LOOP, BODY(0, 4), 0}, {L, S_, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, S_, 0},
+        /* pages at 68: s = 1; for i in 0 .. 1e6 { pages.append(page { big }) } (7) */
+        {C, 0, 1}, {ST, S_, 0}, {C, 0, 0}, {C, 0, 1e6}, {LOOP, BODY(0, 2), 0}, {TK, 1, 0}, {LA, PAGES, 0},
+        /* wide at 75: s = 0; for i in max - 3 .. max (i64s) { s = s + 1 }; require the last i was max - 1 (12) */
+        {C, 0, 0}, {ST, S_, 0}, {C, 2, 0}, {C, 2, 0}, {LOOP, BODY(2, 4) | PURE_LOOP_INTEGER, 0}, {L, S_, 0}, {C, 0, 1},
+        {ADD, 0, 0}, {ST, S_, 0}, {LL, 2 | 3 << 8, 0}, {C, 2, 0}, {PURE_OP_I64_COMPARE, PURE_EQUAL, 0},
+        /* frac at 88: for i in 0 .. 2.5 { } (3) */
+        {REQ, 0, 0}, {C, 0, 0}, {C, 0, 2.5}, {LOOP, BODY(0, 0), 0},
+        /* idle at 91: for i in 0 .. 1e15 { } (3); add at 94: xs.append(row { n }); n = n + 1 (6) */
+        {C, 0, 0}, {C, 0, 1e15}, {LOOP, BODY(0, 0), 0},
+        {L, N, 0}, {LA, XS, 0}, {L, N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, N, 0},
+    };
+    code[77] = IC(INT64_MAX - 3);
+    code[78] = IC(INT64_MAX);
+    code[85] = IC(INT64_MAX - 1);
+    static const H handlers[] = {{1, 0, 9}, {3, 9, 14}, {5, 23, 23}, {7, 46, 15}, {9, 61, 7}, {11, 68, 7},
+                                 {13, 75, 13}, {15, 88, 3}, {17, 91, 3}, {19, 94, 6}};
+    Spec spec = {nums, 2, inputs, LEN(inputs), NULL, 0, handlers, LEN(handlers), code, LEN(code), NULL, 0, states, 3,
+                 constants, 2, NULL, 0, records, 2, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    CHECK(module_a.state_key[SEEN] == 1 && module_a.state_flags[SEEN] == PURE_LIST_ROWS >> 8);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    for (int k = 0; k < 10; ++k) CHECK(pure_app_input(&app, 9, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(app.values[N].num == 10 && pure_list_count(app.lists[XS]) == 10);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 45);
+    CHECK(app.work == 9 + 10 * (4 + 1)); /* the LOOP counts its block and itself each time round */
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 5);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 100 + 3 * 2 * 100);
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 3 && !pure_list_count(app.lists[SEEN]));
+    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 3); /* each event's own */
+    CHECK(pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 3);
+    /* A loop that would not end runs out of work, by default too, and changes nothing. */
+    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_WORK && app.values[S_].num == 3);
+    CHECK(app.work <= PURE_WORK_DEFAULT && app.work > PURE_WORK_DEFAULT - 5);
+    CHECK(pure_app_input(&app, 8, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
+    CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT); /* not a whole number */
+    /* A list that would fill the memory fails as it passes the default room, or the budget. */
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY &&
+          app.values[S_].num == 3 && !pure_list_count(app.lists[PAGES]));
+    CHECK(app.grown > (int64_t)PURE_GROWTH_DEFAULT && app.grown < (int64_t)PURE_GROWTH_DEFAULT + 8192);
+    pure_app_memory(&app, 1 << 20);
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY &&
+          app.grown < (1 << 20) + 8192 && !pure_list_count(app.lists[PAGES]));
+    pure_app_memory(&app, 0);
+    pure_app_work(&app, 10); /* a budget of its own: the sum's 9, and not one time round */
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_LIMIT && app.values[S_].num == 3);
+    pure_app_stop(&app);
+
+    /* What the verifier refuses. */
+    static const O outside[] = {{BREAK, 0, 0}};
+    static const O valued[] = {{C, 0, 0}, {C, 0, 1}, {LOOP, BODY(0, 3), 0}, {C, 0, 1}, {BREAK, 0, 0}, {ST, S_, 0}};
+    static const O into[] = {{C, 1, 1}, {JZ, 5, 0}, {C, 0, 0}, {C, 0, 1}, {LOOP, BODY(0, 2), 0}, {C, 0, 1}, {ST, S_, 0}};
+    static const O typed[] = {{C, 1, 1}, {C, 0, 1}, {LOOP, BODY(0, 0), 0}};
+    static const O flagged[] = {{C, 0, 0}, {C, 0, 1}, {LOOP, BODY(0, 0) | 1u << 9, 0}};
+    static const O two_ways[] = {{C, 0, 0}, {C, 0, 1}, {LOOP, BODY(0, 0), 0}, {XF, XS, 0}, {PURE_OP_LOCAL_STORE, 0 | 1 << 8 | XS << 16, 0}};
+    static const O into_outer[] = {{EACH_, WALKING(XS, 5), 0}, {C, 0, 0}, {C, 0, 1}, {LOOP, BODY(0, 2), 0}, {C, 0, 1}, {LA, XS, 0}};
+    O deep[8 * 3 + 2];
+    for (unsigned d = 0; d < 9; ++d) {
+        if (d == 8) { deep[24] = (O){C, 0, 1}; deep[25] = (O){ST, S_, 0}; break; }
+        deep[3 * d] = (O){C, 0, 0};
+        deep[3 * d + 1] = (O){C, 0, 1};
+        deep[3 * d + 2] = (O){LOOP, BODY(0, 26 - 3 * d - 3), 0};
+    }
+    O deeper[9 * 3 + 2];
+    for (unsigned d = 0; d < 9; ++d) {
+        deeper[3 * d] = (O){C, 0, 0};
+        deeper[3 * d + 1] = (O){C, 0, 1};
+        deeper[3 * d + 2] = (O){LOOP, BODY(0, 29 - 3 * d - 3), 0};
+    }
+    deeper[27] = (O){C, 0, 1};
+    deeper[28] = (O){ST, S_, 0};
+    const struct { const O *code; size_t count; const char *why; } refused[] = {
+        {outside, LEN(outside), "break outside a loop"},
+        {valued, LEN(valued), "break with values on the stack"},
+        {into, LEN(into), "branch into a loop"},
+        {typed, LEN(typed), "operand type"},
+        {flagged, LEN(flagged), "no such state"},
+        {two_ways, LEN(two_ways), "local used as two things"},
+        {into_outer, LEN(into_outer), "insert into the list walked"},
+        {deeper, LEN(deeper), "loops nested deeper than 8"},
+    };
+    for (size_t i = 0; i < LEN(refused); ++i) {
+        H one[] = {{1, 0, (uint32_t)refused[i].count}};
+        Spec bad = spec;
+        bad.o = refused[i].code;
+        bad.no = refused[i].count;
+        bad.h = one;
+        bad.nh = 1;
+        if (load(bad, &module_b) == PURE_OK || !strstr(error, refused[i].why)) {
+            fprintf(stderr, "loop case %zu: expected '%s', got '%s'\n", i, refused[i].why, error);
+            abort();
+        }
+    }
+    H eight[] = {{1, 0, LEN(deep)}};
+    Spec nested = spec;
+    nested.o = deep;
+    nested.no = LEN(deep);
+    nested.h = eight;
+    nested.nh = 1;
+    CHECK(load(nested, &module_b) == PURE_OK); /* eight deep is allowed */
+    pure_module_release(&module_b);
+    pure_module_release(&module_a);
+#undef BODY
+    puts("{\"loops\":\"count-break-nested-walks-event-lists-work-memory-refusals\"}");
+}
+
 int main(void) {
     number_texts();
     behaviour();
@@ -5325,6 +5476,7 @@ int main(void) {
     walk_mutations();
     view_arguments();
     locals();
+    loops();
     ranges();
     keyed();
     keyed_mutations();

@@ -4361,6 +4361,69 @@ def server_transient(aup, pure, work):
     return {'quiet_requests': quiet, 'store_files_compared': len(stored_plain)}
 
 
+RUNAWAY_SOURCE = """record R {
+  n = 0
+}
+state count = 0
+state xs: list of R
+input spin = text
+input fill = text
+input pile = text
+input tap = text
+on spin {
+  for i in 0 .. 1e15 {
+    count = count + 1
+  }
+}
+on fill {
+  for i in 0 .. 1e15 {
+    xs.append(R { n: i })
+  }
+}
+on pile {
+  let ys: list of R
+  for i in 0 .. 1e15 {
+    ys.append(R { n: i })
+  }
+}
+on tap {
+  count = count + 1
+}
+view total = count
+view items = xs.count
+"""
+
+
+def server_runaway(aup, pure, work):
+    """Loops that would not end (docs/design/018) on a host given no budget:
+    one that only counts runs out of work, one that fills a stored list
+    runs out of room (2^28 bytes for the list and its records to save and
+    undo), one that fills an event's list reaches a list's most items; each
+    ends within seconds, the host's peak memory grows by at most 300 MiB,
+    nothing changes, and the host answers after."""
+    import time
+    module, source = work / 'runaway.pmod', work / 'runaway.aup'
+    source.write_text(RUNAWAY_SOURCE)
+    compile_module(aup, source, module)
+    ended = {}
+    for name, why in (('spin', ('work',)), ('fill', ('memory',)), ('pile', ('memory', 'limit'))):
+        host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / f'runaway-{name}'])
+        try:
+            def peak():
+                return next(int(line.split()[1]) for line in Path(f'/proc/{host.process.pid}/status').read_text().splitlines()
+                            if line.startswith('VmHWM'))
+            before, started = peak(), time.monotonic()
+            status, error, _, _ = http(host.port, 'POST', f'/inputs/{name}', b'x')
+            took, grew = time.monotonic() - started, (peak() - before) // 1024
+            assert status in (422, 503) and error in why and took < 20 and grew <= 300, (name, status, error, took, grew)
+            assert http(host.port, 'POST', '/inputs/tap', b'x')[0] == 200
+            assert http(host.port, 'GET', '/views/total')[3] == b'1' and http(host.port, 'GET', '/views/items')[3] == b'0'
+            ended[name] = {'error': error, 'seconds': round(took, 1), 'peak_grew_mib': grew}
+        finally:
+            host.stop()
+    return ended
+
+
 def server_tokens(aup, pure, work):
     """An app's routes take tokens (docs/design/017, 3b). With a tokens file
     an app answers no request without a token (401, WWW-Authenticate:
@@ -4585,6 +4648,7 @@ def main():
         report['server_apps_lifecycle'] = server_apps_lifecycle(aup, pure, work)
         report['server_tokens'] = server_tokens(aup, pure, work)
         report['server_transient'] = server_transient(aup, pure, work)
+        report['server_runaway'] = server_runaway(aup, pure, work)
     print(json.dumps(report))
 
 
