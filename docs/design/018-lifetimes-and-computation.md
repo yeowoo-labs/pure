@@ -1,7 +1,8 @@
 # 018 — 상태의 수명과 메모리 안의 계산
 
 작성일: 2026-10-04. 상태: 설계와 착수 기준. 1단계(transient) 구현, 검사로 고정하고 쟀다
-([117](../research/117-transient-states.md)).
+([117](../research/117-transient-states.md)). 2단계(핸들러의 계산) 구현, 검사로 고정하고 쟀다
+([118](../research/118-computing-in-one-event.md)).
 [외부 리뷰 005](../outside-feedback/feedback-005.md)의 (1) "순수 인메모리 연산 및 알고리즘의 단절"과, 상태의 영속성과 상태성을 aup
 안에서 정할 수단이 필요하다는 요청에서 시작한다.
 

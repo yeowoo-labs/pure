@@ -4,7 +4,7 @@ computing: the examples routes.aup and numbers.aup against their models),
 each recorded by 029's recorded-pure-run, so two machines' records compare
 run by run (029's compare.py).
 
-record.py AUP_ROOT PURE_ROOT OUT.jsonl   the checks' report on stdout"""
+record.py AUP_ROOT PURE_ROOT OUT.jsonl   the checks' report on stdout (MAKE: the make to build with)"""
 import importlib.util
 import json
 import os
@@ -14,8 +14,8 @@ import tempfile
 from pathlib import Path
 
 aup_root, pure_root, out = (Path(a).resolve() for a in sys.argv[1:4])
-subprocess.run(['make', '-s', '-C', str(pure_root), 'build/pure-run'], check=True)
-subprocess.run(['make', '-s', '-C', str(aup_root), 'build/aup'], check=True)
+subprocess.run([os.environ.get('MAKE', 'make'), '-s', '-C', str(pure_root), 'build/pure-run'], check=True)
+subprocess.run([os.environ.get('MAKE', 'make'), '-s', '-C', str(aup_root), 'build/aup'], check=True)
 out.unlink(missing_ok=True)
 os.environ['PURE_RUN'] = str(pure_root / 'build' / 'pure-run')
 os.environ['PURE_RUN_LOG'] = str(out)
