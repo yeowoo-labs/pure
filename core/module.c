@@ -1489,11 +1489,12 @@ static bool related(uint32_t relation, int order) {
 /* A walk (EACH): the list, the item it runs for, where it ends (items the
  * walk removes move it), and whether that item left. */
 typedef struct { uint32_t list; size_t at, end; bool removed; } Walk;
-/* A loop that runs in its block's run (LOOP, EACH): its block, the arena as
- * it began, a walk's walk and the event's walk and row around it, a
- * count's values (low + k of count) and slot. */
+/* A loop that runs in its block's run (LOOP, EACH): its block and where
+ * the code around it ends, the arena as it began, a walk's walk and the
+ * event's walk and row around it, a count's values (low + k of count) and
+ * slot. */
 typedef struct {
-    uint32_t start, end;
+    uint32_t start, end, outer;
     size_t mark;
     bool walking, integer;
     Walk walk, *around;
@@ -2438,12 +2439,12 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
     PureResult status;
     PureFault kind;
     const PureOp *op = NULL;
-    /* The loops open here (LOOP, EACH), innermost last, and where the innermost's block ends. */
+    /* The loops open here (LOOP, EACH), innermost last; end is where the innermost's block ends. */
     Loop loops[PURE_MODULE_NESTING];
     unsigned depth = 0;
-    uint32_t loop_end = UINT32_MAX;
     for (uint32_t pc = block.start, end = block.start + block.length;;) {
-        if (pc == loop_end) { /* a loop's block ran once: again, or the loop ends (its end may be the block's) */
+        if (pc >= end) { /* the block ran; or a loop's ran once: again, or the loop ends (its end may be its outer's) */
+            if (!depth) break;
             Loop *loop = &loops[depth - 1];
             arena->used = loop->mark;
             if (loop->walking) {
@@ -2467,11 +2468,10 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
                 pc = loop->start;
                 continue;
             }
+            end = loop->outer;
             --depth;
-            loop_end = depth ? loops[depth - 1].end : UINT32_MAX;
             continue;
         }
-        if (pc >= end) break;
         op = &m->code[pc++];
         uint32_t arg = op->arg;
         Slot *top = sp ? &stack[sp - 1] : stack;
@@ -2805,7 +2805,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             loop->around = ev->walk, loop->row = ev->row;
             ev->walk = &loop->walk;
             ev->row = loop->walk.at;
-            loop_end = loops[depth++].end;
+            loop->outer = end, end = loop->end, ++depth;
             continue;
         }
         case PURE_OP_LOOP: {
@@ -2830,7 +2830,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             if (integer) loop->slot->i64 = low.i64;
             else loop->slot->num = low.num;
             loop->start = pc, loop->end = pc + length, loop->mark = arena->used;
-            loop_end = loops[depth++].end;
+            loop->outer = end, end = loop->end, ++depth;
             continue;
         }
         case PURE_OP_BREAK: { /* the innermost loop ends: the code after its block runs next */
@@ -2838,7 +2838,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             arena->used = loop->mark;
             if (loop->walking) ev->walk = loop->around, ev->row = loop->row;
             pc = loop->end;
-            loop_end = depth ? loops[depth - 1].end : UINT32_MAX;
+            end = loop->outer;
             continue;
         }
         case PURE_OP_TEXT_COMPARE: {
