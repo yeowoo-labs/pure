@@ -426,9 +426,11 @@ struct PureLinkListener {
     int fd, wake, family;
     pthread_t thread;
     bool started;
-    pthread_mutex_t lock; /* the done list and stopping */
+    pthread_mutex_t lock; /* the done and rebind lists, and stopping */
     PureLinkDone *done;
     size_t done_count, done_capacity;
+    char **rebinds; /* the prefixes of the inputs to find again */
+    size_t rebind_count, rebind_capacity;
     bool stopping;
 };
 
@@ -503,10 +505,18 @@ static void *run_listener(void *context) {
         }
         pthread_mutex_lock(&s->lock);
         PureLinkDone *done = s->done;
-        size_t count = s->done_count;
+        size_t count = s->done_count, rebinds = s->rebind_count;
+        char **prefixes = s->rebinds;
         s->done = NULL;
         s->done_count = s->done_capacity = 0;
+        s->rebinds = NULL;
+        s->rebind_count = s->rebind_capacity = 0;
         pthread_mutex_unlock(&s->lock);
+        for (size_t k = 0; k < rebinds; ++k) {
+            pure_link_receiver_rebind(s->receiver, prefixes[k]);
+            free(prefixes[k]);
+        }
+        free(prefixes);
         pure_link_receiver_turn(s->receiver, done, count, now, send_answer, s);
         free(done);
     }
@@ -564,6 +574,20 @@ void pure_link_done(PureLinkListener *s, PureLinkDone done) {
     wake(s->wake);
 }
 
+void pure_link_listener_rebind(PureLinkListener *s, const char *prefix) {
+    char *kept = strdup(prefix);
+    pthread_mutex_lock(&s->lock);
+    if (kept && s->rebind_count == s->rebind_capacity) {
+        size_t capacity = s->rebind_capacity ? 2 * s->rebind_capacity : 4;
+        char **grown = realloc(s->rebinds, capacity * sizeof(*grown));
+        if (grown) s->rebinds = grown, s->rebind_capacity = capacity;
+    }
+    if (!kept || s->rebind_count == s->rebind_capacity) abort(); /* an input to find anew cannot be lost */
+    s->rebinds[s->rebind_count++] = kept;
+    pthread_mutex_unlock(&s->lock);
+    wake(s->wake);
+}
+
 void pure_link_listener_close(PureLinkListener *s, PureLinkCounts *counts) {
     if (!s) return;
     if (s->started) {
@@ -576,6 +600,8 @@ void pure_link_listener_close(PureLinkListener *s, PureLinkCounts *counts) {
     if (counts) pure_link_receiver_counts(s->receiver, counts);
     pure_link_receiver_free(s->receiver);
     free(s->done);
+    for (size_t k = 0; k < s->rebind_count; ++k) free(s->rebinds[k]);
+    free(s->rebinds);
     if (s->fd >= 0) close(s->fd);
     if (s->wake >= 0) close(s->wake);
     pthread_mutex_destroy(&s->lock);

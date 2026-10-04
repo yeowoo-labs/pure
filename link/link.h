@@ -51,5 +51,9 @@ PureLinkListener *pure_link_listen(PureLinkReceiver *, unsigned port, char *erro
 bool pure_link_serve(PureLinkListener *, char *error, size_t size);
 /* How a delivery went: link-protocol.h's PureLinkDone, with its token. */
 void pure_link_done(PureLinkListener *, PureLinkDone);
+/* The host's inputs whose names begin with prefix may be others now: the
+ * receiver's streams to them find theirs again (pure_link_receiver_rebind),
+ * on the listener's thread; any thread. */
+void pure_link_listener_rebind(PureLinkListener *, const char *prefix);
 void pure_link_listener_close(PureLinkListener *, PureLinkCounts *counts);
 #endif

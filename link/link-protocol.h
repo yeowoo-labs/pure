@@ -278,6 +278,12 @@ void pure_link_receiver_take(PureLinkReceiver *, const unsigned char *packet, si
  * go. */
 void pure_link_receiver_turn(PureLinkReceiver *, const PureLinkDone *done, size_t count, uint64_t now,
                              PureLinkSend *send, void *context);
+/* The host's inputs whose names begin with prefix may be others now (an app
+ * started again with another module): their streams find theirs again, by
+ * name and with the fields they were laid out with, before their next
+ * delivery, a delivery out first done; what they hold stays. One no input
+ * takes now is refused at its sender's next packet, as a new one would be. */
+void pure_link_receiver_rebind(PureLinkReceiver *, const char *prefix);
 /* When a turn is due with no packet (ns), or 0 for none. */
 uint64_t pure_link_receiver_due(const PureLinkReceiver *);
 void pure_link_receiver_counts(const PureLinkReceiver *, PureLinkCounts *);

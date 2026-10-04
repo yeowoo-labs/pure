@@ -1332,6 +1332,7 @@ typedef struct Stream {
     uint64_t run_id;
     unsigned char *fields;       /* the fields its records are laid out with, when its input took them by name */
     size_t fields_size;
+    bool stale;                  /* its input to be found again (pure_link_receiver_rebind) */
 } Stream;
 struct Active {
     uint32_t peer;               /* its place among the peers */
@@ -1897,20 +1898,31 @@ static bool keep_fields(Stream *st, const unsigned char *fields, size_t size) {
  * fields named, which come with FIELDS), or memory runs out (why 0). A
  * stream the sender now sends in another shape (it started again with
  * another module) starts over with what it holds let go: the sender sends
- * those again, laid out anew. */
+ * those again, laid out anew. A stale one (its input may be another now)
+ * finds its input again, with the fields it was laid out with unless these
+ * come, and keeps what it holds. */
 static Stream *stream_of(PureLinkReceiver *s, Active *a, const char *source, const char *input, uint32_t shape,
                          const unsigned char *fields, size_t fields_size, unsigned *why) {
     *why = 0;
     Stream *st = NULL;
     for (unsigned k = 0; k < a->stream_count && !st; ++k)
         if (!strcmp(a->streams[k]->input_name, input) && !strcmp(a->streams[k]->source, source)) st = a->streams[k];
-    if (st && st->shape == shape) return st;
+    if (st && st->shape == shape && !st->stale) return st;
+    bool again = st && st->shape == shape; /* stale */
+    const unsigned char *named = fields ? fields : again ? st->fields : NULL;
+    size_t named_size = fields ? fields_size : again ? st->fields_size : 0;
     int index = !allowed(s, &s->peers[a->peer], source) ? -PURE_LINK_NOT_ALLOWED :
-                s->host.input(s->host.context, input, shape, fields, fields ? fields_size : 0);
+                s->host.input(s->host.context, input, shape, named, named_size);
     if (index < 0) {
         *why = index == -PURE_LINK_OTHER_SHAPE || index == -PURE_LINK_NOT_ALLOWED || index == -PURE_LINK_FIELDS_LACKED
                    ? (unsigned)-index : PURE_LINK_NO_INPUT;
         return NULL;
+    }
+    if (again) { /* its input found again; what it holds stays */
+        if (fields && !keep_fields(st, fields, fields_size)) return NULL;
+        st->input = (uint32_t)index;
+        st->stale = false;
+        return st;
     }
     if (st) { /* another shape now */
         if (st->out) { *why = PURE_LINK_OTHER_SHAPE; return NULL; } /* its last delivery first */
@@ -2077,6 +2089,12 @@ static void hold(Stream *st, uint64_t seq, uint32_t size, uint32_t offset, const
  * False when the host could not take them now. */
 static bool hand_over(PureLinkReceiver *s, Stream *st) {
     if (st->out) return true;
+    if (st->stale) { /* its input found again first: none takes them now, and they wait */
+        int index = s->host.input(s->host.context, st->input_name, st->shape, st->fields, st->fields_size);
+        if (index < 0) return false;
+        st->input = (uint32_t)index;
+        st->stale = false;
+    }
     if (st->known) { /* the line as it is, up to BATCH records */
         line_pull(st);
         if (!st->line_count) return true;
@@ -2639,6 +2657,18 @@ void pure_link_receiver_turn(PureLinkReceiver *s, const PureLinkDone *done, size
         answer(s, now, send, context);
     }
     sweep(s, now);
+}
+
+void pure_link_receiver_rebind(PureLinkReceiver *s, const char *prefix) {
+    size_t length = strlen(prefix);
+    for (size_t k = 0; k < s->active_count; ++k) {
+        Active *a = s->actives[k];
+        for (unsigned i = 0; i < a->stream_count; ++i)
+            if (!strncmp(a->streams[i]->input_name, prefix, length)) {
+                a->streams[i]->stale = true;
+                mark_ready(s, a->streams[i]); /* what it holds handed over, its input found again */
+            }
+    }
 }
 
 uint64_t pure_link_receiver_due(const PureLinkReceiver *s) {

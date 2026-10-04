@@ -774,6 +774,107 @@ static void outputs_until(Outputs *o, PureLinkReceiver *r, bool epochs) {
         }
     }
 }
+/* The receiving app starts again while records come (docs/design/017's
+ * stage 3): first with no input of that name (the receiver holds what
+ * comes), then with the input at another number, then with one of another
+ * shape that takes the sender's fields by name. Told each time
+ * (pure_link_receiver_rebind), the stream finds its input again and keeps
+ * what it holds: every record is applied once, in order, and a delivery
+ * for the input as it was is never taken. */
+typedef struct {
+    PureLinkSender *sender;
+    uint64_t now, heard, stale, named, to[3];
+    unsigned phase; /* 0: input 3; 1: none; 2: input 4; 3: input 5, by name */
+    PureLinkDone done[64];
+    size_t done_count;
+} Rebound;
+static int rebound_input(void *context, const char *name, uint32_t shape, const unsigned char *fields, size_t size) {
+    const Rebound *r = context;
+    if (strcmp(name, "order") || r->phase == 1) return -PURE_LINK_NO_INPUT;
+    if (r->phase < 3) return shape == 0x5eed ? (int)r->phase + 2 + (r->phase == 0) : -PURE_LINK_OTHER_SHAPE;
+    if (!fields) return -PURE_LINK_OTHER_SHAPE;
+    return size == sizeof(NAMED) && !memcmp(fields, NAMED, size) ? 5 : -PURE_LINK_FIELDS_LACKED;
+}
+static bool rebound_deliver(void *context, const PureLinkDelivery *d) {
+    Rebound *r = context;
+    unsigned now = r->phase == 0 ? 3 : r->phase == 2 ? 4 : r->phase == 3 ? 5 : 0;
+    if (d->input != now) { /* found for the app as it was: not taken, kept */
+        ++r->stale;
+        return false;
+    }
+    if (r->done_count == sizeof(r->done) / sizeof(r->done[0])) return false;
+    CHECK(now != 5 || (d->fields && d->fields_size == sizeof(NAMED)), "rebound: records by name came without fields");
+    r->named += now == 5;
+    ++r->to[now - 3];
+    uint64_t heard = r->heard;
+    bool gap = false;
+    const unsigned char *at = d->records;
+    for (unsigned k = 0; k < d->count; ++k) {
+        uint32_t size = (uint32_t)at[0] | (uint32_t)at[1] << 8 | (uint32_t)at[2] << 16 | (uint32_t)at[3] << 24;
+        uint64_t seq = d->first + k;
+        if (seq > heard + 1) {
+            gap = true;
+            break;
+        }
+        if (seq == heard + 1) {
+            bool same = size == record_size(seq);
+            for (size_t i = 0; same && i < size; ++i) same = at[4 + i] == record_byte(seq, i);
+            CHECK(same, "rebound: record %llu is not as it was sent", (unsigned long long)seq);
+            heard = seq;
+        }
+        at += 4 + size;
+    }
+    r->heard = heard;
+    r->done[r->done_count++] = (PureLinkDone){d->token, heard, true, gap, false};
+    return true;
+}
+static bool rebound_answer(void *context, const unsigned char *packet, size_t size, const unsigned char *to,
+                           size_t to_size) {
+    (void)to, (void)to_size;
+    Rebound *r = context;
+    pure_link_sender_take(r->sender, packet, size, r->now);
+    return true;
+}
+static void rebound(const char *dir) {
+    unsigned char public_a[PURE_SEAL_KEY], public_b[PURE_SEAL_KEY], out[PURE_LINK_DATAGRAM_MOST];
+    char memo[512], error[256];
+    PureSealKey *a = key(dir, "a.key", public_a), *b = key(dir, "b.key", public_b);
+    snprintf(memo, sizeof(memo), "%s/b.key.links", dir);
+    unlink(memo);
+    Rebound r = {0};
+    PureLinkReceiver *receiver = pure_link_receiver(b, public_b, &(PureLinkHost){rebound_input, rebound_deliver, &r},
+                                                    error, sizeof(error));
+    if (!receiver || !pure_link_allow(receiver, "test.ordered", public_a, error, sizeof(error))) exit(1);
+    r.sender = sender_of(a, public_a, public_b, 1, 3000);
+    if (!pure_link_sender_fields(r.sender, NAMED, sizeof(NAMED))) exit(1);
+    uint64_t number, back = 0, end = 60000 * MS;
+    for (; r.now < end && pure_link_sender_stored(r.sender) < 3000; r.now += MS) {
+        unsigned was = r.phase;
+        if (r.phase == 0 && r.heard >= 1000) r.phase = 1, back = r.now + 300 * MS; /* stopped */
+        else if (r.phase == 1 && r.now >= back) r.phase = 2; /* started again, the input another */
+        else if (r.phase == 2 && r.heard >= 2000) r.phase = 3; /* and again, of another shape */
+        if (r.phase != was) pure_link_receiver_rebind(receiver, "ord");
+        for (size_t size; (size = pure_link_sender_packet(r.sender, out, false, r.now, &number));)
+            pure_link_receiver_take(receiver, out, size, "sender0", 7, r.now);
+        PureLinkDone told[64];
+        size_t count = r.done_count;
+        memcpy(told, r.done, count * sizeof(*told));
+        r.done_count = 0;
+        pure_link_receiver_turn(receiver, told, count, r.now, rebound_answer, &r);
+        pure_link_sender_tick(r.sender, r.now);
+    }
+    CHECK(r.heard == 3000 && pure_link_sender_stored(r.sender) == 3000, "rebound: heard %llu, stored %llu of 3000",
+          (unsigned long long)r.heard, (unsigned long long)pure_link_sender_stored(r.sender));
+    CHECK(r.phase == 3 && r.to[0] && r.to[1] && r.to[2], "rebound: deliveries %llu, %llu, %llu (phase %u)",
+          (unsigned long long)r.to[0], (unsigned long long)r.to[1], (unsigned long long)r.to[2], r.phase);
+    printf("{\"case\":\"rebound\",\"records\":3000,\"virtual_ms\":%llu,\"to_3\":%llu,\"to_4\":%llu,\"to_5_by_name\":%llu,"
+           "\"stale_refused\":%llu}\n", (unsigned long long)(r.now / MS), (unsigned long long)r.to[0],
+           (unsigned long long)r.to[1], (unsigned long long)r.to[2], (unsigned long long)r.stale);
+    pure_link_sender_free(r.sender);
+    pure_link_receiver_free(receiver);
+    pure_seal_key_free(a), pure_seal_key_free(b);
+}
+
 static void outputs(const char *dir) {
     unsigned char public_a[PURE_SEAL_KEY], public_b[PURE_SEAL_KEY];
     char memo[512];
@@ -1162,6 +1263,7 @@ int main(void) {
     impostors(dir);
     flood(dir);
     outputs(dir);
+    rebound(dir);
     refusals(dir);
     refused_restarted(dir);
     named(dir);
