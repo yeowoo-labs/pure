@@ -1,0 +1,7 @@
+{"medium": "ram", "round": 1, "way": "stored", "written_per_request": 0.0, "requests_per_second": 132446, "completed": 1324463, "2xx": 1324463, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 116, "p99_us": 144, "max_us": 6656}
+{"medium": "ram", "round": 1, "way": "transient", "written_per_request": 0.0, "requests_per_second": 131252, "completed": 1312517, "2xx": 1312517, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 116, "p99_us": 152, "max_us": 8192}
+{"medium": "ram", "round": 2, "way": "transient", "written_per_request": 0.0, "requests_per_second": 132522, "completed": 1325225, "2xx": 1325225, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 116, "p99_us": 144, "max_us": 4608}
+{"medium": "ram", "round": 2, "way": "stored", "written_per_request": 0.0, "requests_per_second": 128044, "completed": 1280441, "2xx": 1280441, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 120, "p99_us": 184, "max_us": 6144}
+{"medium": "ram", "round": 3, "way": "stored", "written_per_request": 0.0, "requests_per_second": 130576, "completed": 1305763, "2xx": 1305763, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 120, "p99_us": 152, "max_us": 5888}
+{"medium": "ram", "round": 3, "way": "transient", "written_per_request": 0.0, "requests_per_second": 133163, "completed": 1331634, "2xx": 1331634, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 116, "p99_us": 144, "max_us": 3968}
+{"medium": "ram", "stored_median": 130576, "transient_median": 132522, "change": 1.5, "written_per_request": {"stored": 0.0, "transient": 0.0}}

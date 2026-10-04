@@ -1,0 +1,7 @@
+{"medium": "sd", "round": 1, "way": "stored", "written_per_request": 1032.9, "requests_per_second": 7598, "completed": 75981, "2xx": 75981, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 1600, "p99_us": 7168, "max_us": 59392}
+{"medium": "sd", "round": 1, "way": "transient", "written_per_request": 0.0, "requests_per_second": 129617, "completed": 1296169, "2xx": 1296169, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 116, "p99_us": 168, "max_us": 11776}
+{"medium": "sd", "round": 2, "way": "transient", "written_per_request": 0.0, "requests_per_second": 132888, "completed": 1328882, "2xx": 1328882, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 116, "p99_us": 136, "max_us": 5120}
+{"medium": "sd", "round": 2, "way": "stored", "written_per_request": 1032.9, "requests_per_second": 7513, "completed": 75137, "2xx": 75137, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 1536, "p99_us": 7168, "max_us": 106496}
+{"medium": "sd", "round": 3, "way": "stored", "written_per_request": 1033.4, "requests_per_second": 7601, "completed": 76193, "2xx": 76193, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 1536, "p99_us": 7168, "max_us": 59392}
+{"medium": "sd", "round": 3, "way": "transient", "written_per_request": 0.0, "requests_per_second": 132305, "completed": 1323051, "2xx": 1323051, "4xx": 0, "5xx": 0, "errors": 0, "p50_us": 116, "p99_us": 152, "max_us": 4096}
+{"medium": "sd", "stored_median": 7598, "transient_median": 132305, "change": 1641.3, "written_per_request": {"stored": 1032.9, "transient": 0.0}}
