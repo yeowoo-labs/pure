@@ -1,0 +1,79 @@
+# The app of research 119 (docs/design/018 stage 3): a graph whose
+# distances a view computes in its body, beside the scoreboard's write
+# (benchmarks/http/load's score) that the owner applies.
+record Edge {
+  link = 0
+  to = 0
+}
+record Seen {
+  node = 0
+  depth = 0
+}
+record Step {
+  node = 0
+}
+state edges: list of Edge by link
+state nodes = 0
+state points = 0
+input size = message {
+  nodes: u32
+}
+input load = message {
+  rows: list of Edge
+}
+input score = message {
+  points: u32
+  name: bytes
+}
+input route = message {
+  start: u32
+  goal: u32
+}
+on size {
+  nodes = size.nodes
+}
+on load {
+  for r in load.rows {
+    edges.add(Edge { ..r })
+  }
+}
+on score {
+  points = points + score.points
+}
+# The same search as an event, on the owner (to compare).
+on route {
+  let seen: list of Seen by node
+  let queue: list of Step
+  queue.append(Step { node: route.start })
+  seen.add(Seen { node: route.start })
+  for i in 0 .. nodes {
+    if i >= queue.count { break }
+    let q = queue.first + i
+    for e in edges[q.node * 1048576 .. q.node * 1048576 + 1048576] {
+      if !seen.has(e.to) {
+        seen.add(Seen { node: e.to, depth: seen[q.node].depth + 1 })
+        queue.append(Step { node: e.to })
+      }
+    }
+  }
+  hops = if seen.has(route.goal) { seen[route.goal].depth } else { -1 }
+}
+state hops = -1
+view total = points
+view distance(start: u32, goal: u32) {
+  let seen: list of Seen by node
+  let queue: list of Step
+  queue.append(Step { node: start })
+  seen.add(Seen { node: start })
+  for i in 0 .. nodes {
+    if i >= queue.count { break }
+    let q = queue.first + i
+    for e in edges[q.node * 1048576 .. q.node * 1048576 + 1048576] {
+      if !seen.has(e.to) {
+        seen.add(Seen { node: e.to, depth: seen[q.node].depth + 1 })
+        queue.append(Step { node: e.to })
+      }
+    }
+  }
+  return if seen.has(goal) { seen[goal].depth } else { -1 }
+}

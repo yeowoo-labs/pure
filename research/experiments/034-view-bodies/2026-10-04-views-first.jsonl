@@ -1,0 +1,19 @@
+{"round": 1, "way": "writes", "writes_per_second": 117606, "views_per_second": 0.0}
+{"round": 1, "way": "both", "writes_per_second": 52913, "views_per_second": 16.1}
+{"round": 1, "way": "apart", "writes_per_second": 53391, "views_per_second": 27.8}
+{"round": 1, "way": "events", "writes_per_second": 189, "views_per_second": 24.9}
+{"round": 1, "way": "one", "views_per_second": 13.3}
+{"round": 1, "way": "many", "views_per_second": 22.2}
+{"round": 2, "way": "many", "views_per_second": 23.9}
+{"round": 2, "way": "one", "views_per_second": 13.5}
+{"round": 2, "way": "events", "writes_per_second": 193, "views_per_second": 24.8}
+{"round": 2, "way": "apart", "writes_per_second": 54521, "views_per_second": 33.6}
+{"round": 2, "way": "both", "writes_per_second": 81288, "views_per_second": 22.4}
+{"round": 2, "way": "writes", "writes_per_second": 118522, "views_per_second": 0.0}
+{"round": 3, "way": "writes", "writes_per_second": 119471, "views_per_second": 0.0}
+{"round": 3, "way": "both", "writes_per_second": 27513, "views_per_second": 37.6}
+{"round": 3, "way": "apart", "writes_per_second": 89647, "views_per_second": 21.6}
+{"round": 3, "way": "events", "writes_per_second": 188, "views_per_second": 24.6}
+{"round": 3, "way": "one", "views_per_second": 13.7}
+{"round": 3, "way": "many", "views_per_second": 23.3}
+{"nodes": 20000, "edges": 100000, "threads": 3, "askers": 2, "writes_median": 118522, "with_views_median": 52913, "writes_kept": 44.6, "writes_kept_apart": 46.0, "writes_kept_events": 0.2, "views_one": 13.5, "views_many": 23.3, "scaling": 1.73}

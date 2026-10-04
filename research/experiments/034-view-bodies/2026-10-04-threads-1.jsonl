@@ -1,0 +1,4 @@
+{"round": 1, "way": "many", "views_per_second": 23.6}
+{"round": 2, "way": "many", "views_per_second": 23.6}
+{"round": 3, "way": "many", "views_per_second": 23.7}
+{"nodes": 20000, "edges": 100000, "threads": 1, "askers": 2, "medians": {"many": 23.6}, "write_p99_medians_us": {}}
