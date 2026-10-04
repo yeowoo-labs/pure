@@ -4723,6 +4723,14 @@ def server_push(aup, pure, work):
         write(work / 'push-gone.pmod')
         reading()
         assert stream.ends(), 'a stream of a view that went still runs'
+        write(module)
+        reading()
+        stream = EventStream(host.port, '/p/views/total', token=token)
+        assert stream.next()[2] == '2'
+        conf.write_text(f"q {module} {work / 'push-q'}\n")  # p goes: its streams end
+        said = reading()
+        assert {app['name']: app['did'] for app in said['apps']}['p'] == 'removed', said
+        assert stream.ends(), 'a stream of an app that went still runs'
     finally:
         stats = host.stop()
     assert stats[0]['subscribers'] == 0, stats[0]

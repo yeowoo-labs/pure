@@ -2476,7 +2476,7 @@ static void subscriber_event(Host *host, Subscriber *s, uint32_t events) {
  * group's value at least. */
 static void push_group(Host *host, Group *g) {
     App *app = g->app;
-    if (!atomic_load(&app->live) || atomic_load(&app->gone)) { close_group(host, g); return; }
+    if (atomic_load(&app->gone)) { close_group(host, g); return; }
     const Tokens *tokens = atomic_load_explicit(&app->tokens, memory_order_acquire);
     for (Subscriber *s = g->first, *after; s; s = after) { /* a tokens file changed: who may still read */
         after = s->next;
@@ -2486,7 +2486,12 @@ static void push_group(Host *host, Group *g) {
             unsubscribe(host, s);
         } else s->checked = tokens;
     }
+    /* Quiet (taking no request: its module changing, or stopping) it waits
+     * for the next word; stopped (quiet and its snapshot let go) its streams end. */
+    bool quiet = !atomic_load(&app->live);
     PureSnapshot *snapshot = read_published(host, app);
+    if (quiet && !snapshot) { close_group(host, g); return; }
+    if (quiet) { pure_snapshot_release(snapshot); return; }
     if (!snapshot) return; /* none yet: the next publication wakes this */
     PureApp *reader = &host->readers[app - apps];
     if (reader->module != g->route.module) { /* the app changed module: the view of that name, if it is the same kind */
@@ -3429,10 +3434,15 @@ static void *run_shard(void *context) {
             drive(c);
         }
         serve_bursts(host);
-        bool told = atomic_exchange_explicit(&host->push_due, false, memory_order_acq_rel);
-        if (host->groups && (told || host->push_waiting)) { /* at most one pass every --push-every-ms */
+        /* At most one pass every --push-every-ms; the word stays given until
+         * one runs, so owners write to this thread at most once a pass. */
+        bool told = atomic_load_explicit(&host->push_due, memory_order_acquire);
+        if (host->groups && (told || host->push_waiting)) {
             host->push_waiting = host->now - host->pushed_at < push_every_ms;
-            if (!host->push_waiting) push_pass(host);
+            if (!host->push_waiting) {
+                atomic_store_explicit(&host->push_due, false, memory_order_release); /* a word given meanwhile runs the next */
+                push_pass(host);
+            }
         }
         uint64_t now = host->now;
         if (now >= next_sweep) {

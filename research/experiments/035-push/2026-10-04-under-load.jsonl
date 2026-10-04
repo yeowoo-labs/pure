@@ -1,0 +1,7 @@
+{"round": 1, "way": "none", "writes_per_second": 138759, "p99_us": 896, "reads_by_subscribers": 0}
+{"round": 1, "way": "subscribed", "writes_per_second": 139164, "p99_us": 832, "reads_by_subscribers": 1000}
+{"round": 2, "way": "subscribed", "writes_per_second": 139052, "p99_us": 896, "reads_by_subscribers": 1000}
+{"round": 2, "way": "none", "writes_per_second": 139115, "p99_us": 1024, "reads_by_subscribers": 0}
+{"round": 3, "way": "none", "writes_per_second": 139012, "p99_us": 1216, "reads_by_subscribers": 0}
+{"round": 3, "way": "subscribed", "writes_per_second": 139320, "p99_us": 800, "reads_by_subscribers": 998}
+{"none_median": 139012, "subscribed_median": 139164, "change": 0.1, "pushes": 3000, "pushed": 3000}

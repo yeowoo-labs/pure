@@ -40,6 +40,7 @@ def main():
     runs = sys.argv[5:]
     work = Path(tempfile.mkdtemp(prefix='pure-035-', dir='/dev/shm'))
     try:
+        subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-Werror', '-o', str(WATCH), str(WATCH) + '.c'], check=True)
         subprocess.run([str(aup), 'build', str(HERE / 'counter.aup'), '-o', str(work / 'counter.pmod')], check=True)
         for run in runs:
             clients, rate, way = run.split(':', 2)
