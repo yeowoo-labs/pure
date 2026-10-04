@@ -4513,9 +4513,11 @@ def server_view_workers(aup, pure, work):
     while 8 connections ask a view that loops 3,000,000 times, its app's
     module changes (SIGHUP) to one with another view in its place and the
     view tenfold, then the app is removed: every answer is the old module's,
-    the new one's, 503 stopped or 404 (gone), none mixed. Streams of it
-    opened and closed at once leave nothing behind. With --view-workers 0
-    the connection threads show it, as before."""
+    the new one's, 503 stopped or 404 (gone), none mixed. A stream of it
+    gets the last value of writes made while it is evaluated (ids only
+    growing); streams opened and closed at once leave nothing behind. Past
+    the app's queue=2 asks are 503 busy, and the places come back. With
+    --view-workers 0 the connection threads show it, as before."""
     import select
     import signal
     import threading
@@ -4547,7 +4549,15 @@ def server_view_workers(aup, pure, work):
             assert stream.head()[0] == 200
             stream.close()
         stream = EventStream(host.port, '/s/views/slow')
-        assert stream.next()[2] == '3000001'
+        first, _, value = stream.next()
+        assert value == '3000001'
+        for _ in range(3):  # written while it is evaluated: the newest snapshot's value after it
+            assert http(host.port, 'POST', '/s/inputs/bump', b'x')[0] == 200
+        ids = [first]
+        while value != '3000004':
+            ident, _, value = stream.next(timeout=10)
+            ids.append(ident)
+        assert ids == sorted(set(ids)), ids
 
         def ask():
             import http.client
@@ -4563,7 +4573,7 @@ def server_view_workers(aup, pure, work):
                     c = http.client.HTTPConnection('127.0.0.1', host.port, timeout=30)
                     continue
                 answers[got] = answers.get(got, 0) + 1
-                if got not in ((200, 'none', b'3000001'), (200, 'none', b'3000010'), (503, 'stopped', b'')) and got[0] != 404:
+                if got not in ((200, 'none', b'3000004'), (200, 'none', b'3000040'), (503, 'stopped', b'')) and got[0] != 404:
                     wrong.append(got)
             c.close()
 
@@ -4573,7 +4583,7 @@ def server_view_workers(aup, pure, work):
         time.sleep(0.5)
         write(tenfold)
         assert reading()['apps'][0]['did'] == 'changed'
-        assert stream.next(timeout=10)[2] == '3000010'  # the stream, on the new module's view
+        assert stream.next(timeout=10)[2] == '3000040'  # the stream, on the new module's view
         time.sleep(0.5)
         write(tenfold, 'q')  # s removed
         reading()
@@ -4586,7 +4596,7 @@ def server_view_workers(aup, pure, work):
     finally:
         stop.set()
         stats = host.stop()
-    old, new = answers.get((200, 'none', b'3000001'), 0), answers.get((200, 'none', b'3000010'), 0)
+    old, new = answers.get((200, 'none', b'3000004'), 0), answers.get((200, 'none', b'3000040'), 0)
     assert not wrong and old and new, (wrong[:5], answers)
     assert stats[0]['view_workers'] == 2 and stats[0]['views_by_workers'] >= old + new and stats[0]['subscribers'] == 0, stats[0]
     by_workers = stats[0]['views_by_workers']
@@ -4594,12 +4604,34 @@ def server_view_workers(aup, pure, work):
     host = HttpHost([pure / 'build/pure-serve', '--apps', conf, '--view-workers', 0])
     try:
         assert http(host.port, 'POST', '/s/inputs/bump', b'x')[0] == 200
-        assert http(host.port, 'GET', '/s/views/slow')[3] == b'3000002'  # its store kept the first bump
+        assert http(host.port, 'GET', '/s/views/slow')[3] == b'3000005'  # its store kept the bumps
     finally:
         stats = host.stop()
     assert stats[0]['view_workers'] == 0 and stats[0]['views_by_workers'] == 0, stats[0]
+    conf.write_text(f"s {module} {work / 'slow-s'} queue=2\n")
+    host = HttpHost([pure / 'build/pure-serve', '--apps', conf, '--threads', 1, '--view-workers', 1])
+    busy, other = [0], []
+    try:
+        def crowd():
+            for _ in range(6):
+                got = http(host.port, 'GET', '/s/views/slow')
+                if got[0] == 503 and got[1] == 'busy':
+                    busy[0] += 1
+                elif got[0] != 200 or got[3] != b'3000005':
+                    other.append((got[0], got[1], got[3][:20]))
+
+        threads = [threading.Thread(target=crowd) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert busy[0] and not other, (busy, other[:5])
+        assert http(host.port, 'GET', '/s/views/slow')[3] == b'3000005'  # the queue's places came back
+    finally:
+        host.stop()
     return {'old': old, 'new': new, 'stopped': answers.get((503, 'stopped', b''), 0),
-            'gone': sum(v for k, v in answers.items() if k[0] == 404), 'by_workers': by_workers}
+            'gone': sum(v for k, v in answers.items() if k[0] == 404), 'by_workers': by_workers, 'pushed_ids': len(ids),
+            'busy': busy[0]}
 
 
 PUSH_SOURCE = """record Row {
