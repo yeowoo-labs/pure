@@ -140,6 +140,7 @@ typedef struct Connection {
     Phase phase;
     bool readable, writable, keep_alive, put, post;
     bool hung_up; /* the peer closed its side: read until the end, never stop at a short read */
+    bool events;  /* its request asks for an event stream (Accept: text/event-stream) */
     bool settled; /* on its app's home thread, or staying here (a host of apps moves it once, at its first request) */
     uint64_t deadline;
     char key[65]; /* the document's key, or the view's or input's name */
@@ -215,6 +216,7 @@ typedef struct {
 typedef struct Published {
     pthread_mutex_t lock;
     PureSnapshot *snapshot;
+    _Atomic unsigned subscribers; /* streams of its views on any thread (docs/design/019): publishing wakes their threads */
 } Published;
 
 /* The app and its store. A connection thread runs it itself (an app of
@@ -450,6 +452,8 @@ static Host *all_hosts;  /* the connection threads, for moving a connection to i
 static unsigned host_count;
 static bool moved_home(Connection *c, size_t head_size);
 static void schedule(Owner *owner);
+static void subscribe(Connection *c, const Route *route, const char *raw, size_t raw_size);
+static void wake_pushers(void);
 
 struct Host {
     Executor local;   /* the one app of the host, when this thread runs it (documents alone) */
@@ -485,6 +489,14 @@ struct Host {
      * read already (under lock, woken by wake too). */
     struct Moved { int fd; bool hung_up; size_t used; char in[HEADER_LIMIT]; } *moved;
     size_t moved_count, moved_capacity;
+    /* Its views' subscribers (docs/design/019), in groups that share an
+     * evaluation; push_due: an owner published since its last pass. */
+    struct Group *groups;
+    size_t subscribers, subscribers_at_stop;
+    _Atomic bool push_due;
+    bool push_waiting;  /* a pass is due but --push-every-ms has not passed since the last */
+    uint64_t pushed_at; /* when the last pass ran (ms) */
+    uint64_t pushes, pushed_events, replaced, subscribed, unsubscribed;
 };
 
 /* Grow an array to hold `need` items; false when memory runs out. */
@@ -777,6 +789,7 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     c->batch = 1;
     c->seal.suite[0] = 0;
     c->bearer_given = false;
+    c->events = false;
     bool counted = false;
     c->body_size = 0;
     c->json = false;
@@ -816,6 +829,8 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
             condition_seen = true;
         } else if (!strcasecmp(line, "Content-Type")) {
             c->json = !strncasecmp(value, "application/json", 16);
+        } else if (!strcasecmp(line, "Accept")) {
+            c->events = strcasestr(value, "text/event-stream") != NULL; /* a view's stream (docs/design/019) */
         } else if (!strcasecmp(line, "Authorization")) {
             size_t length = strlen(value);
             if (c->bearer_given || length < 8 || strncasecmp(value, "Bearer ", 7) || length - 7 > BEARER) return false;
@@ -1185,6 +1200,8 @@ static void start_request(Connection *c, size_t head_size) {
         reject(c, denied, denied == 401 ? "Unauthorized" : "Forbidden", denied == 401 ? "unauthorized" : "forbidden");
         return;
     }
+    /* A view's stream (docs/design/019): pushed from snapshots, so an owned app's. */
+    if (c->events && route.kind == ROUTE_VIEW && route.app->owned) { subscribe(c, &route, raw, raw_size); return; }
     /* A document's PUT carries its body; an input's event its payload's size,
      * the payload (the fixed fields, then the body), and room for its JSON. */
     bool write = route.kind == ROUTE_INPUT || c->put;
@@ -1771,6 +1788,7 @@ static void publish(Executor *ex) {
     ex->published_module = ex->module;
     ++ex->publications;
     if (ex->surface) surface_changed(ex->surface);
+    if (atomic_load_explicit(&ex->published->subscribers, memory_order_relaxed)) wake_pushers();
 }
 
 /* An output's outlets: its wires first, then its links. Each holds a
@@ -2290,6 +2308,299 @@ static PureSnapshot *read_published(Host *host, App *app) {
     reader->work_budget = atomic_load_explicit(&app->work, memory_order_relaxed);
     reader->memory = atomic_load_explicit(&app->memory, memory_order_relaxed); /* what a view's body may add to its own lists */
     return snapshot;
+}
+
+/* ---- Pushing views (docs/design/019). A view's GET that asks for an event
+ * stream makes its connection a subscriber: its socket, and the group of
+ * this thread's subscribers to that view with those arguments. A pass, at
+ * most every --push-every-ms, evaluates each group once on its app's
+ * newest snapshot and sends the value to the group when it changed; a new
+ * subscriber gets the value the group has. A subscriber still sending one
+ * event keeps only the newest after it: a value, not every event. */
+typedef struct Subscriber {
+    int fd;
+    struct Group *group;
+    struct Subscriber *next; /* in its group */
+    bool writable, fresh;    /* fresh: it has not had the group's value yet */
+    char *out;               /* what is left of the event being sent (NULL: none), and the newest after it */
+    size_t out_size, out_at;
+    char *waiting;
+    size_t waiting_size;
+    uint64_t stalled;        /* since when out has not moved (ms) */
+    const Tokens *checked;   /* the tokens it was let in by, and its token's digest (token: it gave one) */
+    bool token;
+    unsigned char digest[32];
+} Subscriber;
+
+typedef struct Group {
+    App *app;
+    Route route;             /* its view in the module it was resolved with; given: text */
+    char name[PURE_MODULE_NAME];
+    char *text;              /* the query as asked */
+    bool computed, failed;   /* a value computed, from the snapshot of changes; failed: why holds a fault's name */
+    uint64_t changes;
+    char *value;             /* the value's bytes (or why it has none), and as an event */
+    size_t value_size;
+    char *event;
+    size_t event_size;
+    Subscriber *first;
+    struct Group *next;
+} Group;
+
+static size_t subscribers_most = 65536; /* --subscribers: a thread's */
+static uint64_t push_every_ms = 10;     /* --push-every-ms */
+
+/* An owner published (or its app stopped) and someone subscribes to its
+ * views: each thread that has not been told since its last pass is. */
+static void wake_pushers(void) {
+    for (unsigned i = 0; i < host_count; ++i) {
+        Host *h = &all_hosts[i];
+        uint64_t one = 1;
+        if (!atomic_exchange_explicit(&h->push_due, true, memory_order_acq_rel) && write(h->wake, &one, sizeof(one)) < 0) {
+            /* full: it is readable already */
+        }
+    }
+}
+
+static char *copied(const char *bytes, size_t size) {
+    char *copy = malloc(size ? size : 1);
+    if (!copy) abort();
+    if (size) memcpy(copy, bytes, size);
+    return copy;
+}
+
+/* An event to a subscriber: sent now as far as its socket takes it, the
+ * rest kept; while one is kept, the newest waits after it, replacing what
+ * waited. False when its socket failed. */
+static bool subscriber_send(Host *host, Subscriber *s, const char *event, size_t size) {
+    ++host->pushed_events;
+    if (s->out) {
+        if (s->waiting) { free(s->waiting); ++host->replaced; }
+        s->waiting = copied(event, size);
+        s->waiting_size = size;
+        return true;
+    }
+    ssize_t n = s->writable ? send(s->fd, event, size, MSG_NOSIGNAL | MSG_DONTWAIT) : 0;
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return false;
+    if (n < 0) n = 0;
+    if ((size_t)n < size) {
+        s->writable = false;
+        s->out = copied(event + n, size - (size_t)n);
+        s->out_size = size - (size_t)n;
+        s->out_at = 0;
+        s->stalled = host->now;
+    }
+    return true;
+}
+
+/* What a subscriber kept, sent as far as its socket takes it. False when its socket failed. */
+static bool subscriber_flush(Host *host, Subscriber *s) {
+    while (s->out && s->writable) {
+        ssize_t n = send(s->fd, s->out + s->out_at, s->out_size - s->out_at, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return false;
+        if (n <= 0) { s->writable = false; break; }
+        s->out_at += (size_t)n;
+        s->stalled = host->now;
+        if (s->out_at < s->out_size) continue;
+        free(s->out);
+        s->out = s->waiting, s->out_size = s->waiting_size, s->out_at = 0;
+        s->waiting = NULL;
+    }
+    return true;
+}
+
+static void unsubscribe(Host *host, Subscriber *s) {
+    Group *g = s->group;
+    for (Subscriber **at = &g->first; *at; at = &(*at)->next)
+        if (*at == s) { *at = s->next; break; }
+    close(s->fd); /* also leaves the epoll set */
+    free(s->out);
+    free(s->waiting);
+    atomic_fetch_sub_explicit(&g->app->owner.published.subscribers, 1, memory_order_relaxed);
+    --host->subscribers;
+    ++host->unsubscribed;
+    free(s);
+    if (g->first) return;
+    for (Group **at = &host->groups; *at; at = &(*at)->next)
+        if (*at == g) { *at = g->next; break; }
+    free(g->text);
+    free(g->value);
+    free(g->event);
+    free(g);
+}
+
+static void close_group(Host *host, Group *g) {
+    while (g->first && g->first->next) unsubscribe(host, g->first);
+    unsubscribe(host, g->first); /* the last lets the group go */
+}
+
+/* Whether a subscriber's token still lets it read (tokens: the app's now). */
+static bool still_reads(const Tokens *tokens, const Subscriber *s) {
+    if (!tokens) return true;
+    if (!s->token) return false;
+    for (unsigned g = 0; g < tokens->count; ++g) {
+        unsigned char differ = 0;
+        for (unsigned i = 0; i < 32; ++i) differ |= (unsigned char)(tokens->grant[g].digest[i] ^ s->digest[i]);
+        if (!differ) return tokens->grant[g].kind == GRANT_READ || tokens->grant[g].kind == GRANT_WRITE;
+    }
+    return false;
+}
+
+static void subscriber_event(Host *host, Subscriber *s, uint32_t events) {
+    bool gone = events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP);
+    if (events & EPOLLOUT) s->writable = true;
+    if (events & EPOLLIN) { /* a stream reads nothing: what comes is let go, and its end ends it */
+        char sink[512];
+        ssize_t n;
+        while ((n = recv(s->fd, sink, sizeof(sink), 0)) > 0) {}
+        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) gone = true;
+    }
+    if (gone || !subscriber_flush(host, s)) unsubscribe(host, s);
+}
+
+/* A group's value from the snapshot its app's reader shows: as the view's
+ * GET answers it, or why it has none (event none). An event made when it
+ * differs from the last; then each subscriber gets it, and a fresh one the
+ * group's value at least. */
+static void push_group(Host *host, Group *g) {
+    App *app = g->app;
+    if (!atomic_load(&app->live) || atomic_load(&app->gone)) { close_group(host, g); return; }
+    const Tokens *tokens = atomic_load_explicit(&app->tokens, memory_order_acquire);
+    for (Subscriber *s = g->first, *after; s; s = after) { /* a tokens file changed: who may still read */
+        after = s->next;
+        if (s->checked == tokens) continue;
+        if (!still_reads(tokens, s)) {
+            if (!s->next && g->first == s) { unsubscribe(host, s); return; } /* the group goes with it */
+            unsubscribe(host, s);
+        } else s->checked = tokens;
+    }
+    PureSnapshot *snapshot = read_published(host, app);
+    if (!snapshot) return; /* none yet: the next publication wakes this */
+    PureApp *reader = &host->readers[app - apps];
+    if (reader->module != g->route.module) { /* the app changed module: the view of that name, if it is the same kind */
+        const PureModule *was = g->route.module, *now = reader->module;
+        int view = pure_module_view(now, g->name);
+        if (view < 0 || now->view_type[view] != was->view_type[g->route.target] ||
+            (pure_module_arguments(now, (uint32_t)view) < 0) != (pure_module_arguments(was, g->route.target) < 0)) {
+            pure_snapshot_release(snapshot);
+            close_group(host, g);
+            return;
+        }
+        g->route.module = now;
+        g->route.target = (uint32_t)view;
+        g->computed = false;
+    }
+    if (!g->computed || reader->changes != g->changes) {
+        Applied a = {0};
+        PureResult status = show_view(reader, &g->route, PURE_OBJECT_LIMIT, &a);
+        Output value = {0};
+        bool failed = status != PURE_OK;
+        if (failed) { /* why it has none */
+            PureFault fault = a.fault != PURE_FAULT_NONE ? a.fault : pure_app_view_fault(reader);
+            const char *why = status == PURE_NOT_FOUND && fault == PURE_FAULT_NONE ? "no_value" : pure_fault_name(fault);
+            put_bytes(&value, why, strlen(why));
+        } else if (a.extents) {
+            for (size_t i = 0; i < a.extent_count; ++i) put_bytes(&value, a.extents[i].iov_base, a.extents[i].iov_len);
+        } else put_bytes(&value, a.resource.body.data, a.resource.body.size);
+        if (a.resource.release) a.resource.release(a.resource.allocation, a.resource.allocation_size);
+        free(a.extents);
+        if (value.failed) abort();
+        bool same = g->computed && failed == g->failed && value.size == g->value_size &&
+                    (!value.size || !memcmp(value.bytes, g->value, value.size));
+        g->changes = reader->changes;
+        g->computed = true;
+        if (!same) {
+            free(g->value);
+            g->value = (char *)value.bytes, g->value_size = value.size, g->failed = failed;
+            value.bytes = NULL;
+            Output event = {0}; /* id, an event's name if it has none, and a data line per line */
+            char id[32];
+            int length = snprintf(id, sizeof(id), "id: %" PRIu64 "\n", g->changes);
+            put_bytes(&event, id, (size_t)length);
+            if (failed) put_bytes(&event, "event: none\n", 12);
+            for (size_t at = 0;;) { /* a data line per line of the value */
+                const char *end = at < g->value_size ? memchr(g->value + at, '\n', g->value_size - at) : NULL;
+                size_t line = end ? (size_t)(end - (g->value + at)) : g->value_size - at;
+                put_bytes(&event, "data: ", 6);
+                if (line) put_bytes(&event, g->value + at, line);
+                put_bytes(&event, "\n", 1);
+                if (!end) break;
+                at += line + 1;
+            }
+            put_bytes(&event, "\n", 1);
+            if (event.failed) abort();
+            free(g->event);
+            g->event = (char *)event.bytes, g->event_size = event.size;
+            for (Subscriber *s = g->first; s; s = s->next) s->fresh = true; /* each gets it */
+        }
+        free(value.bytes);
+    }
+    pure_snapshot_release(snapshot);
+    for (Subscriber *s = g->first, *after; s; s = after) {
+        after = s->next;
+        if (!s->fresh) continue;
+        s->fresh = false;
+        if (!subscriber_send(host, s, g->event, g->event_size)) {
+            if (!s->next && g->first == s) { unsubscribe(host, s); return; }
+            unsubscribe(host, s);
+        }
+    }
+}
+
+static void push_pass(Host *host) {
+    host->pushed_at = host->now;
+    ++host->pushes;
+    for (Group *g = host->groups, *next; g; g = next) {
+        next = g->next;
+        push_group(host, g);
+    }
+}
+
+/* A view's GET that asks for a stream: the connection becomes a subscriber
+ * of its group (made if this thread has none of that view and those
+ * arguments), its answer's head sent; the pass sends it the value. */
+static void subscribe(Connection *c, const Route *route, const char *raw, size_t raw_size) {
+    Host *host = c->host;
+    if (c->in_used) { refuse(c, 400, "Bad Request", "request"); return; } /* no request follows a stream */
+    if (host->subscribers >= subscribers_most) { reject(c, 503, "Service Unavailable", "busy"); return; }
+    Group *g = host->groups;
+    while (g && !(g->app == route->app && g->route.module == route->module && g->route.target == route->target &&
+                  g->route.from == route->from && g->route.count == route->count && strlen(g->text) == raw_size &&
+                  !memcmp(g->text, raw, raw_size)))
+        g = g->next;
+    if (!g) {
+        if (!(g = calloc(1, sizeof(*g)))) abort();
+        g->app = route->app;
+        g->route = *route;
+        g->text = copied(raw, raw_size + 1);
+        g->text[raw_size] = 0;
+        g->route.given = g->text;
+        snprintf(g->name, sizeof(g->name), "%s", route->module->view_names[route->target]);
+        g->next = host->groups;
+        host->groups = g;
+    }
+    Subscriber *s = calloc(1, sizeof(*s));
+    if (!s) abort();
+    s->fd = c->fd;
+    s->group = g;
+    s->writable = true;
+    s->fresh = true;
+    s->checked = atomic_load_explicit(&route->app->tokens, memory_order_acquire);
+    if ((s->token = c->bearer_given && c->hashed_valid)) memcpy(s->digest, c->hashed_digest, sizeof(s->digest));
+    s->next = g->first;
+    g->first = s;
+    struct epoll_event event = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.u64 = (uintptr_t)s | 1u};
+    if (epoll_ctl(host->epoll, EPOLL_CTL_MOD, s->fd, &event)) abort();
+    c->fd = -1; /* the socket is the subscriber's now */
+    close_connection(c);
+    atomic_fetch_add_explicit(&route->app->owner.published.subscribers, 1, memory_order_relaxed);
+    ++host->subscribers;
+    ++host->subscribed;
+    static const char head[] = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
+                               "X-Pure-Error: none\r\n\r\nretry: 1000\n\n";
+    --host->pushed_events; /* the head is not an event */
+    if (!subscriber_send(host, s, head, sizeof(head) - 1)) { unsubscribe(host, s); return; }
+    atomic_store_explicit(&host->push_due, true, memory_order_release); /* its value goes in this round's pass */
 }
 
 /* ---- Queries: PUT /queries/NAME registers a module of the app's states and
@@ -3005,6 +3316,7 @@ static void stop_executor(Executor *ex) {
         ex->published->snapshot = NULL;
         pthread_mutex_unlock(&ex->published->lock);
         pure_snapshot_release(last);
+        if (atomic_load_explicit(&ex->published->subscribers, memory_order_relaxed)) wake_pushers(); /* their streams end */
     }
     pure_app_stop(&ex->app);
     pure_store_close(ex->store);
@@ -3079,9 +3391,18 @@ static void *run_shard(void *context) {
     while (!atomic_load(&stopping)) {
         /* A thread that runs the app ticks its timers on time. */
         long due = apps[0].owned ? -1 : run_timers(&host->local);
+        if (host->push_waiting) { /* a pass waits for --push-every-ms */
+            uint64_t since = host->now - host->pushed_at;
+            long left = since >= push_every_ms ? 0 : (long)(push_every_ms - since);
+            if (due < 0 || left < due) due = left;
+        }
         int ready = epoll_wait(host->epoll, events, EVENTS, due >= 0 && due < 1000 ? (int)due : 1000);
         host->now = now_ms();
         for (int e = 0; e < ready; ++e) {
+            if (events[e].data.u64 & 1u) { /* a subscriber's socket */
+                subscriber_event(host, (Subscriber *)(uintptr_t)(events[e].data.u64 & ~(uint64_t)1), events[e].events);
+                continue;
+            }
             Connection *c = events[e].data.ptr;
             if (!c) { accept_all(host); continue; }
             if (events[e].data.ptr == &host->wake) {
@@ -3097,12 +3418,28 @@ static void *run_shard(void *context) {
             drive(c);
         }
         serve_bursts(host);
+        bool told = atomic_exchange_explicit(&host->push_due, false, memory_order_acq_rel);
+        if (host->groups && (told || host->push_waiting)) { /* at most one pass every --push-every-ms */
+            host->push_waiting = host->now - host->pushed_at < push_every_ms;
+            if (!host->push_waiting) push_pass(host);
+        }
         uint64_t now = host->now;
         if (now >= next_sweep) {
             next_sweep = now + 1000;
             for (size_t i = 0; i < host->capacity; ++i) {
                 Connection *c = host->table[i];
                 if (c && c->phase != WAITING && now >= c->deadline) { ++host->expired; close_connection(c); }
+            }
+            /* A subscriber whose event has not moved for --timeout-ms is let go. */
+            for (Group *g = host->groups, *next_group; g; g = next_group) {
+                next_group = g->next;
+                for (Subscriber *s = g->first, *after; s; s = after) {
+                    after = s->next;
+                    if (!s->out || now - s->stalled < host->timeout_ms) continue;
+                    ++host->expired;
+                    if (!s->next && g->first == s) { unsubscribe(host, s); break; }
+                    unsubscribe(host, s);
+                }
             }
         }
         /* The round is over: closed connections can be reused. */
@@ -3121,6 +3458,8 @@ static void *run_shard(void *context) {
         if (poll(&wake, 1, -1) > 0) answer_handed(host);
     }
     for (size_t i = 0; i < host->capacity; ++i) if (host->table[i]) close_connection(host->table[i]);
+    host->subscribers_at_stop = host->subscribers;
+    while (host->groups) close_group(host, host->groups);
     return NULL;
 }
 
@@ -3730,6 +4069,8 @@ static bool give_tokens(App *app) {
     const Tokens *before = atomic_exchange_explicit(&app->tokens, tokens, memory_order_acq_rel);
     struct RetiredTokens *kept = before ? malloc(sizeof(*kept)) : NULL;
     if (kept) *kept = (struct RetiredTokens){(Tokens *)before, retired_tokens}, retired_tokens = kept;
+    if (all_hosts && atomic_load_explicit(&app->owner.published.subscribers, memory_order_relaxed))
+        wake_pushers(); /* its streams are let in again by the new tokens, or end */
     return true;
 }
 
@@ -4199,6 +4540,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--workers") && number(argv[i + 1], 256, &value) && value) workers = (unsigned)value;
         else if (!strcmp(argv[i], "--app-slots") && number(argv[i + 1], 65536, &value) && value) slots = (unsigned)value;
         else if (!strcmp(argv[i], "--timeout-ms") && number(argv[i + 1], 3600000, &value) && value) timeout_ms = value;
+        else if (!strcmp(argv[i], "--subscribers") && number(argv[i + 1], 1u << 22, &value)) subscribers_most = (size_t)value;
+        else if (!strcmp(argv[i], "--push-every-ms") && number(argv[i + 1], 60000, &value)) push_every_ms = value;
         else goto usage;
     }
     if (surface_path) surface_argv[surface_argc++] = (char *)surface_path;
@@ -4414,7 +4757,8 @@ int main(int argc, char **argv) {
     PureLinkCounts sent = {0}, heard = {0}; /* what links sent, and what the listener took */
     pure_link_listener_close(link_listener, &heard); /* after the owner, which tells it what it stored */
     size_t active = 0, retained = 0, state_bytes = 0;
-    uint64_t unauthorized = 0, forbidden = 0;
+    uint64_t unauthorized = 0, forbidden = 0, subscribed = 0, unsubscribed = 0, pushes = 0, pushed = 0, replaced = 0;
+    size_t subscribers = 0;
     uint64_t moved = 0, handed = 0, accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0, ticks = 0, shown = 0, checkpoints = 0,
              memory_refused = 0, windows_full = 0, publications = 0, answers = 0, delivered = 0, attempts = 0;
     for (unsigned i = 0; i < threads; ++i) {
@@ -4430,6 +4774,8 @@ int main(int argc, char **argv) {
         memory_refused += hosts[i].local.memory_refused;
         expired += hosts[i].expired;
         unauthorized += hosts[i].unauthorized, forbidden += hosts[i].forbidden;
+        subscribers += hosts[i].subscribers_at_stop, subscribed += hosts[i].subscribed, unsubscribed += hosts[i].unsubscribed;
+        pushes += hosts[i].pushes, pushed += hosts[i].pushed_events, replaced += hosts[i].replaced;
         stop_shard(&hosts[i]);
     }
     for (unsigned a = 0, count = places(); a < count; ++a) { /* each app's runs, the present one stopped now */
@@ -4465,13 +4811,14 @@ int main(int argc, char **argv) {
             ",\"listener_swept\":%" PRIu64 ",\"listener_active\":%" PRIu64 ",\"listener_keyed\":%" PRIu64
             ",\"listener_secrets\":%" PRIu64 ",\"listener_epochs\":%" PRIu64 ",\"listener_refused\":%" PRIu64
             ",\"state_bytes\":%zu,\"memory_refused\":%" PRIu64 ",\"windows_full\":%" PRIu64
-            ",\"unauthorized\":%" PRIu64 ",\"forbidden\":%" PRIu64,
+            ",\"unauthorized\":%" PRIu64 ",\"forbidden\":%" PRIu64 ",\"subscribers\":%zu,\"subscribed\":%" PRIu64
+            ",\"pushes\":%" PRIu64 ",\"pushed\":%" PRIu64 ",\"push_replaced\":%" PRIu64,
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, apps[0].owned ? "true" : "false",
             publications, shown, delivered, attempts, answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
             sent.refused, heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept,
             heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused,
-            windows_full, unauthorized, forbidden);
+            windows_full, unauthorized, forbidden, subscribers, subscribed, pushes, pushed, replaced);
     if (named_apps) { /* what each app did */
         fprintf(stderr, ",\"workers\":%u,\"moved_home\":%" PRIu64 ",\"handed\":%" PRIu64 ",\"apps\":[",
                 worker_count, moved, handed);
@@ -4492,12 +4839,12 @@ int main(int argc, char **argv) {
     return 0;
 usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
-          "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=URL ...] [--name NAME] "
+          "[--connections 1024] [--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--send OUTPUT=URL ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
           "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] [--work N] "
           "[--window 4194304] [--tokens FILE] [--surface LIBRARY [-- ARGUMENTS]]\n"
           "pure-serve --apps FILE [--port 8767] [--threads 1|N|auto] [--workers N] [--app-slots 256] [--budget BYTES] [--connections 1024] "
-          "[--timeout-ms 10000] [--key FILE] [--sealed-only] [--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] "
+          "[--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--key FILE] [--sealed-only] [--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] "
           "[--send-ca FILE] [--window BYTES]\n"
           "  --apps FILE: a host of apps (docs/design/017-apps-on-one-host.md), a line each:\n"
           "      NAME MODULE.pmod STORE [memory=BYTES] [work=N] [queue=N] [send=OUTPUT=URL ...] [seal=OUTPUT=KEY ...]\n"

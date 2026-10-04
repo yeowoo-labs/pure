@@ -34,6 +34,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -4492,6 +4493,255 @@ def server_view_bodies(aup, pure, work):
     return {'answers': asked[0], 'connections': 64}
 
 
+PUSH_SOURCE = """record Row {
+  name: text
+  n = 0
+}
+state count = 0
+state note: text = "a"
+state rows: list of Row
+input tap = text
+input same = text
+input fill = message {
+  k: u32
+}
+on tap {
+  count = count + 1
+  note = "line {count}\\nsecond"
+}
+on same {
+  count = count
+}
+on fill {
+  for i in 0 .. fill.k {
+    rows.append(Row { name: "row {i} {count} ......................................................................................................................................................................................................................................................................................................................................................................", n: i })
+  }
+}
+view total = count
+view shown = note
+view twice(k: u32) = count * k
+view page = each r in rows {
+  name = r.name
+  n = r.n + count
+}
+view sum(k: u32) {
+  let acc = 0
+  for i in 0 .. k {
+    acc = acc + count
+  }
+  return acc
+}
+"""
+
+
+class EventStream:
+    """A view's event stream (docs/design/019) read off a socket: its head,
+    then its events as (id, event, data)."""
+
+    def __init__(self, port, path, token=None, rcvbuf=None):
+        import socket
+        self.sock = socket.socket()
+        if rcvbuf:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        self.sock.connect(('127.0.0.1', port))
+        head = f'GET {path} HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n'
+        if token:
+            head += f'Authorization: Bearer {token}\r\n'
+        self.sock.sendall((head + '\r\n').encode())
+        self.buffer = b''
+        self.status = None
+
+    def fill(self, timeout):
+        self.sock.settimeout(timeout)
+        data = self.sock.recv(1 << 20)
+        if not data:
+            raise EOFError
+        self.buffer += data
+
+    def head(self, timeout=5):
+        while b'\r\n\r\n' not in self.buffer:
+            self.fill(timeout)
+        head, self.buffer = self.buffer.split(b'\r\n\r\n', 1)
+        lines = head.decode().split('\r\n')
+        self.status = int(lines[0].split()[1])
+        return self.status, dict(line.split(': ', 1) for line in lines[1:])
+
+    def next(self, timeout=5):
+        if self.status is None:
+            self.head(timeout)
+        while True:
+            while b'\n\n' not in self.buffer:
+                self.fill(timeout)
+            block, self.buffer = self.buffer.split(b'\n\n', 1)
+            fields = {'data': []}
+            for line in block.decode().split('\n'):
+                name, _, value = line.partition(': ')
+                if name == 'data':
+                    fields['data'].append(value)
+                else:
+                    fields[name] = value
+            if 'id' in fields:
+                return int(fields['id']), fields.get('event'), '\n'.join(fields['data'])
+
+    def ends(self, timeout=5):
+        """Whether the host ends it (the socket closes) within timeout, events meanwhile let go."""
+        import socket
+        deadline = time.monotonic() + timeout
+        try:
+            while time.monotonic() < deadline:
+                self.fill(max(0.01, deadline - time.monotonic()))
+        except EOFError:
+            return True
+        except (socket.timeout, TimeoutError):
+            return False
+        return False
+
+    def close(self):
+        self.sock.close()
+
+
+def server_push(aup, pure, work):
+    """A view's value pushed to its subscribers (docs/design/019): GET with
+    Accept: text/event-stream. The value comes first, then each value that
+    differs (none for a write that leaves it), the newest at least after a
+    burst, ids rising; arguments, table pages, lines of text and a view
+    that computes; tokens; a host of apps whose module changes (a view of
+    the same name goes on, one that went ends the stream) and whose tokens
+    change (a token no longer granted ends it); a subscriber that does not
+    read holds the host to two events (the waiting one replaced); and the
+    host lets go of every subscriber that leaves."""
+    import hashlib
+    import select
+    import signal
+    module, source = work / 'push.pmod', work / 'push.aup'
+    source.write_text(PUSH_SOURCE)
+    compile_module(aup, source, module)
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'push', '--threads', 2])
+    report = {}
+    try:
+        def post(path, body=b'x'):
+            assert http(host.port, 'POST', path, body)[0] == 200, path
+
+        total, shown, twice, sums = (EventStream(host.port, f'/views/{p}') for p in ('total', 'shown', 'twice?k=3', 'sum?k=4'))
+        assert total.head()[0] == 200 and total.next()[1:] == (None, '0')
+        assert shown.next()[2] == 'a' and twice.next()[2] == '0' and sums.next()[2] == '0'
+        seen = []
+        for k in range(1, 6):  # one write each 50 ms: each value comes, in order
+            post('/inputs/tap')
+            time.sleep(0.05)
+            seen.append(total.next())
+            assert seen[-1][2] == str(k), seen
+            assert shown.next()[2] == f'line {k}\nsecond' and twice.next()[2] == str(3 * k) and sums.next()[2] == str(4 * k)
+        assert [i for i, _, _ in seen] == sorted({i for i, _, _ in seen})
+        post('/inputs/same')  # the value stays: nothing comes
+        for _ in range(200):  # a burst: the newest comes at last, never an older after a newer
+            post('/inputs/tap')
+        last, values = seen[-1][0], []
+        while not values or values[-1] != '205':
+            i, _, value = total.next()
+            assert i > last, (i, last)
+            last = i
+            values.append(value)
+        assert [int(v) for v in values] == sorted(int(v) for v in values)
+        report['burst_events'] = len(values)
+        try:
+            extra = total.next(timeout=0.3)
+            raise AssertionError(f'an event after the last value: {extra}')
+        except (TimeoutError, OSError):
+            pass
+        # A table page, and one that does not read (its socket's buffer small): the host keeps two events of it.
+        assert http(host.port, 'POST', '/inputs/fill?k=100', b'')[0] == 200
+        page = EventStream(host.port, '/views/page?from=0&count=100')
+        slow = EventStream(host.port, '/views/page?from=0&count=100', rcvbuf=4096)
+        first = json.loads(page.next()[2])
+        assert first['rows'] == 100 and len(first['items']) == 100, first
+        rss = lambda: next(int(line.split()[1]) for line in Path(f'/proc/{host.process.pid}/status').read_text().splitlines()
+                           if line.startswith('VmRSS'))
+        before = rss()
+        for _ in range(600):
+            post('/inputs/tap')
+            time.sleep(0.002)
+        grew = (rss() - before) // 1024
+        final = None
+        while final is None or final['items'][0]['n'] != 805:
+            final = json.loads(slow.next(timeout=10)[2])
+        report['slow_rss_growth_mib'] = grew
+        assert grew < 32, grew
+        for stream in (total, shown, twice, sums, page, slow):
+            stream.close()
+        time.sleep(0.2)
+    finally:
+        stats = host.stop()
+    assert stats[0]['subscribers'] == 0 and stats[0]['subscribed'] == 6, stats[0]
+    assert stats[0]['push_replaced'] >= 1, stats[0]
+    report['replaced'] = stats[0]['push_replaced']
+    # A host of apps: tokens, and modules and tokens that change while streams run.
+    token, writer = 'r' * 40, 'w' * 40
+    grant = lambda kind, t: f'{kind} {hashlib.sha256(t.encode()).hexdigest()}\n'
+    (work / 'push.tokens').write_text(grant('read', token) + grant('write', writer))
+    other = work / 'push-tenfold.aup'
+    other.write_text(PUSH_SOURCE.replace('view total = count', 'view total = count * 10'))
+    compile_module(aup, other, work / 'push-tenfold.pmod')
+    gone = work / 'push-gone.aup'
+    gone.write_text(PUSH_SOURCE.replace('view total = count\n', ''))
+    compile_module(aup, gone, work / 'push-gone.pmod')
+    conf = work / 'push.conf'
+
+    def write(app_module, tokens=True):
+        conf.write_text(f"p {app_module} {work / 'push-p'}" + (f" tokens={work / 'push.tokens'}" if tokens else '') + '\n')
+
+    def reading():
+        host.process.send_signal(signal.SIGHUP)
+        ready, _, _ = select.select([host.process.stdout], [], [], 30)
+        assert ready, 'no reading'
+        return json.loads(host.process.stdout.readline())
+
+    write(module)
+    host = HttpHost([pure / 'build/pure-serve', '--apps', conf])
+    try:
+        refused = EventStream(host.port, '/p/views/total')
+        assert refused.head()[0] == 401
+        refused.close()
+        stream = EventStream(host.port, '/p/views/total', token=token)
+        assert stream.next()[2] == '0'
+        assert call_with(host.port, 'POST', '/p/inputs/tap', writer) == 200
+        assert stream.next()[2] == '1'
+        write(work / 'push-tenfold.pmod')
+        said = reading()
+        assert said['apps'][0]['did'] == 'changed', said
+        assert stream.next()[2] == '10'  # the same stream, the new module's view
+        assert call_with(host.port, 'POST', '/p/inputs/tap', writer) == 200
+        assert stream.next()[2] == '20'
+        (work / 'push.tokens').write_text(grant('read', 'another') + grant('write', writer))
+        reading()
+        assert call_with(host.port, 'POST', '/p/inputs/tap', 'another') == 403  # read alone
+        assert stream.ends(), 'a stream whose token went still runs'
+        (work / 'push.tokens').write_text(grant('read', token) + grant('write', writer))
+        reading()
+        stream = EventStream(host.port, '/p/views/total', token=token)
+        assert stream.next()[2] == '20'
+        write(work / 'push-gone.pmod')
+        reading()
+        assert stream.ends(), 'a stream of a view that went still runs'
+    finally:
+        stats = host.stop()
+    assert stats[0]['subscribers'] == 0, stats[0]
+    return report
+
+
+def call_with(port, method, path, token, body=b'x'):
+    """A request bearing a token: its status."""
+    import http.client
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+    try:
+        connection.request(method, path, body, {'Authorization': f'Bearer {token}', 'Content-Length': str(len(body))})
+        answer = connection.getresponse()
+        answer.read()
+        return answer.status
+    finally:
+        connection.close()
+
+
 def server_tokens(aup, pure, work):
     """An app's routes take tokens (docs/design/017, 3b). With a tokens file
     an app answers no request without a token (401, WWW-Authenticate:
@@ -4718,6 +4968,7 @@ def main():
         report['server_transient'] = server_transient(aup, pure, work)
         report['server_runaway'] = server_runaway(aup, pure, work)
         report['server_view_bodies'] = server_view_bodies(aup, pure, work)
+        report['server_push'] = server_push(aup, pure, work)
     print(json.dumps(report))
 
 
