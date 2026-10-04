@@ -1,0 +1,1 @@
+{"clients": 10000, "way": "push", "rate": 1, "writes": 11, "followed_to_end": 10000, "taken": 120000, "measured": 110000, "p50_us": 0, "p90_us": 16384, "p99_us": 36864, "max_us": 45056, "host_cpu_seconds": 1.03, "host_cpu_share": 0.127, "rss_kib_per_client": 0.42, "pushes": 317, "pushed": 120000, "replaced": 0, "requests": 10012}

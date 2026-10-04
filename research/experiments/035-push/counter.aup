@@ -1,0 +1,8 @@
+# The counter of research 120 (docs/design/019): a view many clients follow,
+# moved by one writer.
+state count = 0
+input tap = text
+on tap {
+  count = count + 1
+}
+view total = count
