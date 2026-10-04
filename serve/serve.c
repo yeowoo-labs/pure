@@ -35,6 +35,7 @@
 #include "seal.h"
 #include "surface.h"
 #include "message-json.h"
+#include "sha256.h"
 #include "module-store.h"
 #include "module-text.h"
 #include "runtime.h"
@@ -59,6 +60,7 @@
 #include <sched.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
@@ -87,6 +89,21 @@ typedef struct {
     App *app;
     const PureModule *module;
 } Route;
+
+/* An app's tokens (docs/design/017's 3b): what each grants, by its token's
+ * SHA-256. Made whole when its file is read and never changed: a reading
+ * puts a new one in its place (the one before kept as long as the host
+ * runs: a request may be checking it). */
+enum { GRANT_READ = 1, GRANT_WRITE = 2, GRANT_INPUT = 3, BEARER = 256 };
+typedef struct {
+    unsigned count;
+    struct Grant {
+        unsigned char digest[32];
+        unsigned char kind;
+        char inputs[256]; /* GRANT_INPUT: the inputs' names, comma-separated */
+    } grant[];
+} Tokens;
+static struct RetiredTokens { Tokens *tokens; struct RetiredTokens *next; } *retired_tokens;
 
 /* This node's key, for deliveries sealed to it (--key), and whether it
  * takes only those (--sealed-only), or only those from the senders named,
@@ -139,6 +156,12 @@ typedef struct Connection {
     bool given[PURE_MODULE_FIELDS], json;
     uint32_t input;
     unsigned char *ingress;
+    /* Its request's token (Authorization: Bearer), and the digest of the
+     * last token it hashed: the same again is not hashed again. */
+    char bearer[BEARER + 1], hashed[BEARER + 1];
+    size_t bearer_size, hashed_size;
+    bool bearer_given, hashed_valid;
+    unsigned char hashed_digest[32];
     char source[PURE_SOURCE + 1]; /* a delivered message's sender (X-Pure-Source), or empty */
     uint64_t sequence;            /* and its number (X-Pure-Sequence) */
     unsigned batch;               /* how many numbered messages the body holds (X-Pure-Count) */
@@ -393,6 +416,10 @@ struct App {
     _Atomic bool gone;
     char *module_path; /* its module's file as its line gives it (a host of apps), and that file's digest */
     uint64_t digest;
+    /* Its tokens (NULL: its routes are open), from tokens_path (its file's digest when read). */
+    _Atomic(const Tokens *) tokens;
+    char *tokens_path;
+    uint64_t tokens_digest;
     const char *store;
     bool documents; /* the module serves /objects: it has show and edit */
     bool owned;     /* an owner runs it (states or outputs, or any of --apps); else the connection threads */
@@ -445,7 +472,7 @@ struct Host {
     int epoll, listener;
     uint64_t timeout_ms;
     uint64_t now; /* the monotonic clock in ms, read once a round: deadlines count from it */
-    uint64_t accepted, requests, expired, moved_away;
+    uint64_t accepted, requests, expired, moved_away, unauthorized, forbidden;
     Session sessions[SESSIONS];
     uint64_t session_uses;
     /* What the owner hands back to answer (swapped for answering), and the
@@ -569,7 +596,7 @@ static void respond_typed(Connection *c, int status, const char *reason, const c
     put_text(&h, type);
     put_text(&h, "\r\nCache-Control: no-store\r\nX-Pure-Error: ");
     put_text(&h, error);
-    put_text(&h, "\r\n");
+    put_text(&h, status == 401 ? "\r\nWWW-Authenticate: Bearer\r\n" : "\r\n");
     if (revision > 0) {
         put_text(&h, "ETag: \"");
         put_decimal(&h, (uint64_t)revision);
@@ -749,6 +776,7 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     c->sequence = 0;
     c->batch = 1;
     c->seal.suite[0] = 0;
+    c->bearer_given = false;
     bool counted = false;
     c->body_size = 0;
     c->json = false;
@@ -788,6 +816,12 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
             condition_seen = true;
         } else if (!strcasecmp(line, "Content-Type")) {
             c->json = !strncasecmp(value, "application/json", 16);
+        } else if (!strcasecmp(line, "Authorization")) {
+            size_t length = strlen(value);
+            if (c->bearer_given || length < 8 || strncasecmp(value, "Bearer ", 7) || length - 7 > BEARER) return false;
+            memcpy(c->bearer, value + 7, length - 6);
+            c->bearer_size = length - 7;
+            c->bearer_given = true;
         } else if (!strcasecmp(line, "Connection")) {
             if (!strcasecmp(value, "close")) c->keep_alive = false;
             else if (strcasecmp(value, "keep-alive")) return false;
@@ -1077,6 +1111,42 @@ static void body_done(Connection *c) {
     c->phase = WAITING;
 }
 
+/* Whether a request may go its route (docs/design/017's 3b): 0, or 401 (no
+ * token, or one the app does not know) or 403 (one that does not grant
+ * it). An app without tokens takes any. A delivery another node sealed
+ * with a key this node names needs none: its key said who sent it. The
+ * digests are compared in constant time, all of them. */
+static int authorize(Connection *c, const App *app, RouteKind kind) {
+    const Tokens *tokens = atomic_load_explicit(&app->tokens, memory_order_acquire);
+    if (!tokens) return 0;
+    if (kind == ROUTE_INPUT && *c->source && *c->seal.suite && sender_count) return 0; /* known_sender held */
+    if (!c->bearer_given) return 401;
+    if (!c->hashed_valid || c->hashed_size != c->bearer_size || memcmp(c->hashed, c->bearer, c->bearer_size)) {
+        pure_sha256(c->bearer, c->bearer_size, c->hashed_digest);
+        memcpy(c->hashed, c->bearer, c->bearer_size);
+        c->hashed_size = c->bearer_size;
+        c->hashed_valid = true;
+    }
+    int found = -1;
+    for (unsigned g = 0; g < tokens->count; ++g) {
+        unsigned char differ = 0;
+        for (unsigned i = 0; i < 32; ++i) differ |= (unsigned char)(tokens->grant[g].digest[i] ^ c->hashed_digest[i]);
+        if (!differ) found = (int)g;
+    }
+    if (found < 0) return 401;
+    const struct Grant *grant = &tokens->grant[found];
+    bool write = kind == ROUTE_INPUT || c->put;
+    if (grant->kind == GRANT_WRITE || (grant->kind == GRANT_READ && !write)) return 0;
+    if (grant->kind != GRANT_INPUT || kind != ROUTE_INPUT) return 403;
+    size_t length = strlen(c->key);
+    for (const char *at = grant->inputs; *at;) { /* name,name,... */
+        size_t part = strcspn(at, ",");
+        if (part == length && !memcmp(at, c->key, length)) return 0;
+        at += part + (at[part] == ',');
+    }
+    return 403;
+}
+
 /* A whole head is in `in`: admit the request and take any body bytes that
  * came with it; later bytes stay for the next request. */
 static void start_request(Connection *c, size_t head_size) {
@@ -1107,6 +1177,12 @@ static void start_request(Connection *c, size_t head_size) {
     const char *why = resolve(c, query, &route, &status);
     if (why) {
         reject(c, status, status == 404 ? "Not Found" : status == 503 ? "Service Unavailable" : "Bad Request", why);
+        return;
+    }
+    int denied = authorize(c, c->app, route.kind);
+    if (denied) {
+        host->unauthorized += denied == 401, host->forbidden += denied == 403;
+        reject(c, denied, denied == 401 ? "Unauthorized" : "Forbidden", denied == 401 ? "unauthorized" : "forbidden");
         return;
     }
     /* A document's PUT carries its body; an input's event its payload's size,
@@ -2802,6 +2878,7 @@ static Connection *adopt(Host *host, int fd) {
     c->body = NULL;
     c->opened = 0;
     c->in_used = 0;
+    c->hashed_valid = false;
     struct epoll_event event = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.ptr = c};
     if (epoll_ctl(host->epoll, EPOLL_CTL_ADD, fd, &event)) {
         close(fd);
@@ -3413,18 +3490,20 @@ static bool start_owner(App *app, Host *hosts, unsigned threads) {
 /* A line of --apps: an app as the file gives it, its strings its own. */
 typedef struct {
     char name[APP_NAME + 1];
-    char *module, *store;
-    uint64_t digest; /* of the module file's bytes when it was read (0: it could not be) */
+    char *module, *store, *tokens;
+    uint64_t digest, tokens_digest; /* of the module's file, and the tokens', when they were read (0: they could not be) */
     size_t memory, queue;
     uint64_t work;
     char *sends[PURE_MODULE_INPUTS], *seals[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
     unsigned send_count, seal_count, reply_count;
-    bool kept; /* its app runs as the line says: a reading leaves it be */
+    bool kept;        /* its app runs as the line says: a reading leaves it be */
+    bool tokens_only; /* and so but for its tokens: they are put in place, and it runs on */
 } Line;
 
 static void let_go_line(Line *line) {
     free(line->module);
     free(line->store);
+    free(line->tokens);
     for (unsigned i = 0; i < line->send_count; ++i) free(line->sends[i]);
     for (unsigned i = 0; i < line->seal_count; ++i) free(line->seals[i]);
     for (unsigned i = 0; i < line->reply_count; ++i) free(line->replies[i]);
@@ -3503,9 +3582,11 @@ static bool parse_apps(const char *path, Line **out, unsigned *count, char *erro
                 ok = (line->seals[line->seal_count++] = strdup(value)) != NULL;
             else if (value && !strcmp(words[w], "reply") && line->reply_count < PURE_MODULE_INPUTS)
                 ok = (line->replies[line->reply_count++] = strdup(value)) != NULL;
+            else if (value && !strcmp(words[w], "tokens") && !line->tokens && *value)
+                ok = (line->tokens = strdup(value)) != NULL;
             else {
                 snprintf(error, size, "--apps %s:%u: an app takes memory=BYTES, work=N, queue=N, send=OUTPUT=URL, "
-                         "seal=OUTPUT=KEY and reply=OUTPUT=INPUT", path, at);
+                         "seal=OUTPUT=KEY, reply=OUTPUT=INPUT and tokens=FILE", path, at);
                 ok = false;
             }
         }
@@ -3515,6 +3596,7 @@ static bool parse_apps(const char *path, Line **out, unsigned *count, char *erro
             break;
         }
         line->digest = file_digest(line->module);
+        line->tokens_digest = line->tokens ? file_digest(line->tokens) : 0;
         ++n;
     }
     fclose(file);
@@ -3536,12 +3618,15 @@ static bool parse_apps(const char *path, Line **out, unsigned *count, char *erro
  * strings move to it; those it had go). Its module is not read here. */
 static void take_line(App *app, Line *line) {
     free(app->module_path);
+    free(app->tokens_path);
     free((char *)app->store);
     for (unsigned i = 0; i < app->send_count; ++i) free((char *)app->sends[i]);
     for (unsigned i = 0; i < app->seal_count; ++i) free((char *)app->seals[i]);
     for (unsigned i = 0; i < app->reply_count; ++i) free((char *)app->replies[i]);
     app->module_path = line->module;
     app->digest = line->digest;
+    app->tokens_path = line->tokens;
+    app->tokens_digest = line->tokens_digest;
     app->store = line->store;
     app->memory = line->memory;
     atomic_store(&app->work, line->work);
@@ -3550,7 +3635,7 @@ static void take_line(App *app, Line *line) {
     memcpy(app->seals, line->seals, sizeof(app->seals));
     memcpy(app->replies, line->replies, sizeof(app->replies));
     app->send_count = line->send_count, app->seal_count = line->seal_count, app->reply_count = line->reply_count;
-    *line = (Line){.kept = line->kept};
+    *line = (Line){.kept = line->kept, .tokens_only = line->tokens_only};
     memcpy(line->name, app->name, sizeof(line->name));
 }
 
@@ -3560,14 +3645,87 @@ static bool same_strings(const char *const *a, unsigned a_count, char *const *b,
     return a_count == b_count;
 }
 
+/* Whether an app's tokens are as a line gives them: the same file, its bytes too. */
+static bool same_tokens(const App *app, const Line *line) {
+    return !app->tokens_path == !line->tokens &&
+           (!line->tokens || (!strcmp(app->tokens_path, line->tokens) && app->tokens_digest == line->tokens_digest));
+}
+
 /* Whether an app runs as a line says: the same module (its file's bytes
- * too), store, budgets and wiring. */
+ * too), store, budgets and wiring (its tokens apart: same_tokens). */
 static bool same_line(const App *app, const Line *line) {
     return app->module_path && !strcmp(app->module_path, line->module) && app->digest == line->digest &&
            !strcmp(app->store, line->store) && app->memory == line->memory && atomic_load(&app->work) == line->work &&
            app->queue == line->queue && same_strings(app->sends, app->send_count, line->sends, line->send_count) &&
            same_strings(app->seals, app->seal_count, line->seals, line->seal_count) &&
            same_strings(app->replies, app->reply_count, line->replies, line->reply_count);
+}
+
+/* An app's tokens file (docs/design/017's 3b): a line a token, GRANT
+ * DIGEST, # beginning a comment; GRANT is read, write or input=NAME[,NAME],
+ * DIGEST the token's SHA-256 in 64 hex digits. NULL, why in error, when it
+ * cannot be read or a line is not one. */
+static Tokens *read_tokens(const char *path, char *error, size_t size) {
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        snprintf(error, size, "Tokens: %s: %s", path, strerror(errno));
+        return NULL;
+    }
+    Tokens *tokens = calloc(1, sizeof(*tokens));
+    char text[1024];
+    unsigned at = 0;
+    while (tokens && fgets(text, sizeof(text), file)) {
+        ++at;
+        char *hash = strchr(text, '#'), *rest = NULL;
+        if (hash) *hash = 0;
+        char *grant = strtok_r(text, " \t\r\n", &rest), *digest = grant ? strtok_r(NULL, " \t\r\n", &rest) : NULL;
+        if (!grant) continue;
+        struct Grant g = {0};
+        bool ok = digest && strlen(digest) == 64 && !strtok_r(NULL, " \t\r\n", &rest);
+        for (unsigned i = 0; ok && i < 32; ++i) {
+            int high = hex_value(digest[2 * i]), low = hex_value(digest[2 * i + 1]);
+            ok = high >= 0 && low >= 0;
+            g.digest[i] = (unsigned char)(high << 4 | low);
+        }
+        if (ok && !strcmp(grant, "read")) g.kind = GRANT_READ;
+        else if (ok && !strcmp(grant, "write")) g.kind = GRANT_WRITE;
+        else if (ok && !strncmp(grant, "input=", 6) && grant[6] && strlen(grant + 6) < sizeof(g.inputs)) {
+            g.kind = GRANT_INPUT;
+            strcpy(g.inputs, grant + 6);
+        } else {
+            snprintf(error, size, "Tokens: %s:%u: a line is read, write or input=NAME[,NAME], then the token's SHA-256 "
+                     "(64 hex digits)", path, at);
+            free(tokens);
+            tokens = NULL;
+            break;
+        }
+        Tokens *grown = realloc(tokens, sizeof(*tokens) + (tokens->count + 1) * sizeof(struct Grant));
+        if (!grown) {
+            free(tokens);
+            tokens = NULL;
+            break;
+        }
+        tokens = grown;
+        tokens->grant[tokens->count++] = g;
+    }
+    fclose(file);
+    if (!tokens && !*error) snprintf(error, size, "Tokens: out of memory");
+    return tokens;
+}
+
+/* An app's tokens as its tokens file says them now, in the place of those it
+ * had (kept: see Tokens). False, why in app->why, when the file is not one. */
+static bool give_tokens(App *app) {
+    Tokens *tokens = NULL;
+    char why[sizeof(app->why)] = "";
+    if (app->tokens_path && !(tokens = read_tokens(app->tokens_path, why, sizeof(why)))) {
+        snprintf(app->why, sizeof(app->why), "%s", why);
+        return false;
+    }
+    const Tokens *before = atomic_exchange_explicit(&app->tokens, tokens, memory_order_acq_rel);
+    struct RetiredTokens *kept = before ? malloc(sizeof(*kept)) : NULL;
+    if (kept) *kept = (struct RetiredTokens){(Tokens *)before, retired_tokens}, retired_tokens = kept;
+    return true;
 }
 
 /* A host of apps' first reading: each app in a place, room left for apps
@@ -3730,6 +3888,7 @@ static bool resume_app(App *app) {
 static bool start_app(App *app) {
     struct stat mine, theirs;
     app->why[0] = 0;
+    if (!give_tokens(app)) return false; /* its routes are never open for a tokens file that is not one */
     if (pure_store_init(app->store) != PURE_OK) snprintf(app->why, sizeof(app->why), "Cannot initialize the store directory");
     else if (stat(app->store, &mine)) snprintf(app->why, sizeof(app->why), "Cannot read the store directory");
     for (unsigned b = 0, count = places(); !app->why[0] && b < count; ++b)
@@ -3800,6 +3959,13 @@ static void stop_app(App *app) {
  * again from what the store has). */
 static bool change_app(App *app) {
     Executor *ex = &app->owner.executor;
+    if (!give_tokens(app)) { /* never open for a tokens file that is not one */
+        char why[sizeof(app->why)];
+        memcpy(why, app->why, sizeof(why));
+        stop_app(app);
+        memcpy(app->why, why, sizeof(why));
+        return false;
+    }
     quiet_app(app);
     if (ex->module != app->module && pure_app_replace(&ex->app, app->module) != PURE_OK) {
         snprintf(app->why, sizeof(app->why), "Its states do not go into the module%s%s", ex->app.why[0] ? ": " : "",
@@ -3863,8 +4029,9 @@ static void read_again(const char *path) {
         }
         bool uncertain = app->running && __atomic_load_n(&app->owner.executor.app.uncertain, __ATOMIC_RELAXED);
         if (app->running && !uncertain && same_line(app, line)) {
-            line->kept = true;
-            did[a] = "kept";
+            did[a] = same_tokens(app, line) ? "kept" : "changed"; /* its tokens alone: put in place below */
+            line->kept = same_tokens(app, line);
+            line->tokens_only = !line->kept;
             continue;
         }
         if (app->running && !uncertain && !strcmp(app->store, line->store)) {
@@ -3898,6 +4065,17 @@ static void read_again(const char *path) {
             continue;
         }
         App *app = &apps[a];
+        if (line->tokens_only) { /* it runs on, its tokens new */
+            take_line(app, line);
+            app->why[0] = 0;
+            if (!give_tokens(app)) {
+                char why[sizeof(app->why)];
+                memcpy(why, app->why, sizeof(why));
+                stop_app(app);
+                memcpy(app->why, why, sizeof(why));
+            }
+            continue;
+        }
         bool same_module = app->module && app->module_path && !strcmp(app->module_path, line->module) &&
                            app->digest == line->digest && line->digest;
         bool in_place = app->running; /* left running by the first pass: its store stays */
@@ -3947,6 +4125,27 @@ static void *run_apps(void *context) {
     return NULL;
 }
 
+/* pure-serve --make-token GRANT: a new token (32 random bytes, hex) and the
+ * line of a tokens file that grants it GRANT (docs/design/017's 3b). */
+static int make_token(const char *grant) {
+    bool named = !strcmp(grant, "read") || !strcmp(grant, "write") || (!strncmp(grant, "input=", 6) && grant[6]);
+    unsigned char bytes[32], digest[32];
+    if (!named || strlen(grant) > 200 || strpbrk(grant, " \t\r\n#")) {
+        fputs("--make-token read|write|input=NAME[,NAME]\n", stderr);
+        return 2;
+    }
+    if (getrandom(bytes, sizeof(bytes), 0) != (ssize_t)sizeof(bytes)) {
+        perror("getrandom");
+        return 1;
+    }
+    char token[65], line[65];
+    for (unsigned i = 0; i < 32; ++i) snprintf(token + 2 * i, 3, "%02x", bytes[i]);
+    pure_sha256(token, 64, digest);
+    for (unsigned i = 0; i < 32; ++i) snprintf(line + 2 * i, 3, "%02x", digest[i]);
+    printf("{\"token\":\"%s\",\"line\":\"%s %s\"}\n", token, grant, line);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     static PureSurfaceHost surface;
     /* What follows -- is the surface's: its library first, then its arguments. */
@@ -3959,6 +4158,8 @@ int main(int argc, char **argv) {
         }
     const char *surface_path = NULL, *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
     const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL, *senders_path = NULL, *apps_path = NULL;
+    const char *tokens_path = NULL;
+    if (argc == 3 && !strcmp(argv[1], "--make-token")) return make_token(argv[2]);
     unsigned send_count = 0, reply_count = 0, seal_count = 0, named_count = 0;
     unsigned port = 8767, threads = 1, link_port = 0, workers = 0, slots = 256;
     size_t budget = 64u << 20, capacity = 1024;
@@ -3969,6 +4170,7 @@ int main(int argc, char **argv) {
         if (i + 1 == options) goto usage;
         if (!strcmp(argv[i], "--module")) module_path = argv[i + 1];
         else if (!strcmp(argv[i], "--apps")) apps_path = argv[i + 1];
+        else if (!strcmp(argv[i], "--tokens")) tokens_path = argv[i + 1];
         else if (!strcmp(argv[i], "--surface")) surface_path = argv[i + 1];
         else if (!strcmp(argv[i], "--key")) key_path = argv[i + 1];
         else if (!strcmp(argv[i], "--seal") && seal_count < PURE_MODULE_INPUTS) seals[seal_count++] = argv[i + 1];
@@ -4000,9 +4202,9 @@ int main(int argc, char **argv) {
     if (options < argc && !surface_path) goto usage;
     if (apps_path) { /* a host of apps: each its own module, store and budgets; none sends yet (017, stage 1) */
         if (module_path || store || name || send_count || reply_count || seal_count || surface_path || memory_budget ||
-            work_budget) {
-            fputs("--apps gives each app its module, store, budgets and wiring (send=, seal=, reply=); --name and "
-                  "--surface are for a host of one app (--module)\n", stderr);
+            work_budget || tokens_path) {
+            fputs("--apps gives each app its module, store, budgets, wiring (send=, seal=, reply=) and tokens (tokens=); "
+                  "--name and --surface are for a host of one app (--module)\n", stderr);
             return 2;
         }
         /* SIGHUP is the reading thread's (run_apps): blocked before any thread is made, as they all inherit it. */
@@ -4028,6 +4230,10 @@ int main(int argc, char **argv) {
         for (uint32_t i = 0; i < apps[0].module->inputs; ++i) outputs = outputs || apps[0].module->input[i].kind == PURE_KIND_OUTPUT;
         apps[0].owned = apps[0].module->states || outputs;
         apps[0].running = true;
+        if (tokens_path && (!(apps[0].tokens_path = strdup(tokens_path)) || !give_tokens(&apps[0]))) {
+            fprintf(stderr, "--tokens: %s\n", apps[0].why);
+            return 2;
+        }
     }
     if (!threads) threads = auto_threads(apps[0].owned);
     char public_key[2 * PURE_SEAL_KEY + 1] = "";
@@ -4203,6 +4409,7 @@ int main(int argc, char **argv) {
     PureLinkCounts sent = {0}, heard = {0}; /* what links sent, and what the listener took */
     pure_link_listener_close(link_listener, &heard); /* after the owner, which tells it what it stored */
     size_t active = 0, retained = 0, state_bytes = 0;
+    uint64_t unauthorized = 0, forbidden = 0;
     uint64_t moved = 0, handed = 0, accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0, ticks = 0, shown = 0, checkpoints = 0,
              memory_refused = 0, windows_full = 0, publications = 0, answers = 0, delivered = 0, attempts = 0;
     for (unsigned i = 0; i < threads; ++i) {
@@ -4217,6 +4424,7 @@ int main(int argc, char **argv) {
         ticks += hosts[i].local.ticks;
         memory_refused += hosts[i].local.memory_refused;
         expired += hosts[i].expired;
+        unauthorized += hosts[i].unauthorized, forbidden += hosts[i].forbidden;
         stop_shard(&hosts[i]);
     }
     for (unsigned a = 0, count = places(); a < count; ++a) { /* each app's runs, the present one stopped now */
@@ -4251,13 +4459,14 @@ int main(int argc, char **argv) {
             ",\"listener_deliveries\":%" PRIu64 ",\"listener_woken\":%" PRIu64 ",\"listener_remembered\":%" PRIu64
             ",\"listener_swept\":%" PRIu64 ",\"listener_active\":%" PRIu64 ",\"listener_keyed\":%" PRIu64
             ",\"listener_secrets\":%" PRIu64 ",\"listener_epochs\":%" PRIu64 ",\"listener_refused\":%" PRIu64
-            ",\"state_bytes\":%zu,\"memory_refused\":%" PRIu64 ",\"windows_full\":%" PRIu64,
+            ",\"state_bytes\":%zu,\"memory_refused\":%" PRIu64 ",\"windows_full\":%" PRIu64
+            ",\"unauthorized\":%" PRIu64 ",\"forbidden\":%" PRIu64,
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, apps[0].owned ? "true" : "false",
             publications, shown, delivered, attempts, answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
             sent.refused, heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept,
             heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused,
-            windows_full);
+            windows_full, unauthorized, forbidden);
     if (named_apps) { /* what each app did */
         fprintf(stderr, ",\"workers\":%u,\"moved_home\":%" PRIu64 ",\"handed\":%" PRIu64 ",\"apps\":[",
                 worker_count, moved, handed);
@@ -4281,17 +4490,21 @@ usage:
           "[--connections 1024] [--timeout-ms 10000] [--send OUTPUT=URL ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
           "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] [--work N] "
-          "[--window 4194304] [--surface LIBRARY [-- ARGUMENTS]]\n"
+          "[--window 4194304] [--tokens FILE] [--surface LIBRARY [-- ARGUMENTS]]\n"
           "pure-serve --apps FILE [--port 8767] [--threads 1|N|auto] [--workers N] [--app-slots 256] [--budget BYTES] [--connections 1024] "
           "[--timeout-ms 10000] [--key FILE] [--sealed-only] [--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] "
           "[--send-ca FILE] [--window BYTES]\n"
           "  --apps FILE: a host of apps (docs/design/017-apps-on-one-host.md), a line each:\n"
           "      NAME MODULE.pmod STORE [memory=BYTES] [work=N] [queue=N] [send=OUTPUT=URL ...] [seal=OUTPUT=KEY ...]\n"
-          "      [reply=OUTPUT=INPUT ...]; its routes start /NAME/, its sends' sources are NAME.OUTPUT, and a\n"
+          "      [reply=OUTPUT=INPUT ...] [tokens=FILE]; its routes start /NAME/, its sends' sources are NAME.OUTPUT, and a\n"
           "      --link-port takes its inputs as NAME/INPUT. On SIGHUP the host reads FILE again: the apps of lines\n"
           "      gone stop, those of new lines start, those of changed lines change in place (their states kept in\n"
           "      memory) unless their store moved; a line out says what it did\n"
           "  --app-slots N: the apps a host of apps holds at most, those started later included\n"
+          "  --tokens FILE (tokens=FILE for an app of --apps): its routes take only requests bearing a token\n"
+          "      (Authorization: Bearer TOKEN) the file grants, a line each: read|write|input=NAME[,NAME] SHA256-HEX;\n"
+          "      a delivery sealed by a key --sender names needs none (docs/design/017-apps-on-one-host.md, 3b)\n"
+          "pure-serve --make-token read|write|input=NAME[,NAME]: a new token and its line for a tokens file\n"
           "  --workers N: the threads the apps' owners take turns on (1 for one app; for apps, one a CPU at most)\n"
           "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
           "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"

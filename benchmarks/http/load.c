@@ -17,7 +17,9 @@
  * the scale (100,000 accounts, 10 tellers and a branch each) and delta in
  * [-5000, 5000], as pgbench picks them.
  * PREFIX goes before every path: /NAME for an app of a host of apps
- * (pure-serve --apps, docs/design/017-apps-on-one-host.md).
+ * (pure-serve --apps, docs/design/017-apps-on-one-host.md). With
+ * PURE_LOAD_TOKEN in the environment each request bears it
+ * (Authorization: Bearer, docs/design/017's 3b).
  * Prints one JSON line: requests/s, statuses, latency percentiles (µs). */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -89,8 +91,9 @@ static uint64_t next_random(uint64_t *state) {
     return *state = x;
 }
 
+static char closing[512]; /* the head's last lines: Connection: close, the token's */
+
 static void prepare(Connection *c) {
-    const char *closing = keep_alive ? "" : "Connection: close\r\n";
     if (method == TRANSFER) {
         unsigned scale = keys / 100000 ? (unsigned)(keys / 100000) : 1;
         char json[128];
@@ -134,7 +137,7 @@ static void prepare(Connection *c) {
     }
     c->request_size = (size_t)snprintf(c->request, sizeof(c->request),
         "%s %s/objects/k%d HTTP/1.1\r\nHost: localhost\r\nContent-Length: %zu\r\n%s%s\r\n",
-        put ? "PUT" : "GET", prefix, c->key, put ? body_bytes + 8 : 0, condition, keep_alive ? "" : "Connection: close\r\n");
+        put ? "PUT" : "GET", prefix, c->key, put ? body_bytes + 8 : 0, condition, closing);
     c->sent = c->received = c->body_sent = 0;
     c->body_size = put ? body_bytes + 8 : 0;
     c->started = now_us();
@@ -195,6 +198,10 @@ int main(int argc, char **argv) {
     keep_alive = argc > 6 && !strcmp(argv[6], "keep-alive");
     body_bytes = argc > 7 ? strtoul(argv[7], NULL, 10) : 16;
     prefix = argc > 8 ? argv[8] : "";
+    const char *token = getenv("PURE_LOAD_TOKEN");
+    if (token && strlen(token) > 256) return 2;
+    snprintf(closing, sizeof(closing), "%s%s%s%s", keep_alive ? "" : "Connection: close\r\n", token ? "Authorization: Bearer " : "",
+             token ? token : "", token ? "\r\n" : "");
     body = calloc(body_bytes + 32, 1);
     memset(body + 8, 'x', body_bytes);
     if (method == JSON) {

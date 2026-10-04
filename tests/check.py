@@ -4246,6 +4246,201 @@ def server_apps_lifecycle(aup, pure, work):
             'refused_while_changing': refused[0], 'puts_at_changes': [put['src'] for put, _ in during]}
 
 
+TOKENS_SOURCE = """state n = 0
+state got = 0
+input add = message { step: number }
+input other = message { step: number }
+input take = message { k: u32 }
+on add {
+  n = n + add.step
+}
+on other {
+  n = n + 1000
+}
+on take {
+  got = got + take.k
+}
+view total = n
+view taken = got
+"""
+TOKENS_SENDER = """input put = message { k: u32 }
+output out = message { k: u32 }
+on put {
+  send out { k: put.k }
+}
+"""
+
+
+def server_tokens(aup, pure, work):
+    """An app's routes take tokens (docs/design/017, 3b). With a tokens file
+    an app answers no request without a token (401, WWW-Authenticate:
+    Bearer), nor with one it does not list; read reads its views, queries
+    and documents, write does all, input=add posts to add alone (403
+    past a grant), and a refused write changes nothing. Tokens of any
+    length check (SHA-256 against hashlib's), on one connection as well as
+    apart. An app with none is open. A new tokens file on SIGHUP takes
+    effect while the app runs on (no 503); one that is not a tokens file
+    stops the app (closed, not open). A delivery another node sealed with a
+    key this host names comes with no token; an unsealed one needs one.
+    The one app of a host takes --tokens."""
+    import hashlib
+    import http.client
+    import select
+    import signal
+    import struct
+    import threading
+    import time
+    for name, text in (('tokens', TOKENS_SOURCE), ('tokens-sender', TOKENS_SENDER)):
+        (work / f'{name}.aup').write_text(text)
+        compile_module(aup, work / f'{name}.aup', work / f'{name}.pmod')
+    editor = work / 'tokens-editor.pmod'
+    compile_module(aup, EDITOR, editor)
+    serve = pure / 'build/pure-serve'
+    names = {'read': 'r' * 40, 'write': 'w' * 40, 'input=add': 'i' * 40, 'read2': 'q' * 40}
+    lengths = {n: bytes(65 + (k * 7) % 57 for k in range(n)).decode() for n in (1, 55, 56, 63, 64, 65, 119, 200)}
+
+    def digest(token):
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def tokens_file(grants):
+        return ''.join(f'{grant} {digest(token)}  # {grant}\n' for grant, token in grants)
+
+    base = [('read', names['read']), ('write', names['write']), ('input=add', names['input=add'])] + \
+           [('read', token) for token in lengths.values()]
+    (work / 'tokens.list').write_text('# who may call t\n' + tokens_file(base))
+    conf = work / 'tokens.conf'
+    conf.write_text(f"t {work / 'tokens.pmod'} {work / 'tokens-t'} tokens={work / 'tokens.list'}\n"
+                    f"open {work / 'tokens.pmod'} {work / 'tokens-open'}\n"
+                    f"docs {editor} {work / 'tokens-docs'} tokens={work / 'tokens.list'}\n")
+    host = HttpHost([serve, '--apps', conf])
+
+    def call(method, path, token=None, body=b'', headers=None, port=None):
+        connection = http.client.HTTPConnection('127.0.0.1', port or host.port, timeout=10)
+        try:
+            sent = dict(headers or {})
+            if token is not None:
+                sent['Authorization'] = f'Bearer {token}'
+            if method != 'GET':
+                sent['Content-Length'] = str(len(body))
+            connection.request(method, path, body if method != 'GET' else None, sent)
+            answer = connection.getresponse()
+            return answer.status, answer.getheader('X-Pure-Error'), answer.getheader('WWW-Authenticate'), answer.read()
+        finally:
+            connection.close()
+
+    try:
+        none = call('GET', '/t/views/total')
+        assert none[:3] == (401, 'unauthorized', 'Bearer'), none
+        for method, path in (('POST', '/t/inputs/add?step=1'), ('GET', '/docs/objects/k'), ('PUT', '/t/queries/q'),
+                             ('GET', '/t/queries/q')):
+            assert call(method, path)[:2] == (401, 'unauthorized'), (method, path)
+        assert call('GET', '/t/views/total', 'x' * 40)[:2] == (401, 'unauthorized')
+        r, w, i = names['read'], names['write'], names['input=add']
+        assert call('GET', '/t/views/total', r)[0] == 200
+        assert call('GET', '/t/queries/q', r)[:2] == (404, 'no_value')  # read, and there is none
+        assert call('POST', '/t/inputs/add?step=1', r)[:2] == (403, 'forbidden')
+        assert call('PUT', '/docs/objects/k', r, b'x', {'If-None-Match': '*'})[:2] == (403, 'forbidden')
+        assert call('POST', '/t/inputs/add?step=1', w)[0] == 200
+        edit = struct.pack('<II', 0, 0) + b'hello'  # the edit: start, remove, insert
+        assert call('PUT', '/docs/objects/k', w, edit, {'If-None-Match': '*'})[0] == 200
+        assert call('GET', '/docs/objects/k', r)[::3] == (200, b'hello')
+        assert call('POST', '/t/inputs/add?step=2', i)[0] == 200
+        assert call('POST', '/t/inputs/other?step=1', i)[:2] == (403, 'forbidden')
+        assert call('GET', '/t/views/total', i)[:2] == (403, 'forbidden')
+        assert call('GET', '/t/views/total', w)[3] == b'3'  # the refused writes changed nothing
+        for n, token in lengths.items():
+            assert call('GET', '/t/views/total', token)[0] == 200, n
+        assert call('GET', '/open/views/total')[0] == 200 and call('POST', '/open/inputs/add?step=1')[0] == 200
+        # One connection: the same token checked again, then another, then none.
+        connection = http.client.HTTPConnection('127.0.0.1', host.port, timeout=10)
+        seen = []
+        for token in (r, r, r, 'x' * 40, r, None):
+            connection.request('GET', '/t/views/total', headers={'Authorization': f'Bearer {token}'} if token else {})
+            answer = connection.getresponse()
+            answer.read()
+            seen.append(answer.status)
+        connection.close()
+        assert seen == [200, 200, 200, 401, 200, 401], seen
+        # A new tokens file, the app running on: no 503 meanwhile.
+        trouble, done = [], threading.Event()
+
+        def caller():
+            while not done.is_set():
+                status = call('GET', '/t/views/total', w)[0]
+                if status != 200:
+                    trouble.append(status)
+
+        thread = threading.Thread(target=caller)
+        thread.start()
+        time.sleep(0.2)
+        (work / 'tokens.list').write_text(tokens_file([('read', names['read2']), ('write', w)]))
+
+        def reading():
+            host.process.send_signal(signal.SIGHUP)
+            ready, _, _ = select.select([host.process.stdout], [], [], 30)
+            assert ready, 'no reading'
+            return {app['name']: app for app in json.loads(host.process.stdout.readline())['apps']}
+
+        did = reading()
+        time.sleep(0.2)
+        done.set()
+        thread.join()
+        assert not trouble and did['t']['did'] == 'changed' and did['docs']['did'] == 'changed' and \
+            did['open']['did'] == 'kept', (trouble[:5], did)
+        assert call('GET', '/t/views/total', r)[:2] == (401, 'unauthorized')
+        assert call('GET', '/t/views/total', names['read2'])[0] == 200
+        # A tokens file that is not one: the app stops (it is never open), and starts once it is one.
+        (work / 'tokens.list').write_text('read not-a-digest\n')
+        did = reading()
+        assert not did['t']['running'] and 'Tokens' in did['t']['why'], did
+        assert call('GET', '/t/views/total')[:2] == (503, 'stopped')
+        (work / 'tokens.list').write_text(tokens_file([('write', w)]))
+        did = reading()
+        assert did['t']['running'] and call('GET', '/t/views/total', w)[3] == b'3', did
+        # An unsealed delivery (this host names no sender) needs a token.
+        delivery = {'X-Pure-Source': 'far.out', 'X-Pure-Sequence': '1', 'Content-Type': 'application/json'}
+        assert call('POST', '/t/inputs/take', None, b'{"k": 5}', delivery)[:2] == (401, 'unauthorized')
+        assert call('POST', '/t/inputs/take', w, b'{"k": 5}', delivery)[0] == 200
+        stats = host.stop()[-1]
+        host = None
+        assert (stats['unauthorized'], stats['forbidden']) == (10, 4), (stats['unauthorized'], stats['forbidden'])
+        # A sealed delivery from a sender the host names comes with no token.
+        keys = {}
+        for side in ('sender', 'receiver'):
+            (work / f'tokens-{side}-key.conf').write_text(f"x {work / 'tokens.pmod'} {work / f'tokens-keys-{side}'}\n")
+            probe = HttpHost([serve, '--apps', work / f'tokens-{side}-key.conf', '--key', work / f'tokens-{side}.key'])
+            keys[side] = probe.info['public_key']
+            probe.stop()
+        receiver = HttpHost([serve, '--apps', conf, '--key', work / 'tokens-receiver.key', '--sender', f"src.out={keys['sender']}"])
+        (work / 'tokens-sender.conf').write_text(
+            f"src {work / 'tokens-sender.pmod'} {work / 'tokens-src'} "
+            f"send=out=http://127.0.0.1:{receiver.port}/t/inputs/take seal=out={keys['receiver']}\n")
+        sender = HttpHost([serve, '--apps', work / 'tokens-sender.conf', '--key', work / 'tokens-sender.key'])
+        try:
+            for k in (1, 2, 3):
+                assert call('POST', f'/src/inputs/put?k={k}', port=sender.port)[0] == 200
+            deadline = time.time() + 20
+            while time.time() < deadline and call('GET', '/t/views/taken', w, port=receiver.port)[3] != b'11':
+                time.sleep(0.05)
+            assert call('GET', '/t/views/taken', w, port=receiver.port)[3] == b'11'  # 5, then 1 + 2 + 3
+        finally:
+            sender.stop()
+            receiver.stop()
+        # The one app of a host: --tokens.
+        one = HttpHost([serve, '--module', work / 'tokens.pmod', '--store', work / 'tokens-one', '--tokens', work / 'tokens.list'])
+        try:
+            assert call('GET', '/views/total', port=one.port)[:2] == (401, 'unauthorized')
+            assert call('POST', '/inputs/add?step=4', w, port=one.port)[0] == 200
+            assert call('GET', '/views/total', w, port=one.port)[3] == b'4'
+        finally:
+            one.stop()
+    finally:
+        if host:
+            host.stop()
+    return {'grants': len(base), 'token_lengths': sorted(lengths), 'one_connection': seen,
+            'unauthorized': stats['unauthorized'], 'forbidden': stats['forbidden']}
+
+
 def main():
     global EDITOR
     parser = argparse.ArgumentParser()
@@ -4298,6 +4493,7 @@ def main():
         report['server_apps'] = server_apps(aup, pure, work)
         report['server_apps_links'] = server_apps_links(aup, pure, work)
         report['server_apps_lifecycle'] = server_apps_lifecycle(aup, pure, work)
+        report['server_tokens'] = server_tokens(aup, pure, work)
     print(json.dumps(report))
 
 
