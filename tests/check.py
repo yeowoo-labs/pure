@@ -4035,12 +4035,14 @@ def server_apps_lifecycle(aup, pure, work):
     """Apps start, stop and change on a running host (docs/design/017,
     stage 3): on SIGHUP it reads its --apps file again and says what it did
     on a line. An app added answers; an app removed goes (404 no_app) and
-    another process opens its store; apps change module while requests,
-    another app's local sends and another node's link records come to them,
-    the new modules' inputs at other numbers and taking the sends by name:
-    a write answered 200 is applied once and one answered 503 stopped not at
-    all, every send arrives once and in order, and the app left alone
-    answers every request. An app that could not open its store starts at
+    another process opens its store; apps change module in place while
+    requests, another app's local sends and another node's link records
+    come to them and their views are read, the new modules' inputs at other
+    numbers and taking the sends by name, and the senders change too: a
+    write answered 200 is applied once and one answered 503 stopped not at
+    all, every send arrives once and in order, a view answers 200 or 503
+    stopped, and the app left alone answers every request; an app whose
+    store moves starts again on it. An app that could not open its store starts at
     the next reading once it can; a file with a wrong line changes nothing;
     after a kill -9 the host starts as the file says, the states as saved."""
     import os
@@ -4150,6 +4152,13 @@ def server_apps_lifecycle(aup, pure, work):
                 if status != 200:
                     trouble.append(('c', status, why))
 
+        def viewer():  # the changing apps' views, lists among them, read as they change
+            while not done.is_set():
+                for path in ('/dst/views/count', '/dstl/views/sum', '/a/views/total', '/dst/views/in_order'):
+                    status, why, _, _ = http(host.port, 'GET', path)
+                    if status != 200 and (status, why) != (503, 'stopped'):
+                        trouble.append((path, status, why))
+
         def once(app, k):
             deadline = time.time() + 30
             while progress[app] < k and time.time() < deadline and not trouble:
@@ -4157,7 +4166,8 @@ def server_apps_lifecycle(aup, pure, work):
             return dict(progress), answered[0]
 
         workers = [threading.Thread(target=adder), threading.Thread(target=putter, args=(host.port, 'src')),
-                   threading.Thread(target=putter, args=(far.port, 'srcf')), threading.Thread(target=watcher)]
+                   threading.Thread(target=putter, args=(far.port, 'srcf')), threading.Thread(target=watcher),
+                   threading.Thread(target=viewer)]
         for thread in workers:
             thread.start()
         during = []
@@ -4167,24 +4177,24 @@ def server_apps_lifecycle(aup, pure, work):
         lines['dstl'] = f"dstl {module['life-taker-next']} {store['dstl']}"
         _, did = reading(['a', 'src', 'dst', 'dstl', 'c'])
         assert [did[name]['did'] for name in ('a', 'dst', 'dstl', 'c', 'src')] == \
-            ['restarted', 'restarted', 'restarted', 'kept', 'kept'], did
+            ['changed', 'changed', 'changed', 'kept', 'kept'], did
         during.append(once('src', 200))
         lines['dst'] = f"dst {module['life-taker']} {store['dst']}"  # and back: take's number moves again
         _, did = reading(['a', 'src', 'dst', 'dstl', 'c'])
-        assert did['dst']['did'] == 'restarted' and did['a']['did'] == 'kept', did
+        assert did['dst']['did'] == 'changed' and did['a']['did'] == 'kept', did
         during.append(once('src', 300))
         lines['src'] += ' queue=100000'  # the sender starts again (its module as it was), its outbox going on
         _, did = reading(['a', 'src', 'dst', 'dstl', 'c'])
-        assert did['src']['did'] == 'restarted' and did['dst']['did'] == 'kept', did
+        assert did['src']['did'] == 'changed' and did['dst']['did'] == 'kept', did
         during.append(once('srcf', 400))
         (work / 'life-far.conf').write_text((work / 'life-far.conf').read_text().replace('\n', ' queue=100000\n'))
         far.process.send_signal(signal.SIGHUP)  # the far node's sender starts again, its link with it
         ready, _, _ = select.select([far.process.stdout], [], [], 30)
-        assert ready and json.loads(far.process.stdout.readline())['apps'][0]['did'] == 'restarted'
+        assert ready and json.loads(far.process.stdout.readline())['apps'][0]['did'] == 'changed'
         for thread in workers[1:3]:
             thread.join()
         done.set()
-        for thread in (workers[0], workers[3]):
+        for thread in (workers[0], workers[3], workers[4]):
             thread.join()
         assert not trouble, trouble[:5]
         for put, adds in during:  # each change came while the sends went
@@ -4200,6 +4210,10 @@ def server_apps_lifecycle(aup, pure, work):
         total = 5 + answered[0]
         assert number(host.port, '/a/views/total') == total and number(host.port, '/a/views/count') == 1 + answered[0], \
             (number(host.port, '/a/views/total'), answered[0], refused[0])
+        # An app whose store moves starts again, on the store it moves to.
+        lines['c'] = f"c {module['life']} {work / 'life-store-c2'}"
+        _, did = reading(['a', 'src', 'dst', 'dstl', 'c'])
+        assert did['c']['did'] == 'restarted' and number(host.port, '/c/views/total') == 0, did
         # An app whose store cannot be made yet stops alone; once it can, the next reading starts it.
         lines['e'] = f"e {module['life']} {store['e']}"
         os.chmod(work / 'life-ro', 0o500)
@@ -4228,7 +4242,7 @@ def server_apps_lifecycle(aup, pure, work):
     finally:
         host.stop()
         far.stop()
-    return {'readings': 8, 'far_readings': 1, 'sent': sent, 'answered_while_changing': answered[0],
+    return {'readings': 9, 'far_readings': 1, 'sent': sent, 'answered_while_changing': answered[0],
             'refused_while_changing': refused[0], 'puts_at_changes': [put['src'] for put, _ in during]}
 
 

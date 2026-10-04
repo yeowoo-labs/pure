@@ -215,9 +215,10 @@ typedef struct {
     uint64_t memory_refused; /* events refused for the app's memory budget */
     bool answers_wait; /* an answer the app had no room for: tried again after ANSWER_WAIT_MS */
     /* The owner's: where its snapshots go (NULL: it shows its views
-     * itself), and the app's changes the last one shows. */
+     * itself), and the app's changes and module the last one shows. */
     Published *published;
     uint64_t published_changes, publications;
+    const PureModule *published_module;
     struct PureSurfaceHost *surface; /* told of each snapshot published */
     /* The owner's: outputs wired to HTTP receivers, and how far each was trimmed. */
     PureWire *wires[PURE_MODULE_INPUTS];
@@ -1679,7 +1680,8 @@ static void surface_changed(PureSurfaceHost *s) {
  * saved, so a read made after a write's answer sees the write. A failed save
  * returns the app to the last save's states, which the snapshot still shows. */
 static void publish(Executor *ex) {
-    if (!ex->published || (ex->publications && ex->published_changes == ex->app.changes)) return;
+    if (!ex->published || (ex->publications && ex->published_changes == ex->app.changes && ex->published_module == ex->module))
+        return;
     PureSnapshot *made = pure_app_snapshot(&ex->app), *old;
     pthread_mutex_lock(&ex->published->lock);
     old = ex->published->snapshot;
@@ -1687,6 +1689,7 @@ static void publish(Executor *ex) {
     pthread_mutex_unlock(&ex->published->lock);
     pure_snapshot_release(old);
     ex->published_changes = ex->app.changes;
+    ex->published_module = ex->module;
     ++ex->publications;
     if (ex->surface) surface_changed(ex->surface);
 }
@@ -3673,24 +3676,14 @@ static bool more_workers(void) {
     return true;
 }
 
-/* An app of a host of apps starts in its place: its store (none another
- * running app has), its owner on it, its outlets and its snapshot; then it
- * takes turns and requests, and the link streams to its inputs find them
- * again. False, why in app->why, when it cannot: it stays stopped. */
-static bool start_app(App *app) {
-    struct stat mine, theirs;
-    app->why[0] = 0;
-    if (pure_store_init(app->store) != PURE_OK) snprintf(app->why, sizeof(app->why), "Cannot initialize the store directory");
-    else if (stat(app->store, &mine)) snprintf(app->why, sizeof(app->why), "Cannot read the store directory");
-    for (unsigned b = 0, count = places(); !app->why[0] && b < count; ++b)
-        if (&apps[b] != app && apps[b].running && !stat(apps[b].store, &theirs) && theirs.st_dev == mine.st_dev &&
-            theirs.st_ino == mine.st_ino)
-            snprintf(app->why, sizeof(app->why), "The store is %s's", apps[b].name);
-    if (app->why[0]) return false;
+/* An app whose executor runs its module takes turns and requests: its
+ * outlets made for that module and its snapshot published; then the link
+ * streams to its inputs find them again. False, why in app->why, when its
+ * sends are wired wrong or an outlet does not start: it is then stopped,
+ * its store closed. */
+static bool resume_app(App *app) {
     Owner *o = &app->owner;
     Executor *ex = &o->executor;
-    *ex = (Executor){0};
-    if (!start_owner(app, all_hosts, host_count)) return false;
     o->queue = app->queue;
     bool wired = open_wires(app, app->name) && wire_replies(ex, app->module, app->replies, app->reply_count) &&
                  wire_seals(ex, app->module, app->seals, app->seal_count, seal_key ? own_public : NULL);
@@ -3731,13 +3724,32 @@ static bool start_app(App *app) {
     return true;
 }
 
-/* An app stops: no request taken from now on (its routes answer 503
- * stopped, link records and other apps' batches wait at their senders),
- * those taken applied, saved and answered, its batches with other apps
- * back, then its outlets closed (what they did not deliver stays in its
- * outbox) and its store closed. Its owner takes no turn after. */
-static void stop_app(App *app) {
-    if (!app->running) return;
+/* An app of a host of apps starts in its place: its store (none another
+ * running app has), its owner on it, then it resumes. False, why in
+ * app->why, when it cannot: it stays stopped. */
+static bool start_app(App *app) {
+    struct stat mine, theirs;
+    app->why[0] = 0;
+    if (pure_store_init(app->store) != PURE_OK) snprintf(app->why, sizeof(app->why), "Cannot initialize the store directory");
+    else if (stat(app->store, &mine)) snprintf(app->why, sizeof(app->why), "Cannot read the store directory");
+    for (unsigned b = 0, count = places(); !app->why[0] && b < count; ++b)
+        if (&apps[b] != app && apps[b].running && !stat(apps[b].store, &theirs) && theirs.st_dev == mine.st_dev &&
+            theirs.st_ino == mine.st_ino)
+            snprintf(app->why, sizeof(app->why), "The store is %s's", apps[b].name);
+    if (app->why[0]) return false;
+    Executor *ex = &app->owner.executor;
+    *ex = (Executor){0};
+    if (!start_owner(app, all_hosts, host_count)) return false;
+    return resume_app(app);
+}
+
+/* An app goes quiet: it takes no request from now on (its routes answer
+ * 503 stopped, link records and other apps' batches wait at their
+ * senders), applies, saves and answers those it took, has its batches
+ * with other apps back, then closes its outlets (what they did not deliver
+ * stays in its outbox) and lets its checkpoint writer finish. Its owner
+ * takes no turn after; its executor and store are as they were. */
+static void quiet_app(App *app) {
     app->running = false;
     atomic_store_explicit(&app->live, NULL, memory_order_release);
     Owner *o = &app->owner;
@@ -3764,18 +3776,62 @@ static void stop_app(App *app) {
         if (!done) nanosleep(&(struct timespec){0, 1000000}, NULL);
     }
     close_outlets(ex, &app->past);
-    stop_executor(ex);
-    fold_run(ex, &app->past);
+    stop_writer(ex);
     o->gather = false;
     o->due = 0;
 }
 
+/* An app stops: quiet, then its store closed. */
+static void stop_app(App *app) {
+    if (!app->running) return;
+    quiet_app(app);
+    Executor *ex = &app->owner.executor;
+    stop_executor(ex);
+    fold_run(ex, &app->past);
+}
+
+/* An app that runs changes in place, its line changed but not its store:
+ * quiet, then its module replaced in memory when it is another
+ * (pure_app_replace: its states, and the sends in its outbox, carried by
+ * name; nothing read again from the store), its budgets as the line says,
+ * and it resumes with outlets made anew. What its executor kept by input
+ * or output number starts anew. A module its states do not go into stops
+ * it, why in app->why (its store closed: a replace left uncertain starts
+ * again from what the store has). */
+static bool change_app(App *app) {
+    Executor *ex = &app->owner.executor;
+    quiet_app(app);
+    if (ex->module != app->module && pure_app_replace(&ex->app, app->module) != PURE_OK) {
+        snprintf(app->why, sizeof(app->why), "Its states do not go into the module%s%s", ex->app.why[0] ? ": " : "",
+                 ex->app.why);
+        stop_executor(ex);
+        fold_run(ex, &app->past);
+        return false;
+    }
+    ex->module = app->module;
+    ex->show = app->show, ex->edit = app->edit;
+    memset(ex->next, 0, sizeof(ex->next));
+    memset(ex->trimmed, 0, sizeof(ex->trimmed));
+    memset(ex->held, 0, sizeof(ex->held));
+    memset(ex->link_output, 0, sizeof(ex->link_output));
+    memset(ex->link_trimmed, 0, sizeof(ex->link_trimmed));
+    memset(ex->local_trimmed, 0, sizeof(ex->local_trimmed));
+    memset(ex->outlet_from, 0, sizeof(ex->outlet_from));
+    ex->gone_seen = ex->app.sends_gone;
+    ex->answers_wait = false;
+    pure_app_memory(&ex->app, app->memory);
+    pure_app_work(&ex->app, atomic_load(&app->work));
+    return resume_app(app);
+}
+
 /* A reading of --apps on SIGHUP: the host made as the file says. Apps whose
- * lines are gone stop and their routes go (404 no_app); those whose lines
- * changed, and those that do not run (they could not start, or a save of
- * theirs is uncertain), start (again) from their stores; new ones start in
- * places of their own; the others are left be. A line out for each
- * reading: each app, whether it runs (and why not), and what was done. */
+ * lines are gone stop and their routes go (404 no_app); a running app whose
+ * line changed but not its store changes in place (change_app); one whose
+ * store changed, one a save of which is uncertain, and one that does not
+ * run start (again) from their stores; new ones start in places of their
+ * own; the others are left be. A line out for each reading: each app,
+ * whether it runs (and why not), and what was done (kept, changed,
+ * restarted, started, removed). */
 static unsigned readings;
 static void read_again(const char *path) {
     Line *lines = NULL;
@@ -3811,6 +3867,10 @@ static void read_again(const char *path) {
             did[a] = "kept";
             continue;
         }
+        if (app->running && !uncertain && !strcmp(app->store, line->store)) {
+            did[a] = "changed"; /* in place, below */
+            continue;
+        }
         did[a] = app->running ? "restarted" : "started";
         stop_app(app);
     }
@@ -3840,11 +3900,17 @@ static void read_again(const char *path) {
         App *app = &apps[a];
         bool same_module = app->module && app->module_path && !strcmp(app->module_path, line->module) &&
                            app->digest == line->digest && line->digest;
+        bool in_place = app->running; /* left running by the first pass: its store stays */
         atomic_store(&app->gone, false); /* in the file again: stopped, not gone, until it starts */
         if (!did[a]) did[a] = "started";
         take_line(app, line);
         app->why[0] = 0;
-        if (same_module || load_module(app, app->module_path)) start_app(app); /* else stopped, with why */
+        if (!same_module && !load_module(app, app->module_path)) { /* stopped, with why */
+            if (in_place) stop_app(app);
+            continue;
+        }
+        if (in_place) change_app(app);
+        else start_app(app);
     }
     more_workers();
     printf("{\"reading\":%u,\"apps\":[", readings);
