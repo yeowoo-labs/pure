@@ -61,6 +61,11 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
+    if (getenv("BFS_WAIT")) { /* loaded: a counter attaches, then a line on stdin starts the searches */
+        fprintf(stderr, "loaded\n");
+        fflush(stderr);
+        (void)getchar();
+    }
     double *took = malloc(rounds * sizeof(*took));
     for (size_t r = 0; r < rounds; ++r) {
         uint32_t from = (uint32_t)(next() % nodes), to = (uint32_t)(next() % nodes);
