@@ -1,0 +1,31 @@
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 0.44, "reading_ms": 0.16}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 2.92, "reading_ms": 0.23}
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 0.54, "reading_ms": 0.26}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 0.38, "reading_ms": 0.24}
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 1.15, "reading_ms": 1.24}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 1.09, "reading_ms": 1.2}
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 1.16, "reading_ms": 1.25}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 1.09, "reading_ms": 1.2}
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 0.53, "reading_ms": 0.23}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 0.65, "reading_ms": 0.26}
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 3.19, "reading_ms": 0.28}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 0.39, "reading_ms": 0.25}
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 1.06, "reading_ms": 0.26}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 3.2, "reading_ms": 1.24}
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 0.47, "reading_ms": 0.28}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 0.35, "reading_ms": 0.22}
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 1.05, "reading_ms": 1.21}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 0.53, "reading_ms": 0.21}
+{"items": 1024, "way": "changed", "to": "items-next", "did": "changed", "gap_ms": 2.15, "reading_ms": 0.2}
+{"items": 1024, "way": "changed", "to": "items", "did": "changed", "gap_ms": 2.92, "reading_ms": 0.16}
+{"items": 1024, "way": "restarted", "gap_ms": 2.77}
+{"items": 1024, "way": "restarted", "gap_ms": 2.32}
+{"items": 1024, "way": "restarted", "gap_ms": 2.7}
+{"items": 1024, "way": "restarted", "gap_ms": 2.32}
+{"items": 1024, "way": "restarted", "gap_ms": 2.53}
+{"items": 1024, "way": "restarted", "gap_ms": 2.35}
+{"items": 1024, "way": "restarted", "gap_ms": 2.43}
+{"items": 1024, "way": "restarted", "gap_ms": 2.41}
+{"items": 1024, "way": "restarted", "gap_ms": 2.72}
+{"items": 1024, "way": "restarted", "gap_ms": 2.39}
+{"items": 1024, "changed_median_ms": 1.06, "restarted_median_ms": 2.42, "refused": 63, "answered": 66300}

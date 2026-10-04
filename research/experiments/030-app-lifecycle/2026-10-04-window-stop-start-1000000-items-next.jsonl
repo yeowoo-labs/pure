@@ -1,0 +1,16 @@
+{"items": 1048576, "way": "changed", "to": "items-next", "did": "restarted", "gap_ms": 151.25, "reading_ms": 151.2}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 149.93, "reading_ms": 150.0}
+{"items": 1048576, "way": "changed", "to": "items-next", "did": "restarted", "gap_ms": 150.36, "reading_ms": 150.34}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 151.27, "reading_ms": 151.31}
+{"items": 1048576, "way": "changed", "to": "items-next", "did": "restarted", "gap_ms": 149.72, "reading_ms": 149.74}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 150.48, "reading_ms": 150.5}
+{"items": 1048576, "way": "changed", "to": "items-next", "did": "restarted", "gap_ms": 149.59, "reading_ms": 149.58}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 150.75, "reading_ms": 150.88}
+{"items": 1048576, "way": "changed", "to": "items-next", "did": "restarted", "gap_ms": 149.79, "reading_ms": 149.8}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 153.03, "reading_ms": 153.06}
+{"items": 1048576, "way": "restarted", "gap_ms": 149.63}
+{"items": 1048576, "way": "restarted", "gap_ms": 148.91}
+{"items": 1048576, "way": "restarted", "gap_ms": 149.63}
+{"items": 1048576, "way": "restarted", "gap_ms": 149.21}
+{"items": 1048576, "way": "restarted", "gap_ms": 151.98}
+{"items": 1048576, "changed_median_ms": 150.42, "restarted_median_ms": 149.63, "refused": 18133, "answered": 33199}

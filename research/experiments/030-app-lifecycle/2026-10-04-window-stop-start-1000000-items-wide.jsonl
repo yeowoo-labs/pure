@@ -1,0 +1,16 @@
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "restarted", "gap_ms": 329.24, "reading_ms": 329.21}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 339.41, "reading_ms": 339.48}
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "restarted", "gap_ms": 335.25, "reading_ms": 335.32}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 345.5, "reading_ms": 345.51}
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "restarted", "gap_ms": 328.75, "reading_ms": 328.83}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 342.24, "reading_ms": 342.22}
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "restarted", "gap_ms": 328.17, "reading_ms": 328.22}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 343.68, "reading_ms": 343.74}
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "restarted", "gap_ms": 332.61, "reading_ms": 332.6}
+{"items": 1048576, "way": "changed", "to": "items", "did": "restarted", "gap_ms": 340.55, "reading_ms": 339.73}
+{"items": 1048576, "way": "restarted", "gap_ms": 329.85}
+{"items": 1048576, "way": "restarted", "gap_ms": 337.79}
+{"items": 1048576, "way": "restarted", "gap_ms": 327.33}
+{"items": 1048576, "way": "restarted", "gap_ms": 337.1}
+{"items": 1048576, "way": "restarted", "gap_ms": 329.47}
+{"items": 1048576, "changed_median_ms": 337.33, "restarted_median_ms": 329.85, "refused": 40844, "answered": 33921}

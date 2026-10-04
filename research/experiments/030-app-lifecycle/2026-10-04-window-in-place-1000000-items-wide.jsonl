@@ -1,0 +1,16 @@
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "changed", "gap_ms": 178.42, "reading_ms": 175.85}
+{"items": 1048576, "way": "changed", "to": "items", "did": "changed", "gap_ms": 160.31, "reading_ms": 157.02}
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "changed", "gap_ms": 177.96, "reading_ms": 175.48}
+{"items": 1048576, "way": "changed", "to": "items", "did": "changed", "gap_ms": 161.7, "reading_ms": 158.05}
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "changed", "gap_ms": 181.63, "reading_ms": 178.71}
+{"items": 1048576, "way": "changed", "to": "items", "did": "changed", "gap_ms": 163.76, "reading_ms": 159.67}
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "changed", "gap_ms": 182.44, "reading_ms": 178.78}
+{"items": 1048576, "way": "changed", "to": "items", "did": "changed", "gap_ms": 163.71, "reading_ms": 159.36}
+{"items": 1048576, "way": "changed", "to": "items-wide", "did": "changed", "gap_ms": 185.21, "reading_ms": 180.69}
+{"items": 1048576, "way": "changed", "to": "items", "did": "changed", "gap_ms": 165.13, "reading_ms": 160.48}
+{"items": 1048576, "way": "restarted", "gap_ms": 332.42}
+{"items": 1048576, "way": "restarted", "gap_ms": 337.08}
+{"items": 1048576, "way": "restarted", "gap_ms": 327.97}
+{"items": 1048576, "way": "restarted", "gap_ms": 337.43}
+{"items": 1048576, "way": "restarted", "gap_ms": 328.56}
+{"items": 1048576, "changed_median_ms": 171.54, "restarted_median_ms": 332.42, "refused": 20534, "answered": 34071}

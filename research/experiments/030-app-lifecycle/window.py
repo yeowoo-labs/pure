@@ -7,12 +7,16 @@ of apps, its store in RAM, the host on cores 0-2. A client on core 3 posts
 writes to it one after another on one connection; the time an app cannot
 answer is the longest gap between two answered writes (200) around the
 change. Changed: SIGHUP after its line names the other of two module files
-(items.pmod, items-next.pmod: the same states, a view more), so each
-reading starts it again on another module. Restarted: SIGTERM, then the
-host started again (the client reconnecting at once).
+(items.pmod and NEXT, items-next.pmod unless named: the same states, a
+view more; items-wide.pmod: its records a field more, so the list is laid
+out anew), so each reading changes it to another module. Restarted: the
+same change made the way there was before, the line naming the other
+module, then SIGTERM and the host started again (the client reconnecting
+at once).
 
-window.py PURE_SERVE ITEMS CHANGES RESTARTS   a JSON line per change and per
-                                              restart, then one with medians
+window.py PURE_SERVE ITEMS CHANGES RESTARTS [NEXT]   a JSON line per change
+                                              and per restart, then one with
+                                              medians
 """
 import http.client
 import json
@@ -93,7 +97,7 @@ def free_port():
         return probe.getsockname()[1]
 
 
-def grow(port, items):
+def grow(port, items, app='x'):
     connection = http.client.HTTPConnection('127.0.0.1', port, timeout=600)
 
     def post(path):
@@ -102,10 +106,10 @@ def grow(port, items):
         answer.read()
         assert answer.status == 200, (path, answer.status)
 
-    post('/x/inputs/seed?n=1')
+    post(f'/{app}/inputs/seed?n=1')
     count = 1
     while count < items:
-        post('/x/inputs/grow?step=1')
+        post(f'/{app}/inputs/grow?step=1')
         count *= 2
     connection.close()
     return count
@@ -113,10 +117,11 @@ def grow(port, items):
 
 def main():
     serve, items, changes, restarts = Path(sys.argv[1]).resolve(), int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+    after = sys.argv[5] if len(sys.argv) > 5 else 'items-next'
     work = Path(tempfile.mkdtemp(prefix='pure-030-', dir='/dev/shm'))
     try:
         modules = {}
-        for name in ('items', 'items-next'):
+        for name in ('items', after):
             modules[name] = work / f'{name}.pmod'
             subprocess.run([str(AUP), 'build', str(HERE / f'{name}.aup'), '-o', str(modules[name])], check=True)
         conf, store, port = work / 'apps.conf', work / 'store', free_port()
@@ -132,17 +137,19 @@ def main():
         time.sleep(0.5)
         gaps = {'changed': [], 'restarted': []}
         for n in range(changes):
-            write('items-next' if n % 2 == 0 else 'items')
+            write(after if n % 2 == 0 else 'items')
             since = time.monotonic()
             began = time.perf_counter()
             said = host.reading()
             took = time.perf_counter() - began
-            assert said['apps'][0]['did'] == 'restarted' and said['apps'][0]['running'], said
+            assert said['apps'][0]['did'] in ('restarted', 'changed') and said['apps'][0]['running'], said
             time.sleep(0.3)
             gaps['changed'].append(writer.gap(since))
-            print(json.dumps({'items': count, 'way': 'changed', 'gap_ms': round(gaps['changed'][-1] * 1000, 2),
+            print(json.dumps({'items': count, 'way': 'changed', 'to': after if n % 2 == 0 else 'items',
+                              'did': said['apps'][0]['did'], 'gap_ms': round(gaps['changed'][-1] * 1000, 2),
                               'reading_ms': round(took * 1000, 2)}), flush=True)
         for n in range(restarts):
+            write(after if (changes + n) % 2 == 0 else 'items')
             since = time.monotonic()
             host.stop()
             host = Host(serve, conf, port)

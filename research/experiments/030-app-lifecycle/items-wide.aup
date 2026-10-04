@@ -1,0 +1,29 @@
+record Item {
+  n = 0
+  m = 0
+}
+state items: list of Item
+state more: list of Item
+state hits = 0
+input seed = message { n: number }
+input grow = message { step: number }
+input add = message { step: number }
+on seed {
+  items.append(Item { n: seed.n })
+}
+on grow {
+  for i in items {
+    more.append(Item { n: i.n + grow.step })
+  }
+  for m in more {
+    items.append(Item { n: m.n })
+  }
+  for m in more {
+    more.remove(m)
+  }
+}
+on add {
+  hits = hits + add.step
+}
+view count = count(i in items where i.n > 0)
+view total = hits
