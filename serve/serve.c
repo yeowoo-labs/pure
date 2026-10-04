@@ -208,6 +208,8 @@ typedef struct {
     const char *refused;  /* refused by the host (503 and this name), not applied */
     uint64_t heard;       /* then the source's last number heard after them */
     bool gap;             /* and whether they stopped at a gap */
+    struct Group *group;  /* a push group's evaluation, by a view worker (docs/design/020) */
+    uint64_t changes;     /* and the snapshot it was of */
 } Applied;
 
 /* The last save's snapshot an owner published, the connection threads'
@@ -428,7 +430,8 @@ struct App {
     uint32_t show, edit;
     _Atomic size_t memory; /* its budgets (0: none): what its states hold (read by its views' readers too), */
     _Atomic uint64_t work; /* what an event or a view's evaluation may run */
-    size_t queue;   /* the requests that may wait for its turn */
+    size_t queue;   /* the requests that may wait for its turn, and its views' with the view workers */
+    _Atomic size_t viewing;
     bool running;   /* started (the main thread's word); else why says why */
     char why[256];
     unsigned home;  /* the connection thread its connections move to (a host of apps) */
@@ -463,7 +466,7 @@ struct Host {
     unsigned *touched; /* the apps read in this round */
     Applied *views; /* a round's views shown here, answered together */
     size_t views_capacity;
-    uint64_t shown; /* views shown from snapshots */
+    uint64_t shown, pooled; /* views shown from snapshots; of them, by the view workers */
     Route *routes;  /* by work slot */
     struct Given { char *text; size_t capacity; } *given; /* a view's arguments as asked, by work slot */
     PureRuntime runtime;
@@ -2239,6 +2242,21 @@ static void answer_burst(void *context, Applied *applied, size_t count) {
     for (size_t i = 0; i < count; ++i) answer_applied(applied[i].host, &applied[i]);
 }
 
+/* A connection thread's requests among those applied, given back to it (an
+ * owner's or a view worker's), and it woken. */
+static void give_back(Host *host, const Applied *applied, size_t count) {
+    size_t mine = 0;
+    for (size_t i = 0; i < count; ++i) mine += applied[i].host == host;
+    if (!mine) return;
+    pthread_mutex_lock(&host->lock);
+    if (!grow(&host->done, &host->done_capacity, host->done_count + mine, sizeof(*host->done))) abort();
+    for (size_t i = 0; i < count; ++i)
+        if (applied[i].host == host) host->done[host->done_count++] = applied[i];
+    pthread_mutex_unlock(&host->lock);
+    uint64_t one = 1;
+    if (write(host->wake, &one, sizeof(one)) != sizeof(one)) abort();
+}
+
 /* On the owner: give each connection thread its applied requests, and wake it. */
 static void hand_back(void *context, Applied *applied, size_t count) {
     Owner *owner = context;
@@ -2262,22 +2280,12 @@ static void hand_back(void *context, Applied *applied, size_t count) {
         pthread_cond_broadcast(&surface->applied);
         pthread_mutex_unlock(&surface->lock);
     }
-    for (unsigned h = 0; h < owner->host_count; ++h) {
-        Host *host = &owner->hosts[h];
-        size_t mine = 0;
-        for (size_t i = 0; i < count; ++i) mine += applied[i].host == host;
-        if (!mine) continue;
-        pthread_mutex_lock(&host->lock);
-        if (!grow(&host->done, &host->done_capacity, host->done_count + mine, sizeof(*host->done))) abort();
-        for (size_t i = 0; i < count; ++i)
-            if (applied[i].host == host) host->done[host->done_count++] = applied[i];
-        pthread_mutex_unlock(&host->lock);
-        uint64_t one = 1;
-        if (write(host->wake, &one, sizeof(one)) != sizeof(one)) abort();
-    }
+    for (unsigned h = 0; h < owner->host_count; ++h) give_back(&owner->hosts[h], applied, count);
 }
 
-/* On a connection thread: answer what the owner handed back. */
+static void group_evaluated(Host *host, Applied *a);
+
+/* On a connection thread: answer what the owner and the view workers handed back. */
 static void answer_handed(Host *host) {
     uint64_t signals;
     if (read(host->wake, &signals, sizeof(signals)) < 0 && errno != EAGAIN) abort();
@@ -2290,24 +2298,131 @@ static void answer_handed(Host *host) {
     pthread_mutex_unlock(&host->lock);
     host->answering = done;
     host->answering_capacity = capacity;
-    for (size_t i = 0; i < count; ++i) answer_applied(host, &done[i]);
+    for (size_t i = 0; i < count; ++i)
+        if (done[i].group) group_evaluated(host, &done[i]);
+        else answer_applied(host, &done[i]);
     host->pending -= count;
 }
 
 /* The owner's newest snapshot, held, shown by this thread's reader; NULL
  * when there is none. Taken for each round, after the round's answers from
  * the owner: those were handed back after their saves' snapshots. */
-static PureSnapshot *read_published(Host *host, App *app) {
+static PureSnapshot *read_newest(PureApp *reader, App *app) {
     Published *published = &app->owner.published;
     pthread_mutex_lock(&published->lock);
     PureSnapshot *snapshot = published->snapshot;
     if (snapshot) pure_snapshot_hold(snapshot);
     pthread_mutex_unlock(&published->lock);
-    PureApp *reader = &host->readers[app - apps];
     if (snapshot) pure_app_read(reader, snapshot);
     reader->work_budget = atomic_load_explicit(&app->work, memory_order_relaxed);
     reader->memory = atomic_load_explicit(&app->memory, memory_order_relaxed); /* what a view's body may add to its own lists */
     return snapshot;
+}
+
+static PureSnapshot *read_published(Host *host, App *app) { return read_newest(&host->readers[app - apps], app); }
+
+/* ---- Views that compute, off the connection threads (docs/design/020's
+ * stage 2). A view with a body may run long: its GET, and a push group's
+ * evaluation of it, go to the view workers, which show it from its app's
+ * newest snapshot on readers of their own and give the answer back to the
+ * thread it came from as an owner does. That thread reads and writes its
+ * other connections meanwhile. A view of one expression stays on it. */
+typedef struct ViewJob {
+    Host *host;
+    Route route;         /* in the module it was resolved with: shown only from a snapshot of that one */
+    PureTicket ticket;   /* a GET's, */
+    PureInput input;
+    size_t available;
+    struct Group *group; /* or a push group's evaluation */
+    struct ViewJob *next;
+} ViewJob;
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t ready;
+    ViewJob *first, *last;
+    bool stopping;
+} views_waiting = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, NULL, NULL, false};
+static unsigned view_workers = UINT_MAX; /* --view-workers (UINT_MAX: a CPU each; 0: none, on the connection threads) */
+static pthread_t *view_threads;
+static unsigned view_thread_count;
+static unsigned online_cpus(void);
+
+/* Whether a view may run long: it has a body, or it is a table one of whose columns has. */
+static bool computes(const PureModule *m, uint32_t view) {
+    if (m->view_body[view]) return true;
+    if (m->view_type[view] != PURE_VIEW_TABLE) return false;
+    for (uint32_t column = 0; column < m->views; ++column)
+        if (m->view_table[column] == view + 1 && m->view_body[column]) return true;
+    return false;
+}
+
+/* A view for the workers to show: it comes back to host. */
+static void hand_view(Host *host, const Route *route, PureTicket ticket, PureInput input, size_t available,
+                      struct Group *group) {
+    ViewJob *job = malloc(sizeof(*job));
+    if (!job) abort();
+    *job = (ViewJob){host, *route, ticket, input, available, group, NULL};
+    ++host->pending;
+    pthread_mutex_lock(&views_waiting.lock);
+    if (views_waiting.last) views_waiting.last->next = job;
+    else views_waiting.first = job;
+    views_waiting.last = job;
+    pthread_cond_signal(&views_waiting.ready);
+    pthread_mutex_unlock(&views_waiting.lock);
+}
+
+static void *run_view_worker(void *unused) {
+    (void)unused;
+    PureApp *readers = calloc(app_slots, sizeof(*readers)); /* by app place, as a connection thread's */
+    if (!readers) abort();
+    for (;;) {
+        pthread_mutex_lock(&views_waiting.lock);
+        while (!views_waiting.first && !views_waiting.stopping) pthread_cond_wait(&views_waiting.ready, &views_waiting.lock);
+        ViewJob *job = views_waiting.first;
+        if (job && !(views_waiting.first = job->next)) views_waiting.last = NULL;
+        pthread_mutex_unlock(&views_waiting.lock);
+        if (!job) break;
+        App *app = job->route.app;
+        PureApp *reader = &readers[app - apps];
+        PureSnapshot *snapshot = read_newest(reader, app);
+        Applied a = {.host = job->host, .ticket = job->ticket, .input = job->input, .route = ROUTE_VIEW, .group = job->group};
+        if (!snapshot || reader->module != job->route.module) { /* its app stopped, or runs another module now */
+            a.status = PURE_CLOSED;
+            a.refused = "stopped";
+        } else {
+            a.status = show_view(reader, &job->route, job->available, &a);
+            a.changes = reader->changes;
+            if (job->group && a.status != PURE_OK && a.fault == PURE_FAULT_NONE) a.fault = pure_app_view_fault(reader);
+        }
+        if (snapshot) pure_snapshot_release(snapshot); /* an answer holds what it lends */
+        if (!job->group) atomic_fetch_sub_explicit(&app->viewing, 1, memory_order_relaxed);
+        give_back(job->host, &a, 1);
+        free(job);
+    }
+    for (unsigned i = 0, count = places(); i < count; ++i) pure_app_stop(&readers[i]);
+    free(readers);
+    return NULL;
+}
+
+/* Made before the connection threads, stopped after them (they wait for what they handed). */
+static bool start_view_workers(void) {
+    unsigned count = view_workers == UINT_MAX ? online_cpus() : view_workers;
+    if (!count) return true;
+    if (!(view_threads = calloc(count, sizeof(*view_threads)))) return false;
+    for (; view_thread_count < count; ++view_thread_count) {
+        if (pthread_create(&view_threads[view_thread_count], NULL, run_view_worker, NULL)) return false;
+        pthread_setname_np(view_threads[view_thread_count], "pure-view"); /* their CPU, seen apart */
+    }
+    return true;
+}
+
+static void stop_view_workers(void) {
+    pthread_mutex_lock(&views_waiting.lock);
+    views_waiting.stopping = true;
+    pthread_cond_broadcast(&views_waiting.ready);
+    pthread_mutex_unlock(&views_waiting.lock);
+    for (unsigned i = 0; i < view_thread_count; ++i) pthread_join(view_threads[i], NULL);
+    free(view_threads);
 }
 
 /* ---- Pushing views (docs/design/019). A view's GET that asks for an event
@@ -2343,6 +2458,10 @@ typedef struct Group {
     size_t value_size;
     char *event;
     size_t event_size;
+    /* A view worker evaluates it (a view with a body): for the module asked
+     * of; again: a newer snapshot came meanwhile. It stays until it is back. */
+    bool evaluating, again;
+    const PureModule *asked;
     Subscriber *first;
     struct Group *next;
 } Group;
@@ -2421,6 +2540,13 @@ static bool subscriber_flush(Host *host, Subscriber *s) {
     return true;
 }
 
+static void free_group(Group *g) {
+    free(g->text);
+    free(g->value);
+    free(g->event);
+    free(g);
+}
+
 static void unsubscribe(Host *host, Subscriber *s) {
     Group *g = s->group;
     for (Subscriber **at = &g->first; *at; at = &(*at)->next)
@@ -2435,10 +2561,7 @@ static void unsubscribe(Host *host, Subscriber *s) {
     if (g->first) return;
     for (Group **at = &host->groups; *at; at = &(*at)->next)
         if (*at == g) { *at = g->next; break; }
-    free(g->text);
-    free(g->value);
-    free(g->event);
-    free(g);
+    if (!g->evaluating) free_group(g); /* else when its evaluation is back */
 }
 
 static void close_group(Host *host, Group *g) {
@@ -2470,10 +2593,75 @@ static void subscriber_event(Host *host, Subscriber *s, uint32_t events) {
     if (gone || !subscriber_flush(host, s)) unsubscribe(host, s);
 }
 
-/* A group's value from the snapshot its app's reader shows: as the view's
- * GET answers it, or why it has none (event none). An event made when it
- * differs from the last; then each subscriber gets it, and a fresh one the
- * group's value at least. */
+/* A group's value, as the view's GET answers it (a), or why it has none
+ * (event none), from the snapshot of changes. An event made when it differs
+ * from the last, for each subscriber. */
+static void group_value(Group *g, Applied *a, uint64_t changes) {
+    Output value = {0};
+    bool failed = a->status != PURE_OK;
+    if (failed) { /* why it has none */
+        const char *why = a->status == PURE_NOT_FOUND && a->fault == PURE_FAULT_NONE ? "no_value" : pure_fault_name(a->fault);
+        put_bytes(&value, why, strlen(why));
+    } else if (a->extents) {
+        for (size_t i = 0; i < a->extent_count; ++i) put_bytes(&value, a->extents[i].iov_base, a->extents[i].iov_len);
+    } else put_bytes(&value, a->resource.body.data, a->resource.body.size);
+    if (value.failed) abort();
+    bool same = g->computed && failed == g->failed && value.size == g->value_size &&
+                (!value.size || !memcmp(value.bytes, g->value, value.size));
+    g->changes = changes;
+    g->computed = true;
+    if (!same) {
+        free(g->value);
+        g->value = (char *)value.bytes, g->value_size = value.size, g->failed = failed;
+        value.bytes = NULL;
+        Output event = {0}; /* id, an event's name if it has none, and a data line per line */
+        char id[32];
+        int length = snprintf(id, sizeof(id), "id: %" PRIu64 "\n", g->changes);
+        put_bytes(&event, id, (size_t)length);
+        if (failed) put_bytes(&event, "event: none\n", 12);
+        for (size_t at = 0;;) { /* a data line per line of the value */
+            const char *end = at < g->value_size ? memchr(g->value + at, '\n', g->value_size - at) : NULL;
+            size_t line = end ? (size_t)(end - (g->value + at)) : g->value_size - at;
+            put_bytes(&event, "data: ", 6);
+            if (line) put_bytes(&event, g->value + at, line);
+            put_bytes(&event, "\n", 1);
+            if (!end) break;
+            at += line + 1;
+        }
+        put_bytes(&event, "\n", 1);
+        if (event.failed) abort();
+        free(g->event);
+        g->event = (char *)event.bytes, g->event_size = event.size;
+        for (Subscriber *s = g->first; s; s = s->next) s->fresh = true; /* each gets it */
+    }
+    free(value.bytes);
+}
+
+static void let_go_applied(Applied *a) {
+    if (a->resource.release) a->resource.release(a->resource.allocation, a->resource.allocation_size);
+    free(a->extents);
+}
+
+/* Each subscriber that has not had the group's value gets it (none before
+ * its first evaluation is back). False when the group went with the last. */
+static bool group_send(Host *host, Group *g) {
+    for (Subscriber *s = g->first, *after; g->event && s; s = after) {
+        after = s->next;
+        if (!s->fresh) continue;
+        s->fresh = false;
+        if (!subscriber_send(host, s, g->event, g->event_size)) {
+            bool last = !s->next && g->first == s;
+            unsubscribe(host, s);
+            if (last) return false;
+        }
+    }
+    return true;
+}
+
+/* A group's value from the snapshot its app's reader shows, when it is not
+ * the one it has: here, or by a view worker for a view with a body (one at
+ * a time; a newer snapshot meanwhile is evaluated after). Then each
+ * subscriber gets it, and a fresh one the group's value at least. */
 static void push_group(Host *host, Group *g) {
     App *app = g->app;
     if (atomic_load(&app->gone)) { close_group(host, g); return; }
@@ -2508,59 +2696,43 @@ static void push_group(Host *host, Group *g) {
         g->computed = false;
     }
     if (!g->computed || reader->changes != g->changes) {
-        Applied a = {0};
-        PureResult status = show_view(reader, &g->route, PURE_OBJECT_LIMIT, &a);
-        Output value = {0};
-        bool failed = status != PURE_OK;
-        if (failed) { /* why it has none */
-            PureFault fault = a.fault != PURE_FAULT_NONE ? a.fault : pure_app_view_fault(reader);
-            const char *why = status == PURE_NOT_FOUND && fault == PURE_FAULT_NONE ? "no_value" : pure_fault_name(fault);
-            put_bytes(&value, why, strlen(why));
-        } else if (a.extents) {
-            for (size_t i = 0; i < a.extent_count; ++i) put_bytes(&value, a.extents[i].iov_base, a.extents[i].iov_len);
-        } else put_bytes(&value, a.resource.body.data, a.resource.body.size);
-        if (a.resource.release) a.resource.release(a.resource.allocation, a.resource.allocation_size);
-        free(a.extents);
-        if (value.failed) abort();
-        bool same = g->computed && failed == g->failed && value.size == g->value_size &&
-                    (!value.size || !memcmp(value.bytes, g->value, value.size));
-        g->changes = reader->changes;
-        g->computed = true;
-        if (!same) {
-            free(g->value);
-            g->value = (char *)value.bytes, g->value_size = value.size, g->failed = failed;
-            value.bytes = NULL;
-            Output event = {0}; /* id, an event's name if it has none, and a data line per line */
-            char id[32];
-            int length = snprintf(id, sizeof(id), "id: %" PRIu64 "\n", g->changes);
-            put_bytes(&event, id, (size_t)length);
-            if (failed) put_bytes(&event, "event: none\n", 12);
-            for (size_t at = 0;;) { /* a data line per line of the value */
-                const char *end = at < g->value_size ? memchr(g->value + at, '\n', g->value_size - at) : NULL;
-                size_t line = end ? (size_t)(end - (g->value + at)) : g->value_size - at;
-                put_bytes(&event, "data: ", 6);
-                if (line) put_bytes(&event, g->value + at, line);
-                put_bytes(&event, "\n", 1);
-                if (!end) break;
-                at += line + 1;
+        if (view_thread_count && computes(g->route.module, g->route.target)) {
+            if (g->evaluating) g->again = true;
+            else {
+                g->evaluating = true;
+                g->asked = g->route.module;
+                hand_view(host, &g->route, (PureTicket){0}, PURE_INPUT_READ, PURE_OBJECT_LIMIT, g);
             }
-            put_bytes(&event, "\n", 1);
-            if (event.failed) abort();
-            free(g->event);
-            g->event = (char *)event.bytes, g->event_size = event.size;
-            for (Subscriber *s = g->first; s; s = s->next) s->fresh = true; /* each gets it */
+        } else {
+            Applied a = {0};
+            a.status = show_view(reader, &g->route, PURE_OBJECT_LIMIT, &a);
+            if (a.status != PURE_OK && a.fault == PURE_FAULT_NONE) a.fault = pure_app_view_fault(reader);
+            group_value(g, &a, reader->changes);
+            let_go_applied(&a);
         }
-        free(value.bytes);
     }
     pure_snapshot_release(snapshot);
-    for (Subscriber *s = g->first, *after; s; s = after) {
-        after = s->next;
-        if (!s->fresh) continue;
-        s->fresh = false;
-        if (!subscriber_send(host, s, g->event, g->event_size)) {
-            if (!s->next && g->first == s) { unsubscribe(host, s); return; }
-            unsubscribe(host, s);
-        }
+    group_send(host, g);
+}
+
+/* A view worker's evaluation of a group, back on its thread: its value,
+ * unless the app stopped or changed module meanwhile (the next look says
+ * which); then the newer snapshot's, if one came. */
+static void group_evaluated(Host *host, Applied *a) {
+    Group *g = a->group;
+    g->evaluating = false;
+    if (!g->first) { /* its subscribers all left meanwhile */
+        let_go_applied(a);
+        free_group(g);
+        return;
+    }
+    if (a->refused || g->asked != g->route.module) g->again = true;
+    else group_value(g, a, a->changes);
+    let_go_applied(a);
+    if (!group_send(host, g)) return;
+    if (g->again && !atomic_load(&stopping)) {
+        g->again = false;
+        push_group(host, g);
     }
 }
 
@@ -2813,6 +2985,19 @@ static void serve_bursts(Host *host) {
             if (job->route.kind == ROUTE_VIEW && host->readers[a].module != job->route.module) { /* another module's view now */
                 applied->status = PURE_CLOSED;
                 applied->refused = "stopped";
+                continue;
+            }
+            if (job->route.kind == ROUTE_VIEW && view_thread_count && computes(job->route.module, job->route.target)) {
+                App *app = job->route.app; /* a view with a body: the workers show it, past its app's queue 503 busy */
+                if (app->queue && atomic_load_explicit(&app->viewing, memory_order_relaxed) >= app->queue) {
+                    applied->status = PURE_BUSY;
+                    applied->refused = "busy";
+                    continue;
+                }
+                atomic_fetch_add_explicit(&app->viewing, 1, memory_order_relaxed);
+                hand_view(host, &job->route, job->effect.ticket, job->effect.input, job->effect.available, NULL);
+                --answers; /* answered when it is back */
+                ++shown, ++host->pooled;
                 continue;
             }
             applied->status = job->route.kind == ROUTE_VIEW ? show_view(&host->readers[a], &job->route, job->effect.available, applied)
@@ -4563,6 +4748,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--timeout-ms") && number(argv[i + 1], 3600000, &value) && value) timeout_ms = value;
         else if (!strcmp(argv[i], "--subscribers") && number(argv[i + 1], 1u << 22, &value)) subscribers_most = (size_t)value;
         else if (!strcmp(argv[i], "--push-every-ms") && number(argv[i + 1], 60000, &value)) push_every_ms = value;
+        else if (!strcmp(argv[i], "--view-workers") && number(argv[i + 1], 256, &value)) view_workers = (unsigned)value;
         else goto usage;
     }
     if (surface_path) surface_argv[surface_argc++] = (char *)surface_path;
@@ -4750,10 +4936,12 @@ int main(int argc, char **argv) {
     /* A surface reads the owner's snapshots and gives it events. */
     if (surface_path && (named_apps || !apps[0].owned)) { fputs("--surface needs an app with states\n", stderr); return 2; }
     if (surface_path && !start_surface(&surface, owner, surface_argc, surface_argv)) return 1;
+    if (apps[0].owned && !start_view_workers()) { fputs("Cannot start a thread\n", stderr); return 1; }
     for (unsigned i = 1; i < threads; ++i)
         if (pthread_create(&thread[i], NULL, run_shard, &hosts[i])) { fputs("Cannot start a thread\n", stderr); return 1; }
     run_shard(&hosts[0]);
     for (unsigned i = 1; i < threads; ++i) pthread_join(thread[i], NULL);
+    stop_view_workers(); /* the connection threads had back all they handed */
     if (surface_path) { /* stopped before the owner, which may still apply its last event */
         surface_changed(&surface);
         pthread_join(surface.thread, NULL);
@@ -4780,10 +4968,10 @@ int main(int argc, char **argv) {
     size_t active = 0, retained = 0, state_bytes = 0;
     uint64_t unauthorized = 0, forbidden = 0, subscribed = 0, unsubscribed = 0, pushes = 0, pushed = 0, replaced = 0;
     size_t subscribers = 0;
-    uint64_t moved = 0, handed = 0, accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0, ticks = 0, shown = 0, checkpoints = 0,
+    uint64_t moved = 0, handed = 0, accepted = 0, requests = 0, bursts = 0, events = 0, expired = 0, ticks = 0, shown = 0, pooled = 0, checkpoints = 0,
              memory_refused = 0, windows_full = 0, publications = 0, answers = 0, delivered = 0, attempts = 0;
     for (unsigned i = 0; i < threads; ++i) {
-        shown += hosts[i].shown;
+        shown += hosts[i].shown, pooled += hosts[i].pooled;
         moved += hosts[i].moved_away;
         active += hosts[i].active;
         retained += hosts[i].runtime.retained;
@@ -4823,6 +5011,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "{\"active\":%zu,\"retained_payload_bytes\":%zu,\"accepted\":%" PRIu64 ",\"requests\":%" PRIu64
             ",\"bursts\":%" PRIu64 ",\"burst_events\":%" PRIu64 ",\"ticks\":%" PRIu64 ",\"expired\":%" PRIu64
             ",\"threads\":%u,\"owner\":%s,\"snapshots\":%" PRIu64 ",\"views_from_snapshots\":%" PRIu64
+            ",\"view_workers\":%u,\"views_by_workers\":%" PRIu64
             ",\"delivered\":%" PRIu64 ",\"delivery_attempts\":%" PRIu64 ",\"answers\":%" PRIu64
             ",\"commit_groups\":%lu,\"grouped_commits\":%lu,\"checkpoints\":%" PRIu64
             ",\"link_packets\":%" PRIu64 ",\"link_records\":%" PRIu64 ",\"link_resent\":%" PRIu64
@@ -4835,7 +5024,7 @@ int main(int argc, char **argv) {
             ",\"unauthorized\":%" PRIu64 ",\"forbidden\":%" PRIu64 ",\"subscribers\":%zu,\"subscribed\":%" PRIu64
             ",\"pushes\":%" PRIu64 ",\"pushed\":%" PRIu64 ",\"push_replaced\":%" PRIu64,
             active, retained, accepted, requests, bursts, events, ticks, expired, threads, apps[0].owned ? "true" : "false",
-            publications, shown, delivered, attempts, answers, groups, grouped,
+            publications, shown, view_thread_count, pooled, delivered, attempts, answers, groups, grouped,
             checkpoints, sent.packets, sent.records, sent.resent, sent.lost, sent.acknowledged, sent.stored,
             sent.refused, heard.packets, heard.received, heard.deliveries, heard.woken, heard.remembered, heard.swept,
             heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused,
@@ -4860,12 +5049,12 @@ int main(int argc, char **argv) {
     return 0;
 usage:
     fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
-          "[--connections 1024] [--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--send OUTPUT=URL ...] [--name NAME] "
+          "[--connections 1024] [--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--view-workers N] [--send OUTPUT=URL ...] [--name NAME] "
           "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
           "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] [--work N] "
           "[--window 4194304] [--tokens FILE] [--surface LIBRARY [-- ARGUMENTS]]\n"
           "pure-serve --apps FILE [--port 8767] [--threads 1|N|auto] [--workers N] [--app-slots 256] [--budget BYTES] [--connections 1024] "
-          "[--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--key FILE] [--sealed-only] [--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] "
+          "[--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--view-workers N] [--key FILE] [--sealed-only] [--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] "
           "[--send-ca FILE] [--window BYTES]\n"
           "  --apps FILE: a host of apps (docs/design/017-apps-on-one-host.md), a line each:\n"
           "      NAME MODULE.pmod STORE [memory=BYTES] [work=N] [queue=N] [send=OUTPUT=URL ...] [seal=OUTPUT=KEY ...]\n"
@@ -4879,6 +5068,8 @@ usage:
           "      a delivery sealed by a key --sender names needs none (docs/design/017-apps-on-one-host.md, 3b)\n"
           "pure-serve --make-token read|write|input=NAME[,NAME]: a new token and its line for a tokens file\n"
           "  --workers N: the threads the apps' owners take turns on (1 for one app; for apps, one a CPU at most)\n"
+          "  --view-workers N: the threads that show views with a body, asked and pushed, off the connection threads\n"
+          "      (a CPU each; 0: on the connection threads, docs/design/020); past an app's queue=N, 503 busy\n"
           "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
           "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"
           "  --send OUTPUT=http[s]://host:port/path: to anything else, over HTTP\n"

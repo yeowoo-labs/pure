@@ -4493,6 +4493,115 @@ def server_view_bodies(aup, pure, work):
     return {'answers': asked[0], 'connections': 64}
 
 
+SLOW_SOURCE = """state n = 0
+input bump = text
+on bump {
+  n = n + 1
+}
+view slow {
+  let acc = 0
+  for i in 0 .. 3000000 {
+    acc = acc + 1
+  }
+  return acc + n
+}
+"""
+
+
+def server_view_workers(aup, pure, work):
+    """Views with a body on the view workers (docs/design/020's stage 2):
+    while 8 connections ask a view that loops 3,000,000 times, its app's
+    module changes (SIGHUP) to one with another view in its place and the
+    view tenfold, then the app is removed: every answer is the old module's,
+    the new one's, 503 stopped or 404 (gone), none mixed. Streams of it
+    opened and closed at once leave nothing behind. With --view-workers 0
+    the connection threads show it, as before."""
+    import select
+    import signal
+    import threading
+    module, tenfold = work / 'slow.pmod', work / 'slow-tenfold.pmod'
+    (work / 'slow.aup').write_text(SLOW_SOURCE)
+    compile_module(aup, work / 'slow.aup', module)
+    (work / 'slow-tenfold.aup').write_text(SLOW_SOURCE.replace('view slow {', 'view other = 7\nview slow {')
+                                           .replace('return acc + n', 'return acc + n * 10'))
+    compile_module(aup, work / 'slow-tenfold.aup', tenfold)
+    conf = work / 'slow.conf'
+
+    def write(app_module, name='s'):
+        conf.write_text(f"{name} {app_module} {work / ('slow-' + name)}\n")
+
+    def reading():
+        host.process.send_signal(signal.SIGHUP)
+        ready, _, _ = select.select([host.process.stdout], [], [], 30)
+        assert ready, 'no reading'
+        return json.loads(host.process.stdout.readline())
+
+    write(module)
+    host = HttpHost([pure / 'build/pure-serve', '--apps', conf, '--threads', 1, '--view-workers', 2])
+    answers, wrong, stop = {}, [], threading.Event()
+    try:
+        assert http(host.port, 'POST', '/s/inputs/bump', b'x')[0] == 200
+        assert http(host.port, 'GET', '/s/views/slow')[3] == b'3000001'
+        for _ in range(10):  # a stream that goes before its value is back
+            stream = EventStream(host.port, '/s/views/slow')
+            assert stream.head()[0] == 200
+            stream.close()
+        stream = EventStream(host.port, '/s/views/slow')
+        assert stream.next()[2] == '3000001'
+
+        def ask():
+            import http.client
+            c = http.client.HTTPConnection('127.0.0.1', host.port, timeout=30)
+            while not stop.is_set():
+                try:
+                    c.request('GET', '/s/views/slow')
+                    response = c.getresponse()
+                    got = (response.status, response.getheader('X-Pure-Error') if response.status != 200 else 'none',
+                           response.read())
+                except (ConnectionError, http.client.HTTPException):
+                    c.close()
+                    c = http.client.HTTPConnection('127.0.0.1', host.port, timeout=30)
+                    continue
+                answers[got] = answers.get(got, 0) + 1
+                if got not in ((200, 'none', b'3000001'), (200, 'none', b'3000010'), (503, 'stopped', b'')) and got[0] != 404:
+                    wrong.append(got)
+            c.close()
+
+        threads = [threading.Thread(target=ask) for _ in range(8)]
+        for t in threads:
+            t.start()
+        time.sleep(0.5)
+        write(tenfold)
+        assert reading()['apps'][0]['did'] == 'changed'
+        assert stream.next(timeout=10)[2] == '3000010'  # the stream, on the new module's view
+        time.sleep(0.5)
+        write(tenfold, 'q')  # s removed
+        reading()
+        assert stream.ends(timeout=10), 'a stream of an app gone still runs'
+        time.sleep(0.3)
+        stop.set()
+        for t in threads:
+            t.join()
+        stream.close()
+    finally:
+        stop.set()
+        stats = host.stop()
+    old, new = answers.get((200, 'none', b'3000001'), 0), answers.get((200, 'none', b'3000010'), 0)
+    assert not wrong and old and new, (wrong[:5], answers)
+    assert stats[0]['view_workers'] == 2 and stats[0]['views_by_workers'] >= old + new and stats[0]['subscribers'] == 0, stats[0]
+    by_workers = stats[0]['views_by_workers']
+    write(module)
+    host = HttpHost([pure / 'build/pure-serve', '--apps', conf, '--view-workers', 0])
+    try:
+        assert http(host.port, 'POST', '/s/inputs/bump', b'x')[0] == 200
+        assert http(host.port, 'GET', '/s/views/slow')[3] == b'3000002'  # its store kept the first bump
+    finally:
+        stats = host.stop()
+    assert stats[0]['view_workers'] == 0 and stats[0]['views_by_workers'] == 0, stats[0]
+    return {'old': old, 'new': new, 'stopped': answers.get((503, 'stopped', b''), 0),
+            'gone': sum(v for k, v in answers.items() if k[0] == 404), 'by_workers': by_workers}
+
+
 PUSH_SOURCE = """record Row {
   name: text
   n = 0
@@ -4977,6 +5086,7 @@ def main():
         report['server_runaway'] = server_runaway(aup, pure, work)
         report['server_view_bodies'] = server_view_bodies(aup, pure, work)
         report['server_push'] = server_push(aup, pure, work)
+        report['server_view_workers'] = server_view_workers(aup, pure, work)
     print(json.dumps(report))
 
 
