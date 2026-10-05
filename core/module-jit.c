@@ -3959,6 +3959,17 @@ static void tier_reps(Tier *t) {
         const TVal *a = &t->vals[d->a], *b = &t->vals[d->b];
         if (a->whole && b->whole && a->lo >= 0 && b->lo > 0) d->integers = true;
     }
+    size_t made = t->val_count;
+    for (size_t i = 0; i < made; ++i) { /* a number over a power of two: times its reciprocal (the same number, exactly) */
+        TVal *v = &t->vals[i];
+        if (v->op != T_DIV || v->integers || t->vals[v->b].op != T_CONST) continue;
+        double b = t->vals[v->b].num;
+        int exp;
+        if (fabs(frexp(b, &exp)) != 0.5 || !(fabs(b) >= 0x1p-1000 && fabs(b) <= 0x1p1000)) continue;
+        int c = tconst(t, 1 / b); /* where the tier begins */
+        t->vals[c].uses = 1, --t->vals[v->b].uses;
+        t->vals[i].op = T_MUL, t->vals[i].b = c;
+    }
     tier_facts(t);
     for (unsigned l = 0; l < t->loop_count; ++l) /* a loop's round and rounds are integers */
         if (!t->vals[t->loops[l].k].whole || !t->vals[t->loops[l].count].whole) t->failed = true, t->why = "rounds";
@@ -3970,6 +3981,27 @@ static void tier_reps(Tier *t) {
         }
         if (v->op == T_SET) continue;
         v->rep = v->whole ? R_INT : R_NUM;
+    }
+    for (size_t i = 0; i < t->val_count; ++i) { /* a constant only numbers' arithmetic reads: a number, made where the tier begins */
+        TVal *c = &t->vals[i];
+        if (c->op != T_CONST || c->rep != R_INT) continue;
+        bool numbers = c->uses > 0;
+        for (size_t j = 0; j < t->val_count && numbers; ++j) {
+            const TVal *w = &t->vals[j];
+            bool reads = w->a == (int)i || w->b == (int)i || w->c == (int)i || w->d == (int)i;
+            for (unsigned k = 0; k < w->ins && !reads; ++k) reads = w->in[k] == (int)i;
+            numbers = !reads || (w->rep == R_NUM && w->op >= T_ADD && w->op <= T_MAX);
+        }
+        if (!numbers) continue;
+        c->rep = R_NUM;
+        if (c->loop < 0) continue;
+        size_t at = 0;
+        while (at < t->item_count && !(t->items[at].kind == I_VALUE && t->items[at].value == (int)i)) ++at;
+        if (at == t->item_count || !grow_array((void **)&t->entry, &t->entry_room, t->entry_count + 1, sizeof(*t->entry))) continue;
+        memmove(&t->items[at], &t->items[at + 1], (t->item_count - at - 1) * sizeof(TItem));
+        --t->item_count;
+        t->entry[t->entry_count++] = (int)i;
+        c->loop = -1;
     }
 }
 
@@ -4079,16 +4111,27 @@ static void tuse_snap(Tier *t, int s, int at) {
     }
 }
 
-/* A way into merge g read at at: its phis' inputs along it. */
-static void tuse_way(Tier *t, int g, int way, int at) {
+/* A way into merge g read at at: the inputs along it of the phis something needs (value k read as next - 1 when k >= 0, tier_moves). */
+static void tuse_way(Tier *t, const bool *need, int g, int way, int at, int k, int next) {
     const TMerge *m = &t->merges[g];
     if (way < 0 || !m->phis) return;
-    for (int var = 0; var < VARS; ++var)
-        if (m->phis[var] >= 0 && (unsigned)way < t->vals[m->phis[var]].ins) tuse(t, t->vals[m->phis[var]].in[way], at);
+    for (int var = 0; var < VARS; ++var) {
+        int phi = m->phis[var];
+        if (phi < 0 || !need[phi] || (unsigned)way >= t->vals[phi].ins) continue;
+        tuse(t, k >= 0 && t->vals[phi].in[way] == k ? next : t->vals[phi].in[way], at);
+    }
 }
 
 /* Whether loop l's latch pays for its next round: the outermost count's (the generic code opened it); the others paid for all their rounds as they opened. */
 static bool tlatch_pays(const Tier *t, int l) { return l == 0 && !t->loops[l].walk; }
+
+/* A latch's round when its way out takes it as the next round less one (the
+ * round not read past the next then: its register the next's), or -1: a
+ * loop that does not pay there (the outermost count's work check reads it). */
+static int tlatch_k(const Tier *t, const TItem *it) {
+    const TLoop *l = &t->loops[it->loop];
+    return !tlatch_pays(t, it->loop) && t->vals[l->k].rep == R_INT && t->vals[it->value].rep == R_INT ? l->k : -1;
+}
 
 /* Whether item it leaves its loop early (a break): to its exit. */
 static bool tbreaks(const Tier *t, const TItem *it) { return it->kind == I_JUMP && it->loop > 0 && it->merge == t->loops[it->loop].exit; }
@@ -4194,13 +4237,13 @@ static bool tier_registers(Tier *t) {
         }
         case I_UNLESS: tuse(t, it->value, p); /* fall through */
         case I_JUMP:
-            tuse_way(t, it->merge, it->way, p);
+            tuse_way(t, need, it->merge, it->way, p, -1, -1);
             if (tbreaks(t, it)) tuse(t, t->loops[it->loop].count, p), tuse(t, t->loops[it->loop].k, p);
             break;
         case I_OPEN: {
             const TLoop *l = &t->loops[it->loop];
             tuse(t, l->count, p);
-            tuse_way(t, it->merge, it->way, p);
+            tuse_way(t, need, it->merge, it->way, p, -1, -1);
             tuse_snap(t, it->snap, p);
             for (unsigned b = 0; b < l->bound_count; ++b) tuse_affine(t, l->bounds[b][0], it->loop, p), tuse(t, l->bounds[b][1], p);
             break;
@@ -4208,8 +4251,8 @@ static bool tier_registers(Tier *t) {
         case I_LATCH: {
             const TLoop *l = &t->loops[it->loop];
             tuse(t, it->value, p), tuse(t, l->count, p);
-            tuse_way(t, l->head, (int)t->merges[l->head].way_count - 1, p);
-            tuse_way(t, it->merge == l->head ? l->exit : it->merge, it->way, p);
+            tuse_way(t, need, l->head, (int)t->merges[l->head].way_count - 1, p, -1, -1);
+            tuse_way(t, need, it->merge == l->head ? l->exit : it->merge, it->way, p, tlatch_k(t, it), it->value);
             if (tlatch_pays(t, it->loop)) tuse_snap(t, it->snap, p);
             break;
         }
@@ -4379,12 +4422,11 @@ static int tfail(Tier *t, int snap) {
 }
 
 /* An integer below 2^53 in size in r, else to fail (from 0: its bits past 53 none). */
-static void tsmall_check(Tier *t, unsigned r, int fail) {
+static void tsmall_check(Tier *t, unsigned r, int fail) { /* from -2^53 below 2^53: its bits from 53 up its sign's */
     Emit *e = t->k->e;
-    mov_imm(e, X9, UINT64_C(1) << 53);
-    add_reg(e, X10, r, X9);
-    cmp_lsl(e, X10, X9, 1);
-    b_cond(e, HS, fail);
+    put(e, 0x9340FC00 | 53u << 16 | r << 5 | X10); /* ASR x10, r, #53 */
+    cmp_asr(e, X10, r, 63);
+    b_cond(e, NE, fail);
 }
 
 static void tsmall_from_0(Tier *t, unsigned r, int fail) {
@@ -4428,8 +4470,12 @@ static void tier_affine_at(Tier *t, int x, int l, unsigned kr, unsigned into, co
 }
 
 /* The moves a way into merge g makes: each phi given its input (a parallel move: what a move would overwrite is moved first, a cycle through scratch). */
-typedef struct { unsigned src, dst; bool src_d, dst_d, convert_bool; } TMove;
-static void tier_moves(Tier *t, int g, int way) {
+typedef struct { unsigned src, dst; bool src_d, dst_d, convert_bool, less; } TMove; /* less: the source less one */
+static void tier_moves_as(Tier *t, int g, int way, int k, int next);
+static void tier_moves(Tier *t, int g, int way) { tier_moves_as(t, g, way, -1, -1); }
+
+/* Value k (a latch's round, tlatch_k) taken as next - 1. */
+static void tier_moves_as(Tier *t, int g, int way, int k, int next) {
     Emit *e = t->k->e;
     const TMerge *m = &t->merges[g];
     TMove moves[VARS];
@@ -4439,10 +4485,12 @@ static void tier_moves(Tier *t, int g, int way) {
         int phi = m->phis[var];
         if (phi < 0 || t->vals[phi].reg < 0 || (unsigned)way >= t->vals[phi].ins) continue;
         const TVal *p = &t->vals[phi], *in = &t->vals[p->in[way]];
+        bool less = k >= 0 && p->in[way] == k;
+        if (less) in = &t->vals[next];
         if (in->reg < 0) continue;
         bool src_d = in->rep == R_NUM, dst_d = p->rep == R_NUM;
-        if (src_d == dst_d && in->reg == p->reg) continue;
-        moves[n++] = (TMove){(unsigned)in->reg, (unsigned)p->reg, src_d, dst_d, in->rep == R_BOOL};
+        if (!less && src_d == dst_d && in->reg == p->reg) continue;
+        moves[n++] = (TMove){(unsigned)in->reg, (unsigned)p->reg, src_d, dst_d, in->rep == R_BOOL, less};
     }
     while (n) {
         bool done = false;
@@ -4452,7 +4500,11 @@ static void tier_moves(Tier *t, int g, int way) {
                 blocked = j != i && moves[j].src == moves[i].dst && moves[j].src_d == moves[i].dst_d;
             if (blocked) continue;
             TMove mv = moves[i];
-            if (mv.src_d && mv.dst_d) put(e, 0x1E604000 | mv.src << 5 | mv.dst); /* FMOV Dd, Dn */
+            if (mv.less && mv.dst_d) { /* a round, as a number */
+                sub_imm(e, X17, mv.src, 1);
+                fp2(e, SCVTF_X, mv.dst, X17);
+            } else if (mv.less) sub_imm(e, mv.dst, mv.src, 1);
+            else if (mv.src_d && mv.dst_d) put(e, 0x1E604000 | mv.src << 5 | mv.dst); /* FMOV Dd, Dn */
             else if (!mv.src_d && !mv.dst_d) mov_reg(e, mv.dst, mv.src);
             else if (!mv.src_d) fp2(e, mv.convert_bool ? UCVTF_X : SCVTF_X, mv.dst, mv.src);
             else fp2(e, FCVTZS_X, mv.dst, mv.src); /* a whole number's (its phi an integer's) */
@@ -5086,7 +5138,7 @@ static void tier_emit(Tier *t, int entry, int fallback) {
             cmp_reg(e, treg(t, it->value), treg(t, l->count));
             if (!tlatch_pays(t, it->loop) && !tier_has_moves(t, l->head, back)) {
                 b_cond(e, LO, t->merges[l->head].label);
-                tier_moves(t, l->exit, it->way);
+                tier_moves_as(t, l->exit, it->way, tlatch_k(t, it), it->value);
                 break;
             }
             b_cond(e, HS, out);
@@ -5104,7 +5156,7 @@ static void tier_emit(Tier *t, int entry, int fallback) {
             tier_moves(t, l->head, back);
             b(e, t->merges[l->head].label);
             bind(e, out);
-            tier_moves(t, l->exit, it->way);
+            tier_moves_as(t, l->exit, it->way, tlatch_k(t, it), it->value);
             break;
         }
         case I_BREAK: { /* the outermost loop's: what changed written, the generic code breaks it */
