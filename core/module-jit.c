@@ -111,8 +111,8 @@ static bool resolve(Emit *e) {
 }
 
 /* x0, x1, x9, x10, x16, x17 and d0-d7 are scratch within an instruction's
- * code; x11-x13 and d16-d31 hold the stack's values; x2-x8, x14, x15, x25
- * and x26 the loops' kept values; x19 the frame, x20 its stack, x21 the values, x22 the
+ * code; x11-x13 and d16-d31 hold the stack's values; x2-x8, x14, x15, x18
+ * (free on Linux), x25 and x26 the loops' kept values; x19 the frame, x20 its stack, x21 the values, x22 the
  * event, x23 the app, x24 its lists, x27 the frame's loops, x28 the event's
  * locals; d8 infinity. */
 enum { X0 = 0, X1 = 1, X2 = 2, X9 = 9, X10 = 10, X11 = 11, X12 = 12, X13 = 13, X16 = 16, X17 = 17, X19 = 19, X20 = 20, X21 = 21, X22 = 22,
@@ -264,15 +264,19 @@ typedef struct {
 /* What a loop keeps in a register: of a list, a FLAT column's cells (0
  * when it is not FLAT), a DENSE one's, its key set's bits (NULL when it keeps
  * no bits), the keys they reach (64 a word), its count; of a walk, where it
- * is and where it stops; of a count, its round and how many. A column's
+ * is and where it stops; of a count, its round and how many. A nest's books
+ * (docs/design/022): the count of a FLAT list it appends to, as its appends
+ * have made it (LIVE), the items added to a DENSE one since it was read
+ * (PENDING), and the bytes the event may still grow by (HEADROOM); they go
+ * to the list and the app before a call (write_back) and as the nest ends. A column's
  * address carries its cells' width in its top byte (bit 56 one byte, 58
  * four, 59 eight): loads on AArch64 Linux leave the top byte out
  * (Documentation/arch/arm64/tagged-pointers.rst), so the code reads through
  * it as it is. */
-enum { C_COLUMN, C_DENSE, C_BITS, C_LIMIT, C_COUNT, C_AT, C_END, C_K, C_N };
+enum { C_COLUMN, C_DENSE, C_BITS, C_LIMIT, C_COUNT, C_AT, C_END, C_K, C_N, C_LIVE, C_PENDING, C_HEADROOM };
 typedef struct { uint8_t kind, field; uint16_t list; uint8_t reg; int loop; } Kept;
 enum { KEPT_MOST = 64, NO_REG = 0xFF };
-static const uint8_t kept_registers[] = {2, 3, 4, 5, 6, 7, 8, 14, 15, 25, 26};
+static const uint8_t kept_registers[] = {2, 3, 4, 5, 6, 7, 8, 14, 15, 18, 25, 26};
 
 typedef struct {
     uint32_t start, end; /* its block */
@@ -291,6 +295,7 @@ typedef struct {
     uint64_t region;     /* what its nest keeps: each in a register of its own, all read at each label in it */
     int ahead;           /* a slice it opens whose key it reads ahead (an Ahead), or -1 */
     uint64_t stores;     /* the locals its block stores (a count's slot too) */
+    uint32_t books;      /* a nest's: the lists its appends count in registers (C_LIVE, C_PENDING) */
     uint64_t ints;       /* the integers' code: the locals that hold whole numbers at its labels */
 } LoopAt;
 
@@ -302,7 +307,7 @@ typedef struct { uint8_t kind; uint16_t list, field; int a, b; double value; } S
 /* A slice read ahead: the loop opening it (an EACH in its block), its list and the column its block reads, its low key. */
 typedef struct { unsigned inner; uint32_t list, field; int key; Sym nodes[32]; unsigned count; } Ahead;
 
-typedef struct { int label; PureFault kind; uint32_t pc; } FaultAt;
+typedef struct { int label; PureFault kind; uint32_t pc; uint64_t fresh; } FaultAt;
 
 /* An instruction's step, called out of the fast way's line: its operands
  * stored first (as they were when it branched), the loops' places written
@@ -322,6 +327,7 @@ typedef struct {
     unsigned tree_field;
     bool two;              /* the step at pc, then the one at pc + 1 (an ITEM_GET and its HAS, run as one) */
     int deopt;             /* the integers' code: where it gives up when the result is no whole number (else -1) */
+    uint64_t entry;        /* what was kept as the instruction began: what it reads after holds nothing to write back */
 } Slow;
 
 /* A cell of eight bytes or one, read out of the line a four-byte one is read in
@@ -378,19 +384,22 @@ typedef struct {
 /* A label whose code gives a fault of kind at pc. */
 static int fault_at(Block *k, PureFault kind, uint32_t pc) {
     for (size_t i = 0; i < k->fault_count; ++i)
-        if (k->faults[i].kind == kind && k->faults[i].pc == pc) return k->faults[i].label;
+        if (k->faults[i].kind == kind && k->faults[i].pc == pc && k->faults[i].fresh == k->fresh) return k->faults[i].label;
     if (!grow_array((void **)&k->faults, &k->fault_room, k->fault_count + 1, sizeof(*k->faults))) {
         k->e->failed = true;
         return k->exit;
     }
-    k->faults[k->fault_count] = (FaultAt){new_label(k->e), kind, pc};
+    k->faults[k->fault_count] = (FaultAt){new_label(k->e), kind, pc, k->fresh};
     return k->faults[k->fault_count++].label;
 }
+
+static void books_back(Block *k, uint64_t mask);
 
 static void fault_stubs(Block *k) {
     Emit *e = k->e;
     for (size_t i = 0; i < k->fault_count; ++i) {
         bind(e, k->faults[i].label);
+        books_back(k, k->faults[i].fresh); /* the lists as they are, whatever comes of them */
         mov_w(e, X9, (uint32_t)k->faults[i].kind);
         store_w(e, X9, X19, offsetof(Frame, kind));
         mov_w(e, X9, k->faults[i].pc);
@@ -464,6 +473,25 @@ static void kept_load(Block *k, unsigned c) {
         csel(e, r, r, X17, LO);
         break;
     }
+    case C_LIVE:
+        load64(e, X16, X24, list_at);
+        load64(e, r, X16, pure_list_layout[LIST_COUNT_AT]);
+        break;
+    case C_PENDING: mov_w(e, r, 0); break;
+    case C_HEADROOM: { /* the least of the budget less what the event grew, and its room less what it holds */
+        int unbudgeted = new_label(e);
+        load64(e, X9, X23, offsetof(PureApp, room));
+        load64(e, X10, X23, offsetof(PureApp, spent));
+        sub_reg(e, r, X9, X10);
+        load64(e, X9, X23, offsetof(PureApp, memory));
+        cbz_x(e, X9, unbudgeted);
+        load64(e, X10, X23, offsetof(PureApp, grown));
+        sub_reg(e, X9, X9, X10);
+        cmp_reg(e, X9, r);
+        csel(e, r, X9, r, LT);
+        bind(e, unbudgeted);
+        break;
+    }
     case C_K: load64(e, r, X27, loop_offset(&k->loops[v->list]) + offsetof(Loop, k)); break;
     case C_N: load64(e, r, X27, loop_offset(&k->loops[v->list]) + offsetof(Loop, count)); break;
     }
@@ -484,12 +512,61 @@ static unsigned kept_reg(Block *k, int c) {
 /* What the code in loop may count on being kept: its nest's. */
 static uint64_t kept_at(const Block *k, int loop) { return loop >= 0 ? k->loops[loop].region : 0; }
 
+static size_t row_bytes(const PureModule *m, uint32_t list) { return 8 * (size_t)m->record[m->state_ref[list]].count; }
+
+/* The nest's books in mask, as they stand, into the lists and the app: a
+ * FLAT list's count (the items past it its appends), a DENSE one's items
+ * added; with them their versions, stored bytes and the event's growth.
+ * What is kept and not read holds nothing of its own: the books change only
+ * where they are read (append_books), and go back before they are let go. */
+static void books_back(Block *k, uint64_t mask) {
+    Emit *e = k->e;
+    for (unsigned c = 0; c < k->kept_count; ++c) {
+        const Kept *v = &k->kept[c];
+        if (!(mask >> c & 1) || (v->kind != C_LIVE && v->kind != C_PENDING)) continue;
+        int none = new_label(e);
+        size_t bytes = row_bytes(k->m, v->list);
+        load64(e, X16, X24, (size_t)v->list * sizeof(PureList *));
+        load64(e, X17, X16, pure_list_layout[LIST_COUNT_AT]);
+        if (v->kind == C_LIVE) {
+            sub_reg(e, X9, v->reg, X17);
+            cbz_x(e, X9, none);
+            store64(e, v->reg, X16, pure_list_layout[LIST_COUNT_AT]);
+        } else {
+            mov_reg(e, X9, v->reg);
+            cbz_x(e, X9, none);
+            add_reg(e, X17, X17, X9);
+            store64(e, X17, X16, pure_list_layout[LIST_COUNT_AT]);
+            load64(e, X10, X16, pure_list_layout[LIST_MEMBER_COUNT_AT]);
+            add_reg(e, X10, X10, X9);
+            store64(e, X10, X16, pure_list_layout[LIST_MEMBER_COUNT_AT]);
+            mov_w(e, v->reg, 0);
+        }
+        load64(e, X10, X16, pure_list_layout[LIST_VERSION_AT]);
+        add_imm(e, X10, X10, 1);
+        store64(e, X10, X16, pure_list_layout[LIST_VERSION_AT]);
+        mov_imm(e, X10, bytes);
+        mul_reg(e, X9, X9, X10); /* the bytes the items added */
+        load64(e, X10, X16, pure_list_layout[LIST_BYTES_AT]);
+        add_reg(e, X10, X10, X9);
+        store64(e, X10, X16, pure_list_layout[LIST_BYTES_AT]);
+        load64(e, X10, X23, offsetof(PureApp, grown));
+        add_reg(e, X10, X10, X9);
+        store64(e, X10, X23, offsetof(PureApp, grown));
+        load64(e, X10, X23, offsetof(PureApp, spent));
+        add_reg(e, X10, X10, X9);
+        store64(e, X10, X23, offsetof(PureApp, spent));
+        bind(e, none);
+    }
+}
+
 /* Before a call from code in loop: the places of the walks open around it,
  * kept in registers, back where the steps read them (the event's row the
  * innermost walk's). */
 static void write_back(Block *k, int loop) {
     Emit *e = k->e;
     bool row = false;
+    books_back(k, k->fresh);
     for (int l = loop; l >= 0; l = k->loops[l].parent) {
         const LoopAt *w = &k->loops[l];
         if (!w->walk || !w->fast || w->at_kept < 0 || !(k->fresh >> w->at_kept & 1)) {
@@ -501,6 +578,25 @@ static void write_back(Block *k, int loop) {
         if (!row) store64(e, r, X22, offsetof(Event, row));
         row = true;
     }
+}
+
+/* Whether the nest of loop keeps list's books in registers. */
+static bool books(const Block *k, int loop, uint32_t list) { return loop >= 0 && k->loops[k->loops[loop].nest].books >> (list & 31) & 1; }
+
+/* The count of list as the code in loop has it now, in a register: what
+ * the nest keeps (its appends counted), else its memory's into scratch
+ * (x16 spent). */
+static unsigned count_reg(Block *k, int loop, uint32_t list, unsigned scratch) {
+    Emit *e = k->e;
+    int live = kept_find(k, loop, C_LIVE, list, 0), pending = kept_find(k, loop, C_PENDING, list, 0),
+        counted = kept_find(k, loop, C_COUNT, list, 0);
+    if (books(k, loop, list) && live >= 0) return kept_reg(k, live);
+    if (counted >= 0) return kept_reg(k, counted);
+    unsigned added = books(k, loop, list) && pending >= 0 ? kept_reg(k, pending) : 0;
+    load64(e, X16, X24, list * sizeof(PureList *));
+    load64(e, scratch, X16, pure_list_layout[LIST_COUNT_AT]);
+    if (added) add_reg(e, scratch, scratch, added);
+    return scratch;
 }
 
 /* ---- The stack as compiled */
@@ -728,6 +824,7 @@ static int landing(const Block *k, uint32_t from, uint32_t target, int *loop) {
  * in their slots, what that label's loop keeps read. */
 static void join(Block *k, unsigned height, int loop) {
     spill_all(k, height);
+    books_back(k, k->fresh & ~kept_at(k, loop)); /* out of the nest: its books back */
     refresh(k, kept_at(k, loop));
     k->fresh = kept_at(k, loop); /* as every way here has it */
     k->ints = k->copy && loop >= 0 ? k->loops[loop].ints : 0;
@@ -748,6 +845,7 @@ static Slow *slow_at(Block *k, uint32_t pc, uintptr_t function, unsigned height,
     s->loop = k->loop_of[pc - k->block.start];
     s->tree_list = -1;
     s->deopt = -1;
+    s->entry = k->fresh;
     return s;
 }
 
@@ -766,7 +864,7 @@ static void stub_call(Block *k, const Slow *s, uintptr_t function) {
     Emit *e = k->e;
     memcpy(k->vs, s->vs, sizeof(k->vs));
     for (unsigned h = 0; h < s->height; ++h) spill(k, h);
-    k->fresh = s->fresh;
+    k->fresh = s->fresh & s->entry;
     write_back(k, s->loop);
     set_sp(k, s->height);
     mov_reg(e, X0, X19);
@@ -1139,6 +1237,119 @@ static void store_cell(Block *k, unsigned h, unsigned col, unsigned wbytes, unsi
     bind(e, done);
 }
 
+/* The value at h into a column whose address carries its width (bit 59
+ * eight bytes, 58 four, else one) at row at, or to slow when it does not
+ * fit; x0, x1, d0, d1 spent. */
+static void store_tagged(Block *k, unsigned h, unsigned col, unsigned at, int slow) {
+    Emit *e = k->e;
+    Value *v = &k->vs[h];
+    int eight = new_label(e), four = new_label(e), done = new_label(e);
+    tbnz(e, col, 59, eight);
+    unsigned x = X0;
+    if (v->kind == V_X) x = v->reg; /* below 0: past either width */
+    else if (v->kind == V_BIT) {
+        and_w_one(e, X0, v->reg);
+        if (v->negate) eor_w_one(e, X0, X0);
+    } else if (v->kind == V_CONST) {
+        double n = num_of(v->bits);
+        if (n >= 0 && n == floor(n) && !(n == 0 && signbit(n)) && n < 0x1p63) mov_imm(e, X0, (uint64_t)n);
+        else b(e, slow);
+    } else {
+        unsigned d = value_d(k, h, D0);
+        fp2(e, FMOV_XD, X0, d);
+        tbnz(e, X0, 63, slow); /* below 0, or -0 */
+        fp2(e, FCVTZU_X, X0, d);
+        fp2(e, UCVTF_X, D1, X0);
+        fcmp(e, d, D1);
+        b_cond(e, NE, slow);
+    }
+    tbnz(e, col, 58, four);
+    cmp_imm(e, x, 256);
+    b_cond(e, HS, slow);
+    store8_index(e, x, col, at);
+    b(e, done);
+    bind(e, four);
+    lsr_imm(e, X1, x, 32);
+    cbnz_x(e, X1, slow);
+    store32_index(e, x, col, at);
+    b(e, done);
+    bind(e, eight);
+    if (v->kind == V_BIT) {
+        and_w_one(e, X0, v->reg);
+        if (v->negate) eor_w_one(e, X0, X0);
+        fp2(e, UCVTF_W, D0, X0);
+        fp2(e, FMOV_XD, X0, D0);
+        store64_index(e, X0, col, at);
+    } else
+        store64_index(e, value_bits(k, h, X0), col, at);
+    bind(e, done);
+}
+
+/* LIST_APPEND with the nest's books (docs/design/022): the cells into the
+ * columns kept (FLAT: at the count kept, DENSE: at the key, absent, below
+ * its room and its bits' reach), the count or the items added counted in
+ * their register, the event's headroom less the item's bytes; nothing else
+ * written until a call or the nest's end (books_back). */
+static void append_books(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
+    Emit *e = k->e;
+    const PureModule *m = k->m;
+    uint32_t list = op->arg;
+    int loop = k->loop_of[pc - k->block.start];
+    unsigned fields = m->record[m->state_ref[list]].count, base = height - fields, key = m->state_key[list];
+    unflag_below(k, height);
+    size_t s = (size_t)(slow_at(k, pc, (uintptr_t)pure_run_step, height, base, -1) - k->slows);
+    if (e->failed) return;
+    int slow = k->slows[s].label;
+    unsigned columns[16], head = kept_reg(k, kept_find(k, loop, C_HEADROOM, 0, 0)), at = 0, bits = 0, limit = 0, pending = 0;
+    for (unsigned f = 0; f < fields; ++f)
+        columns[f] = key && f == key - 1u ? 0 : kept_reg(k, kept_find(k, loop, key ? C_DENSE : C_COLUMN, list, f));
+    if (!key) at = kept_reg(k, kept_find(k, loop, C_LIVE, list, 0));
+    else {
+        bits = kept_reg(k, kept_find(k, loop, C_BITS, list, 0)), limit = kept_reg(k, kept_find(k, loop, C_LIMIT, list, 0));
+        pending = kept_reg(k, kept_find(k, loop, C_PENDING, list, 0));
+    }
+    unsigned some = key == 1 ? columns[1] : columns[0]; /* a column kept: 0 when the list is not in that form */
+    cbz_x(e, some, slow);
+    if (!key) {
+        load64(e, X16, X24, list * sizeof(PureList *));
+        load64(e, X17, X16, pure_list_layout[LIST_ROOM_AT]);
+        cmp_reg(e, at, X17);
+        b_cond(e, HS, slow);
+    } else {
+        cbz_x(e, bits, slow);
+        at = value_key(k, base + key - 1u, X9, slow);
+        if (at != X9) mov_reg(e, X9, at);
+        at = X9;
+        cmp_reg(e, X9, limit); /* the bits reach it (small keys only) */
+        b_cond(e, HS, slow);
+        load64(e, X16, X24, list * sizeof(PureList *));
+        load64(e, X17, X16, pure_list_layout[LIST_ROOM_AT]);
+        cmp_reg(e, X9, X17);
+        b_cond(e, HS, slow);
+        lsr_imm(e, X10, X9, 6);
+        load64_index(e, X17, bits, X10); /* its word: the key there already is EXISTS */
+        lsr_reg(e, X17, X17, X9);
+        tbnz(e, X17, 0, fault_at(k, PURE_FAULT_EXISTS, pc));
+    }
+    for (unsigned f = 0; f < fields; ++f)
+        if (columns[f]) store_tagged(k, base + f, columns[f], at, slow);
+    mov_imm(e, X10, row_bytes(m, list));
+    cmp_reg(e, head, X10);
+    b_cond(e, LT, slow); /* past the budget or the room: the step says MEMORY */
+    sub_reg(e, head, head, X10);
+    if (!key) add_imm(e, at, at, 1);
+    else {
+        lsr_imm(e, X10, X9, 6);
+        load64_index(e, X1, bits, X10);
+        mov_imm(e, X17, 1);
+        lsl_reg(e, X17, X17, X9);
+        orr_reg(e, X1, X1, X17);
+        store64_index(e, X1, bits, X10);
+        add_imm(e, pending, pending, 1);
+    }
+    slow_back(k, s, V_MEM, 0);
+}
+
 /* LIST_APPEND to an event's list of numbers whose places no index follows:
  * at the end of a FLAT one, or at its key in a DENSE one, with room, each
  * cell fitting its column. */
@@ -1226,6 +1437,8 @@ static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
     load64(e, X1, X23, offsetof(PureApp, room));
     cmp_reg(e, X0, X1);
     b_cond(e, GT, fault_at(k, PURE_FAULT_MEMORY, pc));
+    int head = kept_find(k, k->loop_of[pc - k->block.start], C_HEADROOM, 0, 0);
+    if (head >= 0 && k->fresh >> head & 1) sub_imm(e, k->kept[head].reg, k->kept[head].reg, bytes); /* the nest's books' */
     slow_back(k, s, V_MEM, 0);
 }
 
@@ -1259,13 +1472,7 @@ static bool item_has(Block *k, uint32_t pc, unsigned height) {
     unsigned at = value_index(k, height - 1, X1);
     int walk = k->vs[height - 1].walk;
     if (walk < 0 || k->loops[walk].list != list) {
-        unsigned count;
-        if (count_c >= 0) count = kept_reg(k, count_c);
-        else {
-            load64(e, X16, X24, list * sizeof(PureList *));
-            load64(e, X17, X16, pure_list_layout[LIST_COUNT_AT]);
-            count = X17;
-        }
+        unsigned count = count_c >= 0 ? kept_reg(k, count_c) : count_reg(k, loop, list, X17);
         cmp_reg(e, at, count);
         b_cond(e, HS, fault_at(k, PURE_FAULT_NOT_FOUND, pc));
     }
@@ -1367,9 +1574,8 @@ static void compile_op(Block *k, uint32_t pc) {
             vs[height] = (Value){V_X, (uint8_t)kept_reg(k, c), 0, true, false, -1, 0, -1, false, 25};
             return;
         }
-        unsigned r = alloc_x(k, height);
-        load64(e, X16, X24, arg * sizeof(PureList *));
-        load64(e, r, X16, pure_list_layout[LIST_COUNT_AT]);
+        unsigned r = alloc_x(k, height), n = count_reg(k, loop, arg, r); /* the books' own: copied, the appends change it */
+        if (n != r) mov_reg(e, r, n);
         vs[height] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1, false, 25};
         return;
     }
@@ -1406,13 +1612,13 @@ static void compile_op(Block *k, uint32_t pc) {
         unflag_below(k, height);
         int owner = vs[height - 2].owner;
         bool known = vs[height - 2].kind != V_MEM && owner >= 0;
+        if (!known && loop >= 0 && k->loops[k->loops[loop].nest].books) break; /* whose count: the step's, the books written back */
         if (k->copy && known && whole(&vs[height - 2]) && whole(&vs[height - 1])) { /* the integers' code */
             unsigned r = alloc_x(k, height - 2), x = value_whole(k, height - 2, X9), by = value_whole(k, height - 1, X10);
             add_reg(e, r, x, by);
-            load64(e, X16, X24, (size_t)owner * sizeof(PureList *));
-            load64(e, X17, X16, pure_list_layout[LIST_COUNT_AT]);
-            sub_imm(e, X9, X17, 1);
-            cmp_imm(e, X17, 0);
+            unsigned n = count_reg(k, loop, (uint32_t)owner, X17);
+            sub_imm(e, X9, n, 1);
+            cmp_imm(e, n, 0);
             csel(e, X9, XZR, X9, EQ);
             cmp_reg(e, r, X9);
             csel(e, r, r, X9, LT);
@@ -1425,14 +1631,15 @@ static void compile_op(Block *k, uint32_t pc) {
         fp2(e, FRINTM, D2, by);
         fcmp(e, by, D2);
         b_cond(e, NE, fault_at(k, PURE_FAULT_LIMIT, pc));
-        if (known) load64(e, X10, X24, (size_t)owner * sizeof(PureList *));
+        unsigned n = X10;
+        if (known) n = count_reg(k, loop, (uint32_t)owner, X10);
         else {
             load16(e, X10, X20, AT(height - 2) + OWNER);
             load64_index(e, X10, X24, X10);
+            load64(e, X10, X10, pure_list_layout[LIST_COUNT_AT]);
         }
-        load64(e, X10, X10, pure_list_layout[LIST_COUNT_AT]);
-        sub_imm(e, X9, X10, 1);
-        cmp_imm(e, X10, 0);
+        sub_imm(e, X9, n, 1);
+        cmp_imm(e, n, 0);
         csel(e, X9, XZR, X9, EQ);
         fp2(e, UCVTF_X, D3, X9);
         fp3(e, FADD, r, x, by);
@@ -1540,12 +1747,7 @@ static void compile_op(Block *k, uint32_t pc) {
             unsigned at = value_index(k, height - 1, X9), count;
             int walk = vs[height - 1].walk;
             if (walk < 0 || k->loops[walk].list != list) { /* else its place is below its end, which is at most the count */
-                if (count_c >= 0) count = kept_reg(k, count_c);
-                else {
-                    load64(e, X16, X24, list * sizeof(PureList *));
-                    load64(e, X17, X16, pure_list_layout[LIST_COUNT_AT]);
-                    count = X17;
-                }
+                count = count_c >= 0 ? kept_reg(k, count_c) : count_reg(k, loop, list, X17);
                 cmp_reg(e, at, count);
                 b_cond(e, HS, fault_at(k, PURE_FAULT_NOT_FOUND, pc));
             }
@@ -1603,7 +1805,8 @@ static void compile_op(Block *k, uint32_t pc) {
     }
     case PURE_OP_LIST_APPEND:
         if (!event_list(m, arg) || !numbers_only(m, arg) || m->state_indexed[arg]) break;
-        append(k, op, pc, height);
+        if (books(k, loop, arg)) append_books(k, op, pc, height);
+        else append(k, op, pc, height);
         return;
     case PURE_OP_JZ: {
         int target_loop, target = landing(k, pc, arg, &target_loop);
@@ -1879,7 +2082,6 @@ static void iteration(Block *k, LoopAt *l, unsigned li) {
     const PureOp *op = &k->m->code[l->at];
     int again = l->start == l->end ? AGAIN(k, l) : OP_LABEL(k, l->start - k->block.start), done = new_label(e);
     size_t at = loop_offset(l);
-    (void)li;
     if (l->arena) { /* the arena as the block began */
         load64(e, X10, X27, at + offsetof(Loop, mark));
         load64(e, X9, X19, offsetof(Frame, arena));
@@ -1908,9 +2110,8 @@ static void iteration(Block *k, LoopAt *l, unsigned li) {
         load64(e, X10, X9, offsetof(Loop, walk) + offsetof(Walk, end));
         cmp_reg(e, X17, X10);
         b_cond(e, HS, done);
-        load64(e, X10, X24, (op->arg >> 8 & 0xFF) * sizeof(PureList *)); /* the list walked: at most its items now */
-        load64(e, X10, X10, pure_list_layout[LIST_COUNT_AT]);
-        cmp_reg(e, X17, X10);
+        unsigned n = count_reg(k, (int)li, op->arg >> 8 & 0xFF, X10); /* the list walked: at most its items now */
+        cmp_reg(e, X17, n);
         b_cond(e, HS, done);
         store64(e, X17, X22, offsetof(Event, row));
         b(e, again);
@@ -2083,6 +2284,31 @@ static void plan_kept(Block *k) {
                         KEEP(nest, C_BITS, op->arg, 0);
                         KEEP(nest, C_LIMIT, op->arg, 0);
                         break;
+                    case PURE_OP_LIST_APPEND: { /* an event's list of numbers: its books in registers, when they all fit */
+                        uint32_t list = op->arg;
+                        if (!event_list(m, list) || !numbers_only(m, list) || m->state_indexed[list]) break;
+                        unsigned fields = m->record[m->state_ref[list]].count, key = m->state_key[list];
+                        bool all = !key || fields > 1;
+                        for (unsigned f = 0; f < fields && all; ++f) {
+                            if (key && f == key - 1u) continue;
+                            KEEP(nest, key ? C_DENSE : C_COLUMN, list, f);
+                            all = kept_find(k, (int)li, key ? C_DENSE : C_COLUMN, list, f) >= 0;
+                        }
+                        if (key) {
+                            KEEP(nest, C_BITS, list, 0);
+                            KEEP(nest, C_LIMIT, list, 0);
+                            KEEP(nest, C_PENDING, list, 0);
+                            all = all && kept_find(k, (int)li, C_BITS, list, 0) >= 0 && kept_find(k, (int)li, C_LIMIT, list, 0) >= 0 &&
+                                  kept_find(k, (int)li, C_PENDING, list, 0) >= 0;
+                        } else {
+                            KEEP(nest, C_LIVE, list, 0);
+                            all = all && kept_find(k, (int)li, C_LIVE, list, 0) >= 0;
+                        }
+                        KEEP(nest, C_HEADROOM, 0, 0);
+                        all = all && kept_find(k, (int)li, C_HEADROOM, 0, 0) >= 0;
+                        if (all) k->loops[nest].books |= UINT32_C(1) << (list & 31);
+                        break;
+                    }
                     default: break;
                     }
                 }
@@ -2237,12 +2463,7 @@ static void emit_key(Block *k, unsigned li, const Ahead *a, int n, unsigned dept
             unsigned column = kept_reg(k, column_c);
             fp2(e, FCVTZU_X, X0, r);
             cbz_x(e, column, skip);
-            if (count_c >= 0) cmp_reg(e, X0, kept_reg(k, count_c));
-            else {
-                load64(e, X16, X24, (size_t)s->list * sizeof(PureList *));
-                load64(e, X10, X16, pure_list_layout[LIST_COUNT_AT]);
-                cmp_reg(e, X0, X10);
-            }
+            cmp_reg(e, X0, count_c >= 0 ? kept_reg(k, count_c) : count_reg(k, (int)li, s->list, X10));
             b_cond(e, HS, skip);
             load_cell(k, r, column, X0);
             return;
