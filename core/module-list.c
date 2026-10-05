@@ -1506,6 +1506,19 @@ void pure_list_clear(PureList *list) {
     (void)members_start(list);
 }
 
+bool pure_list_full(PureList *list) { return list->form == DENSE && list->count && dense_keys(list) && list->full; }
+
+bool pure_list_suits(PureList *list, unsigned needs, unsigned narrow) {
+    if (list->form == DENSE && !dense_keys(list)) return false; /* its keys counted: full as it is (the tier reads it, LIST_FULL_AT) */
+    if (needs & 1 && list->form != DENSE) return false;                                /* by key: at its keys */
+    if (needs & 2 && list->form != FLAT && !(list->form == DENSE && dense_keys(list) && list->full)) return false; /* by position */
+    if (needs & 4 && !(list->form == DENSE && dense_keys(list) && list->full)) return false; /* a key its position */
+    if (list->form != FLAT && list->form != DENSE) return false;
+    for (unsigned f = 0; f < list->layout.fields; ++f)
+        if (narrow >> f & 1 && list->width[f] != 1 && list->width[f] != 4) return false;
+    return true;
+}
+
 bool pure_list_hashed(PureList *list) {
     const Layout *l = &list->layout;
     if (list->members) return true;
@@ -1560,7 +1573,7 @@ const size_t pure_list_layout[] = {
     [LIST_FORM_AT] = offsetof(PureList, form), [LIST_COLUMNS_AT] = offsetof(PureList, columns),
     [LIST_VERSION_AT] = offsetof(PureList, version), [LIST_ROOM_AT] = offsetof(PureList, room),
     [LIST_MEMBER_COUNT_AT] = offsetof(PureList, member_count), [LIST_BYTES_AT] = offsetof(PureList, bytes),
-    [LIST_PACK_AT] = offsetof(PureList, pack), [LIST_WIDTH_AT] = offsetof(PureList, width)};
+    [LIST_PACK_AT] = offsetof(PureList, pack), [LIST_WIDTH_AT] = offsetof(PureList, width), [LIST_FULL_AT] = offsetof(PureList, full)};
 
 const size_t pure_pack_layout[] = {
     [PACK_FIRST_AT] = offsetof(Pack, first), [PACK_WHOLE_AT] = offsetof(Pack, whole), [PACK_SHIFT_AT] = offsetof(Pack, shift),

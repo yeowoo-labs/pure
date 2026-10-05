@@ -147,6 +147,15 @@ PureResult pure_list_keyed(PureList *, int field);
  * it is not keyed by a number, is a copy, or memory runs out (it is
  * searched as before). */
 bool pure_list_hashed(PureList *);
+/* Whether an event's list is as the tier's code reads it (docs/design/023):
+ * needs 1, found by key: DENSE; 2, read by position: FLAT, or DENSE with
+ * every key below its count (a key its position); 4, a key's position: the
+ * latter; and each field in narrow a number column of one or four bytes.
+ * Its full (pure_list_layout's LIST_FULL_AT) then says whether every key
+ * below its count is there. */
+bool pure_list_suits(PureList *, unsigned needs, unsigned narrow);
+/* Whether a DENSE list holds every key below its count (a key is its position). */
+bool pure_list_full(PureList *);
 /* Whether key is there, by the set: false when the list keeps none (search it then). */
 bool pure_list_contains(const PureList *, double key, bool *found);
 /* The bytes it keeps beside its items for that. */

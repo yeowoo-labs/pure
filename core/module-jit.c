@@ -301,6 +301,7 @@ typedef struct {
     uint64_t stores;     /* the locals its block stores (a count's slot too) */
     uint32_t books;      /* a nest's: the lists its appends count in registers (C_LIVE, C_PENDING) */
     uint64_t ints;       /* the integers' code: the locals that hold whole numbers at its labels */
+    int tier;            /* an outermost loop the tier runs (docs/design/023): its entry's label, else -1 */
 } LoopAt;
 
 /* A key as a loop computes it, followed from its block's start (reading
@@ -2118,6 +2119,11 @@ static void enter_body(Block *k, unsigned li) {
         return;
     }
     bool counted = !l->walk && !(op->arg & PURE_LOOP_INTEGER) && (op->arg & 0xFF) < 64;
+    if (!k->copy && l->parent < 0 && l->tier >= 0) { /* the tier runs its rounds, the generic code's when it does not */
+        write_back(k, (int)li);
+        b(e, l->tier);
+        return;
+    }
     if (!k->copy && l->parent < 0) {
         int made = new_label(e);
         for (unsigned c = 0; c < k->kept_count; ++c)
@@ -2191,7 +2197,12 @@ static void iteration(Block *k, LoopAt *l, unsigned li) {
         unsigned place = kept_reg(k, l->at_kept), end = kept_reg(k, l->end_kept);
         add_imm(e, place, place, 1);
         cmp_reg(e, place, end);
-        b_cond(e, LO, again);
+        if (!k->copy && l->tier >= 0) { /* the next round the tier's */
+            b_cond(e, HS, done);
+            write_back(k, (int)(l - k->loops));
+            b(e, l->tier);
+        } else
+            b_cond(e, LO, again);
         bind(e, done);
         load64(e, X10, X27, at + offsetof(Loop, around));
         store64(e, X10, X22, offsetof(Event, walk));
@@ -2214,7 +2225,8 @@ static void iteration(Block *k, LoopAt *l, unsigned li) {
         cmp_reg(e, X17, n);
         b_cond(e, HS, done);
         store64(e, X17, X22, offsetof(Event, row));
-        b(e, again);
+        if (!k->copy && l->tier >= 0) write_back(k, (int)(l - k->loops)), b(e, l->tier);
+        else b(e, again);
         bind(e, done);
         load64(e, X10, X9, offsetof(Loop, around));
         store64(e, X10, X22, offsetof(Event, walk));
@@ -2264,7 +2276,8 @@ static void iteration(Block *k, LoopAt *l, unsigned li) {
             fp3(e, FADD, D0, D0, D1);
             store_d(e, D0, X28, slot);
         }
-        b(e, again);
+        if (!k->copy && l->tier >= 0) write_back(k, (int)(l - k->loops)), b(e, l->tier);
+        else b(e, again);
         bind(e, done);
         k->fresh = kept_at(k, (int)(l - k->loops));
     }
@@ -2805,6 +2818,7 @@ static bool shape_block(Block *k) {
             l->nest = depth ? k->loops[open[0]].nest : (int)k->loop_count;
             l->ahead = -1;
             l->at_kept = l->end_kept = l->k_kept = l->n_kept = -1;
+            l->tier = -1;
             if (l->start < l->end) k->target[l->start - k->block.start] = true; /* its block begins: what it keeps read */
             k->opens[pc - k->block.start] = (int)k->loop_count;
             open[depth] = (int)k->loop_count++;
@@ -2865,6 +2879,2115 @@ static void compile_ints(Block *k, unsigned li) {
     k->copy = 0;
 }
 
+/* ---- The tier (docs/design/023)
+ * A nest of loops (an outermost loop and those in it) run as SSA: the
+ * stack's values, the locals and the states its code uses are values, held
+ * in registers for as long as they live; a whole number is an integer where
+ * its facts say it is (a count, a narrow cell, a message's u32, a sum of
+ * those), with no check its range does not need. Nothing is called on the
+ * way: what is rare (a fault, a cell that does not fit its column, a list in
+ * another form, a check the facts could not drop) gives up where it is,
+ * the stack and what changed written as the executor keeps them, the rest
+ * of the round run by the executor (pure_run_rest), the generic code going
+ * on from there (copy 0), and the next round of the outermost loop coming
+ * back. It is entered at a round of the outermost loop from the generic
+ * code (the loop opened, its state in memory), and when the loop ends it
+ * writes the loop's state as after its last round and goes on at the
+ * generic code's iteration of it, which closes it. */
+
+enum { R_NUM, R_INT, R_BOOL }; /* a value's register: d a number; x a whole number as an integer; x 0 or 1 */
+enum {
+    T_CONST, T_IN, T_FIELD, T_PHI, T_COUNT, T_ADD, T_SUB, T_MUL, T_DIV, T_MIN, T_MAX, T_NEG, T_FLOOR,
+    T_LT, T_LE, T_GT, T_GE, T_EQ, T_NE, T_NOT, T_AND, T_OR, T_GET, T_FIND_GET, T_FIND, T_HAS, T_SET, T_MOVE, T_SPAN
+};
+/* T_IN's variables past the locals, states and stack: the outermost loop's round, its rounds or items, its low value. */
+enum { V_ROUND0 = -10, V_COUNT0 = -11, V_LOW0 = -12 };
+/* What a number is to the code that reads it: a number, a bool, an index (of the list in list). */
+enum { K_NUM, K_BOOL, K_INDEX };
+/* A variable: a local (0-63), a state (64-95), a stack slot where ways meet (96-160). */
+enum { V_STATE = 64, V_STACK = 96, VARS = 96 + PURE_MODULE_STACK + 1 };
+
+typedef struct {
+    uint8_t op, rep, kind;
+    bool integers;     /* T_DIV: whole numbers divided as integers (its one use a FLOOR, docs/design/023) */
+    bool negzero;      /* T_MUL of integers: 0 times a number below 0 is -0 (checked: else it gives up) */
+    uint16_t list, field;
+    int a, b, c, d;    /* operands: values, or -1 */
+    uint32_t pc;       /* its instruction */
+    int snap;          /* where it gives up (a snapshot), or -1 */
+    int loop;          /* the tier's loop it is in, or -1 (the outermost's preheader) */
+    double num;        /* T_CONST */
+    int var;           /* T_IN, T_PHI: the variable */
+    int label;         /* T_PHI: the merge it is at */
+    int *in;           /* T_PHI: a value for each way in */
+    size_t ins, in_room;
+    double lo, hi;     /* what its values may be: from lo to hi, */
+    bool whole, zero;  /* each a whole number; -0 possible */
+    unsigned uses;
+    int at, last;      /* where it is made and last read (positions in the code) */
+    int reg;           /* its register, or -1 */
+} TVal;
+
+/* A loop of the nest: its Block loop, its kind, and its values. */
+typedef struct {
+    int li;            /* k->loops index */
+    bool walk;
+    uint32_t list;     /* a walk's */
+    int parent;        /* the tier's loop around it, or -1 */
+    int count, low, k; /* a count's values (k: its round, a phi), or a walk's: count its items, k its place */
+    int head, end, exit; /* merges: its round's start (its phis), its block's end (iteration), past it */
+    unsigned length;   /* its block's instructions */
+    int slot;          /* a count's local slot */
+    int open_snap;     /* where its opening (its work) gives up */
+    int last;          /* past it: its round when it ended (the outermost's, the generic code's iteration closes it) */
+} TLoop;
+
+/* Where the code may give up: the instruction, the stack's height, and the
+ * value of every variable there (a stack slot's too). */
+typedef struct {
+    uint32_t pc;
+    unsigned height;
+    int loop;          /* the innermost tier loop open there, or -1 */
+    int *vars;         /* VARS values */
+    int label;         /* its stub's */
+    bool needed;       /* something gives up there (a stub made) */
+} TSnap;
+
+/* A merge: where ways meet (a branch's target, a loop's head, end or exit):
+ * its label, its phis, the variables' values along each way in. */
+typedef struct {
+    int label;
+    int *phis;         /* a phi per variable differing between ways, or -1 (VARS) */
+    int **ways;        /* each way's variables (VARS each) */
+    size_t way_count, way_room;
+    unsigned height;
+    bool reached, back; /* a way has come; a loop's head (its last way, the back edge, comes after) */
+    int loop;          /* a loop's merge: the loop */
+} TMerge;
+
+/* The code in order: a value made, a merge bound, a branch or jump to one, a loop's parts. */
+enum { I_VALUE, I_MERGE, I_UNLESS, I_JUMP, I_OPEN, I_LATCH, I_BREAK, I_DONE };
+typedef struct { uint8_t kind; int value, merge, loop, way, snap; } TItem; /* way: into merge; snap: where it gives up */
+
+typedef struct {
+    Block *k;
+    int nest;              /* k->loops index of the outermost loop */
+    TVal *vals;
+    size_t val_count, val_room;
+    TLoop loops[PURE_MODULE_NESTING];
+    unsigned loop_count;
+    TSnap *snaps;
+    size_t snap_count, snap_room;
+    TMerge *merges;
+    size_t merge_count, merge_room;
+    TItem *items;
+    size_t item_count, item_room;
+    int *merge_at;         /* by instruction (from the nest's start): the merge a branch lands on, or -1 */
+    int *entry;            /* the values made where the tier begins, in order */
+    size_t entry_count, entry_room;
+    int state[VARS];       /* the values as the code goes: each variable's, -1 none yet */
+    unsigned height;       /* the stack's */
+    bool live;             /* the code here is reached */
+    int cur_loop;
+    uint64_t assigned[3];  /* the variables the nest assigns (locals, states) */
+    uint32_t written;      /* the lists it changes (ITEM_SET) */
+    uint32_t used;         /* the lists it reads */
+    bool failed;           /* it cannot be the tier's */
+    const char *why;
+    int input;             /* its handler's message input, or -1 */
+    struct TList *lists;   /* what each list needs (tier_lists) */
+    uint64_t *live_in;     /* by instruction from the block's start: the locals read before written from there (tier_liveness) */
+    int fields[64];        /* the message's fields read: each once (+1; 0 none yet) */
+    uint64_t slots;        /* the nest's loops' slots (kept as live: their loops write them) */
+} Tier;
+
+static void titem(Tier *t, unsigned kind, int value, int merge, int loop);
+
+static int tval(Tier *t, unsigned op, unsigned rep, int a, int b, int c) {
+    if (!grow_array((void **)&t->vals, &t->val_room, t->val_count + 1, sizeof(*t->vals))) {
+        t->failed = true;
+        return 0;
+    }
+    TVal *v = &t->vals[t->val_count];
+    memset(v, 0, sizeof(*v));
+    v->op = (uint8_t)op, v->rep = (uint8_t)rep, v->a = a, v->b = b, v->c = c;
+    v->snap = -1, v->loop = t->cur_loop, v->var = -1, v->label = -1, v->reg = -1, v->d = -1;
+    v->lo = -INFINITY, v->hi = INFINITY;
+    int made = (int)t->val_count++;
+    if (op == T_PHI) return made; /* bound at its merge */
+    if (t->cur_loop < 0) { /* where the tier begins */
+        if (!grow_array((void **)&t->entry, &t->entry_room, t->entry_count + 1, sizeof(*t->entry))) t->failed = true;
+        else t->entry[t->entry_count++] = made;
+    } else
+        titem(t, I_VALUE, made, -1, t->cur_loop);
+    return made;
+}
+
+static void titem(Tier *t, unsigned kind, int value, int merge, int loop) {
+    if (!grow_array((void **)&t->items, &t->item_room, t->item_count + 1, sizeof(*t->items))) {
+        t->failed = true;
+        return;
+    }
+    t->items[t->item_count++] = (TItem){(uint8_t)kind, value, merge, loop, -1, -1};
+}
+
+static int tmerge(Tier *t, int loop) {
+    if (!grow_array((void **)&t->merges, &t->merge_room, t->merge_count + 1, sizeof(*t->merges))) {
+        t->failed = true;
+        return 0;
+    }
+    TMerge *m = &t->merges[t->merge_count];
+    memset(m, 0, sizeof(*m));
+    m->label = new_label(t->k->e);
+    m->loop = loop;
+    return (int)t->merge_count++;
+}
+
+/* The way here into merge m: the variables as they are. */
+static int tway(Tier *t, int m) {
+    TMerge *g = &t->merges[m];
+    int *copy = malloc(VARS * sizeof(int));
+    if (!copy || !grow_array((void **)&g->ways, &g->way_room, g->way_count + 1, sizeof(*g->ways))) {
+        free(copy);
+        t->failed = true;
+        return 0;
+    }
+    memcpy(copy, t->state, VARS * sizeof(int));
+    g->ways[g->way_count] = copy;
+    g->height = t->height;
+    g->reached = true;
+    return (int)g->way_count++;
+}
+
+static void tphi_in(Tier *t, int phi, int value) {
+    TVal *p = &t->vals[phi];
+    if (!grow_array((void **)&p->in, &p->in_room, p->ins + 1, sizeof(*p->in))) {
+        t->failed = true;
+        return;
+    }
+    p->in[p->ins++] = value;
+}
+
+/* Where the code gives up at pc, the variables as they are (the stack's below height). */
+static int tsnap(Tier *t, uint32_t pc) {
+    if (!grow_array((void **)&t->snaps, &t->snap_room, t->snap_count + 1, sizeof(*t->snaps))) {
+        t->failed = true;
+        return 0;
+    }
+    TSnap *s = &t->snaps[t->snap_count];
+    s->vars = malloc(VARS * sizeof(int));
+    if (!s->vars) {
+        t->failed = true;
+        return 0;
+    }
+    memcpy(s->vars, t->state, VARS * sizeof(int));
+    uint64_t live = t->slots; /* the locals the executor may read from pc: the rest need not be written */
+    if (t->live_in) {
+        live |= t->live_in[pc - t->k->block.start];
+        for (unsigned l = 0; l < t->k->loop_count; ++l) /* a loop's end: its next round too */
+            if (t->k->loops[l].end == pc && t->k->loops[l].at >= t->k->loops[t->nest].at) live |= t->live_in[t->k->loops[l].start - t->k->block.start];
+    }
+    for (int var = 0; var < V_STATE; ++var)
+        if (!(live >> var & 1)) s->vars[var] = -1;
+    s->pc = pc, s->height = t->height, s->loop = t->cur_loop, s->label = new_label(t->k->e), s->needed = false;
+    return (int)t->snap_count++;
+}
+
+/* ---- Which nests: what the tier's code can do */
+
+static bool tier_list(const PureModule *m, uint32_t list) { return event_list(m, list) && numbers_only(m, list); }
+
+/* Whether the tier has code for every instruction from at to end (a nest), its handler's message input given; what it assigns and which lists it reads and sets, in t when given. */
+static bool tier_supports(const PureModule *m, int input, uint32_t at, uint32_t end, Tier *t) {
+    Tier none = {0};
+    if (!t) t = &none;
+    const char *off = getenv("PURE_TIER");
+    if ((off && !strcmp(off, "0")) || input < 0) return false;
+    t->input = input;
+    for (uint32_t pc = at; pc < end; pc = after(&m->code[pc], pc)) {
+        const PureOp *op = &m->code[pc];
+        uint32_t arg = op->arg;
+        switch (op->op) {
+        case PURE_OP_CONST: if (arg > 1) return false; break; /* a number or a bool */
+        case PURE_OP_LOAD: case PURE_OP_STORE:
+            if (m->state_type[arg] != PURE_STATE_NUM && m->state_type[arg] != PURE_STATE_BOOL) return false;
+            t->assigned[1] |= op->op == PURE_OP_STORE ? UINT64_C(1) << arg : 0;
+            break;
+        case PURE_OP_LOCAL_LOAD: case PURE_OP_LOCAL_STORE:
+            if ((arg & 0xFF) >= 64 || (arg >> 8 & 0xFF) > 2) return false; /* a number, an index or a bool */
+            t->assigned[0] |= op->op == PURE_OP_LOCAL_STORE ? UINT64_C(1) << (arg & 0x3F) : 0;
+            break;
+        case PURE_OP_FIELD: {
+            const PureField *f = &m->field[m->input[t->input].field_start + arg];
+            if (f->type != PURE_FIELD_U32 && f->type != PURE_FIELD_NUMBER && f->type != PURE_FIELD_BOOL) return false;
+            break;
+        }
+        case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_MIN: case PURE_OP_MAX:
+        case PURE_OP_NEG: case PURE_OP_FLOOR: case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ:
+        case PURE_OP_NE: case PURE_OP_NOT: case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_JZ: case PURE_OP_JMP:
+        case PURE_OP_BREAK:
+            break;
+        case PURE_OP_LOOP: if (arg & PURE_LOOP_INTEGER || (arg & 0xFF) >= 64) return false; break;
+        case PURE_OP_EACH:
+            if (arg & PURE_EACH_SLICED || op->range || !tier_list(m, arg >> 8 & 0xFF)) return false;
+            t->used |= UINT32_C(1) << (arg >> 8 & 31);
+            break;
+        case PURE_OP_ROW: case PURE_OP_INDEX_FIRST: case PURE_OP_LIST_COUNT:
+            if (!tier_list(m, arg)) return false;
+            t->used |= UINT32_C(1) << (arg & 31);
+            break;
+        case PURE_OP_INDEX_MOVE: break;
+        case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET:
+            if (op->plan & PLAN_TEXT || !tier_list(m, list_of(arg))) return false;
+            t->used |= UINT32_C(1) << (list_of(arg) & 31);
+            if (op->op == PURE_OP_ITEM_SET) {
+                if (m->state_key[list_of(arg)] && item_field(arg) == m->state_key[list_of(arg)] - 1u) return false; /* a key moves its item */
+                t->written |= UINT32_C(1) << (list_of(arg) & 31);
+            }
+            break;
+        case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS:
+            if (op->plan & PLAN_TEXT || !tier_list(m, arg) || !m->state_key[arg]) return false;
+            if (op->op == PURE_OP_LIST_FIND && op->plan & PLAN_JOINED && m->code[pc + 1].plan & PLAN_TEXT) return false;
+            t->used |= UINT32_C(1) << (arg & 31);
+            break;
+        default: return false;
+        }
+    }
+    return true;
+}
+
+/* Each instruction's locals read before written from it on (the block's ways: branches, a loop's next round, BREAK), by backward passes. */
+static void tier_liveness(Tier *t) {
+    Block *k = t->k;
+    const PureModule *m = k->m;
+    uint32_t n = k->block.length, start = k->block.start;
+    t->live_in = calloc(n + 1, sizeof(uint64_t));
+    if (!t->live_in) {
+        t->failed = true;
+        return;
+    }
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (uint32_t i = n; i-- > 0;) {
+            uint32_t pc = start + i;
+            const PureOp *op = &m->code[pc];
+            uint32_t next = op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP ? pc + 1 : after(op, pc);
+            uint32_t succ[4];
+            unsigned count = 0;
+            if (op->op == PURE_OP_JMP) succ[count++] = op->arg;
+            else if (op->op == PURE_OP_BREAK) {
+                int l = k->loop_of[i];
+                succ[count++] = l >= 0 ? k->loops[l].end : start + n;
+            } else {
+                succ[count++] = next;
+                if (op->op == PURE_OP_JZ) succ[count++] = op->arg;
+                if (op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP) succ[count++] = pc + 1 + (op->arg >> 16);
+            }
+            uint64_t out = 0;
+            for (unsigned c = 0; c < count; ++c) {
+                uint32_t to = succ[c];
+                for (int l = k->loop_of[i]; l >= 0; l = k->loops[l].parent) /* a loop's end: its next round as well */
+                    if (k->loops[l].end == to) out |= t->live_in[k->loops[l].start - start];
+                if (to >= start && to - start <= n) out |= t->live_in[to - start];
+            }
+            uint64_t in = out;
+            if (op->op == PURE_OP_LOCAL_STORE && (op->arg & 0xFF) < 64) in &= ~(UINT64_C(1) << (op->arg & 0x3F));
+            if (op->op == PURE_OP_LOCAL_LOAD && (op->arg & 0xFF) < 64) in |= UINT64_C(1) << (op->arg & 0x3F);
+            if (in != t->live_in[i]) t->live_in[i] = in, changed = true;
+        }
+    }
+}
+
+/* Whether the nest at li is the tier's to run, its every instruction one it has code for. */
+static bool tier_nest(Tier *t, unsigned li) {
+    const LoopAt *l = &t->k->loops[li];
+    return l->parent < 0 && l->start < l->end && tier_supports(t->k->m, t->input, l->at, l->end, t);
+}
+
+/* ---- The tier: the nest as values */
+
+static void tfacts(Tier *t, int v, bool whole, double lo, double hi, bool zero) {
+    TVal *x = &t->vals[v];
+    x->whole = whole, x->lo = lo, x->hi = hi, x->zero = zero;
+}
+
+static int tconst(Tier *t, double n) {
+    int v = tval(t, T_CONST, R_NUM, -1, -1, -1);
+    t->vals[v].num = n;
+    bool whole = n == floor(n) && fabs(n) < 0x1p53 && !(n == 0 && signbit(n));
+    tfacts(t, v, whole, n, n, n == 0 && signbit(n));
+    return v;
+}
+
+/* Something read where the tier begins: a variable (a local or a state, as it is in memory), or the outermost loop's round, rounds or low value. */
+static int tin(Tier *t, int var, unsigned kind, uint16_t owner) {
+    int saved = t->cur_loop;
+    t->cur_loop = -1;
+    int v = tval(t, T_IN, R_NUM, -1, -1, -1);
+    t->cur_loop = saved;
+    t->vals[v].var = var, t->vals[v].kind = (uint8_t)kind, t->vals[v].list = owner;
+    return v;
+}
+
+/* Variable var as the code has it here (read where the tier begins when it has none yet). */
+static int tvar(Tier *t, int var, unsigned kind, uint16_t owner) {
+    if (t->state[var] < 0) t->state[var] = tin(t, var, kind, owner);
+    return t->state[var];
+}
+
+static void tpush(Tier *t, int v) {
+    if (t->height >= PURE_MODULE_STACK) {
+        t->failed = true;
+        return;
+    }
+    t->state[V_STACK + t->height++] = v;
+}
+
+static int tpop(Tier *t) {
+    if (!t->height) {
+        t->failed = true;
+        return 0;
+    }
+    return t->state[V_STACK + --t->height];
+}
+
+/* The merges where forward branches land (a loop's end is its loop's own); false when one goes back or out. */
+static void tier_merges(Tier *t) {
+    Block *k = t->k;
+    const PureModule *m = k->m;
+    const LoopAt *l0 = &k->loops[t->nest];
+    for (uint32_t pc = l0->start; pc < l0->end; pc = after(&m->code[pc], pc)) {
+        const PureOp *op = &m->code[pc];
+        if (op->op != PURE_OP_JZ && op->op != PURE_OP_JMP) continue;
+        bool landing = false; /* the end of a loop around it: that loop's iteration */
+        for (int l = k->loop_of[pc - k->block.start]; l >= 0; l = k->loops[l].parent)
+            landing = landing || k->loops[l].end == op->arg;
+        if (landing) continue;
+        if (op->arg <= pc || op->arg >= l0->end) {
+            t->failed = true;
+            return;
+        }
+        if (t->merge_at[op->arg - l0->start] < 0) t->merge_at[op->arg - l0->start] = tmerge(t, -1);
+    }
+}
+
+/* The tier's loop whose iteration a branch at pc to target lands on, or -1. */
+static int tier_landing(Tier *t, uint32_t pc, uint32_t target) {
+    for (int l = t->k->loop_of[pc - t->k->block.start]; l >= 0; l = t->k->loops[l].parent)
+        if (t->k->loops[l].end == target)
+            for (unsigned i = 0; i < t->loop_count; ++i)
+                if (t->loops[i].li == l) return (int)i;
+    return -1;
+}
+
+/* A way from here into merge g: a branch (cond its bool, I_UNLESS) or a jump. */
+static void tier_go(Tier *t, int g, unsigned kind, int cond) {
+    int way = tway(t, g);
+    titem(t, kind, cond, g, t->cur_loop);
+    if (!t->failed) t->items[t->item_count - 1].way = way;
+}
+
+/* Whether a loop's block assigns var (the loop's own round: always). */
+static bool tassigned(const Tier *t, int var) {
+    if (var < V_STATE) return t->assigned[0] >> var & 1;
+    if (var < V_STACK) return t->assigned[1] >> (var - V_STATE) & 1;
+    return var == V_STACK + PURE_MODULE_STACK;
+}
+
+/* Merge g reached by the code going on (when it does) and its ways: a phi
+ * for each variable they differ in (a loop's head: each its block assigns,
+ * the back edge's input to come), bound. */
+static void tier_arrive(Tier *t, int g) {
+    TMerge *m = &t->merges[g];
+    if (t->live) tier_go(t, g, I_JUMP, -1);
+    if (!m->reached) {
+        t->live = false;
+        return;
+    }
+    m->phis = malloc(VARS * sizeof(int));
+    if (!m->phis) {
+        t->failed = true;
+        return;
+    }
+    for (int var = 0; var < VARS; ++var) {
+        m->phis[var] = -1;
+        if (var >= V_STACK && var < V_STACK + PURE_MODULE_STACK && (unsigned)(var - V_STACK) >= m->height) {
+            t->state[var] = -1;
+            continue;
+        }
+        int first = m->ways[0][var];
+        bool differ = m->back && tassigned(t, var);
+        for (unsigned w = 1; w < m->way_count; ++w) differ = differ || m->ways[w][var] != first;
+        if (differ && var < V_STACK) { /* a variable one way has not read: as it is where the tier begins (the same value) */
+            int known = -1;
+            for (unsigned w = 0; w < m->way_count && known < 0; ++w) known = m->ways[w][var];
+            bool in = known >= 0 && t->vals[known].op == T_IN && t->vals[known].var == var;
+            for (unsigned w = 0; w < m->way_count; ++w)
+                if (m->ways[w][var] < 0) m->ways[w][var] = in ? known : tvar(t, var, K_NUM, 0);
+            first = m->ways[0][var];
+            differ = m->back && tassigned(t, var);
+            for (unsigned w = 1; w < m->way_count; ++w) differ = differ || m->ways[w][var] != first;
+        }
+        if (!differ) {
+            t->state[var] = first;
+            continue;
+        }
+        first = m->ways[0][var];
+        int phi = tval(t, T_PHI, R_NUM, -1, -1, -1);
+        t->vals[phi].var = var, t->vals[phi].label = g, t->vals[phi].loop = m->loop;
+        t->vals[phi].kind = first >= 0 ? t->vals[first].kind : K_NUM, t->vals[phi].list = first >= 0 ? t->vals[first].list : 0;
+        for (unsigned w = 0; w < m->way_count; ++w) tphi_in(t, phi, m->ways[w][var]);
+        m->phis[var] = phi;
+        t->state[var] = phi;
+    }
+    t->height = m->height;
+    t->live = true;
+    titem(t, I_MERGE, -1, g, t->cur_loop);
+}
+
+/* The way back from here to a loop's head g: its phis' last inputs. */
+static void tier_back(Tier *t, int g) {
+    TMerge *m = &t->merges[g];
+    (void)tway(t, g);
+    for (int var = 0; var < VARS; ++var)
+        if (m->phis[var] >= 0) tphi_in(t, m->phis[var], t->state[var] >= 0 ? t->state[var] : tvar(t, var, K_NUM, 0));
+}
+
+/* A value of two operands at pc; where it gives up, its operands still on the stack. */
+static int tbinary(Tier *t, unsigned op, uint32_t pc, bool fails) {
+    int snap = fails ? tsnap(t, pc) : -1;
+    int b = tpop(t), a = tpop(t);
+    int v = tval(t, op, R_NUM, a, b, -1);
+    t->vals[v].pc = pc, t->vals[v].snap = snap;
+    return v;
+}
+
+/* A value of one operand at pc, its operand on the stack where it gives up. */
+static int tunary(Tier *t, unsigned op, unsigned rep, uint32_t pc, bool fails) {
+    int snap = fails ? tsnap(t, pc) : -1;
+    int v = tval(t, op, rep, tpop(t), -1, -1);
+    t->vals[v].pc = pc, t->vals[v].snap = snap;
+    return v;
+}
+
+static void tier_code(Tier *t, uint32_t pc, uint32_t end);
+
+/* Loop n's head (a phi for each variable its block assigns, and its round), its block, its iteration, and past it. */
+static void tier_round(Tier *t, int n, uint32_t at) {
+    Block *k = t->k;
+    const PureModule *m = k->m;
+    TLoop *l = &t->loops[n];
+    const LoopAt *bl = &k->loops[l->li];
+    uint64_t outer[2] = {t->assigned[0], t->assigned[1]};
+    t->assigned[0] = t->assigned[1] = 0;
+    for (uint32_t pc = bl->start; pc < bl->end; ++pc) { /* what its block assigns */
+        const PureOp *o = &m->code[pc];
+        if (o->op == PURE_OP_LOCAL_STORE) t->assigned[0] |= UINT64_C(1) << (o->arg & 0x3F);
+        if (o->op == PURE_OP_STORE) t->assigned[1] |= UINT64_C(1) << o->arg;
+        if (o->op == PURE_OP_LOOP) t->assigned[0] |= UINT64_C(1) << (o->arg & 0x3F);
+    }
+    if (!l->walk) t->assigned[0] |= UINT64_C(1) << (l->slot & 0x3F);
+    l->head = tmerge(t, n);
+    TMerge *head = &t->merges[l->head];
+    head->back = true;
+    int way = tway(t, l->head);
+    (void)way;
+    head = &t->merges[l->head];
+    head->phis = malloc(VARS * sizeof(int));
+    if (!head->phis) {
+        t->failed = true;
+        return;
+    }
+    titem(t, I_JUMP, -1, l->head, t->cur_loop);
+    t->items[t->item_count - 1].way = 0;
+    t->cur_loop = n;
+    for (int var = 0; var < VARS; ++var) {
+        head->phis[var] = -1;
+        if (var >= V_STACK && var < V_STACK + PURE_MODULE_STACK) {
+            t->state[var] = var - V_STACK < (int)bl->base ? head->ways[0][var] : -1;
+            continue;
+        }
+        int in = head->ways[0][var];
+        if (!tassigned(t, var)) {
+            t->state[var] = in;
+            continue;
+        }
+        if (in < 0) in = head->ways[0][var] = tin(t, var, K_NUM, 0);
+        int phi = tval(t, T_PHI, R_NUM, -1, -1, -1);
+        t->vals[phi].var = var, t->vals[phi].label = l->head, t->vals[phi].loop = n;
+        t->vals[phi].kind = t->vals[in].kind, t->vals[phi].list = t->vals[in].list;
+        tphi_in(t, phi, in);
+        head->phis[var] = phi;
+        t->state[var] = phi;
+    }
+    t->assigned[0] |= outer[0], t->assigned[1] |= outer[1];
+    l->k = head->phis[V_STACK + PURE_MODULE_STACK];
+    if (l->walk) t->vals[l->k].kind = K_INDEX, t->vals[l->k].list = (uint16_t)l->list;
+    t->height = head->height = bl->base;
+    t->live = true;
+    titem(t, I_MERGE, -1, l->head, n);
+    if (!l->walk) { /* its slot holds low + its round (its round when low is 0) */
+        const TVal *low = &t->vals[l->low];
+        if (low->op == T_CONST && low->num == 0 && !signbit(low->num)) t->state[l->slot] = l->k;
+        else {
+            int i = tval(t, T_ADD, R_NUM, l->low, l->k, -1);
+            t->vals[i].pc = at;
+            t->state[l->slot] = i;
+        }
+    }
+    l->end = tmerge(t, n);
+    tier_code(t, bl->start, bl->end);
+    if (t->failed) return;
+    tier_arrive(t, l->end); /* its block ran: its iteration */
+    if (t->live) {
+        int one = tconst(t, 1);
+        int next = tval(t, T_ADD, R_INT, l->k, one, -1);
+        t->vals[next].pc = at;
+        t->state[V_STACK + PURE_MODULE_STACK] = next;
+        titem(t, I_LATCH, next, l->head, n);
+        int latch = (int)t->item_count - 1, snap = tsnap(t, at); /* a count's work for its next round, where it gives up */
+        tier_back(t, l->head);
+        int out = tway(t, l->exit); /* done: past it */
+        if (!t->failed) t->items[latch].snap = snap, t->items[latch].way = out;
+    }
+    t->cur_loop = l->parent;
+    t->live = false;
+}
+
+/* A loop opened at pc (EACH or LOOP): what it runs over, its work, its rounds, and past it. */
+static void tier_loop(Tier *t, uint32_t pc) {
+    Block *k = t->k;
+    const PureOp *op = &k->m->code[pc];
+    if (t->loop_count == PURE_MODULE_NESTING) {
+        t->failed = true;
+        return;
+    }
+    int n = (int)t->loop_count++;
+    TLoop *l = &t->loops[n];
+    memset(l, 0, sizeof(*l));
+    l->li = k->opens[pc - k->block.start], l->walk = op->op == PURE_OP_EACH, l->parent = t->cur_loop, l->length = op->arg >> 16;
+    l->list = op->arg >> 8 & 0xFF, l->slot = op->arg & 0xFF;
+    l->exit = tmerge(t, n);
+    l->open_snap = tsnap(t, pc); /* its bounds (a count's) and its work, where they give up */
+    if (l->walk) {
+        l->count = tval(t, T_COUNT, R_INT, -1, -1, -1);
+        t->vals[l->count].list = (uint16_t)l->list, t->vals[l->count].pc = pc;
+        tfacts(t, l->count, true, 0, 0x1p32, false);
+        l->low = -1;
+    } else { /* its rounds: max(high - low, 0), its bounds whole numbers within 2^53 */
+        int high = tpop(t), low = tpop(t);
+        l->count = tval(t, T_SPAN, R_INT, low, high, -1);
+        t->vals[l->count].pc = pc, t->vals[l->count].snap = l->open_snap;
+        tfacts(t, l->count, true, 0, 0x1p54, false);
+        l->low = low;
+    }
+    titem(t, I_OPEN, -1, l->exit, n);
+    int skip = tway(t, l->exit); /* none to run: past it */
+    if (!t->failed) t->items[t->item_count - 1].way = skip, t->items[t->item_count - 1].snap = l->open_snap;
+    t->state[V_STACK + PURE_MODULE_STACK] = tconst(t, 0);
+    tier_round(t, n, pc);
+    if (t->failed) return;
+    tier_arrive(t, t->loops[n].exit);
+}
+
+/* The instructions from pc to end, as values and items. */
+static void tier_code(Tier *t, uint32_t pc, uint32_t end) {
+    Block *k = t->k;
+    const PureModule *m = k->m;
+    const LoopAt *l0 = &k->loops[t->nest];
+    while (pc < end && !t->failed) {
+        int g = t->merge_at[pc - l0->start];
+        if (g >= 0) tier_arrive(t, g);
+        const PureOp *op = &m->code[pc];
+        uint32_t arg = op->arg, next = after(op, pc);
+        if (!t->live) { /* nothing reaches it */
+            pc = op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP ? pc + 1 + (arg >> 16) : next;
+            continue;
+        }
+        switch (op->op) {
+        case PURE_OP_CONST: {
+            int v = tconst(t, op->value);
+            if (arg == 1) t->vals[v].kind = K_BOOL, t->vals[v].rep = R_BOOL;
+            tpush(t, v);
+            break;
+        }
+        case PURE_OP_LOAD: tpush(t, tvar(t, V_STATE + (int)arg, m->state_type[arg] == PURE_STATE_BOOL ? K_BOOL : K_NUM, 0)); break;
+        case PURE_OP_STORE: t->state[V_STATE + arg] = tpop(t); break;
+        case PURE_OP_LOCAL_LOAD: {
+            unsigned kind = (arg >> 8 & 0xFF) == 1 ? K_INDEX : (arg >> 8 & 0xFF) == 2 ? K_BOOL : K_NUM;
+            tpush(t, tvar(t, (int)(arg & 0x3F), kind, (uint16_t)(arg >> 16)));
+            break;
+        }
+        case PURE_OP_LOCAL_STORE: t->state[arg & 0x3F] = tpop(t); break;
+        case PURE_OP_FIELD: {
+            if (arg < 64 && t->fields[arg]) { /* read once */
+                tpush(t, t->fields[arg] - 1);
+                break;
+            }
+            int saved = t->cur_loop;
+            t->cur_loop = -1; /* the message's: where the tier begins */
+            int v = tval(t, T_FIELD, R_NUM, -1, -1, -1);
+            if (arg < 64) t->fields[arg] = v + 1;
+            t->cur_loop = saved;
+            t->vals[v].field = (uint16_t)arg, t->vals[v].pc = pc;
+            const PureField *f = &m->field[m->input[t->input].field_start + arg];
+            if (f->type == PURE_FIELD_U32) tfacts(t, v, true, 0, 0x1p32 - 1, false);
+            if (f->type == PURE_FIELD_BOOL) t->vals[v].kind = K_BOOL, t->vals[v].rep = R_BOOL;
+            tpush(t, v);
+            break;
+        }
+        case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_MIN: case PURE_OP_MAX: {
+            unsigned to = op->op == PURE_OP_ADD ? T_ADD : op->op == PURE_OP_SUB ? T_SUB : op->op == PURE_OP_MUL ? T_MUL
+                        : op->op == PURE_OP_DIV ? T_DIV : op->op == PURE_OP_MIN ? T_MIN : T_MAX;
+            tpush(t, tbinary(t, to, pc, true));
+            break;
+        }
+        case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE: {
+            unsigned to = op->op == PURE_OP_LT ? T_LT : op->op == PURE_OP_LE ? T_LE : op->op == PURE_OP_GT ? T_GT
+                        : op->op == PURE_OP_GE ? T_GE : op->op == PURE_OP_EQ ? T_EQ : T_NE;
+            int v = tbinary(t, to, pc, false);
+            t->vals[v].rep = R_BOOL, t->vals[v].kind = K_BOOL;
+            tpush(t, v);
+            break;
+        }
+        case PURE_OP_AND: case PURE_OP_OR: {
+            int v = tbinary(t, op->op == PURE_OP_AND ? T_AND : T_OR, pc, false);
+            t->vals[v].rep = R_BOOL, t->vals[v].kind = K_BOOL;
+            tpush(t, v);
+            break;
+        }
+        case PURE_OP_NOT: {
+            int v = tunary(t, T_NOT, R_BOOL, pc, false);
+            t->vals[v].kind = K_BOOL;
+            tpush(t, v);
+            break;
+        }
+        case PURE_OP_NEG: case PURE_OP_FLOOR: tpush(t, tunary(t, op->op == PURE_OP_NEG ? T_NEG : T_FLOOR, R_NUM, pc, true)); break;
+        case PURE_OP_JZ: case PURE_OP_JMP: {
+            int landing = tier_landing(t, pc, arg);
+            int g = landing >= 0 ? t->loops[landing].end : t->merge_at[arg - l0->start];
+            if (op->op == PURE_OP_JZ) {
+                int cond = tpop(t);
+                tier_go(t, g, I_UNLESS, cond);
+            } else {
+                tier_go(t, g, I_JUMP, -1);
+                t->live = false;
+            }
+            break;
+        }
+        case PURE_OP_BREAK: {
+            int l = t->cur_loop;
+            if (l < 0) {
+                t->failed = true;
+                break;
+            }
+            if (t->loops[l].li == t->nest) { /* the outermost loop's: the generic code breaks it */
+                titem(t, I_BREAK, -1, -1, l);
+                int snap = tsnap(t, pc);
+                if (!t->failed) t->items[t->item_count - 1].snap = snap;
+            } else
+                tier_go(t, t->loops[l].exit, I_JUMP, -1);
+            t->live = false;
+            break;
+        }
+        case PURE_OP_EACH: case PURE_OP_LOOP:
+            tier_loop(t, pc);
+            pc += 1 + (arg >> 16);
+            continue;
+        case PURE_OP_ROW: {
+            int l = t->cur_loop;
+            while (l >= 0 && !t->loops[l].walk) l = t->loops[l].parent;
+            if (l < 0) t->failed = true;
+            else tpush(t, t->loops[l].k);
+            break;
+        }
+        case PURE_OP_INDEX_FIRST: {
+            int v = tconst(t, 0);
+            t->vals[v].kind = K_INDEX, t->vals[v].list = (uint16_t)arg;
+            tpush(t, v);
+            break;
+        }
+        case PURE_OP_LIST_COUNT: {
+            int v = tval(t, T_COUNT, R_INT, -1, -1, -1);
+            t->vals[v].list = (uint16_t)arg, t->vals[v].pc = pc;
+            tfacts(t, v, true, 0, 0x1p32, false);
+            tpush(t, v);
+            break;
+        }
+        case PURE_OP_INDEX_MOVE: {
+            int owner = t->vals[t->state[V_STACK + t->height - 2]].list;
+            int v = tbinary(t, T_MOVE, pc, true);
+            t->vals[v].kind = K_INDEX, t->vals[v].list = (uint16_t)owner;
+            tpush(t, v);
+            break;
+        }
+        case PURE_OP_ITEM_GET: {
+            int v = tunary(t, T_GET, R_NUM, pc, true);
+            t->vals[v].list = (uint16_t)list_of(arg), t->vals[v].field = (uint16_t)item_field(arg);
+            tpush(t, v);
+            break;
+        }
+        case PURE_OP_ITEM_SET: {
+            int v = tbinary(t, T_SET, pc, true);
+            t->vals[v].list = (uint16_t)list_of(arg), t->vals[v].field = (uint16_t)item_field(arg);
+            break;
+        }
+        case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: {
+            unsigned to = op->op == PURE_OP_LIST_HAS ? T_HAS : op->plan & PLAN_JOINED ? T_FIND_GET : T_FIND;
+            int v = tunary(t, to, to == T_HAS ? R_BOOL : R_NUM, pc, true);
+            t->vals[v].list = (uint16_t)arg;
+            if (to == T_FIND_GET) t->vals[v].field = (uint16_t)item_field(m->code[pc + 1].arg);
+            if (to == T_HAS) t->vals[v].kind = K_BOOL;
+            if (to == T_FIND) t->vals[v].kind = K_INDEX;
+            tpush(t, v);
+            break;
+        }
+        default: t->failed = true; break;
+        }
+        pc = next;
+    }
+}
+
+/* The nest from a round of its outermost loop (opened by the generic code, its state in memory) to its end. */
+static void tier_build(Tier *t) {
+    Block *k = t->k;
+    const LoopAt *l0 = &k->loops[t->nest];
+    const PureOp *op = &k->m->code[l0->at];
+    for (int var = 0; var < VARS; ++var) t->state[var] = -1;
+    t->height = l0->base;
+    t->cur_loop = -1;
+    tier_merges(t);
+    if (t->failed) return;
+    TLoop *l = &t->loops[0];
+    t->loop_count = 1;
+    memset(l, 0, sizeof(*l));
+    l->li = t->nest, l->walk = l0->walk, l->parent = -1, l->length = op->arg >> 16;
+    l->list = op->arg >> 8 & 0xFF, l->slot = op->arg & 0xFF;
+    l->exit = tmerge(t, 0);
+    l->open_snap = -1;
+    l->count = tin(t, V_COUNT0, K_NUM, 0);
+    tfacts(t, l->count, true, 0, 0x1p54, false);
+    l->low = l->walk ? -1 : tin(t, V_LOW0, K_NUM, 0);
+    t->state[V_STACK + PURE_MODULE_STACK] = tin(t, V_ROUND0, K_NUM, 0);
+    tfacts(t, t->state[V_STACK + PURE_MODULE_STACK], true, 0, 0x1p54, false);
+    t->live = true;
+    tier_round(t, 0, l0->at);
+    if (t->failed) return;
+    tier_arrive(t, t->loops[0].exit);
+    if (t->live) {
+        titem(t, I_DONE, t->state[V_STACK + PURE_MODULE_STACK], -1, -1);
+        int snap = tsnap(t, l0->end); /* what changed, written back */
+        if (!t->failed) t->items[t->item_count - 1].snap = snap;
+    }
+}
+
+/* ---- The tier: values that do not change in a loop, made before it */
+
+/* Whether loop a is loop b or in it. */
+static bool tin_loop(const Tier *t, int a, int b) {
+    for (; a >= 0; a = t->loops[a].parent)
+        if (a == b) return true;
+    return false;
+}
+
+/* Each value of an inner loop's whose operands the loop does not make (and,
+ * reading a list, one the nest does not set) is made before the loop opens
+ * instead, as far out as it holds. Where it gives up then is where the loop
+ * opens: the executor runs the loop from its start (none of its rounds has
+ * run), so a check moved out of an if or ahead of a BREAK still ends as the
+ * executor ends. */
+static void tier_hoist(Tier *t) {
+    for (bool moved = true; moved && !t->failed;) {
+        moved = false;
+        for (size_t i = 0; i < t->item_count; ++i) {
+            if (t->items[i].kind != I_VALUE) continue;
+            int vi = t->items[i].value;
+            TVal *v = &t->vals[vi];
+            int l = v->loop;
+            if (l <= 0) continue; /* the outermost loop's are where the tier's rounds are */
+            switch (v->op) {
+            case T_ADD: case T_SUB: case T_MUL: case T_DIV: case T_MIN: case T_MAX: case T_NEG: case T_FLOOR: case T_LT: case T_LE:
+            case T_GT: case T_GE: case T_EQ: case T_NE: case T_NOT: case T_AND: case T_OR:
+                break;
+            case T_GET: case T_FIND_GET: case T_FIND: case T_HAS:
+                if (t->written >> (v->list & 31) & 1) continue;
+                break;
+            default: continue;
+            }
+            int ops[4] = {v->a, v->b, v->c, v->d};
+            bool outside = true;
+            for (int o = 0; o < 4 && outside; ++o)
+                outside = ops[o] < 0 || !tin_loop(t, t->vals[ops[o]].loop, l) || t->vals[ops[o]].loop == -1 ||
+                          (t->vals[ops[o]].op == T_CONST && t->vals[ops[o]].loop != l);
+            for (int o = 0; o < 4 && outside; ++o) /* a constant made in the loop: made again outside is the same */
+                if (ops[o] >= 0 && t->vals[ops[o]].op == T_CONST && tin_loop(t, t->vals[ops[o]].loop, l)) outside = false;
+            if (!outside) continue;
+            size_t open = 0; /* the loop's opening: made just before it */
+            while (open < t->item_count && !(t->items[open].kind == I_OPEN && t->items[open].loop == l)) ++open;
+            if (open >= i) continue;
+            TItem it = t->items[i];
+            memmove(&t->items[open + 1], &t->items[open], (i - open) * sizeof(TItem));
+            t->items[open] = it;
+            v->loop = t->loops[l].parent;
+            if (v->snap >= 0) v->snap = t->loops[l].open_snap;
+            moved = true;
+        }
+    }
+}
+
+/* ---- The tier: facts, registers' kinds, and what each list needs */
+
+/* What the tier keeps of a list where it begins: its form's checks and values. */
+enum { L_COUNT = 16, L_BITS = 17, L_LIMIT = 18, L_PARTS = 19 }; /* parts of a list: its columns (0-15), its count, bits, limit */
+enum { T_LIST = -20 };                                             /* T_IN's variable for a list's part */
+typedef struct TList {
+    int part[L_PARTS];  /* the values, or -1 */
+    bool position;      /* read or set by position: FLAT, or DENSE full */
+    bool key;           /* found by key: DENSE */
+} TList;
+
+static bool tfinite(const TVal *v) { return v->lo > -INFINITY && v->hi < INFINITY; }
+static bool tsmall(double lo, double hi) { return lo > -0x1p53 && hi < 0x1p53; }
+
+/* The facts of each value, from its operands' (a phi from its ways', widened past a few passes). */
+static void tier_facts(Tier *t) {
+    for (size_t i = 0; i < t->val_count; ++i) { /* what is computed from nothing yet (optimistic: grown to what it may be) */
+        TVal *v = &t->vals[i];
+        if (v->rep == R_BOOL || v->op == T_CONST || v->op == T_FIELD || v->op == T_COUNT || v->op == T_SPAN || v->op == T_SET ||
+            (v->op == T_IN && v->var == T_LIST))
+            continue;
+        v->lo = INFINITY, v->hi = -INFINITY, v->whole = true, v->zero = false;
+    }
+    for (unsigned pass = 0; pass < 16; ++pass) {
+        bool changed = false;
+        for (size_t i = 0; i < t->val_count; ++i) {
+            TVal *v = &t->vals[i];
+            if (v->rep == R_BOOL || v->op == T_CONST || v->op == T_FIELD || v->op == T_COUNT) continue;
+            const TVal *a = v->a >= 0 ? &t->vals[v->a] : NULL, *b = v->b >= 0 ? &t->vals[v->b] : NULL;
+            if (v->op == T_SPAN) { /* a count's rounds: high - low, from 0 */
+                double most = a->whole && b->whole ? fmax(b->hi - a->lo, 0) : 0x1p54;
+                if (a->lo > a->hi || b->lo > b->hi) continue;
+                if (v->hi != most) changed = true;
+                v->whole = true, v->lo = 0, v->hi = fmin(most, 0x1p54), v->zero = false;
+                continue;
+            }
+            if (v->op != T_PHI && v->op != T_IN && ((a && a->lo > a->hi && a->rep != R_BOOL) || (b && b->lo > b->hi && b->rep != R_BOOL)))
+                continue; /* an operand not known yet */
+            bool whole = false, zero = true;
+            double lo = -INFINITY, hi = INFINITY;
+            switch (v->op) {
+            case T_IN:
+                if (v->var == T_LIST) continue;
+                if (v->var == V_ROUND0 || v->var == V_COUNT0) whole = true, lo = 0, hi = 0x1p32 - 1, zero = false; /* checked where the tier begins */
+                else if (v->var == V_LOW0) whole = true, lo = 0, hi = 0x1p53, zero = false; /* from 0 (checked where the tier begins) */
+                else if (v->kind == K_INDEX) whole = true, lo = 0, hi = 0x1p32, zero = false;
+                else if (v->var >= 0 && v->var < V_STACK) { /* whole where every value the nest gives it is (checked where the tier begins) */
+                    whole = true, lo = -0x1p53, hi = 0x1p53, zero = false;
+                    for (size_t j = 0; j < t->val_count && whole; ++j) {
+                        const TVal *p = &t->vals[j];
+                        if (p->op != T_PHI || p->var != v->var) continue;
+                        for (unsigned w = 0; w < p->ins && whole; ++w) {
+                            const TVal *in = &t->vals[p->in[w]];
+                            whole = p->in[w] == (int)i || in->op == T_PHI || in->lo > in->hi || in->whole;
+                        }
+                    }
+                    if (!whole) lo = -INFINITY, hi = INFINITY, zero = true;
+                    bool assigned = false; /* none given: as it is (a number) */
+                    for (size_t j = 0; j < t->val_count && !assigned; ++j) assigned = t->vals[j].op == T_PHI && t->vals[j].var == v->var;
+                    if (!assigned) whole = false, lo = -INFINITY, hi = INFINITY, zero = true;
+                }
+                break;
+            case T_PHI: {
+                whole = true, zero = false, lo = INFINITY, hi = -INFINITY;
+                for (unsigned w = 0; w < v->ins; ++w) {
+                    const TVal *in = &t->vals[v->in[w]];
+                    if (in->lo > in->hi && in->rep != R_BOOL) continue; /* not known yet */
+                    whole = whole && in->whole, zero = zero || in->zero;
+                    lo = fmin(lo, in->lo), hi = fmax(hi, in->hi);
+                }
+                if (pass >= 4 && v->lo <= v->hi && (lo < v->lo || hi > v->hi)) { /* still growing: as far as it may */
+                    if (lo < v->lo) lo = whole ? -0x1p53 : -INFINITY;
+                    if (hi > v->hi) hi = whole ? 0x1p53 : INFINITY;
+                }
+                for (unsigned l = 0; l < t->loop_count; ++l) /* a loop's round: below its rounds (its iteration goes back only then) */
+                    if (t->loops[l].k == (int)i) {
+                        const TVal *count = &t->vals[t->loops[l].count];
+                        if (count->lo <= count->hi) whole = true, lo = 0, hi = fmax(count->hi - 1, 0), zero = false;
+                    }
+                break;
+            }
+            case T_ADD: case T_SUB:
+                whole = a->whole && b->whole, zero = !whole && a->zero && (v->op == T_ADD ? b->zero : true);
+                lo = v->op == T_ADD ? a->lo + b->lo : a->lo - b->hi, hi = v->op == T_ADD ? a->hi + b->hi : a->hi - b->lo;
+                if (isnan(lo)) lo = -INFINITY;
+                if (isnan(hi)) hi = INFINITY;
+                break;
+            case T_MUL: {
+                double c[4] = {a->lo * b->lo, a->lo * b->hi, a->hi * b->lo, a->hi * b->hi};
+                lo = INFINITY, hi = -INFINITY;
+                for (int j = 0; j < 4; ++j) {
+                    if (isnan(c[j])) c[j] = 0; /* 0 times infinity: the bound is 0's side */
+                    lo = fmin(lo, c[j]), hi = fmax(hi, c[j]);
+                }
+                bool negzero = (a->lo <= 0 && a->hi >= 0 && b->lo < 0) || (b->lo <= 0 && b->hi >= 0 && a->lo < 0);
+                whole = a->whole && b->whole; /* 0 times a number below 0 is -0: the code checks it */
+                v->negzero = whole && negzero;
+                zero = !whole && (negzero || a->zero || b->zero);
+                break;
+            }
+            case T_DIV:
+                if (v->integers) whole = true, lo = 0, hi = a->hi, zero = false;
+                else if (b->lo > 0 || b->hi < 0) {
+                    double c[4] = {a->lo / b->lo, a->lo / b->hi, a->hi / b->lo, a->hi / b->hi};
+                    lo = INFINITY, hi = -INFINITY;
+                    for (int j = 0; j < 4; ++j) lo = fmin(lo, isnan(c[j]) ? -INFINITY : c[j]), hi = fmax(hi, isnan(c[j]) ? INFINITY : c[j]);
+                }
+                break;
+            case T_FLOOR:
+                if (a->whole || (a->op == T_DIV && a->integers)) whole = true, lo = a->lo, hi = a->hi, zero = false;
+                else {
+                    lo = floor(a->lo), hi = floor(a->hi), zero = a->zero;
+                    whole = !zero && tsmall(lo, hi);
+                }
+                break;
+            case T_MIN: case T_MAX:
+                whole = a->whole && b->whole, zero = a->zero || b->zero;
+                lo = v->op == T_MIN ? fmin(a->lo, b->lo) : fmax(a->lo, b->lo);
+                hi = v->op == T_MIN ? fmin(a->hi, b->hi) : fmax(a->hi, b->hi);
+                break;
+            case T_NEG:
+                lo = -a->hi, hi = -a->lo;
+                whole = a->whole && (a->lo > 0 || a->hi < 0), zero = true; /* -0 of 0 */
+                break;
+            case T_GET: case T_FIND_GET: whole = true, lo = 0, hi = 0x1p32 - 1, zero = false; break; /* a narrow cell (checked where the tier begins) */
+            case T_FIND: case T_MOVE: whole = true, lo = 0, hi = 0x1p32, zero = false; break;
+            default: continue;
+            }
+            if (whole && !tsmall(lo, hi) && v->op != T_IN) { /* past 2^53: whole, the code checks it (else gives up) */
+                lo = fmax(lo, -0x1p53), hi = fmin(hi, 0x1p53);
+            }
+            if (v->whole != whole || v->lo != lo || v->hi != hi || v->zero != zero) changed = true;
+            v->whole = whole, v->lo = lo, v->hi = hi, v->zero = zero;
+        }
+        if (!changed && pass) break;
+    }
+    for (size_t i = 0; i < t->val_count; ++i) /* never known (never reached): any number */
+        if (t->vals[i].lo > t->vals[i].hi && t->vals[i].rep != R_BOOL) t->vals[i].lo = -INFINITY, t->vals[i].hi = INFINITY, t->vals[i].whole = false, t->vals[i].zero = true;
+}
+
+/* Each value's register: a whole number an integer, else a number (a bool's as made). Uses counted. */
+static void tier_reps(Tier *t) {
+    for (size_t i = 0; i < t->val_count; ++i) {
+        TVal *v = &t->vals[i];
+        if (v->a >= 0) ++t->vals[v->a].uses;
+        if (v->b >= 0) ++t->vals[v->b].uses;
+        if (v->c >= 0) ++t->vals[v->c].uses;
+        if (v->d >= 0) ++t->vals[v->d].uses;
+        for (unsigned w = 0; w < v->ins; ++w) ++t->vals[v->in[w]].uses;
+    }
+    for (size_t i = 0; i < t->val_count; ++i) { /* floor(a / b) of whole numbers, a from 0 and b above it: an integer division */
+        TVal *v = &t->vals[i];
+        if (v->op != T_FLOOR || t->vals[v->a].op != T_DIV || t->vals[v->a].uses != 1) continue;
+        TVal *d = &t->vals[v->a];
+        const TVal *a = &t->vals[d->a], *b = &t->vals[d->b];
+        if (a->whole && b->whole && a->lo >= 0 && b->lo > 0) d->integers = true;
+    }
+    tier_facts(t);
+    for (unsigned l = 0; l < t->loop_count; ++l) /* a loop's round and rounds are integers */
+        if (!t->vals[t->loops[l].k].whole || !t->vals[t->loops[l].count].whole) t->failed = true, t->why = "rounds";
+    for (size_t i = 0; i < t->val_count; ++i) {
+        TVal *v = &t->vals[i];
+        if (v->rep == R_BOOL || v->kind == K_BOOL) {
+            v->rep = R_BOOL;
+            continue;
+        }
+        if (v->op == T_SET) continue;
+        v->rep = v->whole ? R_INT : R_NUM;
+    }
+}
+
+/* The values a list's part takes where the tier begins (made once). */
+static int tlist(Tier *t, TList *lists, unsigned list, unsigned part) {
+    TList *l = &lists[list];
+    if (l->part[part] < 0) {
+        int saved = t->cur_loop;
+        t->cur_loop = -1;
+        int v = tval(t, T_IN, part == L_BITS || part < 16 ? R_INT : R_INT, -1, -1, -1);
+        t->cur_loop = saved;
+        t->vals[v].var = T_LIST, t->vals[v].list = (uint16_t)list, t->vals[v].field = (uint16_t)part;
+        tfacts(t, v, true, 0, 0x1p62, false);
+        l->part[part] = v;
+    }
+    return l->part[part];
+}
+
+/* What each list access needs, as values where the tier begins: a column (its address tagged with its cells' width), the count, the key bits and their reach. */
+static void tier_lists(Tier *t, TList *lists) {
+    for (unsigned i = 0; i < PURE_MODULE_STATES; ++i) {
+        for (unsigned p = 0; p < L_PARTS; ++p) lists[i].part[p] = -1;
+        lists[i].position = lists[i].key = false;
+    }
+    size_t made = t->val_count;
+    for (size_t i = 0; i < made && !t->failed; ++i) {
+        TVal *v = &t->vals[i];
+        switch (v->op) {
+        case T_COUNT: { int c = tlist(t, lists, v->list, L_COUNT); t->vals[i].b = c; break; }
+        case T_GET: case T_SET: {
+            lists[v->list].position = true;
+            int column = tlist(t, lists, t->vals[i].list, t->vals[i].field), count = tlist(t, lists, t->vals[i].list, L_COUNT);
+            t->vals[i].c = column;
+            if (t->vals[i].op == T_GET) t->vals[i].b = count;
+            else t->vals[i].d = count;
+            break;
+        }
+        case T_FIND_GET: {
+            lists[v->list].key = true;
+            int column = tlist(t, lists, t->vals[i].list, t->vals[i].field), bits = tlist(t, lists, t->vals[i].list, L_BITS),
+                limit = tlist(t, lists, t->vals[i].list, L_LIMIT);
+            t->vals[i].c = column, t->vals[i].b = bits, t->vals[i].d = limit;
+            break;
+        }
+        case T_FIND: case T_HAS: {
+            lists[v->list].key = true;
+            int bits = tlist(t, lists, t->vals[i].list, L_BITS), limit = tlist(t, lists, t->vals[i].list, L_LIMIT);
+            t->vals[i].b = bits, t->vals[i].c = limit;
+            break;
+        }
+        case T_MOVE: { int c = tlist(t, lists, t->vals[i].list, L_COUNT); t->vals[i].c = c; break; }
+        default: break;
+        }
+    }
+    for (unsigned i = 0; i < PURE_MODULE_STATES; ++i) /* found by key and by position: DENSE and full, its count its keys' reach */
+        if (lists[i].key && lists[i].position) (void)tlist(t, lists, i, L_COUNT);
+}
+
+/* ---- The tier: where each value lives, and its register */
+
+/* Registers the tier gives values: x ones for integers and bools, d ones for numbers (x0, x1, x9, x10, x16, x17, d0-d3 scratch). */
+static const uint8_t tier_x[] = {2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 18, 25, 26, 20, 21, 22, 23, 24, 27, 28}; /* x30: the work (TIER_WORK) */
+static const uint8_t tier_d[] = {4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
+
+/* Whether a snapshot (or a write back) needs variable var's value v: it changed from what memory holds. */
+static bool tchanged(const Tier *t, int var, int v) {
+    if (v < 0) return false;
+    const TVal *x = &t->vals[v];
+    return !(x->op == T_IN && x->var == var);
+}
+
+static void tuse(Tier *t, int v, int at) {
+    if (v >= 0 && t->vals[v].last < at) t->vals[v].last = at;
+}
+
+/* A snapshot's values read at at (it gives up there: they are written). */
+static void tuse_snap(Tier *t, int s, int at) {
+    if (s < 0) return;
+    const TSnap *snap = &t->snaps[s];
+    for (int var = 0; var < VARS; ++var)
+        if (var < V_STACK ? tchanged(t, var, snap->vars[var]) : snap->vars[var] >= 0) tuse(t, snap->vars[var], at);
+    for (int l = snap->loop; l >= 0; l = t->loops[l].parent) { /* the open loops: their rounds, counts and lows */
+        tuse(t, t->loops[l].k, at), tuse(t, t->loops[l].count, at);
+        if (t->loops[l].low >= 0 && t->vals[t->loops[l].low].op != T_CONST) tuse(t, t->loops[l].low, at); /* a constant written as one */
+    }
+}
+
+/* A way into merge g read at at: its phis' inputs along it. */
+static void tuse_way(Tier *t, int g, int way, int at) {
+    const TMerge *m = &t->merges[g];
+    if (way < 0 || !m->phis) return;
+    for (int var = 0; var < VARS; ++var)
+        if (m->phis[var] >= 0 && (unsigned)way < t->vals[m->phis[var]].ins) tuse(t, t->vals[m->phis[var]].in[way], at);
+}
+
+/* The values something needs: the items', what may give up (its snapshot's too), and their operands. */
+static void tier_needed(Tier *t, bool *need) {
+    int *work = malloc(t->val_count * sizeof(int));
+    size_t top = 0;
+    if (!work) {
+        t->failed = true;
+        return;
+    }
+#define NEED(v) do { int v_ = (v); if (v_ >= 0 && !need[v_]) need[v_] = true, work[top++] = v_; } while (0)
+#define NEED_SNAP(s) do { if ((s) >= 0) { const TSnap *sn = &t->snaps[s]; \
+        for (int var = 0; var < VARS; ++var) if (var < V_STACK ? tchanged(t, var, sn->vars[var]) : sn->vars[var] >= 0) NEED(sn->vars[var]); \
+        for (int l = sn->loop; l >= 0; l = t->loops[l].parent) { NEED(t->loops[l].k); NEED(t->loops[l].count); \
+            if (t->loops[l].low >= 0 && t->vals[t->loops[l].low].op != T_CONST) NEED(t->loops[l].low); } } } while (0)
+    for (size_t i = 0; i < t->item_count; ++i) {
+        const TItem *it = &t->items[i];
+        const TMerge *m = it->merge >= 0 ? &t->merges[it->merge] : NULL;
+        (void)m;
+        if (it->kind == I_UNLESS || it->kind == I_LATCH || it->kind == I_DONE) NEED(it->value);
+        if (it->kind == I_OPEN || it->kind == I_LATCH) {
+            NEED(t->loops[it->loop].count);
+            NEED(t->loops[it->loop].k);
+        }
+        if (it->kind == I_OPEN || it->kind == I_LATCH || it->kind == I_BREAK || it->kind == I_DONE) NEED_SNAP(it->snap);
+    }
+    for (size_t i = 0; i < t->val_count; ++i)
+        if (t->vals[i].snap >= 0 || t->vals[i].op == T_SET) NEED((int)i);
+    while (top) {
+        const TVal *v = &t->vals[work[--top]];
+        NEED(v->a);
+        NEED(v->b);
+        NEED(v->c);
+        NEED(v->d);
+        NEED_SNAP(v->snap);
+        for (unsigned w = 0; w < v->ins; ++w) NEED(v->in[w]);
+    }
+#undef NEED
+#undef NEED_SNAP
+    free(work);
+}
+
+/* Where each value is made and last read (a value made before a loop and read in it, to the loop's end); registers by linear scan. False when they run out. */
+static bool tier_registers(Tier *t) {
+    int at = 0;
+    bool *need = calloc(t->val_count + 1, sizeof(bool));
+    if (!need) return false;
+    tier_needed(t, need);
+    for (size_t i = 0; i < t->val_count; ++i) t->vals[i].at = -1, t->vals[i].last = -1;
+    for (size_t e = 0; e < t->entry_count; ++e) t->vals[t->entry[e]].at = at++;
+    int base = at;
+    for (size_t i = 0; i < t->item_count; ++i) {
+        TItem *it = &t->items[i];
+        int p = base + (int)i;
+        if (it->kind == I_VALUE) t->vals[it->value].at = p;
+        if (it->kind == I_MERGE)
+            for (int var = 0; var < VARS; ++var)
+                if (t->merges[it->merge].phis && t->merges[it->merge].phis[var] >= 0) t->vals[t->merges[it->merge].phis[var]].at = p;
+    }
+    for (size_t i = 0; i < t->item_count; ++i) { /* a phi holds its register from the first way in that comes before it (its move there) */
+        const TItem *it = &t->items[i];
+        int p = base + (int)i, g = -1;
+        if (it->kind == I_JUMP || it->kind == I_UNLESS || it->kind == I_OPEN) g = it->merge;
+        else if (it->kind == I_LATCH) g = t->loops[it->loop].exit;
+        if (g < 0 || !t->merges[g].phis) continue;
+        for (int var = 0; var < VARS; ++var) {
+            int phi = t->merges[g].phis[var];
+            if (phi >= 0 && t->vals[phi].at > p) t->vals[phi].at = p;
+        }
+    }
+    for (size_t i = 0; i < t->item_count; ++i) {
+        TItem *it = &t->items[i];
+        int p = base + (int)i;
+        switch (it->kind) {
+        case I_VALUE: {
+            TVal *v = &t->vals[it->value];
+            tuse(t, v->a, p), tuse(t, v->b, p), tuse(t, v->c, p), tuse(t, v->d, p);
+            tuse_snap(t, v->snap, p);
+            break;
+        }
+        case I_UNLESS: tuse(t, it->value, p); /* fall through */
+        case I_JUMP: tuse_way(t, it->merge, it->way, p); break;
+        case I_OPEN:
+            tuse(t, t->loops[it->loop].count, p);
+            tuse_way(t, it->merge, it->way, p);
+            tuse_snap(t, it->snap, p);
+            break;
+        case I_LATCH: {
+            const TLoop *l = &t->loops[it->loop];
+            tuse(t, it->value, p), tuse(t, l->count, p);
+            tuse_way(t, l->head, (int)t->merges[l->head].way_count - 1, p);
+            tuse_way(t, it->merge == l->head ? l->exit : it->merge, it->way, p);
+            tuse_snap(t, it->snap, p);
+            break;
+        }
+        case I_BREAK: case I_DONE: tuse(t, it->value, p), tuse_snap(t, it->snap, p); break;
+        default: break;
+        }
+    }
+    /* A value read in a loop it was made before lives to the loop's iteration (its back edge reads it again). */
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (unsigned l = 0; l < t->loop_count; ++l) {
+            int head = -1, latch = -1;
+            for (size_t i = 0; i < t->item_count; ++i) {
+                if (t->items[i].kind == I_MERGE && t->items[i].merge == t->loops[l].head) head = base + (int)i;
+                if (t->items[i].kind == I_LATCH && t->items[i].loop == (int)l) latch = base + (int)i;
+            }
+            if (head < 0 || latch < 0) continue;
+            for (size_t v = 0; v < t->val_count; ++v) {
+                TVal *x = &t->vals[v];
+                if (x->at >= 0 && x->at < head && x->last >= head && x->last < latch) x->last = latch, changed = true;
+            }
+        }
+    }
+    /* Linear scan: by where they are made, a register each until its last read. */
+    int *order = malloc(t->val_count * sizeof(int));
+    int x_until[32], d_until[32];
+    if (!order) return false;
+    size_t n = 0;
+    for (size_t v = 0; v < t->val_count; ++v)
+        if (t->vals[v].at >= 0 && t->vals[v].op != T_SET && need[v]) order[n++] = (int)v;
+    free(need);
+    for (size_t i = 1; i < n; ++i) { /* by at (stable) */
+        int v = order[i];
+        size_t j = i;
+        while (j && t->vals[order[j - 1]].at > t->vals[v].at) order[j] = order[j - 1], --j;
+        order[j] = v;
+    }
+    for (int r = 0; r < 32; ++r) x_until[r] = d_until[r] = -1;
+    bool ok = true;
+    for (size_t i = 0; i < n && ok; ++i) {
+        TVal *v = &t->vals[order[i]];
+        if (v->last < 0) v->last = v->at; /* made, never read: a register for the moment */
+        bool d = v->rep == R_NUM;
+        const uint8_t *pool = d ? tier_d : tier_x;
+        unsigned size = d ? sizeof(tier_d) : sizeof(tier_x);
+        int *until = d ? d_until : x_until;
+        int pick = -1;
+        if (v->op == T_PHI) /* a phi: an input's register when it is free (no move on that way) */
+            for (unsigned w = 0; w < v->ins && pick < 0; ++w) {
+                const TVal *in = &t->vals[v->in[w]];
+                if (in->reg >= 0 && (in->rep == R_NUM) == d && until[in->reg] < v->at) pick = in->reg;
+            }
+        for (unsigned r = 0; r < size && pick < 0; ++r)
+            if (until[pool[r]] < v->at) pick = pool[r];
+        if (pick < 0) {
+            if (getenv("PURE_TIER_DUMP")) {
+                fprintf(stderr, "tier: no register for v%d at %d; held:", order[i], v->at);
+                for (size_t j = 0; j < i; ++j)
+                    if (t->vals[order[j]].reg >= 0 && t->vals[order[j]].last >= v->at && (t->vals[order[j]].rep == R_NUM) == d)
+                        fprintf(stderr, " v%d(%d-%d)", order[j], t->vals[order[j]].at, t->vals[order[j]].last);
+                fprintf(stderr, "\n");
+            }
+            ok = false;
+            break;
+        }
+        v->reg = pick;
+        until[pick] = v->last;
+    }
+    free(order);
+    if (!ok) t->why = "registers";
+    return ok;
+}
+
+/* ---- The tier: its code */
+
+enum { TIER_WORK = 30 }; /* x30: the work the event may still do (its budget less what it did) */
+enum { NEEDS_KEY = 1, NEEDS_POSITION = 2, NEEDS_FULL = 4 };
+
+static unsigned treg(const Tier *t, int v) { return (unsigned)t->vals[v].reg; }
+
+/* The tier's values may hold x20-x24, x27 and x28 (the generic code's
+ * stack, values, event, app, lists, loops and locals): where it begins and
+ * ends it reads what it needs of them from the frame (x19), and gives them
+ * back before the generic code or a step runs. */
+enum { B_LOCALS, B_VALUES, B_APP, B_LISTS, B_LOOPS, B_EV, B_STACK };
+static unsigned tbase(Tier *t, unsigned which, unsigned into) {
+    Emit *e = t->k->e;
+    switch (which) {
+    case B_LOCALS: load64(e, into, X19, offsetof(Frame, ev)), load64(e, into, into, offsetof(Event, locals)); break;
+    case B_VALUES: load64(e, into, X19, offsetof(Frame, values)); break;
+    case B_APP: load64(e, into, X19, offsetof(Frame, app)); break;
+    case B_LISTS:
+        load64(e, into, X19, offsetof(Frame, app));
+        mov_imm(e, X10, offsetof(PureApp, lists));
+        add_reg(e, into, into, X10);
+        break;
+    case B_LOOPS: load64(e, into, X19, offsetof(Frame, loops)); break;
+    case B_EV: load64(e, into, X19, offsetof(Frame, ev)); break;
+    default: load64(e, into, X19, offsetof(Frame, stack)); break;
+    }
+    return into;
+}
+
+/* x20-x24, x27 and x28 as the generic code keeps them. */
+static void tier_fixed(Tier *t) {
+    Emit *e = t->k->e;
+    load64(e, X20, X19, offsetof(Frame, stack));
+    load64(e, X21, X19, offsetof(Frame, values));
+    load64(e, X22, X19, offsetof(Frame, ev));
+    load64(e, X23, X19, offsetof(Frame, app));
+    mov_imm(e, X24, offsetof(PureApp, lists));
+    add_reg(e, X24, X23, X24);
+    load64(e, X27, X19, offsetof(Frame, loops));
+    load64(e, X28, X22, offsetof(Event, locals));
+}
+
+/* Value v as a number in a d register (its own, or scratch made of its integer). */
+static unsigned td(Tier *t, int v, unsigned scratch) {
+    const TVal *x = &t->vals[v];
+    if (x->rep == R_NUM) return (unsigned)x->reg;
+    fp2(t->k->e, x->rep == R_BOOL ? UCVTF_X : SCVTF_X, scratch, (unsigned)x->reg);
+    return scratch;
+}
+
+/* Value v as an integer in an x register: an integer's or a bool's own; a number's made whole into scratch, else to fail. */
+static unsigned tx(Tier *t, int v, unsigned scratch, int fail) {
+    Emit *e = t->k->e;
+    const TVal *x = &t->vals[v];
+    if (x->rep != R_NUM) return (unsigned)x->reg;
+    unsigned d = (unsigned)x->reg;
+    fp2(e, FCVTZS_X, scratch, d);
+    fp2(e, SCVTF_X, D1, scratch);
+    fcmp(e, d, D1);
+    b_cond(e, NE, fail);
+    fp2(e, FMOV_XD, X17, d);
+    mov_imm(e, X9, UINT64_C(0x8000000000000000));
+    cmp_reg(e, X17, X9); /* -0 */
+    b_cond(e, EQ, fail);
+    return scratch;
+}
+
+static int tfail(Tier *t, int snap) {
+    t->snaps[snap].needed = true;
+    return t->snaps[snap].label;
+}
+
+/* An integer below 2^53 in size in r, else to fail (from 0: its bits past 53 none). */
+static void tsmall_check(Tier *t, unsigned r, int fail) {
+    Emit *e = t->k->e;
+    mov_imm(e, X9, UINT64_C(1) << 53);
+    add_reg(e, X10, r, X9);
+    cmp_lsl(e, X10, X9, 1);
+    b_cond(e, HS, fail);
+}
+
+static void tsmall_from_0(Tier *t, unsigned r, int fail) {
+    lsr_imm(t->k->e, X10, r, 53);
+    cbnz_x(t->k->e, X10, fail);
+}
+
+/* A number in d finite, else to fail. */
+static void tfinite_check(Tier *t, unsigned d, int fail) {
+    fp2(t->k->e, FABS, D2, d);
+    fcmp(t->k->e, D2, D8);
+    b_cond(t->k->e, HS, fail);
+}
+
+/* The moves a way into merge g makes: each phi given its input (a parallel move: what a move would overwrite is moved first, a cycle through scratch). */
+typedef struct { unsigned src, dst; bool src_d, dst_d, convert_bool; } TMove;
+static void tier_moves(Tier *t, int g, int way) {
+    Emit *e = t->k->e;
+    const TMerge *m = &t->merges[g];
+    TMove moves[VARS];
+    unsigned n = 0;
+    if (!m->phis || way < 0) return;
+    for (int var = 0; var < VARS; ++var) {
+        int phi = m->phis[var];
+        if (phi < 0 || t->vals[phi].reg < 0 || (unsigned)way >= t->vals[phi].ins) continue;
+        const TVal *p = &t->vals[phi], *in = &t->vals[p->in[way]];
+        if (in->reg < 0) continue;
+        bool src_d = in->rep == R_NUM, dst_d = p->rep == R_NUM;
+        if (src_d == dst_d && in->reg == p->reg) continue;
+        moves[n++] = (TMove){(unsigned)in->reg, (unsigned)p->reg, src_d, dst_d, in->rep == R_BOOL};
+    }
+    while (n) {
+        bool done = false;
+        for (unsigned i = 0; i < n; ++i) {
+            bool blocked = false; /* another move still reads what this one writes */
+            for (unsigned j = 0; j < n && !blocked; ++j)
+                blocked = j != i && moves[j].src == moves[i].dst && moves[j].src_d == moves[i].dst_d;
+            if (blocked) continue;
+            TMove mv = moves[i];
+            if (mv.src_d && mv.dst_d) put(e, 0x1E604000 | mv.src << 5 | mv.dst); /* FMOV Dd, Dn */
+            else if (!mv.src_d && !mv.dst_d) mov_reg(e, mv.dst, mv.src);
+            else if (!mv.src_d) fp2(e, mv.convert_bool ? UCVTF_X : SCVTF_X, mv.dst, mv.src);
+            else fp2(e, FCVTZS_X, mv.dst, mv.src); /* a whole number's (its phi an integer's) */
+            moves[i] = moves[--n];
+            done = true;
+            break;
+        }
+        if (!done) { /* a cycle: one source through scratch */
+            TMove *mv = &moves[0];
+            if (mv->src_d) put(e, 0x1E604000 | mv->src << 5 | D0), mv->src = D0;
+            else mov_reg(e, X16, mv->src), mv->src = X16;
+        }
+    }
+}
+
+/* What the tier changed, back where the executor keeps it: the variables
+ * whose values differ from memory's (in vars: a snapshot's or the end's),
+ * the work, the lists it set (their versions). */
+static void tier_write(Tier *t, const int *vars) {
+    Block *k = t->k;
+    Emit *e = k->e;
+    tbase(t, B_LOCALS, X17);
+    tbase(t, B_VALUES, X16);
+    for (int var = 0; var < V_STACK; ++var) {
+        int v = vars[var];
+        if (!tchanged(t, var, v) || t->vals[v].reg < 0) continue;
+        unsigned d = td(t, v, D0);
+        if (var < V_STATE) store_d(e, d, X17, (size_t)var * sizeof(PureValue));
+        else store_d(e, d, X16, (size_t)(var - V_STATE) * sizeof(PureValue));
+    }
+    int budgeted = new_label(e); /* what it did: its budget less what it may still do */
+    tbase(t, B_APP, X17);
+    load64(e, X10, X17, offsetof(PureApp, work_budget));
+    cbnz_x(e, X10, budgeted);
+    mov_imm(e, X10, PURE_WORK_DEFAULT);
+    bind(e, budgeted);
+    sub_reg(e, X10, X10, TIER_WORK);
+    store64(e, X10, X17, offsetof(PureApp, work));
+    tbase(t, B_LISTS, X17);
+    for (unsigned list = 0; list < 32; ++list)
+        if (t->written >> list & 1) {
+            load64(e, X16, X17, list * sizeof(PureList *));
+            load64(e, X10, X16, pure_list_layout[LIST_VERSION_AT]);
+            add_imm(e, X10, X10, 1);
+            store64(e, X10, X16, pure_list_layout[LIST_VERSION_AT]);
+        }
+}
+
+/* The open loops' records as the executor keeps them, from the outermost
+ * (opened by the generic code: its round) to loop n; the frame's depth and
+ * end, the event's walk and row. */
+static void tier_records(Tier *t, int n) {
+    Block *k = t->k;
+    Emit *e = k->e;
+    int chain[PURE_MODULE_NESTING], depth = 0;
+    for (int l = n; l >= 0; l = t->loops[l].parent) chain[depth++] = l;
+    load64(e, X0, X19, offsetof(Frame, arena));
+    load64(e, X0, X0, offsetof(PureArena, used)); /* the arena as the loops began (the tier takes none of it) */
+    tbase(t, B_LOOPS, X17);
+    tbase(t, B_EV, X16);
+    for (int d = depth - 1, at = 0; d >= 0; --d, ++at) {
+        const TLoop *l = &t->loops[chain[d]];
+        const LoopAt *bl = &k->loops[l->li];
+        size_t off = loop_offset(bl);
+        unsigned round = treg(t, l->k);
+        if (at == 0) { /* the outermost: its round */
+            if (l->walk) {
+                store64(e, round, X17, off + offsetof(Loop, walk) + offsetof(Walk, at));
+                store64(e, round, X16, offsetof(Event, row));
+            } else
+                store64(e, round, X17, off + offsetof(Loop, k));
+            continue;
+        }
+        add_imm(e, X9, X17, (uint32_t)off);
+        mov_w(e, X10, bl->start);
+        store_w(e, X10, X9, offsetof(Loop, start));
+        mov_w(e, X10, bl->end);
+        store_w(e, X10, X9, offsetof(Loop, end));
+        mov_w(e, X10, k->loops[t->loops[l->parent].li].end);
+        store_w(e, X10, X9, offsetof(Loop, outer));
+        store64(e, X0, X9, offsetof(Loop, mark));
+        mov_w(e, X10, l->walk);
+        store8(e, X10, X9, offsetof(Loop, walking));
+        store8(e, XZR, X9, offsetof(Loop, integer));
+        if (l->walk) {
+            mov_w(e, X10, l->list);
+            store_w(e, X10, X9, offsetof(Loop, walk) + offsetof(Walk, list));
+            store64(e, round, X9, offsetof(Loop, walk) + offsetof(Walk, at));
+            mov_imm(e, X10, SIZE_MAX);
+            store64(e, X10, X9, offsetof(Loop, walk) + offsetof(Walk, end));
+            store8(e, XZR, X9, offsetof(Loop, walk) + offsetof(Walk, removed));
+            load64(e, X10, X16, offsetof(Event, walk));
+            store64(e, X10, X9, offsetof(Loop, around));
+            load64(e, X10, X16, offsetof(Event, row));
+            store64(e, X10, X9, offsetof(Loop, row));
+            add_imm(e, X10, X9, offsetof(Loop, walk));
+            store64(e, X10, X16, offsetof(Event, walk));
+            store64(e, round, X16, offsetof(Event, row));
+        } else {
+            store64(e, treg(t, l->count), X9, offsetof(Loop, count));
+            store64(e, round, X9, offsetof(Loop, k));
+            if (t->vals[l->low].op == T_CONST) { /* written as the constant it is */
+                uint64_t bits;
+                memcpy(&bits, &t->vals[l->low].num, sizeof(bits));
+                mov_imm(e, X10, bits);
+                store64(e, X10, X9, offsetof(Loop, low));
+            } else
+                store_d(e, td(t, l->low, D0), X9, offsetof(Loop, low));
+            load64(e, X10, X16, offsetof(Event, locals));
+            add_imm(e, X10, X10, (uint32_t)(l->slot * sizeof(PureValue)));
+            store64(e, X10, X9, offsetof(Loop, slot));
+        }
+    }
+    const LoopAt *inner = &k->loops[t->loops[n].li];
+    mov_w(e, X10, inner->end);
+    store_w(e, X10, X19, offsetof(Frame, end));
+    mov_w(e, X10, (uint32_t)depth);
+    store_w(e, X10, X19, offsetof(Frame, depth));
+}
+
+/* Where snapshot s gives up: what changed written back, the stack and the
+ * loops as the executor keeps them at its instruction, the rest of the
+ * round the executor's, the generic code going on. */
+static void tier_stub(Tier *t, int s) {
+    Block *k = t->k;
+    Emit *e = k->e;
+    const TSnap *snap = &t->snaps[s];
+    const LoopAt *l0 = &k->loops[t->nest];
+    bind(e, snap->label);
+    tier_write(t, snap->vars);
+    tbase(t, B_STACK, X17);
+    for (unsigned h = l0->base; h < snap->height; ++h) {
+        int v = snap->vars[V_STACK + h];
+        if (v < 0 || t->vals[v].reg < 0) continue;
+        store_d(e, td(t, v, D0), X17, AT(h));
+        if (t->vals[v].kind == K_INDEX) {
+            mov_w(e, X9, (uint32_t)t->vals[v].list & 0xFFFF);
+            store_h(e, X9, X17, AT(h) + OWNER);
+        }
+    }
+    tier_records(t, snap->loop);
+    tier_fixed(t);
+    set_sp(k, snap->height);
+    mov_reg(e, X0, X19);
+    mov_w(e, X1, snap->pc);
+    call(e, (uintptr_t)pure_run_rest);
+    const LoopAt *l = &k->loops[t->loops[snap->loop].li];
+    int left = new_label(e);
+    k->fresh = 0;
+    cbnz_w(e, X0, left);
+    refresh(k, kept_at(k, t->loops[snap->loop].li)); /* the round ran: the generic code's iteration */
+    b(e, l->again[0]);
+    bind(e, left);
+    k->fresh = 0;
+    cmp_w_imm(e, X0, STEP_SKIP);
+    b_cond(e, NE, k->exit);
+    refresh(k, kept_at(k, l->parent)); /* it left the loop */
+    b(e, l->after[0]);
+}
+
+/* A value's code. */
+static void tier_value(Tier *t, int vi) {
+    Block *k = t->k;
+    Emit *e = k->e;
+    TVal *v = &t->vals[vi];
+    const PureModule *m = k->m;
+    unsigned r = v->reg >= 0 ? (unsigned)v->reg : X16;
+    int fail = v->snap >= 0 ? tfail(t, v->snap) : -1;
+    const TVal *a = v->a >= 0 ? &t->vals[v->a] : NULL, *b2 = v->b >= 0 ? &t->vals[v->b] : NULL;
+    bool ints = a && b2 && a->rep != R_NUM && b2->rep != R_NUM;
+    switch (v->op) {
+    case T_CONST:
+        if (v->rep == R_INT) mov_imm(e, r, (uint64_t)(int64_t)v->num);
+        else if (v->rep == R_BOOL) mov_w(e, r, v->num != 0);
+        else {
+            uint64_t bits;
+            memcpy(&bits, &v->num, sizeof(bits));
+            mov_imm(e, X16, bits);
+            fp2(e, FMOV_DX, r, X16);
+        }
+        return;
+    case T_IN: {
+        const LoopAt *l0 = &k->loops[t->nest];
+        size_t off = loop_offset(l0);
+        if (v->var == T_LIST) { /* a list's part */
+            tbase(t, B_LISTS, X17);
+            load64(e, X16, X17, (size_t)v->list * sizeof(PureList *));
+            if (v->field < 16) { /* a column, its address tagged with its cells' width */
+                load64(e, r, X16, pure_list_layout[LIST_COLUMNS_AT] + v->field * sizeof(void *));
+                load8(e, X9, X16, pure_list_layout[LIST_WIDTH_AT] + v->field);
+                orr_lsl(e, r, r, X9, 56);
+            } else if (v->field == L_COUNT) load64(e, r, X16, pure_list_layout[LIST_COUNT_AT]);
+            else if (v->field == L_BITS) { /* bit 0 set: every key below the count there (as pure_list_suits found it), no bit to test */
+                load64(e, r, X16, pure_list_layout[LIST_MEMBERS_AT]);
+                load8(e, X17, X16, pure_list_layout[LIST_FULL_AT]);
+                orr_reg(e, r, r, X17);
+            } else { /* the keys the bits reach: none without bits; a full list's, its count */
+                load64(e, r, X16, pure_list_layout[LIST_MEMBER_CAPACITY_AT]);
+                lsl_imm(e, r, r, 6);
+                load8(e, X17, X16, pure_list_layout[LIST_BITMAP_AT]);
+                cmp_w_imm(e, X17, 0);
+                csel(e, r, r, XZR, NE);
+                load8(e, X9, X16, pure_list_layout[LIST_FULL_AT]);
+                load64(e, X17, X16, pure_list_layout[LIST_COUNT_AT]);
+                cmp_w_imm(e, X9, 0);
+                csel(e, r, X17, r, NE);
+            }
+            return;
+        }
+        if (v->var == V_ROUND0) {
+            tbase(t, B_LOOPS, X17);
+            load64(e, r, X17, off + (k->loops[t->nest].walk ? offsetof(Loop, walk) + offsetof(Walk, at) : offsetof(Loop, k)));
+            return;
+        }
+        if (v->var == V_COUNT0) {
+            tbase(t, B_LOOPS, X17);
+            if (!l0->walk) {
+                load64(e, r, X17, off + offsetof(Loop, count));
+                return;
+            }
+            load64(e, r, X17, off + offsetof(Loop, walk) + offsetof(Walk, end));
+            tbase(t, B_LISTS, X17);
+            load64(e, X16, X17, (size_t)l0->list * sizeof(PureList *));
+            load64(e, X17, X16, pure_list_layout[LIST_COUNT_AT]);
+            cmp_reg(e, r, X17);
+            csel(e, r, r, X17, LO);
+            return;
+        }
+        size_t at = v->var == V_LOW0 ? off + offsetof(Loop, low) : 0;
+        unsigned base = tbase(t, v->var == V_LOW0 ? B_LOOPS : v->var < V_STATE ? B_LOCALS : B_VALUES, X17);
+        if (v->var != V_LOW0) at = (size_t)(v->var < V_STATE ? v->var : v->var - V_STATE) * sizeof(PureValue);
+        if (v->rep == R_NUM) {
+            load_d(e, r, base, at);
+            return;
+        }
+        load_d(e, D0, base, at);
+        if (v->rep == R_BOOL) {
+            fcmp_zero(e, D0);
+            cset(e, r, NE);
+            return;
+        }
+        fp2(e, FCVTZS_X, r, D0); /* whole where the tier begins (checked there) */
+        return;
+    }
+    case T_FIELD: {
+        const PureField *f = &m->field[m->input[t->input].field_start + v->field];
+        tbase(t, B_APP, X16);
+        load64(e, X16, X16, offsetof(PureApp, payload) + offsetof(PureSpan, data));
+        if (f->offset) {
+            mov_imm(e, X17, f->offset);
+            add_reg(e, X16, X16, X17);
+        }
+        if (f->type == PURE_FIELD_U32) put(e, 0xB9400000 | X16 << 5 | r); /* LDR Wr, [x16] */
+        else if (f->type == PURE_FIELD_BOOL) load8(e, r, X16, 0);
+        else put(e, 0xFD400000 | X16 << 5 | r); /* LDR Dr, [x16] */
+        return;
+    }
+    case T_COUNT: mov_reg(e, r, treg(t, v->b)); return;
+    case T_SPAN: { /* a count's rounds: its bounds whole within 2^53, else LIMIT */
+        unsigned low = tx(t, v->a, X0, fail), high = tx(t, v->b, X1, fail);
+        if (a->rep == R_NUM) tsmall_check(t, low, fail);
+        if (b2->rep == R_NUM) tsmall_check(t, high, fail);
+        sub_reg(e, X16, high, low);
+        cmp_reg(e, high, low);
+        csel(e, r, X16, XZR, GT);
+        return;
+    }
+    case T_ADD: case T_SUB: case T_MUL: case T_MIN: case T_MAX:
+        if (v->rep == R_INT) {
+            unsigned x = tx(t, v->a, X0, fail), y = tx(t, v->b, X1, fail);
+            bool check = fail >= 0 && !(tsmall(a->lo, a->hi) && tsmall(b2->lo, b2->hi) &&
+                                          (v->op == T_MUL ? tsmall(fmin(fmin(a->lo * b2->lo, a->lo * b2->hi), fmin(a->hi * b2->lo, a->hi * b2->hi)),
+                                                                   fmax(fmax(a->lo * b2->lo, a->lo * b2->hi), fmax(a->hi * b2->lo, a->hi * b2->hi)))
+                                                           : v->op == T_ADD ? tsmall(a->lo + b2->lo, a->hi + b2->hi)
+                                                           : v->op == T_SUB ? tsmall(a->lo - b2->hi, a->hi - b2->lo) : true));
+            bool from0 = a->lo >= 0 && b2->lo >= 0;
+            unsigned to = check && (r == x || r == y) ? X16 : r; /* r an operand's: where it gives up the operands stay as they were */
+            if (v->op == T_ADD) add_reg(e, to, x, y);
+            else if (v->op == T_SUB) sub_reg(e, to, x, y);
+            else if (v->op == T_MUL) {
+                double most = fmax(fabs(a->lo), fabs(a->hi)) * fmax(fabs(b2->lo), fabs(b2->hi));
+                mul_reg(e, to, x, y);
+                if (check && most >= (from0 ? 0x1p64 : 0x1p63)) { /* past 64 bits: the high half */
+                    if (from0) {
+                        put(e, 0x9BC07C00 | y << 16 | x << 5 | X17); /* UMULH */
+                        cbnz_x(e, X17, fail);
+                    } else {
+                        smulh(e, X17, x, y);
+                        cmp_asr(e, X17, to, 63);
+                        b_cond(e, NE, fail);
+                    }
+                }
+                if (v->negzero) { /* 0 of a number below 0: -0, not an integer */
+                    int nonzero = new_label(e);
+                    cbnz_x(e, to, nonzero);
+                    orr_reg(e, X17, x, y);
+                    tbnz(e, X17, 63, fail);
+                    bind(e, nonzero);
+                }
+            } else {
+                cmp_reg(e, x, y);
+                csel(e, to, x, y, v->op == T_MIN ? LT : GT);
+            }
+            if (check) {
+                if (from0 && v->op != T_SUB) tsmall_from_0(t, to, fail);
+                else tsmall_check(t, to, fail);
+                if (to != r) mov_reg(e, r, to);
+            }
+            return;
+        }
+        {
+            unsigned x = td(t, v->a, D0), y = td(t, v->b, D1);
+            uint32_t fop = v->op == T_ADD ? FADD : v->op == T_SUB ? FSUB : v->op == T_MUL ? FMUL : v->op == T_MIN ? FMIN : FMAX;
+            fp3(e, fop, r, x, y);
+            if (fail >= 0 && (v->op == T_ADD || v->op == T_SUB || v->op == T_MUL) && !tfinite(v)) tfinite_check(t, r, fail);
+            return;
+        }
+    case T_DIV:
+        if (v->integers) { /* whole a from 0 over whole b above 0: the quotient's floor */
+            put(e, 0x9AC00800 | treg(t, v->b) << 16 | treg(t, v->a) << 5 | r); /* UDIV */
+            return;
+        }
+        {
+            unsigned x = td(t, v->a, D0), y = td(t, v->b, D1);
+            if (!(b2->lo > 0 || b2->hi < 0)) {
+                fcmp_zero(e, y);
+                b_cond(e, EQ, fail);
+            }
+            fp3(e, FDIV, r, x, y);
+            if (!tfinite(v)) tfinite_check(t, r, fail);
+            return;
+        }
+    case T_NEG:
+        if (v->rep == R_INT) sub_reg(e, r, XZR, treg(t, v->a));
+        else fp2(e, FNEG, r, td(t, v->a, D0));
+        return;
+    case T_FLOOR:
+        if (a->rep != R_NUM) {
+            if (r != treg(t, v->a)) mov_reg(e, r, treg(t, v->a));
+            return;
+        }
+        if (v->rep == R_INT) {
+            fp2(e, FRINTM, D0, treg(t, v->a));
+            fp2(e, FCVTZS_X, r, D0);
+        } else
+            fp2(e, FRINTM, r, treg(t, v->a));
+        return;
+    case T_LT: case T_LE: case T_GT: case T_GE: case T_EQ: case T_NE: {
+        unsigned cond;
+        if (ints) {
+            cmp_reg(e, treg(t, v->a), treg(t, v->b));
+            cond = v->op == T_LT ? LT : v->op == T_LE ? LE : v->op == T_GT ? GT : v->op == T_GE ? GE : v->op == T_EQ ? EQ : NE;
+        } else {
+            fcmp(e, td(t, v->a, D0), td(t, v->b, D1));
+            cond = v->op == T_LT ? MI : v->op == T_LE ? LS : v->op == T_GT ? GT : v->op == T_GE ? GE : v->op == T_EQ ? EQ : NE;
+        }
+        cset(e, r, cond);
+        return;
+    }
+    case T_NOT: eor_w_one(e, r, treg(t, v->a)); return;
+    case T_AND: and_w(e, r, treg(t, v->a), treg(t, v->b)); return;
+    case T_OR: orr_w(e, r, treg(t, v->a), treg(t, v->b)); return;
+    case T_MOVE: { /* within its list: from 0 to its last item */
+        unsigned at = treg(t, v->a), by = tx(t, v->b, X1, fail), count = treg(t, v->c);
+        add_reg(e, X16, at, by);
+        sub_imm(e, X17, count, 1);
+        cmp_imm(e, count, 0);
+        csel(e, X17, XZR, X17, EQ);
+        cmp_reg(e, X16, X17);
+        csel(e, X16, X16, X17, LT);
+        cmp_imm(e, X16, 0);
+        csel(e, r, X16, XZR, GT);
+        return;
+    }
+    case T_GET: { /* by position: below the count (a walk's own place is), its cell (one or four bytes) */
+        unsigned at = tx(t, v->a, X0, fail), column = treg(t, v->c);
+        bool walked = false;
+        for (unsigned l = 0; l < t->loop_count; ++l) walked = walked || (t->loops[l].walk && t->loops[l].k == v->a && t->loops[l].list == v->list);
+        if (!walked && t->vals[v->a].op != T_FIND) {
+            cmp_reg(e, at, treg(t, v->b));
+            b_cond(e, HS, fail);
+        }
+        int one = new_label(e), done = new_label(e);
+        tbz(e, column, 58, one);
+        load32_index(e, r, column, at);
+        b(e, done);
+        bind(e, one);
+        load8_index(e, r, column, at);
+        bind(e, done);
+        return;
+    }
+    case T_FIND_GET: case T_FIND: case T_HAS: { /* by key: in the bits (below their reach), its cell at its key */
+        unsigned key = tx(t, v->a, X0, fail), bits = treg(t, v->b);
+        unsigned limit = treg(t, v->op == T_FIND_GET ? v->d : v->c);
+        if (v->op == T_HAS) {
+            int no = new_label(e), done = new_label(e), bit = new_label(e);
+            cmp_reg(e, key, limit);
+            b_cond(e, HS, no);
+            tbz(e, bits, 0, bit);
+            mov_w(e, r, 1); /* full: there */
+            b(e, done);
+            bind(e, bit);
+            lsr_imm(e, X16, key, 6);
+            load64_index(e, X16, bits, X16);
+            lsr_reg(e, X16, X16, key);
+            and_w_one(e, r, X16);
+            b(e, done);
+            bind(e, no);
+            mov_w(e, r, 0);
+            bind(e, done);
+            return;
+        }
+        cmp_reg(e, key, limit);
+        b_cond(e, HS, fail);
+        int there = new_label(e);
+        tbnz(e, bits, 0, there); /* full: every key below its count there */
+        lsr_imm(e, X16, key, 6);
+        load64_index(e, X16, bits, X16);
+        lsr_reg(e, X16, X16, key);
+        tbz(e, X16, 0, fail);
+        bind(e, there);
+        if (v->op == T_FIND) { /* a full list's position: its key */
+            if (r != key) mov_reg(e, r, key);
+            return;
+        }
+        unsigned column = treg(t, v->c);
+        int one = new_label(e), done = new_label(e);
+        tbz(e, column, 58, one);
+        load32_index(e, r, column, key);
+        b(e, done);
+        bind(e, one);
+        load8_index(e, r, column, key);
+        bind(e, done);
+        return;
+    }
+    case T_SET: { /* by position (below the count; a position found is), a whole number fitting its column's cells */
+        unsigned at = tx(t, v->a, X0, fail), value = tx(t, v->b, X1, fail), column = treg(t, v->c);
+        if (t->vals[v->a].op != T_FIND) {
+            cmp_reg(e, at, treg(t, v->d));
+            b_cond(e, HS, fail);
+        }
+        int one = new_label(e), done = new_label(e);
+        tbz(e, column, 58, one);
+        lsr_imm(e, X16, value, 32);
+        cbnz_x(e, X16, fail);
+        store32_index(e, value, column, at);
+        b(e, done);
+        bind(e, one);
+        cmp_imm(e, value, 256);
+        b_cond(e, HS, fail);
+        store8_index(e, value, column, at);
+        bind(e, done);
+        return;
+    }
+    default: e->failed = true; return;
+    }
+}
+
+/* The tier's code for the nest: its entry (each list as it assumes, each
+ * variable it takes as whole a whole number; else the generic code runs the
+ * round), its values and items, where it gives up. */
+static void tier_emit(Tier *t, int entry, int fallback) {
+    Block *k = t->k;
+    Emit *e = k->e;
+    const LoopAt *l0 = &k->loops[t->nest];
+    bind(e, entry);
+    for (unsigned list = 0; list < PURE_MODULE_STATES; ++list) { /* each list as the tier reads it (pure_list_suits) */
+        const TList *l = &t->lists[list];
+        unsigned needs = 0, narrow = 0;
+        for (unsigned f = 0; f < 16; ++f) narrow |= l->part[f] >= 0 ? 1u << f : 0;
+        bool found = false;
+        for (size_t i = 0; i < t->val_count; ++i) found = found || (t->vals[i].op == T_FIND && t->vals[i].list == list);
+        if (l->key) needs |= NEEDS_KEY;
+        if (l->position) needs |= NEEDS_POSITION;
+        if ((l->key && l->position) || found) needs |= NEEDS_FULL;
+        if (!needs && !narrow) continue;
+        load64(e, X0, X24, list * sizeof(PureList *));
+        mov_w(e, X1, needs);
+        mov_w(e, X2, narrow);
+        call(e, (uintptr_t)pure_list_suits);
+        cbz_w(e, X0, fallback);
+    }
+    for (size_t i = 0; i < t->entry_count; ++i) { /* what it reads where it begins */
+        int v = t->entry[i];
+        TVal *x = &t->vals[v];
+        if (x->reg < 0) continue;
+        if (x->op == T_IN && x->var == V_LOW0) { /* the outermost count's low: from 0 */
+            tier_value(t, v);
+            tbnz(e, (unsigned)x->reg, 63, fallback);
+            continue;
+        }
+        if (x->op == T_IN && (x->var == V_COUNT0 || x->var == V_ROUND0)) { /* its rounds below 2^32 */
+            tier_value(t, v);
+            lsr_imm(e, X16, (unsigned)x->reg, 32);
+            cbnz_x(e, X16, fallback);
+            continue;
+        }
+        if (x->op == T_IN && x->var >= 0 && x->var < V_STACK && x->rep == R_INT && x->kind != K_INDEX) { /* taken as whole: checked */
+            size_t at = (size_t)(x->var < V_STATE ? x->var : x->var - V_STATE) * sizeof(PureValue);
+            load_d(e, D0, tbase(t, x->var < V_STATE ? B_LOCALS : B_VALUES, X17), at);
+            fp2(e, FCVTZS_X, (unsigned)x->reg, D0);
+            fp2(e, SCVTF_X, D1, (unsigned)x->reg);
+            fcmp(e, D0, D1);
+            b_cond(e, NE, fallback);
+            fp2(e, FMOV_XD, X17, D0);
+            mov_imm(e, X9, UINT64_C(0x8000000000000000));
+            cmp_reg(e, X17, X9);
+            b_cond(e, EQ, fallback);
+            tsmall_check(t, (unsigned)x->reg, fallback);
+            continue;
+        }
+        tier_value(t, v);
+    }
+    int budgeted = new_label(e); /* the work it may still do */
+    tbase(t, B_APP, X17);
+    load64(e, TIER_WORK, X17, offsetof(PureApp, work_budget));
+    cbnz_x(e, TIER_WORK, budgeted);
+    mov_imm(e, TIER_WORK, PURE_WORK_DEFAULT);
+    bind(e, budgeted);
+    load64(e, X9, X17, offsetof(PureApp, work));
+    sub_reg(e, TIER_WORK, TIER_WORK, X9);
+    for (size_t i = 0; i < t->item_count && !e->failed; ++i) {
+        const TItem *it = &t->items[i];
+        switch (it->kind) {
+        case I_VALUE:
+            if (t->vals[it->value].reg >= 0 || t->vals[it->value].op == T_SET) tier_value(t, it->value);
+            break;
+        case I_MERGE: bind(e, t->merges[it->merge].label); break;
+        case I_JUMP:
+            tier_moves(t, it->merge, it->way);
+            if (!(i + 1 < t->item_count && t->items[i + 1].kind == I_MERGE && t->items[i + 1].merge == it->merge))
+                b(e, t->merges[it->merge].label);
+            break;
+        case I_UNLESS: { /* its bool 0: to the merge */
+            int go_on = new_label(e);
+            cbnz_w(e, treg(t, it->value), go_on);
+            tier_moves(t, it->merge, it->way);
+            b(e, t->merges[it->merge].label);
+            bind(e, go_on);
+            break;
+        }
+        case I_OPEN: { /* none to run: past it; else its work */
+            const TLoop *l = &t->loops[it->loop];
+            unsigned count = treg(t, l->count);
+            int go_on = new_label(e), fail = tfail(t, it->snap);
+            if (l->walk) { /* its block's length times its items, at once (none: none) */
+                mov_imm(e, X16, l->length);
+                mul_reg(e, X16, X16, count);
+                cmp_reg(e, TIER_WORK, X16);
+                b_cond(e, LO, fail);
+                sub_reg(e, TIER_WORK, TIER_WORK, X16);
+            }
+            cbnz_x(e, count, go_on);
+            tier_moves(t, it->merge, it->way);
+            b(e, t->merges[it->merge].label);
+            bind(e, go_on);
+            if (!l->walk) { /* a count's first round */
+                mov_imm(e, X16, (uint64_t)l->length + 1);
+                cmp_reg(e, TIER_WORK, X16);
+                b_cond(e, LO, fail);
+                sub_reg(e, TIER_WORK, TIER_WORK, X16);
+            }
+            break;
+        }
+        case I_LATCH: { /* again while below its rounds (a count's work each), else past it */
+            const TLoop *l = &t->loops[it->loop];
+            int out = new_label(e);
+            cmp_reg(e, treg(t, it->value), treg(t, l->count));
+            b_cond(e, HS, out);
+            if (!l->walk && l->length + 1 < 4096) {
+                cmp_imm(e, TIER_WORK, l->length + 1);
+                b_cond(e, LO, tfail(t, it->snap));
+                sub_imm(e, TIER_WORK, TIER_WORK, l->length + 1);
+            } else if (!l->walk) {
+                mov_imm(e, X16, (uint64_t)l->length + 1);
+                cmp_reg(e, TIER_WORK, X16);
+                b_cond(e, LO, tfail(t, it->snap));
+                sub_reg(e, TIER_WORK, TIER_WORK, X16);
+            }
+            tier_moves(t, l->head, (int)t->merges[l->head].way_count - 1);
+            b(e, t->merges[l->head].label);
+            bind(e, out);
+            tier_moves(t, l->exit, it->way);
+            break;
+        }
+        case I_BREAK: { /* the outermost loop's: what changed written, the generic code breaks it */
+            const TSnap *snap = &t->snaps[it->snap];
+            tier_write(t, snap->vars);
+            tier_records(t, 0);
+            tier_fixed(t);
+            mov_reg(e, X0, X19);
+            call(e, (uintptr_t)pure_run_break);
+            k->fresh = 0;
+            refresh(k, kept_at(k, l0->parent));
+            b(e, l0->after[0]);
+            break;
+        }
+        case I_DONE: { /* the outermost loop ran out: its round the last, the generic code's iteration closes it */
+            const TSnap *snap = &t->snaps[it->snap];
+            tier_write(t, snap->vars);
+            unsigned last = treg(t, it->value);
+            sub_imm(e, X9, last, 1);
+            size_t off = loop_offset(l0);
+            tbase(t, B_LOOPS, X17);
+            tbase(t, B_EV, X16);
+            if (l0->walk) {
+                store64(e, X9, X17, off + offsetof(Loop, walk) + offsetof(Walk, at));
+                store64(e, X9, X16, offsetof(Event, row));
+            } else
+                store64(e, X9, X17, off + offsetof(Loop, k));
+            tier_fixed(t);
+            k->fresh = 0;
+            refresh(k, kept_at(k, t->nest));
+            b(e, l0->again[0]);
+            break;
+        }
+        default: break;
+        }
+    }
+    for (size_t s = 0; s < t->snap_count; ++s)
+        if (t->snaps[s].needed) tier_stub(t, (int)s);
+}
+
+static void tier_free(Tier *t) {
+    for (size_t i = 0; i < t->val_count; ++i) free(t->vals[i].in);
+    for (size_t i = 0; i < t->snap_count; ++i) free(t->snaps[i].vars);
+    for (size_t i = 0; i < t->merge_count; ++i) {
+        for (unsigned w = 0; w < t->merges[i].way_count; ++w) free(t->merges[i].ways[w]);
+        free(t->merges[i].ways);
+        free(t->merges[i].phis);
+    }
+    free(t->vals), free(t->snaps), free(t->merges), free(t->items), free(t->merge_at), free(t->entry), free(t->lists), free(t->live_in);
+}
+
+/* The handler's message input the block is, or -1. */
+static int tier_input(const PureModule *m, PureBlock block) {
+    for (uint32_t i = 0; i < m->handlers; ++i)
+        if (m->handler[i].code.start == block.start && m->handler[i].code.length == block.length && m->handler[i].event) {
+            int input = (int)((m->handler[i].event - 1) / 2);
+            return m->input[input].kind == PURE_KIND_MESSAGE ? input : -1;
+        }
+    return -1;
+}
+
+/* The tier's values and items on stderr (PURE_TIER_DUMP), to read what it made. */
+static void tier_dump(const Tier *t) {
+    static const char *ops[] = {"const", "in", "field", "phi", "count", "add", "sub", "mul", "div", "min", "max", "neg", "floor",
+                                "lt", "le", "gt", "ge", "eq", "ne", "not", "and", "or", "get", "find_get", "find", "has", "set", "move", "span"};
+    static const char *items[] = {"value", "merge", "unless", "jump", "open", "latch", "break", "done"};
+    for (size_t i = 0; i < t->val_count; ++i) {
+        const TVal *v = &t->vals[i];
+        fprintf(stderr, "v%zu %s rep=%d a=%d b=%d c=%d d=%d var=%d loop=%d snap=%d [%g,%g] whole=%d reg=%d at=%d last=%d", i, ops[v->op],
+                v->rep, v->a, v->b, v->c, v->d, v->var, v->loop, v->snap, v->lo, v->hi, v->whole, v->reg, v->at, v->last);
+        if (v->op == T_CONST) fprintf(stderr, " =%g", v->num);
+        if (v->op == T_PHI) {
+            fprintf(stderr, " in:");
+            for (unsigned w = 0; w < v->ins; ++w) fprintf(stderr, " v%d", v->in[w]);
+        }
+        fprintf(stderr, "\n");
+    }
+    for (size_t i = 0; i < t->item_count; ++i)
+        fprintf(stderr, "i%zu %s value=%d merge=%d loop=%d way=%d snap=%d\n", i, items[t->items[i].kind], t->items[i].value,
+                t->items[i].merge, t->items[i].loop, t->items[i].way, t->items[i].snap);
+    for (size_t i = 0; i < t->snap_count; ++i) {
+        const TSnap *sn = &t->snaps[i];
+        fprintf(stderr, "s%zu pc=%u height=%u loop=%d:", i, sn->pc, sn->height, sn->loop);
+        for (int var = 0; var < VARS; ++var)
+            if (sn->vars[var] >= 0 && (var >= V_STACK || tchanged(t, var, sn->vars[var]))) fprintf(stderr, " %d=v%d", var, sn->vars[var]);
+        fprintf(stderr, "\n");
+    }
+}
+
+/* Whether the nest at li is the tier's: built, its facts, its registers. Its code goes after the block's (tier_finish). */
+static Tier *tier_plan(Block *k, unsigned li) {
+    Tier *t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    t->k = k, t->nest = (int)li, t->input = tier_input(k->m, k->block);
+    const LoopAt *l0 = &k->loops[li];
+    t->merge_at = malloc((l0->end - l0->start + 1) * sizeof(int));
+    if (!t->merge_at || !tier_nest(t, li)) {
+        tier_free(t);
+        free(t);
+        return NULL;
+    }
+    for (uint32_t i = 0; i <= l0->end - l0->start; ++i) t->merge_at[i] = -1;
+    for (unsigned l = 0; l < k->loop_count; ++l) /* its loops' slots */
+        if (!k->loops[l].walk && k->loops[l].at >= l0->at && k->loops[l].end <= l0->end) t->slots |= UINT64_C(1) << (k->m->code[k->loops[l].at].arg & 0x3F);
+    tier_liveness(t);
+    tier_build(t);
+    if (!t->failed && !(t->lists = calloc(PURE_MODULE_STATES, sizeof(*t->lists)))) t->failed = true;
+    if (!t->failed) tier_lists(t, t->lists);
+    const char *hoist = getenv("PURE_TIER_HOIST");
+    if (!t->failed && !(hoist && !strcmp(hoist, "0"))) tier_hoist(t);
+    if (!t->failed) tier_reps(t);
+    if (t->failed || !tier_registers(t)) {
+        if (getenv("PURE_TIER_DUMP")) {
+            fprintf(stderr, "tier: nest %u not taken (%s)\n", li, t->why ? t->why : "built");
+            if (!t->failed) tier_dump(t);
+        }
+        tier_free(t);
+        free(t);
+        return NULL;
+    }
+    if (getenv("PURE_TIER_DUMP")) tier_dump(t);
+    return t;
+}
+
 /* The block's code into e (leaving the stack end_height high), its start's word in *entry. */
 static bool compile_block(const PureModule *m, PureBlock block, unsigned end_height, Emit *e, size_t *entry) {
     Block *k = calloc(1, sizeof(*k));
@@ -2872,6 +4995,11 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
     k->m = m, k->block = block, k->e = e;
     for (unsigned h = 0; h <= PURE_MODULE_STACK; ++h) k->vs[h] = MEMORY;
     bool ok = shape_block(k);
+    Tier *tiers[64];
+    unsigned tier_count = 0;
+    for (unsigned li = 0; ok && li < k->loop_count && tier_count < 64; ++li) /* the nests the tier runs (docs/design/023) */
+        if (k->loops[li].parent < 0 && k->loops[li].start < k->loops[li].end && (tiers[tier_count] = tier_plan(k, li)))
+            k->loops[li].tier = new_label(e), ++tier_count;
     if (ok) {
         *entry = e->count;
         stp(e, X29, X30, -112, true);
@@ -2920,7 +5048,19 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
         ldp(e, X29, X30, 112, true);
         put(e, 0xD65F03C0);         /* RET */
         for (unsigned li = 0; li < k->loop_count; ++li) /* each nest's integers' code */
-            if (k->loops[li].parent < 0 && k->loops[li].start < k->loops[li].end) compile_ints(k, li);
+            if (k->loops[li].parent < 0 && k->loops[li].start < k->loops[li].end && k->loops[li].tier < 0) compile_ints(k, li);
+        for (unsigned i = 0; i < tier_count; ++i) { /* each tier's: where it does not hold, the generic code's round */
+            Tier *t = tiers[i];
+            const LoopAt *l = &k->loops[t->nest];
+            int fallback = new_label(e);
+            k->copy = 0;
+            tier_emit(t, l->tier, fallback);
+            bind(e, fallback);
+            tier_fixed(t);
+            k->fresh = 0;
+            refresh(k, kept_at(k, t->nest));
+            b(e, k->labels[0][l->start - k->block.start]);
+        }
         fault_stubs(k);
         slow_stubs(k);
         wide_stubs(k);
@@ -2928,6 +5068,7 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
         deopt_stubs(k);
     }
     ok = ok && !e->failed;
+    for (unsigned i = 0; i < tier_count; ++i) tier_free(tiers[i]), free(tiers[i]);
     free(k->height);
     free(k->loop_of);
     free(k->labels[0]);
@@ -2974,18 +5115,20 @@ static bool in_code(const PureModule *m, const PureOp *op) {
  * the checks). */
 static bool worth(const PureModule *m, PureBlock block) {
     const char *all = getenv("PURE_JIT");
-    bool loops = false, steps = false;
+    bool loops = false, steps = false, tier = false;
     uint32_t end = 0;
+    int input = tier_input(m, block);
     for (uint32_t pc = block.start; pc < block.start + block.length; pc = after(&m->code[pc], pc)) {
         const PureOp *op = &m->code[pc];
         if (op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP) {
             loops = true;
             uint32_t ends = pc + 1 + (op->arg >> 16);
+            if (pc >= end && tier_supports(m, input, pc, ends, NULL)) tier = true; /* an outermost loop the tier runs (docs/design/023) */
             if (ends > end) end = ends;
         } else if (pc < end && !in_code(m, op))
             steps = true;
     }
-    return loops && (!steps || (all && !strcmp(all, "all")));
+    return loops && (!steps || tier || (all && !strcmp(all, "all")));
 }
 
 /* A block to make (one worth it), leaving leaves values on the stack. */

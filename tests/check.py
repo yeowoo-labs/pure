@@ -1110,6 +1110,129 @@ def module_assumptions(aup, pure, work):
     return len(runs)
 
 
+def tier_program(rng):
+    """A random handler for module_tier: loops over counts and a list,
+    numbers in locals and states, a keyed list read and set by key, ifs and
+    breaks, with what fails (a key not there, not whole, 0 divided by, a
+    cell past its column's width) as likely as not."""
+    names = iter('jklpqrxyz')
+    def number(depth, loops):
+        choices = ['const', 'const', 'loop', 'local', 'field']
+        if depth < 3:
+            choices += ['add', 'sub', 'mul', 'div', 'floor', 'minmax', 'cell', 'add', 'sub']
+        kind = rng.choice(choices)
+        if kind == 'const':
+            return rng.choice(['0', '1', '2', '3', '7', '255', '256', '1000', '0.5', '2.25', '(0 - 3)', '(0 - 0)', '65536'])
+        if kind == 'loop' and loops:
+            return rng.choice(loops)
+        if kind == 'field':
+            return rng.choice(['go.n', 'go.m', 'go.q'])
+        if kind in ('loop', 'local'):
+            return rng.choice(['s', 'u'])
+        if kind == 'cell':
+            return f't[{key(depth + 1, loops)}].v' if rng.random() < 0.7 else 'c.v' if 'c' in loops else 's'
+        if kind == 'floor':
+            return f'floor({number(depth + 1, loops)} / {rng.choice(["2", "3", "7", "go.q", "u"])})'
+        if kind == 'minmax':
+            return f'{rng.choice(["min", "max"])}({number(depth + 1, loops)}, {number(depth + 1, loops)})'
+        op = {'add': '+', 'sub': '-', 'mul': '*', 'div': '/'}[kind]
+        return f'({number(depth + 1, loops)} {op} {number(depth + 1, loops)})'
+    def key(depth, loops):
+        return rng.choice([rng.choice(loops) if loops else '0', number(depth + 1, loops), 'go.q', '3',
+                           f'floor({number(depth + 1, loops)} / 2)'])
+    def cond(depth, loops):
+        kind = rng.choice(['cmp', 'cmp', 'has', 'not', 'and'] if depth < 2 else ['cmp', 'has'])
+        if kind == 'cmp':
+            return f'{number(depth + 1, loops)} {rng.choice(["<", "<=", ">", ">=", "==", "!="])} {number(depth + 1, loops)}'
+        if kind == 'has':
+            return f't.has({key(depth + 1, loops)})'
+        if kind == 'not':
+            return f'!({cond(depth + 1, loops)})'
+        return f'({cond(depth + 1, loops)}) && ({cond(depth + 1, loops)})'
+    def statements(depth, loops, indent, inside):
+        lines = []
+        for _ in range(rng.randint(1, 3)):
+            kind = rng.choice(['s', 's', 'u', 'acc', 'if', 'loop', 'walk', 'set', 'set', 'break'] if depth < 3 else ['s', 'u', 'set', 'break'])
+            pad = '  ' * indent
+            if kind == 's':
+                lines.append(f'{pad}s = s + {number(1, loops)}')
+            elif kind == 'u':
+                lines.append(f'{pad}u = {number(1, loops)}')
+            elif kind == 'acc':
+                lines.append(f'{pad}acc = acc + {number(2, loops)}')
+            elif kind == 'set':
+                lines.append(f'{pad}t[{key(1, loops)}].v = {number(1, loops)}')
+            elif kind == 'break' and inside:
+                lines.append(f'{pad}if {cond(1, loops)} {{ break }}')
+            elif kind == 'if':
+                lines.append(f'{pad}if {cond(1, loops)} {{')
+                lines += statements(depth + 1, loops, indent + 1, inside)
+                if rng.random() < 0.5:
+                    lines.append(f'{pad}}} else {{')
+                    lines += statements(depth + 1, loops, indent + 1, inside)
+                lines.append(f'{pad}}}')
+            elif kind == 'loop':
+                name = next(names, None)
+                if not name:
+                    continue
+                lines.append(f'{pad}for {name} in {rng.choice(["0", "1", "go.q"])} .. {rng.choice(["3", "go.n", "go.m", name if False else "5"])} {{')
+                lines += statements(depth + 1, loops + [name], indent + 1, True)
+                lines.append(f'{pad}}}')
+            elif kind == 'walk' and 'c' not in loops:
+                lines.append(f'{pad}for c in f {{')
+                lines += statements(depth + 1, loops + ['c'], indent + 1, True)
+                lines.append(f'{pad}}}')
+        return lines
+    body = statements(0, ['i'], 2, True)
+    return '\n'.join([
+        'record Cell {', '  at = 0', '  v = 0', '}', 'state out = 0', 'state acc = 0',
+        'input go = message {', '  n: u32', '  m: u32', '  q: u32', '}',
+        'on go {', '  let t: list of Cell by at', '  let f: list of Cell',
+        '  for i in 0 .. go.n {', f'    t.add(Cell {{ at: i, v: {rng.choice(["i", "0", "(i * 3)", "1"])} }})',
+        '    f.append(Cell { at: i * 2, v: i })', '  }',
+        '  let s = 0', '  let u = 1',
+        '  for i in 0 .. go.m {', *body, '  }',
+        '  out = s', '  acc = acc + u', '}', ''])
+
+
+def module_tier(aup, pure, work, programs=150):
+    """The tier (Pure docs/design/023) against the executor: random handlers
+    (tier_program) whose loops the tier runs where it can, each run on a few
+    messages by the executor alone (PURE_JIT=0), with the compiled code
+    (PURE_JIT=1, all) and without the tier (PURE_TIER=0): the same states,
+    faults and errors, byte for byte. Their failures (keys not there, not
+    whole, 0 divided by, cells past their columns' widths, a list not yet
+    DENSE) are where the tier gives up to the executor."""
+    import os
+    import random
+    import struct
+    rng = random.Random(23)
+    runs = [(0, 0, 0), (5, 3, 1), (70, 40, 3), (130, 25, 2), (300, 7, 299), (70, 70, 64)]
+    commands = ''.join(f'message go {struct.pack("<III", n, m, q).hex()}\n' for n, m, q in runs)
+    checked = failed = 0
+    for i in range(programs):
+        source, module = work / f'tier-{i}.aup', work / f'tier-{i}.pmod'
+        source.write_text(tier_program(rng))
+        try:
+            compile_module(aup, source, module)
+        except subprocess.CalledProcessError:
+            continue  # not a program aup takes (its types): another
+        outputs = {}
+        for name, env in (('0', {'PURE_JIT': '0'}), ('1', {'PURE_JIT': '1'}), ('all', {'PURE_JIT': 'all'}),
+                          ('tierless', {'PURE_JIT': 'all', 'PURE_TIER': '0'})):
+            done = subprocess.run([str(pure / 'build/pure-run'), str(module)], input=commands, capture_output=True, text=True,
+                                  timeout=120, env=dict(os.environ, **env))
+            assert done.returncode in (0, 1), (i, name, done.stderr)
+            outputs[name] = done.stdout
+        for name in ('1', 'all', 'tierless'):
+            assert outputs[name] == outputs['0'], (i, name, source.read_text(),
+                                                   next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['0'].splitlines()) if a != b))
+        checked += 1
+        failed += sum(json.loads(line)['fault'] != 'none' for line in outputs['0'].splitlines() if line.startswith('{'))
+    assert checked >= programs // 2, checked
+    return {'programs': checked, 'failed_events': failed}
+
+
 def server_links_refused(aup, pure, work):
     """A link to an input the receiver's app does not have: the receiver
     says so (REFUSED), and the sender says it once on stderr, as a wire says
@@ -5169,6 +5292,7 @@ def main():
         work = Path(directory)
         report['module_ranges'] = module_ranges(aup, pure, work)
         report['module_assumptions'] = module_assumptions(aup, pure, work)
+        report['module_tier'] = module_tier(aup, pure, work)
         report['server_parity_requests'] = sum(server_parity(aup, pure, work, range(args.seeds), threads=threads)
                                                for threads in (1, 3))
         report['server_pipelined_answers'] = server_pipelining(aup, pure, work)

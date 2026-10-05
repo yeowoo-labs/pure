@@ -109,7 +109,7 @@ int pure_run_rest(Frame *, uint32_t pc);
  * each: 0 a DENSE list's key, 1, 4 or 8 a number's, more a text's). */
 enum {
     LIST_COUNT_AT, LIST_MEMBERS_AT, LIST_MEMBER_CAPACITY_AT, LIST_BITMAP_AT, LIST_FORM_AT, LIST_COLUMNS_AT, LIST_VERSION_AT,
-    LIST_ROOM_AT, LIST_MEMBER_COUNT_AT, LIST_BYTES_AT, LIST_PACK_AT, LIST_WIDTH_AT
+    LIST_ROOM_AT, LIST_MEMBER_COUNT_AT, LIST_BYTES_AT, LIST_PACK_AT, LIST_WIDTH_AT, LIST_FULL_AT
 };
 extern const size_t pure_list_layout[];
 /* A packed list's index (docs/design/022), where its keys are whole: the
