@@ -16,7 +16,8 @@
  *            order: the same numbers), a row of b a batch; axpy: that with
  *            the multiply and the add as one operation
  *   knapsack each item's rounds a batch, lanes of 8 bytes; u32: lanes of
- *            the column's 4 bytes, the add, max and store one operation
+ *            the column's 4 bytes, the add, max and store one operation;
+ *            u32_ops: those lanes, the operations apart (interpreted)
  *   roots    a batch of i, each lane's Newton rounds while it goes on
  * Built cc -O2 -std=c17 -I../040-against-c batch.c -lm (the batch operations
  * at -O3: their loops made vector), as join.c and bfs.c; their runs in
@@ -233,6 +234,55 @@ __attribute__((optimize("O3"))) static void u32_addk_max_store(uint32_t *restric
     *over |= o;
     if (!o) for (unsigned l = 0; l < n; ++l) to[l] = tmp[l];
 }
+/* The same as interpreted operations over lanes of four bytes (no operation fused): the store last, made only when no check failed */
+__attribute__((optimize("O3"))) static void u32_loads(uint32_t *restrict d, const uint32_t *restrict col, int64_t low, unsigned n) {
+    for (unsigned l = 0; l < n; ++l) d[l] = col[low + l];
+}
+__attribute__((optimize("O3"))) static void u32_addk(uint32_t *restrict d, const uint32_t *restrict a, uint32_t k, unsigned n, uint32_t *over) {
+    uint32_t o = 0;
+    for (unsigned l = 0; l < n; ++l) { uint32_t x = a[l] + k; o |= x < k; d[l] = x; }
+    *over |= o;
+}
+__attribute__((optimize("O3"))) static void u32_max(uint32_t *restrict d, const uint32_t *restrict a, const uint32_t *restrict b, unsigned n) {
+    for (unsigned l = 0; l < n; ++l) d[l] = a[l] > b[l] ? a[l] : b[l];
+}
+__attribute__((optimize("O3"))) static void u32_stores(uint32_t *restrict col, int64_t low, const uint32_t *restrict v, unsigned n) {
+    for (unsigned l = 0; l < n; ++l) col[low + l] = v[l];
+}
+enum { Q_LOADS, Q_ADDK, Q_MAX, Q_STORES };
+typedef struct { uint8_t op, d, a, b; uint32_t k; int64_t low; uint32_t *col; } QOp;
+static void run32(const QOp *prog, unsigned ops, uint32_t (*r)[B], unsigned n, uint32_t *over) {
+    for (unsigned p = 0; p < ops; ++p) {
+        const QOp *o = &prog[p];
+        switch (o->op) {
+        case Q_LOADS: u32_loads(r[o->d], o->col, o->low, n); break;
+        case Q_ADDK: u32_addk(r[o->d], r[o->a], o->k, n, over); break;
+        case Q_MAX: u32_max(r[o->d], r[o->a], r[o->b], n); break;
+        case Q_STORES: if (!*over) u32_stores(o->col, o->low, r[o->a], n); break;
+        }
+    }
+}
+static double knapsack_u32_ops(uint32_t n, uint32_t capacity, const uint32_t *weight, const uint32_t *worth, uint32_t *best) {
+    static uint32_t r[4][B];
+    uint32_t over = 0;
+    QOp prog[] = {
+        {Q_LOADS, 0, 0, 0, 0, 0, best}, /* best[c - w], lanes ascending in memory (the batch's rounds read before any writes) */
+        {Q_ADDK, 0, 0, 0, 0, 0, NULL},  /* + worth, past 32 bits a failed check */
+        {Q_LOADS, 1, 0, 0, 0, 0, best}, /* best[c] */
+        {Q_MAX, 2, 0, 1, 0, 0, NULL},
+        {Q_STORES, 0, 2, 0, 0, 0, best},
+    };
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t rounds = capacity + 1 - weight[i];
+        for (uint32_t k = 0; k < rounds; k += B) {
+            unsigned m = rounds - k < B ? rounds - k : B;
+            int64_t low = (int64_t)capacity - k - (m - 1);
+            prog[0].low = low - weight[i], prog[1].k = worth[i], prog[2].low = low, prog[4].low = low;
+            run32(prog, 5, r, m, &over);
+        }
+    }
+    return over ? -1 : best[capacity];
+}
 static double knapsack_u32(uint32_t n, uint32_t capacity, const uint32_t *weight, const uint32_t *worth, uint32_t *best) {
     uint32_t over = 0;
     for (uint32_t i = 0; i < n; ++i) {
@@ -408,7 +458,7 @@ int main(void) {
         weight[i] = minstd_next() % 1000 + 1;
         worth[i] = minstd_next() % 1000;
     }
-    double kc[11], k6[11], k3[11], kv[11], kk[11], kb[11], ku[11], kgot[6];
+    double kc[11], k6[11], k3[11], kv[11], kk[11], kb[11], ku[11], ko[11], kgot[7];
     uint32_t kin[2] = {items, capacity};
     for (int r = 0; r < 11; ++r) {
         TIME(kc[r], natural[1](kin, out));
@@ -426,11 +476,13 @@ int main(void) {
         TIME(kb[r], kgot[3] = knapsack(items, capacity, weight, worth, best));
         memset(best, 0, 4 * (capacity + 1));
         TIME(ku[r], kgot[4] = knapsack_u32(items, capacity, weight, worth, best));
+        memset(best, 0, 4 * (capacity + 1));
+        TIME(ko[r], kgot[6] = knapsack_u32_ops(items, capacity, weight, worth, best));
     }
     same = true;
-    for (int g = 0; g < 6; ++g) same &= kgot[g] == want;
-    printf("{\"work\":\"knapsack\",\"c_natural_ms\":%.2f,\"c_ms\":%.2f,\"c_u32_ms\":%.2f,\"c_vec_ms\":%.2f,\"c_block_ms\":%.2f,\"batch_ms\":%.2f,\"u32_ms\":%.2f,\"same\":%s}\n",
-           MEDIAN(kc), MEDIAN(k6), MEDIAN(k3), MEDIAN(kv), MEDIAN(kk), MEDIAN(kb), MEDIAN(ku), same ? "true" : "false");
+    for (int g = 0; g < 7; ++g) same &= kgot[g] == want;
+    printf("{\"work\":\"knapsack\",\"c_natural_ms\":%.2f,\"c_ms\":%.2f,\"c_u32_ms\":%.2f,\"c_vec_ms\":%.2f,\"c_block_ms\":%.2f,\"batch_ms\":%.2f,\"u32_ms\":%.2f,\"u32_ops_ms\":%.2f,\"same\":%s}\n",
+           MEDIAN(kc), MEDIAN(k6), MEDIAN(k3), MEDIAN(kv), MEDIAN(kk), MEDIAN(kb), MEDIAN(ku), MEDIAN(ko), same ? "true" : "false");
     /* roots, 100,000 */
     double rc[11], rb[11], rgot = 0, steps;
     uint32_t rin[1] = {sizes[3]};
