@@ -4646,10 +4646,12 @@ static void tsmall_from_0(Tier *t, unsigned r, int fail) {
 }
 
 /* A number in d finite, else to fail. */
-static void tfinite_check(Tier *t, unsigned d, int fail) {
-    fp2(t->k->e, FABS, D2, d);
-    fcmp(t->k->e, D2, D8);
-    b_cond(t->k->e, HS, fail);
+static void tfinite_check(Tier *t, unsigned d, int fail) { /* its exponent's bits all ones: not finite (in integers: off the number pipes, 040 newton.c) */
+    Emit *e = t->k->e;
+    fp2(e, FMOV_XD, X10, d);
+    put(e, 0xD374F800 | X10 << 5 | X10); /* UBFX x10, x10, #52, #11 */
+    cmp_imm(e, X10, 0x7FF);
+    b_cond(e, EQ, fail);
 }
 
 /* Affine value x of loop l at the round in register kr (XZR: round 0)
