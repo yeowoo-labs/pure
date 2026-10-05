@@ -95,6 +95,15 @@ struct PureList {
     void *columns[16]; /* each field's cells */
     size_t room;       /* the rows the columns hold: FLAT items, DENSE keys */
     size_t moved;      /* FLAT: items moved by changes inside it since it was cleared */
+    /* A stored list keyed by a number and searched by key often at one
+     * version is packed when an event ends (pure_list_settle, docs/design
+     * 022): FLAT, its columns a Pack's, which its copies share and nothing
+     * changes (a change makes the list a tree again first). searched counts
+     * its searches by key at searched_version; aligned is the fewest
+     * trailing zero bits of a whole key searched then (64: none). */
+    struct Pack *pack;
+    uint64_t searched, searched_version;
+    uint8_t aligned;
 };
 
 /* The log of an event's changes: a removed item's cells wait in the log's
@@ -761,6 +770,104 @@ enum { TREE, FLAT, DENSE };
  * than a tree would); the items a FLAT list moves freely. */
 enum { ARRAYS_KEPT = 1 << 22, ARRAYS_LARGE = 1 << 26, DENSE_SLACK = 1 << 21, FLAT_SMALL = 64 };
 
+/* A packed list's arrays (docs/design/022): each field's cells in order and,
+ * keyed by a number, a bucket index: the keys' range cut into buckets a
+ * power of two wide (their starts multiples of it), each bucket's first
+ * position whose key is not below its start. A search for a key at a
+ * bucket's start reads that one cell; another steps through its bucket's
+ * keys. Never changed; freed with its last list. */
+typedef struct Pack {
+    unsigned refs;            /* the list and its copies */
+    void *columns[16];
+    double low, high;         /* the first key and the last */
+    double origin, width, scale; /* the first bucket's start, a bucket's width, 1 / width */
+    size_t buckets;           /* 0: none (searched by halves) */
+    uint32_t *first;          /* by bucket, and the end past the last */
+} Pack;
+
+/* Searched by key at least an eighth of its items' times at one version, a
+ * list of PACK_ITEMS or more is packed; about PACK_BUCKET items a bucket. */
+enum { PACK_ITEMS = 4096, PACK_SEARCHES = 8, PACK_BUCKET = 8 };
+
+static void pack_release(Pack *pack) {
+    if (!pack || __atomic_sub_fetch(&pack->refs, 1, __ATOMIC_ACQ_REL)) return;
+    for (unsigned f = 0; f < 16; ++f) free(pack->columns[f]);
+    free(pack->first);
+    free(pack);
+}
+
+/* The bucket holding key (the first or the last past them), and its start:
+ * computed again from the bucket, which is exact (pack_index), so a
+ * rounding of the division moves it one bucket at most. */
+static size_t bucket_of(const Pack *pack, double key, double *start) {
+    double at = (key - pack->origin) * pack->scale;
+    size_t b = !(at > 0) ? 0 : at >= (double)(pack->buckets - 1) ? pack->buckets - 1 : (size_t)at;
+    double begins = pack->origin + (double)b * pack->width;
+    if (begins > key && b) begins = pack->origin + (double)--b * pack->width;
+    else if (b + 1 < pack->buckets && pack->origin + (double)(b + 1) * pack->width <= key)
+        begins = pack->origin + (double)++b * pack->width;
+    *start = begins;
+    return b;
+}
+
+/* The index of keys (n, ascending, finite): buckets about PACK_BUCKET items
+ * wide, or narrower to start at every key searched (aligned: their fewest
+ * trailing zero bits), never finer than the keys' own precision (so every
+ * start is exact) nor more of them than items. False without memory; none
+ * (buckets 0) when the keys span too far. */
+static bool pack_index(Pack *pack, const double *keys, size_t n, unsigned aligned) {
+    double low = keys[0], high = keys[n - 1], span = high - low;
+    pack->low = low, pack->high = high, pack->buckets = 0;
+    if (!isfinite(span)) return true;
+    int exponent = 0, top;
+    if (span > 0) (void)frexp(span / (double)(n / PACK_BUCKET + 1), &exponent); /* 2^exponent above span per bucket */
+    if ((int)aligned < exponent) exponent = (int)aligned;
+    (void)frexp(fabs(low) > fabs(high) ? low : high, &top);
+    if (exponent < top - 53) exponent = top - 53; /* the keys' last bit */
+    double width, origin, buckets;
+    for (;; ++exponent) {
+        width = ldexp(1.0, exponent), origin = floor(low / width) * width;
+        buckets = floor((high - origin) / width) + 1;
+        if (buckets <= (double)n) break;
+    }
+    pack->origin = origin, pack->width = width, pack->scale = 1 / width, pack->buckets = (size_t)buckets;
+    if (!(pack->first = malloc((pack->buckets + 1) * sizeof(*pack->first)))) return false;
+    size_t filled = 0;
+    for (size_t i = 0; i < n; ++i) {
+        double start;
+        size_t b = bucket_of(pack, keys[i], &start);
+        while (filled <= b) pack->first[filled++] = (uint32_t)i;
+    }
+    while (filled <= pack->buckets) pack->first[filled++] = (uint32_t)n;
+    return true;
+}
+
+/* The first position whose key is not below key, in a packed list. */
+static size_t pack_seek(const PureList *list, double key) {
+    const Pack *pack = list->pack;
+    const double *keys = list->columns[list->layout.key];
+    if (!pack->buckets) return lower(keys, (unsigned)list->count, key);
+    if (!(key > pack->low)) return 0;
+    if (key > pack->high) return list->count;
+    double start;
+    size_t b = bucket_of(pack, key, &start), at = pack->first[b];
+    if (start == key) return at;
+    for (size_t end = pack->first[b + 1]; at < end && keys[at] < key;) ++at;
+    return at;
+}
+
+/* A search of a stored tree by its key, counted for packing it. */
+static void searched_by(const PureList *list, double key) {
+    PureList *kept = (PureList *)list; /* what it counts to choose its form, not what it holds */
+    if (kept->searched_version != list->version || !kept->searched)
+        kept->searched_version = list->version, kept->searched = 0, kept->aligned = 64;
+    ++kept->searched;
+    double whole = fabs(key);
+    if (whole == 0) return;
+    unsigned zeros = whole < 9007199254740992.0 && whole == floor(whole) ? (unsigned)__builtin_ctzll((uint64_t)whole) : 0;
+    if (zeros < kept->aligned) kept->aligned = (uint8_t)zeros;
+}
+
 static size_t width(const Layout *l, unsigned f) { return pure_cell_text(l->kinds[f]) ? sizeof(PureSpan) : 8; }
 
 static size_t row_width(const Layout *l) {
@@ -810,7 +917,12 @@ static bool arrays_room(PureList *list, size_t room) {
 }
 
 static void arrays_free(PureList *list) {
-    for (unsigned f = 0; f < 16; ++f) free(list->columns[f]), list->columns[f] = NULL;
+    if (list->pack) { /* a packed list's are its pack's */
+        pack_release(list->pack);
+        list->pack = NULL;
+        memset(list->columns, 0, sizeof(list->columns));
+    } else
+        for (unsigned f = 0; f < 16; ++f) free(list->columns[f]), list->columns[f] = NULL;
     list->room = 0;
 }
 
@@ -911,28 +1023,110 @@ static void free_nodes(Node *node) {
     free(node);
 }
 
-/* A FLAT or DENSE list as a tree, its items placed in order (a tree that
- * grows at its end fills its leaves); false without memory (it is as it was). */
+/* A FLAT list's items as a tree's root, built from the leaves up with full
+ * leaves and full inner nodes (as a tree filled at its end has them); false
+ * without memory (none made). */
+static bool build_tree(PureList *list, Node **root) {
+    const Layout *l = &list->layout;
+    size_t n = list->count, count = (n + FANOUT - 1) / FANOUT;
+    *root = NULL;
+    if (!n) return true;
+    Node **level = malloc(count * sizeof(*level));
+    if (!level) return false;
+    for (size_t i = 0; i < count; ++i) {
+        Node *leaf = new_node(list, true);
+        if (!leaf) {
+            while (i) free(level[--i]);
+            free(level);
+            return false;
+        }
+        unsigned items = (unsigned)(n - i * FANOUT < FANOUT ? n - i * FANOUT : FANOUT);
+        for (unsigned f = 0; f < l->fields; ++f)
+            memcpy((char *)leaf + l->column[f], (const char *)list->columns[f] + i * FANOUT * width(l, f), items * width(l, f));
+        leaf->count = items;
+        sum(list, leaf);
+        level[i] = leaf;
+    }
+    while (count > 1) {
+        size_t above = (count + FANOUT - 1) / FANOUT;
+        for (size_t i = 0; i < above; ++i) {
+            Node *node = new_node(list, false);
+            if (!node) { /* the nodes made above, and those not yet under one */
+                for (size_t j = 0; j < i; ++j) free_nodes(level[j]);
+                for (size_t j = i * FANOUT; j < count; ++j) free_nodes(level[j]);
+                free(level);
+                return false;
+            }
+            unsigned children = (unsigned)(count - i * FANOUT < FANOUT ? count - i * FANOUT : FANOUT);
+            memcpy(node->child, level + i * FANOUT, children * sizeof(*level));
+            node->count = children;
+            sum(list, node);
+            level[i] = node; /* i is below i * FANOUT, read already */
+        }
+        count = above;
+    }
+    *root = level[0];
+    free(level);
+    return true;
+}
+
+/* A FLAT or DENSE list as a tree (a packed one's pack let go); false
+ * without memory (it is as it was). Its version moves: what was read of its
+ * arrays (a finger, a run) is not read again. */
 static bool make_tree(PureList *list) {
     if (list->form == TREE) return true;
     if (list->form == DENSE && !make_flat(list)) return false;
-    size_t count = list->count;
-    list->form = TREE;
-    list->count = 0;
-    for (size_t i = 0; i < count; ++i) {
-        PureCell cells[16];
-        for (unsigned f = 0; f < list->layout.fields; ++f) cells[f] = array_cell(list, i, f);
-        Place p;
-        if (!prepare(list, list->count, &p)) {
-            free_nodes(list->root);
-            list->root = NULL;
-            list->count = count;
-            list->form = FLAT;
-            return false;
-        }
-        place(list, &p, cells);
-    }
+    Node *root;
+    if (!build_tree(list, &root)) return false;
     arrays_free(list);
+    list->root = root;
+    list->form = TREE;
+    ++list->version;
+    return true;
+}
+
+static bool visit_leaves(const Node *node, bool (*visit)(void *, const Node *), void *context);
+
+typedef struct { const Layout *layout; void *const *columns; size_t at; } Packing;
+
+static bool pack_leaf(void *context, const Node *leaf) {
+    Packing *p = context;
+    const Layout *l = p->layout;
+    for (unsigned f = 0; f < l->fields; ++f)
+        memcpy((char *)p->columns[f] + p->at * width(l, f), (const char *)leaf + l->column[f], leaf->count * width(l, f));
+    p->at += leaf->count;
+    return true;
+}
+
+static void let_go_nodes(PureList *list, Node *node);
+
+/* A stored tree as a packed list (its texts kept, its nodes let go); false
+ * without memory (it is as it was). */
+static bool pack(PureList *list) {
+    const Layout *l = &list->layout;
+    size_t n = list->count;
+    Pack *made = calloc(1, sizeof(*made));
+    bool ok = made != NULL;
+    for (unsigned f = 0; ok && f < l->fields; ++f) ok = (made->columns[f] = malloc(n * width(l, f))) != NULL;
+    if (ok) {
+        Packing packing = {l, made->columns, 0};
+        visit_leaves(list->root, pack_leaf, &packing);
+        ok = l->key < 0 || pack_index(made, made->columns[l->key], n, list->aligned);
+    }
+    if (!ok) {
+        if (made) made->refs = 1;
+        pack_release(made);
+        return false;
+    }
+    made->refs = 1;
+    let_go_nodes(list, list->root);
+    list->root = NULL;
+    list->pack = made;
+    memcpy(list->columns, made->columns, sizeof(list->columns));
+    list->room = n;
+    list->form = FLAT;
+    list->moved = 0;
+    ++list->version;
     return true;
 }
 
@@ -990,9 +1184,10 @@ static bool positioned(PureList *list) {
     return make_flat(list);
 }
 
-/* The list as a tree, for a change logged to be undone or recorded. */
+/* The list as a tree, for a change logged to be undone or recorded, or to a
+ * packed list (whose arrays never change). */
 static bool logged(PureList *list, const PureUndo *undo) {
-    return list->form == TREE || (!undo && !list->journaled) || make_tree(list);
+    return list->form == TREE || (!undo && !list->journaled && !list->pack) || make_tree(list);
 }
 
 /* ---- The list */
@@ -1040,6 +1235,15 @@ PureResult pure_list_keyed(PureList *list, int field) {
     return PURE_OK;
 }
 
+/* Every node below node let go (retired where a copy may read it), not its
+ * texts: the list packed keeps them. */
+static void let_go_nodes(PureList *list, Node *node) {
+    if (!node) return;
+    for (unsigned i = 0; !node->leaf && i < node->count; ++i) let_go_nodes(list, child(node, i));
+    if (shared_node(list, node)) retire(list, node, false);
+    else free(node);
+}
+
 /* Every node and text below node let go (retired where a copy may read them). */
 static void let_go_tree(PureList *list, Node *node) {
     if (!node) return;
@@ -1052,12 +1256,21 @@ static void let_go_tree(PureList *list, Node *node) {
     else free(node);
 }
 
+/* A packed list's texts let go (retired where a copy may read them). */
+static void let_go_packed(PureList *list) {
+    const Layout *l = &list->layout;
+    for (size_t i = 0; l->texts && i < list->count; ++i)
+        for (unsigned t = 0; t < l->texts; ++t) let_go_text(list, array_cell(list, i, l->text_field[t]).text);
+}
+
 void pure_list_free(PureList *list) {
     if (!list) return;
     if (list->copy) {
         if (__atomic_sub_fetch(&list->refs, 1, __ATOMIC_ACQ_REL)) return;
+        pack_release(list->pack);
     } else {
-        if (list->form != TREE) let_go_rows(list);
+        if (list->pack) let_go_packed(list);
+        else if (list->form != TREE) let_go_rows(list);
         arrays_free(list);
         free(list->journal);
         free(list->members);
@@ -1073,7 +1286,8 @@ void pure_list_free(PureList *list) {
 void pure_list_clear(PureList *list) {
     bool had = list->count != 0;
     if (had) {
-        if (list->form != TREE) let_go_rows(list);
+        if (list->pack) let_go_packed(list), arrays_free(list), list->form = TREE;
+        else if (list->form != TREE) let_go_rows(list);
         let_go_tree(list, list->root);
         list->root = NULL;
         list->count = list->bytes = 0;
@@ -1125,14 +1339,23 @@ bool pure_list_contains(const PureList *list, double key, bool *found) {
 size_t pure_list_extra(const PureList *list) { return list->member_capacity * sizeof(*list->members); }
 
 bool pure_list_arrays(PureList *list) {
-    if (list->form != TREE || list->arrays) return true;
-    if (list->copy || list->journaled || list->count) return false;
+    if (list->arrays) return true;
+    if (list->form != TREE || list->copy || list->journaled || list->count) return false;
     list->arrays = true;
     list->form = FLAT;
     return true;
 }
 
 unsigned pure_list_form(const PureList *list) { return list->form; }
+
+bool pure_list_settle(PureList *list) {
+    if (list->pack || list->copy || list->arrays || list->form != TREE || list->layout.key < 0 || list->count < PACK_ITEMS ||
+        list->searched_version != list->version || list->searched < list->count / PACK_SEARCHES)
+        return false;
+    return pack(list);
+}
+
+bool pure_list_packed(const PureList *list) { return list->pack != NULL; }
 
 const size_t pure_list_layout[] = {
     [LIST_COUNT_AT] = offsetof(PureList, count), [LIST_MEMBERS_AT] = offsetof(PureList, members),
@@ -1155,12 +1378,17 @@ bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, un
 size_t pure_list_count(const PureList *list) { return list->count; }
 
 PureList *pure_list_share(PureList *list, PureRetired *retired, uint64_t epoch) {
-    /* A copy reads a tree; an empty list (an event's, between events) stays as it is. */
-    if (list->count && !make_tree(list)) return NULL;
+    /* A copy reads a tree or a pack; an empty list (an event's, between events) stays as it is. */
+    if (list->count && !list->pack && !make_tree(list)) return NULL;
     PureList *copy = malloc(sizeof(*copy));
     if (!copy) return NULL;
     *copy = (PureList){.layout = list->layout, .root = list->root, .count = list->count, .bytes = list->bytes,
                        .id = list->id, .version = list->version, .refs = 1, .copy = true};
+    if (list->pack) {
+        __atomic_add_fetch(&list->pack->refs, 1, __ATOMIC_RELAXED);
+        copy->pack = list->pack, copy->form = FLAT, copy->room = list->count;
+        memcpy(copy->columns, list->columns, sizeof(copy->columns));
+    }
     list->retired = retired;
     list->shares = epoch > list->shares ? epoch : list->shares + 1;
     return copy;
@@ -1405,14 +1633,18 @@ static bool encode_leaf(void *context, const Node *leaf) {
 size_t pure_list_size(const PureList *list) { return list->bytes; }
 
 /* An event's list is never stored, shared or sorted: one that was is made a
- * tree first (memory for it or none: the process stops rather than lose items). */
+ * tree first (memory for it or none: the process stops rather than lose
+ * items). A packed list is read as it is. */
 static void tree_now(const PureList *list) {
-    if (list->form != TREE && !make_tree((PureList *)list)) abort();
+    if (list->form != TREE && !list->pack && !make_tree((PureList *)list)) abort();
 }
 
 void pure_list_encode(const PureList *list, unsigned char *out) {
     tree_now(list);
-    Encoding encoding = {&list->layout, out};
+    const Layout *l = &list->layout;
+    for (size_t i = 0; list->pack && i < list->count; ++i)
+        for (unsigned f = 0; f < l->fields; ++f) out = encode_cell(l, f, array_cell(list, i, f), out);
+    Encoding encoding = {l, out};
     visit_leaves(list->root, encode_leaf, &encoding);
 }
 
@@ -1422,6 +1654,22 @@ size_t pure_list_encode_part(const PureList *list, size_t *at, unsigned char *ou
     PureRun run;
     size_t used = 0;
     *needed = 0;
+    if (list->pack) {
+        for (; *at < list->count; ++*at) {
+            PureCell cells[16];
+            size_t size = l->number_bytes;
+            for (unsigned f = 0; f < l->fields; ++f) cells[f] = array_cell(list, *at, f);
+            for (unsigned t = 0; t < l->texts; ++t) size += 4 + cells[l->text_field[t]].size;
+            if (size > capacity - used) {
+                if (!used) *needed = size;
+                return used;
+            }
+            unsigned char *end = out + used;
+            for (unsigned f = 0; f < l->fields; ++f) end = encode_cell(l, f, cells[f], end);
+            used += size;
+        }
+        return used;
+    }
     if (!pure_list_run(list, *at, &run)) return 0;
     do {
         const Node *leaf = run.path[run.depth];
@@ -1881,7 +2129,7 @@ size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *
     }
     if (list->form == FLAT) {
         size_t low = 0, high = list->count;
-        if ((int)field == l->key) low = lower(list->columns[field], (unsigned)list->count, key.num);
+        if ((int)field == l->key) low = list->pack ? pack_seek(list, key.num) : lower(list->columns[field], (unsigned)list->count, key.num);
         else
             while (low < high) {
                 size_t middle = low + (high - low) / 2;
@@ -1895,6 +2143,7 @@ size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *
     size_t start = 0;
     if (!node) return 0;
     if ((int)field == l->key) {
+        if (!list->copy && !list->arrays) searched_by(list, key.num);
         /* The finger's leaf, when its keys reach round key, holds its place
          * (a slice's high bound is near its low one, found just before). */
         if (finger.leaf && finger.id == list->id && finger.version == list->version && finger.leaf->count) {
@@ -1942,6 +2191,12 @@ size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *
     return start + low;
 }
 
+size_t pure_list_bound(const PureList *list, unsigned field, PureCell key) {
+    if (list->pack && (int)field == list->layout.key && list->count) return pack_seek(list, key.num);
+    bool found;
+    return pure_list_seek(list, field, key, &found);
+}
+
 /* An item where it is: its leaf and its place there. */
 typedef struct { const Node *leaf; unsigned index; } Ref;
 
@@ -1970,7 +2225,7 @@ static bool gather_leaf(void *context, const Node *leaf) {
 }
 
 PURE_COLD PureResult pure_list_sorted(const PureList *list, unsigned field, PureList **out, size_t *moved) {
-    tree_now(list);
+    if (list->form != TREE && !make_tree((PureList *)list)) abort(); /* the app's own, its module changing */
     const Layout *l = &list->layout;
     *out = NULL;
     Gathered gathered = {list->count ? malloc(list->count * sizeof(Ref)) : NULL, 0};
@@ -2024,6 +2279,7 @@ void pure_undo_rollback(PureUndo *undo, size_t mark) {
         const Layout *l = &list->layout;
         Step path[DEPTH];
         unsigned within, depth;
+        if (list->form != TREE && !make_tree(list)) abort(); /* packed since: the changes were a tree's */
         if (e->change == REMOVED) {
             Place p;
             if (!prepare(list, e->at, &p)) abort();

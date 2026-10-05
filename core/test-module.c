@@ -1506,6 +1506,246 @@ static void arrays_equivalence(void) {
            forms[2], conversions);
 }
 
+/* The first position in a model (in key order) whose key is not below key. */
+static size_t model_bound(const Model *m, double key) {
+    size_t low = 0, high = m->count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (m->items[middle].key < key) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
+/* The stored form of a list a part at a time, against it whole. */
+static bool encoded_in_parts(const PureList *list, size_t capacity) {
+    size_t size = pure_list_size(list), at = 0, used = 0, needed;
+    unsigned char *whole = malloc(size + 1), *parts = malloc(size + 1), *buffer = malloc(capacity);
+    CHECK(whole && parts && buffer);
+    pure_list_encode(list, whole);
+    for (;;) {
+        size_t got = pure_list_encode_part(list, &at, buffer, capacity, &needed);
+        if (!got) {
+            if (!needed) break;
+            unsigned char *grown = realloc(buffer, needed);
+            CHECK(grown);
+            buffer = grown, capacity = needed;
+            continue;
+        }
+        CHECK(used + got <= size);
+        memcpy(parts + used, buffer, got);
+        used += got;
+    }
+    bool same = used == size && at == pure_list_count(list) && (!size || !memcmp(whole, parts, size));
+    free(whole), free(parts), free(buffer);
+    return same;
+}
+
+/* A stored keyed list packed between events once searched often (docs/design
+ * 022): at every step its answers are a model's, through searches by key at
+ * a bucket's start and between, its changes (a tree again), their undoing
+ * (also of changes made before it was packed), its journal and stored form,
+ * a restart from them, and its copies, which share its pack and outlive its
+ * changes. Then packs of keys at the edges of the index: fractions, near
+ * 2^53, negative, and a span too wide for buckets. */
+static void packed_lists(void) {
+    static const uint8_t fields[2] = {PURE_CELL_NUMBER, PURE_CELL_TEXT};
+    uint32_t seed = 0x7061636bu;
+    PureList *list = pure_list_new(2, fields);
+    CHECK(list && pure_list_keyed(list, 0) == PURE_OK && pure_list_hashed(list));
+    pure_list_journal(list, true);
+    PureUndo undo = {0};
+    Model model = {0}, before = {0};
+    Grown stored = {0};
+    size_t stored_items = 0;
+    enum { SHARES = 4 };
+    PureList *copies[SHARES];
+    Model shared[SHARES] = {{0}};
+    PureRetired retired[SHARES] = {{0}};
+    unsigned first = 0, held = 0, open = 0;
+    uint64_t epoch = 0;
+    size_t packs = 0, unpacked = 0, searches = 0, packed_searches = 0, undone_packed = 0, mark = 0, journal = 0;
+    for (unsigned event = 0; event < 3000; ++event) {
+        if (!open) mark = undo.count, journal = pure_list_changes(list).size, model_copy(&before, &model);
+        bool was_packed = pure_list_packed(list);
+        /* Grow to some thousands, searched at times in bursts (packing it), changed at others. */
+        unsigned changes = event < 300 ? 60 : next_random(&seed) % 4 ? 0 : 1 + next_random(&seed) % 6;
+        for (unsigned c = 0; c < changes; ++c) {
+            uint32_t r = next_random(&seed);
+            unsigned roll = r % 100;
+            if (roll < 60 || model.count < 100) {
+                ModelItem item = {(double)(next_random(&seed) % 700) * 1024 + next_random(&seed) % 1000, "", r % 11};
+                for (size_t k = 0; k < item.size; ++k) item.text[k] = (char)('a' + next_random(&seed) % 26);
+                PureCell cells[2] = {{.num = item.key}, {.text = (unsigned char *)item.text, .size = item.size}};
+                size_t at;
+                bool exists;
+                CHECK(pure_list_add(list, cells, &undo, &at, &exists) == PURE_OK);
+                size_t want = model_bound(&model, item.key);
+                CHECK(at == want && exists == (want < model.count && model.items[want].key == item.key));
+                if (!exists) model_insert(&model, at, item);
+            } else if (roll < 80) {
+                size_t at = next_random(&seed) % model.count;
+                CHECK(pure_list_remove(list, at, &undo) == PURE_OK);
+                memmove(model.items + at, model.items + at + 1, (model.count - at - 1) * sizeof(*model.items));
+                --model.count;
+            } else {
+                size_t at = next_random(&seed) % model.count;
+                ModelItem *item = &model.items[at];
+                if (r % 3 == 0 && at + 1 < model.count && item[1].key - item[0].key > 1) { /* its key, between its neighbours */
+                    double key = item[0].key + 1;
+                    CHECK(pure_list_set(list, at, 0, (PureCell){.num = key}, &undo) == PURE_OK);
+                    item->key = key;
+                } else {
+                    item->size = next_random(&seed) % 11;
+                    for (size_t k = 0; k < item->size; ++k) item->text[k] = (char)('A' + next_random(&seed) % 26);
+                    CHECK(pure_list_set(list, at, 1, (PureCell){.text = (unsigned char *)item->text, .size = item->size}, &undo) ==
+                          PURE_OK);
+                }
+            }
+        }
+        unpacked += was_packed && !pure_list_packed(list);
+        /* Searches: a node's slice bounds (at a bucket's start once packed), a key between, by halves of keys, a field by key. */
+        unsigned burst = event % 9 == 4 ? 1500 + next_random(&seed) % 1500 : next_random(&seed) % 40;
+        for (unsigned k = 0; k < burst && model.count; ++k, ++searches) {
+            uint32_t r = next_random(&seed);
+            double key = r % 4 == 0 ? (double)(r % 720) * 1024
+                         : r % 4 == 1 ? model.items[r % model.count].key
+                         : r % 4 == 2 ? (double)(next_random(&seed) % 740000) - 10000
+                                      : (double)(next_random(&seed) % 2900000) / 4;
+            size_t want = model_bound(&model, key);
+            bool found, want_found = want < model.count && model.items[want].key == key;
+            packed_searches += pure_list_packed(list);
+            CHECK(pure_list_bound(list, 0, (PureCell){.num = key}) == want);
+            if (r % 3 == 0) CHECK(pure_list_seek(list, 0, (PureCell){.num = key}, &found) == want && found == want_found);
+            if (r % 5 == 0) {
+                PureCell text;
+                CHECK(pure_list_lookup(list, 0, (PureCell){.num = key}, 1, &text) == want_found);
+                if (want_found) CHECK(same_item(&model, want, key, (PureSpan){text.text, text.size}));
+            }
+        }
+        /* The event's end: kept, or undone (now and then with the one before it, packed between them). */
+        if (open || next_random(&seed) % 8) {
+            if (!open && next_random(&seed) % 12 == 0) {
+                ++open; /* left open across one more event */
+            } else if (next_random(&seed) % 6 == 0) {
+                undone_packed += pure_list_packed(list);
+                pure_undo_rollback(&undo, mark);
+                pure_list_forget(list, journal);
+                model_copy(&model, &before);
+                open = 0;
+            } else {
+                pure_undo_commit(&undo);
+                open = 0;
+            }
+        } else {
+            pure_undo_rollback(&undo, mark);
+            pure_list_forget(list, journal);
+            model_copy(&model, &before);
+        }
+        if (pure_list_settle(list)) ++packs;
+        if (event % 11 == 0) CHECK(same_items(list, &model));
+        if (!open && event % 3 == 0) { /* a save: records, or now and then the items whole */
+            if (event % 90 == 0) {
+                stored.size = 0;
+                Grown whole = {malloc(pure_list_size(list) + 1), 0, 0};
+                CHECK(whole.bytes);
+                pure_list_encode(list, whole.bytes);
+                collect_bytes(&stored, (PureSpan){whole.bytes, pure_list_size(list)});
+                free(whole.bytes);
+                stored_items = pure_list_size(list);
+            } else
+                collect_bytes(&stored, pure_list_changes(list));
+            pure_list_forget(list, 0);
+        }
+        if (!open && event % 3 == 0 && event % 51 == 0) {
+            PureList *restarted = stored_list(&stored, stored_items);
+            CHECK(restarted && same_items(restarted, &model));
+            pure_list_free(restarted);
+            CHECK(stored_as(list, &model) && encoded_in_parts(list, 64 + next_random(&seed) % 4096));
+        }
+        if (!open && event % 30 == 15) { /* a share, as a snapshot takes one */
+            if (held == SHARES) {
+                CHECK(same_items(copies[first], &shared[first]) && stored_as(copies[first], &shared[first]));
+                CHECK(encoded_in_parts(copies[first], 100));
+                pure_list_free(copies[first]);
+                pure_retired_reuse(&retired[first], &list, 1);
+                first = (first + 1) % SHARES;
+                --held;
+            }
+            unsigned slot = (first + held) % SHARES;
+            CHECK((copies[slot] = pure_list_share(list, &retired[slot], ++epoch)));
+            CHECK(pure_list_packed(copies[slot]) == pure_list_packed(list));
+            model_copy(&shared[slot], &model);
+            ++held;
+        }
+        if (event % 25 == 0)
+            for (unsigned i = 0; i < held; ++i) {
+                const PureList *copy = copies[(first + i) % SHARES];
+                const Model *m = &shared[(first + i) % SHARES];
+                CHECK(same_items(copy, m));
+                for (unsigned k = 0; k < 50 && m->count; ++k) {
+                    double key = (double)(next_random(&seed) % 720) * 1024;
+                    CHECK(pure_list_bound(copy, 0, (PureCell){.num = key}) == model_bound(m, key));
+                }
+            }
+    }
+    CHECK(same_items(list, &model) && stored_as(list, &model));
+    CHECK(packs > 20 && unpacked > 10 && packed_searches > 10000 && undone_packed > 0);
+    pure_list_free(list); /* first, as an app's: its copies read on what they share */
+    for (; held; --held, first = (first + 1) % SHARES) {
+        CHECK(same_items(copies[first], &shared[first]));
+        pure_list_free(copies[first]);
+        pure_retired_free(&retired[first]);
+    }
+    pure_undo_free(&undo);
+    free(stored.bytes);
+    free(model.items);
+    free(before.items);
+    for (unsigned i = 0; i < SHARES; ++i) free(shared[i].items);
+
+    /* The index's edges: each list packed, then searched as its tree (never packed) is. */
+    static const uint8_t number[1] = {PURE_CELL_NUMBER};
+    size_t indexed = 0;
+    for (unsigned kind = 0; kind < 5; ++kind) {
+        PureList *packed = pure_list_new(1, number), *tree = pure_list_new(1, number);
+        CHECK(packed && tree && pure_list_keyed(packed, 0) == PURE_OK && pure_list_keyed(tree, 0) == PURE_OK);
+        double keys[6000];
+        size_t n = 0;
+        for (size_t i = 0; i < 6000; ++i) {
+            double key = kind == 0 ? (double)i * 0.25 - 700         /* fractions, negative and positive, -0 among them */
+                         : kind == 1 ? 9007199254740992.0 - 2 * (double)(6000 - i) * 2 /* near 2^53: the keys' last bits */
+                         : kind == 2 ? -1e300 + (double)i * 1e296   /* wide, negative */
+                         : kind == 3 ? (i % 2 ? 1e300 : -1e300) * (double)(i + 1) / 6000 /* too wide for buckets */
+                                     : (double)(i / 7) * 65536 + (double)(i % 7) * 3; /* slices at multiples of 2^16 */
+            if (kind == 0 && i == 2800) key = -0.0;
+            bool exists;
+            CHECK(pure_list_add(packed, (PureCell[]){{.num = key}}, NULL, NULL, &exists) == PURE_OK);
+            CHECK(pure_list_add(tree, (PureCell[]){{.num = key}}, NULL, NULL, &exists) == PURE_OK);
+            keys[n++] = key;
+        }
+        for (size_t i = 0; i < 1000; ++i) { /* searched enough, at the slices' starts for the last kind */
+            bool found;
+            double key = kind == 4 ? (double)(next_random(&seed) % 900) * 65536 : keys[next_random(&seed) % n];
+            (void)pure_list_seek(packed, 0, (PureCell){.num = key}, &found);
+        }
+        CHECK(pure_list_settle(packed) && pure_list_packed(packed));
+        for (size_t i = 0; i < 20000; ++i) {
+            uint32_t r = next_random(&seed);
+            double a = keys[r % n], b = keys[(r / 7) % n];
+            double key = r % 5 == 0 ? a : r % 5 == 1 ? a + (b - a) * 0.37 : r % 5 == 2 ? -a : r % 5 == 3 ? a * 1.0000001
+                         : kind == 4 ? (double)(r % 900) * 65536 : (r % 2 ? 1 : -1) * 1e308;
+            bool fp, ft;
+            size_t got = pure_list_seek(packed, 0, (PureCell){.num = key}, &fp), want = pure_list_seek(tree, 0, (PureCell){.num = key}, &ft);
+            CHECK(got == want && fp == ft && pure_list_bound(packed, 0, (PureCell){.num = key}) == want);
+        }
+        indexed += kind != 3; /* the too wide one has no buckets: searched by halves */
+        pure_list_free(packed);
+        pure_list_free(tree);
+    }
+    printf("{\"packed\":{\"searches\":%zu,\"packed_searches\":%zu,\"packs\":%zu,\"unpacked\":%zu,\"undone_packed\":%zu,\"edges\":%zu}}\n",
+           searches, packed_searches, packs, unpacked, undone_packed, indexed);
+}
+
 static void list_trees(void) {
     static const uint8_t text_fields[2] = {0, 1};
     uint32_t seed = 0x5eed1234u;
@@ -5987,6 +6227,7 @@ int main(void) {
     key_sets();
     keyed_journal();
     arrays_equivalence();
+    packed_lists();
     folds();
     filters();
     lane_folds();

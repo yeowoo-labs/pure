@@ -123,6 +123,18 @@ bool pure_list_next(const PureList *, PureRun *);
  * field does not order below key (numbers and integers by value, texts by
  * bytes), and whether that item's field is key. */
 size_t pure_list_seek(const PureList *, unsigned field, PureCell key, bool *found);
+/* The first position whose item's field does not order below key, as
+ * pure_list_seek's but without whether it is key (a slice's bound: a packed
+ * list then reads its index alone). */
+size_t pure_list_bound(const PureList *, unsigned field, PureCell key);
+/* A stored list keyed by a number and searched by key at least an eighth of
+ * its items' times since it last changed (4,096 items or more) is packed
+ * (docs/design/022): its items in arrays, each field's in order, with an
+ * index of its keys in buckets, which its copies share; a change makes it a
+ * tree again first. Answers are the tree's. Called between events (no run of
+ * the list is open): true when it packed the list. */
+bool pure_list_settle(PureList *);
+bool pure_list_packed(const PureList *);
 /* The field a keyed list keeps its items in order of: when it is a number
  * field, seek by it reads each level's keys from one node (field -1, or a
  * text field: none). ALLOCATION leaves the list searched as if it had none. */

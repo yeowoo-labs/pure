@@ -2172,9 +2172,8 @@ static PureResult fold_runs(const PureModule *m, PureValue *values, PureBlock in
 /* The positions of the items whose keys are from low up to before high. */
 /* The items whose keys are from low up to before high (numbers or i64s, as the key is). */
 static void slice_of(const PureList *list, unsigned key, Slot low, Slot high, size_t *from, size_t *to) {
-    bool found;
-    *from = pure_list_seek(list, key, (PureCell){.i64 = low.i64}, &found);
-    *to = pure_list_seek(list, key, (PureCell){.i64 = high.i64}, &found);
+    *from = pure_list_bound(list, key, (PureCell){.i64 = low.i64});
+    *to = pure_list_bound(list, key, (PureCell){.i64 = high.i64});
     if (*to < *from) *to = *from;
 }
 
@@ -3518,6 +3517,10 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
         return result;
     }
     clear_rows(app);
+    /* No run of a list is open between events: one searched often since it
+     * last changed is packed now (docs/design/022). */
+    for (uint32_t i = 0; i < m->states; ++i)
+        if (app->lists[i]) (void)pure_list_settle(app->lists[i]);
     memcpy(app->values, pending, sizeof(pending));
     ++app->events;
     ++app->changes;
