@@ -254,6 +254,7 @@ typedef struct {
     /* A keyed list: its key field + 1 (0: none). Its items stay in key order
      * (numbers by value, texts by bytes), each key once, and keys do not change. */
     uint8_t state_key[PURE_MODULE_STATES];
+    bool state_indexed[PURE_MODULE_STATES]; /* list: an index state refers to it (set at load) */
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
     PureValue initial[PURE_MODULE_STATES];

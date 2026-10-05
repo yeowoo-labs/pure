@@ -81,6 +81,18 @@ struct PureList {
     uint64_t *members;
     size_t member_capacity, member_count;
     bool bitmap;
+    /* An event's list may keep its items in arrays rather than a tree
+     * (pure_list_arrays, docs/design/021): FLAT, each field's cells side by
+     * side in the list's order; DENSE (keyed by small whole numbers, its keys
+     * as bits), each field's cells at its key. What the arrays cannot answer
+     * at once (a position in a DENSE list; a change logged to be undone, a
+     * record, a share) makes them FLAT, or a tree, first. */
+    uint8_t form;
+    bool arrays;       /* it may be FLAT or DENSE: an event's list */
+    uint8_t flattened; /* DENSE made FLAT since it was cleared: twice, and it stays FLAT or a tree */
+    void *columns[16]; /* each field's cells */
+    size_t room;       /* the rows the columns hold: FLAT items, DENSE keys */
+    size_t moved;      /* FLAT: items moved by changes inside it since it was cleared */
 };
 
 /* The log of an event's changes: a removed item's cells wait in the log's
@@ -738,6 +750,249 @@ static void take_out(PureList *list, Step *path, unsigned depth, unsigned within
     ++list->version;
 }
 
+/* ---- An event's list in arrays (docs/design/021) */
+
+enum { TREE, FLAT, DENSE };
+/* The arrays a clear keeps for the next event; the most they grow to (a
+ * larger list is a tree: doubling arrays would hold twice its items); a
+ * DENSE list's slack beyond four times its items (so it never holds far more
+ * than a tree would); the items a FLAT list moves freely. */
+enum { ARRAYS_KEPT = 1 << 22, ARRAYS_LARGE = 1 << 26, DENSE_SLACK = 1 << 21, FLAT_SMALL = 64 };
+
+static size_t width(const Layout *l, unsigned f) { return pure_cell_text(l->kinds[f]) ? sizeof(PureSpan) : 8; }
+
+static size_t row_width(const Layout *l) {
+    size_t row = 0;
+    for (unsigned f = 0; f < l->fields; ++f) row += width(l, f);
+    return row ? row : 1;
+}
+
+static PureCell array_cell(const PureList *list, size_t i, unsigned f) {
+    PureCell cell = {0};
+    if (!pure_cell_text(list->layout.kinds[f])) memcpy(&cell.i64, (const char *)list->columns[f] + 8 * i, 8);
+    else {
+        PureSpan text = ((const PureSpan *)list->columns[f])[i];
+        cell.text = (unsigned char *)text.data, cell.size = text.size;
+    }
+    return cell;
+}
+
+static void array_put(PureList *list, size_t i, unsigned f, PureCell cell) {
+    if (pure_cell_text(list->layout.kinds[f])) ((PureSpan *)list->columns[f])[i] = (PureSpan){cell.text, cell.size};
+    else memcpy((char *)list->columns[f] + 8 * i, &cell.i64, 8);
+}
+
+/* Row from's cells to row to, of the same columns or of others. */
+static void array_copy(const Layout *l, void *const *to_columns, size_t to, void *const *from_columns, size_t from) {
+    for (unsigned f = 0; f < l->fields; ++f)
+        memcpy((char *)to_columns[f] + to * width(l, f), (const char *)from_columns[f] + from * width(l, f), width(l, f));
+}
+
+static void array_move(PureList *list, size_t to, size_t from, size_t count) {
+    const Layout *l = &list->layout;
+    for (unsigned f = 0; f < l->fields; ++f)
+        memmove((char *)list->columns[f] + to * width(l, f), (const char *)list->columns[f] + from * width(l, f),
+                count * width(l, f));
+}
+
+/* Columns of room rows each; false without memory (each as it was or grown). */
+static bool arrays_room(PureList *list, size_t room) {
+    const Layout *l = &list->layout;
+    for (unsigned f = 0; f < l->fields; ++f) {
+        void *grown = realloc(list->columns[f], room * width(l, f));
+        if (!grown) return false;
+        list->columns[f] = grown;
+    }
+    list->room = room;
+    return true;
+}
+
+static void arrays_free(PureList *list) {
+    for (unsigned f = 0; f < 16; ++f) free(list->columns[f]), list->columns[f] = NULL;
+    list->room = 0;
+}
+
+/* A DENSE list's i-th key's slot, counted along its bits (no memory needed). */
+static size_t dense_slot(const PureList *list, size_t i) {
+    for (size_t w = 0; w < list->member_capacity; ++w) {
+        size_t bits = (size_t)__builtin_popcountll(list->members[w]);
+        if (i < bits) {
+            uint64_t word = list->members[w];
+            for (; i; --i) word &= word - 1;
+            return w * 64 + (size_t)__builtin_ctzll(word);
+        }
+        i -= bits;
+    }
+    return SIZE_MAX;
+}
+
+/* The texts of every item of a FLAT or DENSE list let go. */
+static void let_go_rows(PureList *list) {
+    const Layout *l = &list->layout;
+    if (!l->texts) return;
+    for (size_t i = 0; list->form == FLAT && i < list->count; ++i)
+        for (unsigned t = 0; t < l->texts; ++t) free_text(array_cell(list, i, l->text_field[t]).text);
+    for (size_t w = 0; list->form == DENSE && w < list->member_capacity; ++w)
+        for (uint64_t word = list->members[w]; word; word &= word - 1)
+            for (unsigned t = 0; t < l->texts; ++t)
+                free_text(array_cell(list, w * 64 + (size_t)__builtin_ctzll(word), l->text_field[t]).text);
+}
+
+/* The keys a DENSE list may hold: below four times its items and a slack. */
+static size_t dense_limit(const PureList *list) {
+    size_t row = row_width(&list->layout), limit = 4 * (list->count + 1) + DENSE_SLACK / row;
+    return limit < ARRAYS_LARGE / row ? limit : ARRAYS_LARGE / row;
+}
+
+/* Whether a full FLAT list would grow its arrays past ARRAYS_LARGE. */
+static bool flat_large(const PureList *list) {
+    return list->count == list->room && 2 * list->room * row_width(&list->layout) > ARRAYS_LARGE;
+}
+
+static bool dense_holds(const PureList *list, double key) { return small_key(key) && (size_t)key < dense_limit(list); }
+
+/* A FLAT list keyed by small whole numbers (its keys as bits) as DENSE,
+ * room for key too; false when it cannot be (it stays FLAT). */
+static bool make_dense(PureList *list, double key) {
+    const Layout *l = &list->layout;
+    if (l->key < 0 || !list->members || !list->bitmap || list->flattened >= 2 || !dense_holds(list, key)) return false;
+    const double *keys = list->columns[l->key];
+    size_t top = (size_t)key;
+    if (list->count) {
+        double last = keys[list->count - 1]; /* the greatest: FLAT keeps key order */
+        if (!dense_holds(list, last)) return false;
+        if ((size_t)last > top) top = (size_t)last;
+    }
+    size_t room = top + 1 + (top + 1) / 2, limit = dense_limit(list);
+    if (room > limit) room = limit;
+    if (room <= top) return false;
+    void *columns[16] = {0};
+    for (unsigned f = 0; f < l->fields; ++f)
+        if (!(columns[f] = malloc(room * width(l, f)))) {
+            for (unsigned g = 0; g < f; ++g) free(columns[g]);
+            return false;
+        }
+    for (size_t i = 0; i < list->count; ++i) array_copy(l, columns, (size_t)keys[i], list->columns, i);
+    arrays_free(list);
+    memcpy(list->columns, columns, sizeof(columns));
+    list->room = room;
+    list->form = DENSE;
+    return true;
+}
+
+/* A DENSE list as FLAT, its items in key order; false without memory. */
+static bool make_flat(PureList *list) {
+    const Layout *l = &list->layout;
+    size_t room = list->count > 16 ? list->count : 16, row = 0;
+    void *columns[16] = {0};
+    for (unsigned f = 0; f < l->fields; ++f)
+        if (!(columns[f] = malloc(room * width(l, f)))) {
+            for (unsigned g = 0; g < f; ++g) free(columns[g]);
+            return false;
+        }
+    for (size_t w = 0; w < list->member_capacity; ++w)
+        for (uint64_t word = list->members[w]; word; word &= word - 1)
+            array_copy(l, columns, row++, list->columns, w * 64 + (size_t)__builtin_ctzll(word));
+    arrays_free(list);
+    memcpy(list->columns, columns, sizeof(columns));
+    list->room = room;
+    list->form = FLAT;
+    list->moved = 0;
+    ++list->flattened;
+    return true;
+}
+
+/* Every node below node freed, its texts not (they are a FLAT list's still). */
+static void free_nodes(Node *node) {
+    if (!node) return;
+    for (unsigned i = 0; !node->leaf && i < node->count; ++i) free_nodes(child(node, i));
+    free(node);
+}
+
+/* A FLAT or DENSE list as a tree, its items placed in order (a tree that
+ * grows at its end fills its leaves); false without memory (it is as it was). */
+static bool make_tree(PureList *list) {
+    if (list->form == TREE) return true;
+    if (list->form == DENSE && !make_flat(list)) return false;
+    size_t count = list->count;
+    list->form = TREE;
+    list->count = 0;
+    for (size_t i = 0; i < count; ++i) {
+        PureCell cells[16];
+        for (unsigned f = 0; f < list->layout.fields; ++f) cells[f] = array_cell(list, i, f);
+        Place p;
+        if (!prepare(list, list->count, &p)) {
+            free_nodes(list->root);
+            list->root = NULL;
+            list->count = count;
+            list->form = FLAT;
+            return false;
+        }
+        place(list, &p, cells);
+    }
+    arrays_free(list);
+    return true;
+}
+
+/* An item (its cells the list's own) into a FLAT list before at. */
+static bool flat_insert(PureList *list, size_t at, const PureCell *item) {
+    if (list->count == list->room && !arrays_room(list, list->room ? 2 * list->room : 16)) return false;
+    if (at < list->count) {
+        array_move(list, at + 1, at, list->count - at);
+        list->moved += list->count - at;
+    }
+    for (unsigned f = 0; f < list->layout.fields; ++f) array_put(list, at, f, item[f]);
+    if (list->members) member_add(list, item[list->layout.key].num);
+    ++list->count;
+    ++list->version;
+    return true;
+}
+
+/* Whether a FLAT list may move the items after at (else it becomes a tree):
+ * a few always, more while the moves stay within a few times its items. */
+static bool flat_moves(const PureList *list, size_t at) {
+    size_t after = list->count - at;
+    return list->count < FLAT_SMALL || list->moved + after <= 8 * list->count + 4096;
+}
+
+/* An item (its cells the list's own) into a DENSE list at its key (one it
+ * may hold); false without memory (the list as it was). */
+static bool dense_add(PureList *list, const PureCell *item, double number) {
+    size_t key = (size_t)number;
+    if (key >= list->room) {
+        size_t room = list->room + list->room / 2, limit = dense_limit(list);
+        if (room <= key) room = key + 1 + (key + 1) / 2;
+        if (room > limit) room = limit;
+        if (!arrays_room(list, room)) return false;
+    }
+    if (key / 64 >= list->member_capacity) { /* the bits grown first: adding a key must not give them up */
+        size_t capacity = list->member_capacity ? list->member_capacity : 1;
+        while (capacity <= key / 64) capacity *= 2;
+        uint64_t *grown = realloc(list->members, capacity * sizeof(*grown));
+        if (!grown) return false;
+        memset(grown + list->member_capacity, 0, (capacity - list->member_capacity) * sizeof(*grown));
+        list->members = grown, list->member_capacity = capacity;
+    }
+    for (unsigned f = 0; f < list->layout.fields; ++f) array_put(list, key, f, item[f]);
+    member_add(list, number);
+    ++list->count;
+    ++list->version;
+    return true;
+}
+
+/* The list as a form that answers by position (FLAT or a tree): a DENSE
+ * one made FLAT, a tree when it was made FLAT too often; false without memory. */
+static bool positioned(PureList *list) {
+    if (list->form != DENSE) return true;
+    if (list->flattened >= 2) return make_tree(list);
+    return make_flat(list);
+}
+
+/* The list as a tree, for a change logged to be undone or recorded. */
+static bool logged(PureList *list, const PureUndo *undo) {
+    return list->form == TREE || (!undo && !list->journaled) || make_tree(list);
+}
+
 /* ---- The list */
 
 PureList *pure_list_new(unsigned fields, const uint8_t *kinds) {
@@ -774,6 +1029,7 @@ PureResult pure_list_keyed(PureList *list, int field) {
     Layout *l = &list->layout;
     int key = field >= 0 && (unsigned)field < l->fields && l->kinds[field] == PURE_CELL_NUMBER ? field : -1;
     if (key == l->key) return PURE_OK;
+    if (list->count && !make_tree(list)) return PURE_ALLOCATION;
     l->key = key;
     if (list->root && !rekey(list, &list->root)) {
         l->key = -1; /* searched without leads, which some nodes lack */
@@ -799,6 +1055,8 @@ void pure_list_free(PureList *list) {
     if (list->copy) {
         if (__atomic_sub_fetch(&list->refs, 1, __ATOMIC_ACQ_REL)) return;
     } else {
+        if (list->form != TREE) let_go_rows(list);
+        arrays_free(list);
         free(list->journal);
         free(list->members);
         let_go_tree(list, list->root);
@@ -811,11 +1069,21 @@ void pure_list_free(PureList *list) {
 }
 
 void pure_list_clear(PureList *list) {
-    if (!list->count) return;
-    let_go_tree(list, list->root);
-    list->root = NULL;
-    list->count = list->bytes = 0;
-    ++list->version;
+    bool had = list->count != 0;
+    if (had) {
+        if (list->form != TREE) let_go_rows(list);
+        let_go_tree(list, list->root);
+        list->root = NULL;
+        list->count = list->bytes = 0;
+        ++list->version;
+    }
+    if (list->arrays) { /* FLAT again, its arrays kept for the next event unless large */
+        list->form = FLAT;
+        list->flattened = 0;
+        list->moved = 0;
+        if (list->room * row_width(&list->layout) > ARRAYS_KEPT) arrays_free(list);
+    }
+    if (!had) return;
     if (!list->members) return;
     if (list->bitmap && list->member_capacity <= BITMAP_KEPT) { /* small bits are kept for the next event */
         memset(list->members, 0, list->member_capacity * sizeof(*list->members));
@@ -849,11 +1117,37 @@ bool pure_list_contains(const PureList *list, double key, bool *found) {
     return true;
 }
 
+/* An event's arrays are its items, as a tree's nodes are: neither counts
+ * here (the stored bytes stand for both), so a list's room runs out at the
+ * same item whatever it keeps them in (021). */
 size_t pure_list_extra(const PureList *list) { return list->member_capacity * sizeof(*list->members); }
+
+bool pure_list_arrays(PureList *list) {
+    if (list->form != TREE || list->arrays) return true;
+    if (list->copy || list->journaled || list->count) return false;
+    list->arrays = true;
+    list->form = FLAT;
+    return true;
+}
+
+unsigned pure_list_form(const PureList *list) { return list->form; }
+
+bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, unsigned field, PureCell *cell) {
+    bool found;
+    if (list->form == DENSE && (int)key_field == list->layout.key) { /* at its key, by its bits */
+        if (!pure_list_contains(list, key.num, &found) || !found) return false;
+        *cell = array_cell(list, (size_t)key.num, field);
+        return true;
+    }
+    size_t at = pure_list_seek(list, key_field, key, &found);
+    if (found) *cell = pure_list_get(list, at, field);
+    return found;
+}
 
 size_t pure_list_count(const PureList *list) { return list->count; }
 
 PureList *pure_list_share(PureList *list, PureRetired *retired, uint64_t epoch) {
+    if (!make_tree(list)) return NULL; /* a copy reads a tree */
     PureList *copy = malloc(sizeof(*copy));
     if (!copy) return NULL;
     *copy = (PureList){.layout = list->layout, .root = list->root, .count = list->count, .bytes = list->bytes,
@@ -1063,6 +1357,8 @@ static unsigned char *record_head(unsigned char *out, unsigned kind, size_t at) 
 }
 
 void pure_list_journal(PureList *list, bool journaled) {
+    if (journaled && list->form != TREE && !make_tree(list)) abort(); /* an event's list is never journaled */
+    if (journaled) list->arrays = false;
     list->journaled = journaled;
     if (!journaled) pure_list_forget(list, 0);
 }
@@ -1099,12 +1395,20 @@ static bool encode_leaf(void *context, const Node *leaf) {
 
 size_t pure_list_size(const PureList *list) { return list->bytes; }
 
+/* An event's list is never stored, shared or sorted: one that was is made a
+ * tree first (memory for it or none: the process stops rather than lose items). */
+static void tree_now(const PureList *list) {
+    if (list->form != TREE && !make_tree((PureList *)list)) abort();
+}
+
 void pure_list_encode(const PureList *list, unsigned char *out) {
+    tree_now(list);
     Encoding encoding = {&list->layout, out};
     visit_leaves(list->root, encode_leaf, &encoding);
 }
 
 size_t pure_list_encode_part(const PureList *list, size_t *at, unsigned char *out, size_t capacity, size_t *needed) {
+    tree_now(list);
     const Layout *l = &list->layout;
     PureRun run;
     size_t used = 0;
@@ -1135,6 +1439,7 @@ static bool decode_item(const Layout *l, const unsigned char *bytes, size_t size
 }
 
 PURE_COLD PureResult pure_list_read(PureList *list, const unsigned char *bytes, size_t size) {
+    if (!make_tree(list)) return PURE_ALLOCATION;
     PureCell cells[16];
     for (size_t at = 0; at < size;) {
         if (!decode_item(&list->layout, bytes, size, &at, cells)) return PURE_STORE_ERROR;
@@ -1151,6 +1456,7 @@ static bool record_cell(const Layout *l, bool compact, unsigned field, const uns
 }
 
 PURE_COLD PureResult pure_list_replay(PureList *list, const unsigned char *bytes, size_t size) {
+    if (!make_tree(list)) return PURE_ALLOCATION;
     const Layout *l = &list->layout;
     bool journaled = list->journaled;
     PureResult result = PURE_OK;
@@ -1188,10 +1494,21 @@ PURE_COLD PureResult pure_list_replay(PureList *list, const unsigned char *bytes
 PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, PureUndo *undo) {
     const Layout *l = &list->layout;
     if (at > list->count || list->count == PURE_LIST_ITEMS) return PURE_LIMIT;
+    if (!logged(list, undo) || !positioned(list) ||
+        (list->form == FLAT && ((at < list->count && !flat_moves(list, at)) || flat_large(list)) && !make_tree(list)))
+        return PURE_ALLOCATION;
     PureCell item[16];
     unsigned owned = 0;
     for (; owned < l->fields; ++owned)
         if (!own_cell(list, owned, cells[owned], &item[owned])) break;
+    if (list->form == FLAT) {
+        if (owned < l->fields || !flat_insert(list, at, item)) {
+            for (unsigned f = 0; f < owned; ++f) free_text(item[f].text);
+            return PURE_ALLOCATION;
+        }
+        list->bytes += cells_bytes(l, item);
+        return PURE_OK;
+    }
     size_t size = RECORD_HEAD;
     for (unsigned f = 0; list->journaled && f < l->fields; ++f) size += compact_bound(l, f, cells[f]);
     unsigned char *record = list->journaled ? journal_room(list, size) : NULL;
@@ -1219,16 +1536,54 @@ PureResult pure_list_add(PureList *list, const PureCell *cells, PureUndo *undo, 
     const Layout *l = &list->layout;
     *exists = false;
     if (l->key < 0) return PURE_INVALID; /* searched and inserted apart, then */
+    if (!logged(list, undo)) return PURE_ALLOCATION;
+    if (list->form != TREE) {
+        double key = cells[l->key].num;
+        bool found = false;
+        if (list->form == DENSE) { /* by its bits, at its key: no position, unless asked */
+            if (pure_list_contains(list, key, &found) && found && !at) return *exists = true, PURE_OK;
+            if (!at && !found && dense_holds(list, key)) {
+                PureCell item[16];
+                unsigned owned = 0;
+                for (; owned < l->fields; ++owned)
+                    if (!own_cell(list, owned, cells[owned], &item[owned])) break;
+                if (owned < l->fields || !dense_add(list, item, key)) {
+                    for (unsigned f = 0; f < owned; ++f) free_text(item[f].text);
+                    return PURE_ALLOCATION;
+                }
+                list->bytes += cells_bytes(l, item);
+                return PURE_OK;
+            }
+            if (!positioned(list)) return PURE_ALLOCATION;
+        }
+        if (list->form == FLAT) {
+            const double *keys = list->columns[l->key];
+            size_t n = list->count, low = n ? lower(keys, (unsigned)n, key) : 0;
+            if (low < n && keys[low] == key) {
+                if (at) *at = low;
+                return *exists = true, PURE_OK;
+            }
+            if (low < n && !at && n >= FLAT_SMALL && make_dense(list, key)) return pure_list_add(list, cells, undo, at, exists);
+            if (low < n && !flat_moves(list, low) && !make_tree(list)) return PURE_ALLOCATION;
+            if (list->form == FLAT) {
+                if (at) *at = low;
+                return pure_list_insert(list, low, cells, undo);
+            }
+        }
+    }
     if (list->members) { /* the set says at once when the key is there */
         bool found;
         if (pure_list_contains(list, cells[l->key].num, &found) && found) {
-            *at = pure_list_seek(list, (unsigned)l->key, cells[l->key], exists);
+            size_t where = pure_list_seek(list, (unsigned)l->key, cells[l->key], exists);
+            if (at) *at = where;
             return PURE_OK;
         }
     }
     if (list->count == PURE_LIST_ITEMS) return PURE_LIMIT;
     if (!list->root && !(list->root = new_node(list, true))) return PURE_ALLOCATION;
     Place p = {.extras = 0, .used = 0};
+    size_t where;
+    if (!at) at = &where;
     if (!descend_key(list, cells[l->key].num, &p, at, exists)) return PURE_ALLOCATION;
     if (*exists) return PURE_OK;
     p.appending = *at == list->count;
@@ -1274,6 +1629,21 @@ static PureCell *log_cells(PureUndo *undo, unsigned fields) {
 PureResult pure_list_remove(PureList *list, size_t at, PureUndo *undo) {
     const Layout *l = &list->layout;
     if (at >= list->count) return PURE_NOT_FOUND;
+    if (!logged(list, undo) || !positioned(list) ||
+        (list->form == FLAT && at + 1 < list->count && !flat_moves(list, at + 1) && !make_tree(list)))
+        return PURE_ALLOCATION;
+    if (list->form == FLAT) {
+        PureCell cells[16];
+        for (unsigned f = 0; f < l->fields; ++f) cells[f] = array_cell(list, at, f);
+        if (list->members) member_remove(list, cells[l->key].num);
+        list->bytes -= cells_bytes(l, cells);
+        let_go_cells(list, cells);
+        array_move(list, at, at + 1, list->count - at - 1);
+        list->moved += list->count - at - 1;
+        --list->count;
+        ++list->version;
+        return PURE_OK;
+    }
     Step path[DEPTH];
     unsigned within, depth = descend(list, at, path, &within);
     if (!depth) return PURE_ALLOCATION;
@@ -1300,6 +1670,17 @@ PureResult pure_list_remove(PureList *list, size_t at, PureUndo *undo) {
 PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell value, PureUndo *undo) {
     const Layout *l = &list->layout;
     if (at >= list->count) return PURE_NOT_FOUND;
+    if (!logged(list, undo) || !positioned(list)) return PURE_ALLOCATION;
+    if (list->form == FLAT) {
+        PureCell copy, old = array_cell(list, at, field);
+        if (!own_cell(list, field, value, &copy)) return PURE_ALLOCATION;
+        list->bytes += cell_bytes(l, field, copy) - cell_bytes(l, field, old);
+        array_put(list, at, field, copy);
+        let_go_text(list, old.text);
+        if ((int)field == l->key && list->members) member_remove(list, old.num), member_add(list, copy.num);
+        ++list->version;
+        return PURE_OK;
+    }
     Step path[DEPTH];
     unsigned within, depth = 0;
     bool keyed = (int)field == l->key;
@@ -1343,6 +1724,10 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
 }
 
 PureCell pure_list_get(const PureList *list, size_t at, unsigned field) {
+    if (list->form != TREE) { /* a DENSE list by position: FLAT from now, or counted along its bits without memory */
+        if (list->form == DENSE && !positioned((PureList *)list)) return array_cell(list, dense_slot(list, at), field);
+        if (list->form == FLAT) return array_cell(list, at, field);
+    }
     size_t within;
     const Node *leaf = leaf_of(list, at, &within); /* first: an argument beside it would be read in either order */
     return cell_at(&list->layout, leaf, (unsigned)within, field);
@@ -1356,8 +1741,29 @@ static void open_run(const Layout *l, const Node *leaf, PureRun *run) {
         else run->column[f].numbers = numbers(l, leaf, f);
 }
 
+/* A FLAT list's run from at: up to PURE_LIST_RUN items of its arrays; a
+ * DENSE one's (made FLAT without memory) its item at alone. */
+static void open_array_run(const PureList *list, size_t at, PureRun *run) {
+    const Layout *l = &list->layout;
+    size_t row = list->form == DENSE ? dense_slot(list, at) : at;
+    run->start = at;
+    run->count = list->form == DENSE ? 1 : (unsigned)(list->count - at < PURE_LIST_RUN ? list->count - at : PURE_LIST_RUN);
+    run->depth = 0;
+    for (unsigned f = 0; f < l->fields; ++f)
+        if (pure_cell_text(l->kinds[f])) run->column[f].texts = (const PureSpan *)list->columns[f] + row;
+        else if (l->kinds[f] == PURE_CELL_INTEGER) run->column[f].integers = (const int64_t *)list->columns[f] + row;
+        else run->column[f].numbers = (const double *)list->columns[f] + row;
+}
+
 bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
     if (at >= list->count) return false;
+    if (list->form != TREE) {
+        if (list->form == DENSE) (void)positioned((PureList *)list);
+        if (list->form != TREE) {
+            open_array_run(list, at, run);
+            return true;
+        }
+    }
     const Node *node = list->root;
     size_t start = 0;
     unsigned depth = 0;
@@ -1379,6 +1785,11 @@ bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
  * first children to a leaf. The leaf after it (a sibling) is fetched ahead:
  * leaves copied at different times lie far apart in memory. */
 bool pure_list_next(const PureList *list, PureRun *run) {
+    if (list->form != TREE) {
+        if (run->start + run->count >= list->count) return false;
+        open_array_run(list, run->start + run->count, run);
+        return true;
+    }
     size_t start = run->start + run->count;
     unsigned depth = run->depth;
     while (depth && run->taken[depth - 1] + 1u >= ((const Node *)run->path[depth - 1])->count) --depth;
@@ -1417,10 +1828,34 @@ static int order(const Layout *l, unsigned field, PureCell a, PureCell b) {
  * the children's first leaves. */
 size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *found) {
     const Layout *l = &list->layout;
+    *found = false;
+    if (!list->count) return 0;
+    if (list->form == DENSE && !positioned((PureList *)list) && (int)field == l->key) { /* counted along its bits */
+        size_t below = 0, all = list->member_capacity * 64; /* the keys below key: whole numbers below its ceiling */
+        size_t limit = key.num <= 0 ? 0 : key.num >= (double)all ? all : (size_t)ceil(key.num);
+        for (size_t w = 0; w < list->member_capacity && w * 64 < limit; ++w) {
+            uint64_t word = list->members[w];
+            if ((w + 1) * 64 > limit) word &= (UINT64_C(1) << (limit - w * 64)) - 1;
+            below += (size_t)__builtin_popcountll(word);
+        }
+        pure_list_contains(list, key.num, found);
+        return below;
+    }
+    if (list->form == FLAT) {
+        size_t low = 0, high = list->count;
+        if ((int)field == l->key) low = lower(list->columns[field], (unsigned)list->count, key.num);
+        else
+            while (low < high) {
+                size_t middle = low + (high - low) / 2;
+                if (order(l, field, array_cell(list, middle, field), key) < 0) low = middle + 1;
+                else high = middle;
+            }
+        *found = low < list->count && !order(l, field, array_cell(list, low, field), key);
+        return low;
+    }
     const Node *node = list->root;
     size_t start = 0;
-    *found = false;
-    if (!node || !list->count) return 0;
+    if (!node) return 0;
     if ((int)field == l->key) {
         /* The finger's leaf, when its keys reach round key, holds its place
          * (a slice's high bound is near its low one, found just before). */
@@ -1497,6 +1932,7 @@ static bool gather_leaf(void *context, const Node *leaf) {
 }
 
 PURE_COLD PureResult pure_list_sorted(const PureList *list, unsigned field, PureList **out, size_t *moved) {
+    tree_now(list);
     const Layout *l = &list->layout;
     *out = NULL;
     Gathered gathered = {list->count ? malloc(list->count * sizeof(Ref)) : NULL, 0};

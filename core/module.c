@@ -354,6 +354,9 @@ static unsigned char state_type(const PureModule *m, uint32_t state) {
     return m->state_type[state] == PURE_STATE_BOOL ? T_BOOL : m->state_type[state] == PURE_STATE_I64 ? T_I64 : T_NUM;
 }
 
+/* An item's or a key's op->plan: its cell a text; a FIND joined to the ITEM_GET after it. */
+enum { PLAN_TEXT = 1, PLAN_JOINED = 2 };
+
 /* Whether a list's record field is a text. */
 static bool text_field(const PureModule *m, uint32_t list, uint32_t field) {
     return m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_TEXT;
@@ -1341,13 +1344,32 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         plan_folds(out, out->handler[i].code, input);
         range_code(out, out->handler[i].code, input);
     }
-    /* What a cell is, read once here: an item's field, or a keyed list's key, a text (plan) or not. */
+    /* What a cell is, read once here: an item's field, or a keyed list's key, a text (PLAN_TEXT) or not. */
     for (uint32_t pc = 0; pc < out->code_count; ++pc) {
         PureOp *op = &out->code[pc];
         if (op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET) op->plan = text_field(out, list_of(op->arg), item_field(op->arg));
         else if (op->op == PURE_OP_LIST_FIND || op->op == PURE_OP_LIST_HAS)
             op->plan = text_field(out, op->arg, out->state_key[op->arg] - 1u);
     }
+    /* A FIND whose index the next instruction, an ITEM_GET of its list, takes
+     * at once (no jump lands between them) reads the field by key, as one
+     * (PLAN_JOINED, docs/design/021): no position is made. */
+    bool *landed = calloc(out->code_count + 1, sizeof(*landed));
+    if (!landed) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
+    for (uint32_t pc = 0; pc < out->code_count; ++pc)
+        if (out->code[pc].op == PURE_OP_JZ || out->code[pc].op == PURE_OP_JMP) landed[out->code[pc].arg] = true;
+    for (uint32_t pc = 0; pc + 1 < out->code_count; ++pc) {
+        PureOp *op = &out->code[pc], *next = op + 1;
+        if (op->op == PURE_OP_LIST_FIND && next->op == PURE_OP_ITEM_GET && list_of(next->arg) == op->arg && !landed[pc + 1])
+            op->plan |= PLAN_JOINED;
+    }
+    free(landed);
+    /* The lists an index state refers to: their inserts tell where (move_indices). */
+    for (uint32_t i = 0; i < out->states; ++i)
+        if (out->state_type[i] == PURE_STATE_INDEX) out->state_indexed[out->state_ref[i]] = true;
     return PURE_OK;
 refused:
     if (error_size) snprintf(error, error_size, "%s (%u)", why, bad);
@@ -2682,7 +2704,9 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             status = PURE_INVALID;
             if (m->state_key[arg]) { /* a keyed list places the item by its key: found and placed at once when kept by a number */
                 bool found;
-                if ((status = pure_list_add(list, cells, undo_for(app, arg), &at, &found)) == PURE_INVALID) {
+                /* where it went matters to an index state's alone */
+                if ((status = pure_list_add(list, cells, undo_for(app, arg), m->state_indexed[arg] ? &at : NULL, &found)) ==
+                    PURE_INVALID) {
                     unsigned key = m->state_key[arg] - 1u;
                     at = pure_list_seek(list, key, cells[key], &found);
                 }
@@ -2715,7 +2739,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             if (at >= pure_list_count(app->lists[list])) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
             PureCell cell = pure_list_get(app->lists[list], at, field);
             /* A text is copied: the item may change or go before the value is used. */
-            if (!op->plan) top->i64 = cell.i64; /* the bits: a number's, a bool's or an i64's (plan: a text, set at load) */
+            if (!(op->plan & PLAN_TEXT)) top->i64 = cell.i64; /* the bits: a number's, a bool's or an i64's (else a text) */
             else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) return status;
             continue;
         }
@@ -2725,7 +2749,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             size_t at = (size_t)stack[--sp].num, mark = arena->used;
             Held before = list_held(app, app->lists[list]);
             PureSpan span = {0};
-            status = op->plan ? contiguous(app, arena, value.bytes, &span) : PURE_OK; /* plan: a text */
+            status = op->plan & PLAN_TEXT ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
             if (status == PURE_OK)
                 status = pure_list_set(app->lists[list], at, field,
                                        (PureCell){.i64 = value.i64, .text = (unsigned char *)span.data, .size = span.size},
@@ -2861,12 +2885,23 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             unsigned key = m->state_key[arg] - 1u;
             size_t mark = arena->used;
             PureCell cell = {.i64 = top->i64};
-            if (op->plan) { /* a text key (set at load) */
+            if (op->plan & PLAN_TEXT) { /* a text key (set at load) */
                 PureSpan span;
                 if ((status = contiguous(app, arena, top->bytes, &span)) != PURE_OK) return status;
                 cell = (PureCell){.text = (unsigned char *)span.data, .size = span.size};
             }
             bool found;
+            if (op->plan & PLAN_JOINED) { /* FIND, then ITEM_GET of what it found: the field by key */
+                const PureOp *get = &m->code[pc];
+                PureCell value;
+                found = pure_list_lookup(app->lists[arg], key, cell, item_field(get->arg), &value);
+                arena->used = mark;
+                if (!found) { kind = PURE_FAULT_NOT_FOUND; goto failed; }
+                ++pc;
+                if (!(get->plan & PLAN_TEXT)) top->i64 = value.i64;
+                else if ((status = keep_bytes(arena, value.text, value.size, &top->bytes)) != PURE_OK) return status;
+                continue;
+            }
             /* An event's list keeps its keys as a set: HAS asks it alone (020). */
             if (op->op == PURE_OP_LIST_HAS && pure_list_contains(app->lists[arg], cell.num, &found)) {
                 top->num = found;
@@ -3667,6 +3702,7 @@ static bool own_lists(PureApp *app, uint32_t lists) {
             if (!(app->own[i] = new_list(m, m->state_ref[i]))) return false;
             (void)pure_list_keyed(app->own[i], m->state_key[i] ? (int)m->state_key[i] - 1 : -1);
             if (m->state_key[i]) (void)pure_list_hashed(app->own[i]);
+            (void)pure_list_arrays(app->own[i]); /* in arrays, not a tree, while it can (021) */
         }
         app->lists[i] = app->own[i];
     }
@@ -4335,6 +4371,8 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
             (void)pure_list_keyed(lists[i], module->state_key[i] ? (int)module->state_key[i] - 1 : -1);
         if (module->state_type[i] == PURE_STATE_LIST && module->state_key[i] && module->state_flags[i] & PURE_LIST_ROWS >> 8)
             (void)pure_list_hashed(lists[i]);
+        if (module->state_type[i] == PURE_STATE_LIST && module->state_flags[i] & PURE_LIST_ROWS >> 8)
+            (void)pure_list_arrays(lists[i]); /* in arrays, not a tree, while it can (021) */
     }
     if (old) remap_outputs(app, old, module, true, NULL, NULL);
     if (recast) { /* in the place of the outbox, its sends now the new module's */

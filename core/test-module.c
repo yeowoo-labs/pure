@@ -1374,6 +1374,119 @@ static void keyed_journal(void) {
     printf("{\"keyed_journal\":{\"adds\":%zu,\"had\":%zu,\"undone\":%zu,\"restarts\":%zu}}\n", adds, had, undone, restarts);
 }
 
+/* An event's list in arrays (docs/design/021): beside a list that is a tree
+ * alone, the same random run of changes and questions gets the same answers
+ * at every step, whatever the arrays are then (FLAT, DENSE, or a tree after
+ * all): adds by key (where asked and not), inserts and removes anywhere,
+ * changes of a text and of a key, finds, reads by position and run by run,
+ * the field found by key, clears between events. Keys run small and whole
+ * (DENSE), past what DENSE may hold, and fractional (then the set is a
+ * table), so every change of form happens, back and forth. */
+static void same_list(const PureList *a, const PureList *t) {
+    CHECK(pure_list_count(a) == pure_list_count(t) && pure_list_size(a) == pure_list_size(t));
+    size_t n = pure_list_count(t);
+    for (size_t i = 0; i < n; i += 1 + i / 64) {
+        PureCell x = pure_list_get(a, i, 0), y = pure_list_get(t, i, 0), u = pure_list_get(a, i, 1), v = pure_list_get(t, i, 1);
+        CHECK(x.i64 == y.i64 && u.size == v.size && (!u.size || !memcmp(u.text, v.text, u.size)));
+    }
+}
+
+static void arrays_equivalence(void) {
+    static const uint8_t fields[2] = {PURE_CELL_NUMBER, PURE_CELL_TEXT};
+    uint32_t seed = 0x61727261u;
+    size_t forms[3] = {0}, conversions = 0, steps = 0;
+    for (unsigned keyed = 0; keyed < 2; ++keyed) {
+        PureList *a = pure_list_new(2, fields), *t = pure_list_new(2, fields);
+        CHECK(a && t);
+        if (keyed) {
+            CHECK(pure_list_keyed(a, 0) == PURE_OK && pure_list_keyed(t, 0) == PURE_OK);
+            CHECK(pure_list_hashed(a) && pure_list_hashed(t));
+        }
+        CHECK(pure_list_arrays(a) && pure_list_form(a) == 1);
+        unsigned form = pure_list_form(a);
+        for (unsigned event = 0; event < 400; ++event) {
+            /* Each event's keys: small and whole, sparse, or with fractions. */
+            unsigned kind = event % 5, changes = 50 + next_random(&seed) % (event % 7 == 0 ? 4000 : 400);
+            for (unsigned c = 0; c < changes; ++c, ++steps) {
+                uint32_t r = next_random(&seed);
+                size_t n = pure_list_count(t);
+                double key = kind < 3 ? (double)(r % 20000)
+                             : kind == 3 ? (double)(r % 4000000)
+                                         : (double)(r % 80000) / 4;
+                char text[16];
+                size_t size = (size_t)snprintf(text, sizeof(text), "t%u", r % 1000);
+                PureCell cells[2] = {{.num = key}, {.text = (unsigned char *)text, .size = r % 11 ? size : 0}};
+                unsigned op = next_random(&seed) % 20;
+                if (keyed && event % 3 == 1) op = op < 12 ? 1 + op % 8 : 13 + op % 2; /* by key alone, as a search does: DENSE stays */
+                if (keyed && op < 9) { /* add by key, where it went asked or not */
+                    bool ask = op == 0, ea, et;
+                    size_t at_a = 0, at_t = 0;
+                    CHECK(pure_list_add(a, cells, NULL, ask ? &at_a : NULL, &ea) == PURE_OK);
+                    CHECK(pure_list_add(t, cells, NULL, &at_t, &et) == PURE_OK);
+                    CHECK(ea == et && (!ask || at_a == at_t));
+                } else if (!keyed && op < 9) { /* insert anywhere: mostly the end */
+                    size_t at = op < 6 ? n : n ? next_random(&seed) % (n + 1) : 0;
+                    CHECK(pure_list_insert(a, at, cells, NULL) == PURE_OK && pure_list_insert(t, at, cells, NULL) == PURE_OK);
+                } else if (op < 11 && n) { /* remove */
+                    size_t at = next_random(&seed) % n;
+                    CHECK(pure_list_remove(a, at, NULL) == PURE_OK && pure_list_remove(t, at, NULL) == PURE_OK);
+                } else if (op < 12 && n) { /* a text changed; in a keyed list now and then its key, between its neighbours */
+                    size_t at = next_random(&seed) % n;
+                    CHECK(pure_list_set(a, at, 1, cells[1], NULL) == PURE_OK && pure_list_set(t, at, 1, cells[1], NULL) == PURE_OK);
+                    if (keyed && at + 1 < n && r % 3 == 0) {
+                        double low = pure_list_get(t, at, 0).num, high = pure_list_get(t, at + 1, 0).num, to = low + (high - low) / 2;
+                        if (to > low && to < high) {
+                            CHECK(pure_list_set(a, at, 0, (PureCell){.num = to}, NULL) == PURE_OK);
+                            CHECK(pure_list_set(t, at, 0, (PureCell){.num = to}, NULL) == PURE_OK);
+                        }
+                    }
+                } else if (keyed && op < 15) { /* found, has, and its field by key */
+                    bool fa, ft, ha, ht;
+                    PureCell ca, ct;
+                    if (op == 12) CHECK(pure_list_seek(a, 0, cells[0], &fa) == pure_list_seek(t, 0, cells[0], &ft) && fa == ft);
+                    CHECK(pure_list_contains(a, key, &ha) && pure_list_contains(t, key, &ht) && ha == ht);
+                    fa = pure_list_lookup(a, 0, cells[0], 1, &ca);
+                    ft = pure_list_lookup(t, 0, cells[0], 1, &ct);
+                    CHECK(fa == ft && fa == ht && (!fa || (ca.size == ct.size && (!ca.size || !memcmp(ca.text, ct.text, ca.size)))));
+                } else if (op < 17 && n) { /* by position */
+                    size_t at = next_random(&seed) % n;
+                    PureCell x = pure_list_get(a, at, 0), y = pure_list_get(t, at, 0);
+                    CHECK(x.i64 == y.i64);
+                } else if (op < 18 && n) { /* run by run from somewhere */
+                    size_t at = next_random(&seed) % n, seen = 0;
+                    PureRun ra, rt;
+                    CHECK(pure_list_run(a, at, &ra) && pure_list_run(t, at, &rt));
+                    size_t ia = at, it = at;
+                    for (bool ma = true, mt = true; seen < 200 && ma && mt; ++seen) {
+                        while (ma && ia >= ra.start + ra.count) ma = pure_list_next(a, &ra);
+                        while (mt && it >= rt.start + rt.count) mt = pure_list_next(t, &rt);
+                        if (!ma || !mt) {
+                            CHECK(ma == mt);
+                            break;
+                        }
+                        CHECK(ra.column[0].numbers[ia - ra.start] == rt.column[0].numbers[it - rt.start]);
+                        PureSpan sa = ra.column[1].texts[ia - ra.start], st = rt.column[1].texts[it - rt.start];
+                        CHECK(sa.size == st.size && (!sa.size || !memcmp(sa.data, st.data, sa.size)));
+                        ++ia, ++it;
+                    }
+                }
+                if (pure_list_form(a) != form) ++conversions, form = pure_list_form(a);
+                ++forms[form];
+            }
+            same_list(a, t);
+            pure_list_clear(a); /* the event's end */
+            pure_list_clear(t);
+            CHECK(pure_list_count(a) == 0 && pure_list_form(a) == 1);
+            form = 1;
+        }
+        pure_list_free(a);
+        pure_list_free(t);
+    }
+    CHECK(forms[0] > 10000 && forms[1] > 10000 && forms[2] > 10000 && conversions > 100);
+    printf("{\"arrays\":{\"steps\":%zu,\"tree\":%zu,\"flat\":%zu,\"dense\":%zu,\"conversions\":%zu}}\n", steps, forms[0], forms[1],
+           forms[2], conversions);
+}
+
 static void list_trees(void) {
     static const uint8_t text_fields[2] = {0, 1};
     uint32_t seed = 0x5eed1234u;
@@ -5850,6 +5963,7 @@ int main(void) {
     list_trees();
     key_sets();
     keyed_journal();
+    arrays_equivalence();
     folds();
     filters();
     lane_folds();
@@ -5878,6 +5992,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-bools-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-key-sets-text-order-message-fields-timers-now-snapshots-links\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-bools-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-key-sets-arrays-text-order-message-fields-timers-now-snapshots-links\"}");
     return 0;
 }

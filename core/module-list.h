@@ -102,10 +102,11 @@ void pure_retired_free(PureRetired *);
  * log means the change is not undone. */
 PureResult pure_list_insert(PureList *, size_t at, const PureCell *cells, PureUndo *);
 /* An item into a list kept in order of a number field, where its key goes,
- * found and placed in one descent (docs/design/020): at says where, exists
- * whether an item had the key (then nothing changes). Its change is logged
- * and journaled as pure_list_insert's. PURE_INVALID when the list is not
- * such a one (search it and insert then). */
+ * found and placed in one descent (docs/design/020): at says where (NULL:
+ * not asked, so a DENSE list need not count it), exists whether an item had
+ * the key (then nothing changes). Its change is logged and journaled as
+ * pure_list_insert's. PURE_INVALID when the list is not such a one (search
+ * it and insert then). */
 PureResult pure_list_add(PureList *, const PureCell *cells, PureUndo *, size_t *at, bool *exists);
 PureResult pure_list_remove(PureList *, size_t at, PureUndo *);
 PureResult pure_list_set(PureList *, size_t at, unsigned field, PureCell value, PureUndo *);
@@ -134,6 +135,18 @@ bool pure_list_hashed(PureList *);
 bool pure_list_contains(const PureList *, double key, bool *found);
 /* The bytes it keeps beside its items for that. */
 size_t pure_list_extra(const PureList *);
+/* An event's list (empty, never shared, journaled or undone) may keep its
+ * items in arrays rather than a tree (docs/design/021): in order (FLAT), or
+ * at their keys when keyed by small whole numbers (DENSE), as the changes it
+ * gets allow; a clear makes it FLAT again. Answers are the tree's. False
+ * when the list cannot (it stays a tree). */
+bool pure_list_arrays(PureList *);
+/* What it keeps its items in now: 0 a tree, 1 FLAT arrays, 2 DENSE (for tests and counts). */
+unsigned pure_list_form(const PureList *);
+/* Field of the item whose key_field is key, in a list ordered by key_field
+ * (seek, then get, as one: a DENSE list reads it at its key); false when no
+ * item has key. */
+bool pure_list_lookup(const PureList *, unsigned key_field, PureCell key, unsigned field, PureCell *cell);
 /* The list's items ordered by field, as a keyed list keeps them: *out is NULL
  * when they already are, or a new list in that order with moved[position
  * before] = position after for every item. CONFLICT when two items have the
