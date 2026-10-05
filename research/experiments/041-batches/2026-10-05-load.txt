@@ -1,3 +1,6 @@
 b1 jit  22:53:50 up 1 day, 19:15,  2 users,  load average: 0.90, 0.93, 0.74
 b1 batches  22:53:57 up 1 day, 19:15,  2 users,  load average: 1.23, 1.00, 0.76
 b1 rounds  22:54:21 up 1 day, 19:15,  2 users,  load average: 1.15, 1.00, 0.77
+b2 jit  23:21:06 up 1 day, 19:42,  2 users,  load average: 1.12, 0.73, 0.59
+b2 batches  23:21:13 up 1 day, 19:42,  2 users,  load average: 1.11, 0.74, 0.60
+b2 rounds  23:21:27 up 1 day, 19:42,  2 users,  load average: 1.08, 0.75, 0.60
