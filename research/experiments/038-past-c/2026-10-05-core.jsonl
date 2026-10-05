@@ -1,0 +1,12 @@
+{"version":"before","round":1,"run":{"nodes":100000,"edges":999937,"median_ms":190.61}}
+{"version":"after","round":1,"run":{"nodes":100000,"edges":999937,"median_ms":89.02}}
+{"version":"after","round":2,"run":{"nodes":100000,"edges":999937,"median_ms":89.95}}
+{"version":"before","round":2,"run":{"nodes":100000,"edges":999937,"median_ms":190.43}}
+{"version":"before","round":3,"run":{"nodes":100000,"edges":999937,"median_ms":189.56}}
+{"version":"after","round":3,"run":{"nodes":100000,"edges":999937,"median_ms":89.24}}
+{"version":"after","round":4,"run":{"nodes":100000,"edges":999937,"median_ms":89.76}}
+{"version":"before","round":4,"run":{"nodes":100000,"edges":999937,"median_ms":189.41}}
+{"version":"before","round":5,"run":{"nodes":100000,"edges":999937,"median_ms":188.96}}
+{"version":"after","round":5,"run":{"nodes":100000,"edges":999937,"median_ms":89.27}}
+{"version":"after","round":6,"run":{"nodes":100000,"edges":999937,"median_ms":89.46}}
+{"version":"before","round":6,"run":{"nodes":100000,"edges":999937,"median_ms":188.81}}

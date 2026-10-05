@@ -1,0 +1,12 @@
+1 before  08:42:43 up 1 day,  5:04,  3 users,  load average: 0.97, 1.18, 1.42
+1 after  08:44:10 up 1 day,  5:05,  3 users,  load average: 1.24, 1.25, 1.43
+2 after  08:45:37 up 1 day,  5:07,  3 users,  load average: 1.40, 1.36, 1.45
+2 before  08:47:04 up 1 day,  5:08,  3 users,  load average: 1.44, 1.43, 1.47
+3 before  08:48:41 up 1 day,  5:10,  3 users,  load average: 1.38, 1.52, 1.51
+3 after  08:50:18 up 1 day,  5:11,  3 users,  load average: 1.45, 1.60, 1.54
+4 after  08:53:41 up 1 day,  5:15,  3 users,  load average: 0.44, 1.27, 1.44
+4 before  08:55:08 up 1 day,  5:16,  3 users,  load average: 1.45, 1.42, 1.48
+5 before  08:56:45 up 1 day,  5:18,  3 users,  load average: 1.28, 1.48, 1.51
+5 after  08:58:22 up 1 day,  5:19,  3 users,  load average: 1.38, 1.56, 1.54
+6 after  09:00:09 up 1 day,  5:21,  3 users,  load average: 1.39, 1.63, 1.57
+6 before  09:01:56 up 1 day,  5:23,  3 users,  load average: 1.33, 1.64, 1.59
