@@ -1219,6 +1219,74 @@ on go {
 """
 
 
+# Nested loops a batch runs together, and reductions (NESTED_SOURCE): Newton
+# steps breaking out lane by lane, a sum of fractions one a round, a nested
+# loop of 0 to 6 rounds a lane whose division by 0 is a fault in some
+# lane's round (q < 4), max and min, a sum of fractions several a lane (the
+# batch gives its rounds back), -0 summed, a grid's sums.
+NESTED_SOURCE = """state total = 0
+state steps = 0
+state most = 0
+state least = 0
+state frac = 0
+state zero = 0
+state grid = 0
+input go = message {
+  n: u32
+  q: u32
+}
+on go {
+  let sum = 0
+  let count = 0
+  for i in 1 .. go.n + 1 {
+    let r = i
+    for s in 0 .. 64 {
+      let next = (r + i / r) / 2
+      if next >= r { break }
+      r = next
+      count = count + 1
+    }
+    sum = sum + r
+  }
+  let high = 0
+  let low = 0
+  for i in 0 .. go.n {
+    let w = 0
+    for k in 0 .. i - floor(i / 7) * 7 {
+      w = w + 1000 / (k + go.q - 3)
+    }
+    high = max(high, w)
+    low = min(low, 0 - w)
+  }
+  let f = 0
+  for i in 0 .. go.n {
+    for k in 0 .. 3 {
+      f = f + 0.1
+    }
+  }
+  let z = 0 * (0 - 1)
+  for i in 0 .. go.n {
+    z = z + 0 * (0 - 1)
+  }
+  let g = 0
+  for j in 0 .. go.n {
+    let c = 0
+    for k in 0 .. 20 {
+      c = c + (j * 7 + k) * (k + 1)
+    }
+    g = g + c
+  }
+  total = sum
+  steps = count
+  most = high
+  least = low
+  frac = f
+  zero = z
+  grid = g
+}
+"""
+
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -1270,6 +1338,19 @@ def module_assumptions(aup, pure, work):
         assert outputs[name] == outputs['batches'], ('batch', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
     faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
     assert 'divide' in faults and 'none' in faults and 'work' in faults, faults
+    source, program = work / 'nested.aup', work / 'nested.pmod'  # nested loops together and reductions, against the rounds one by one
+    source.write_text(NESTED_SOURCE)
+    compile_module(aup, source, program)
+    given = ''.join(f'message go {struct.pack("<II", n, q).hex()}\nwork\n' for n, q in
+                    ((2000, 9), (2000, 2), (300, 100), (17, 9), (5, 9), (1500, 3)))
+    given += 'budget 30011\n' + given + 'budget 400000\n' + given
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=120, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('nested', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
+    faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
+    assert 'divide' in faults and 'none' in faults and 'work' in faults, faults
     return len(runs)
 
 
@@ -1278,7 +1359,8 @@ def tier_program(rng):
     numbers in locals and states, a keyed list read and set by key, one
     whose keys came out of order read by key alone (HASHED), one of small
     keys read by key alone (full, or not where keys are left out), ifs and
-    breaks, loops whose rounds are apart (a batch's, 024), with what fails
+    breaks, loops whose rounds are apart (a batch's, 024), some with a loop
+    run in each and reductions (ra, rb, rc), with what fails
     (a key not there, not whole, 0 divided by, a cell past its column's
     width) as likely as not."""
     names = iter('jklpqrxyz')
@@ -1327,8 +1409,8 @@ def tier_program(rng):
     def statements(depth, loops, indent, inside):
         lines = []
         for _ in range(rng.randint(1, 3)):
-            kind = rng.choice(['s', 's', 'u', 'acc', 'if', 'loop', 'walk', 'set', 'set', 'break', 'sweep', 'lanes', 'lanes'] if depth < 3
-                              else ['s', 'u', 'set', 'break'])
+            kind = rng.choice(['s', 's', 'u', 'acc', 'if', 'loop', 'walk', 'set', 'set', 'break', 'sweep', 'lanes', 'lanes', 'nest', 'nest']
+                              if depth < 3 else ['s', 'u', 'set', 'break'])
             pad = '  ' * indent
             if kind == 's':
                 lines.append(f'{pad}s = s + {number(1, loops)}')
@@ -1382,6 +1464,30 @@ def tier_program(rng):
                         lines.append(f'{pad}  if {cond(1, inner)} {{ t[{at()}].v = {number(1, inner)} }}' +
                                      (f' else {{ t[{at()}].v = {number(1, inner)} }}' if rng.random() < 0.4 else ''))
                 lines.append(f'{pad}}}')
+            elif kind == 'nest':  # rounds apart, a loop in each run together, reductions (024's stage 2)
+                outer, inner = next(names, None), next(names, None)
+                if not inner:
+                    continue
+                w = f'w{outer}'
+                lines.append(f'{pad}for {outer} in {rng.choice(["0", "1", "go.q"])} .. {rng.choice(["go.n", "go.m", "go.n + 3"])} {{')
+                lines.append(f'{pad}  let {w} = {number(2, loops + [outer])}')
+                high = rng.choice([outer, f'{outer} + 2', 'go.q', '3', f'floor({outer} / 2)', '64'])
+                lines.append(f'{pad}  for {inner} in {rng.choice(["0", "1", outer])} .. {high} {{')
+                both = loops + [outer, inner, w]
+                for _ in range(rng.randint(1, 3)):
+                    pick = rng.random()
+                    if pick < 0.25:
+                        lines.append(f'{pad}    if {cond(1, both)} {{ break }}')
+                    elif pick < 0.55:
+                        lines.append(f'{pad}    {w} = {w} + {number(2, both)}')
+                    elif pick < 0.8:
+                        lines.append(f'{pad}    rc = rc + {number(2, both)}')
+                    else:
+                        lines.append(f'{pad}    if {cond(1, both)} {{ {w} = {number(2, both)} }}')
+                lines.append(f'{pad}  }}')
+                lines.append(f'{pad}  ra = ra + {w}')
+                lines.append(f'{pad}  rb = {rng.choice(["max", "min"])}(rb, {number(2, loops + [outer, w])})')
+                lines.append(f'{pad}}}')
             elif kind == 'walk' and 'c' not in loops:
                 lines.append(f'{pad}for c in f {{')
                 lines += statements(depth + 1, loops + ['c'], indent + 1, True)
@@ -1395,9 +1501,9 @@ def tier_program(rng):
         '  for i in 0 .. go.n {', f'    t.add(Cell {{ at: i, v: {rng.choice(["i", "0", "(i * 3)", "1"])} }})',
         '    f.append(Cell { at: i * 2, v: i })', '    h.add(Cell { at: i * 7919 - floor(i * 7919 / 1009) * 1009 + 5000000, v: i * 5 })',
         f'    g.add(Cell {{ at: {rng.choice(["i", "i", "i + floor(i / 40)"])}, v: i * 3 }})', '  }',
-        '  let s = 0', '  let u = 1',
+        '  let s = 0', '  let u = 1', '  let ra = 0', '  let rb = 0', '  let rc = 0',
         '  for i in 0 .. go.m {', *body, '  }',
-        '  out = s', '  acc = acc + u', '}', ''])
+        '  out = s + ra + rb + rc', '  acc = acc + u', '}', ''])
 
 
 def module_tier(aup, pure, work, programs=150):

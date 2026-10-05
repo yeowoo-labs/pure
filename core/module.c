@@ -686,43 +686,51 @@ PURE_COLD static bool block_has_lanes(const PureModule *m, PureBlock block, int 
     return true;
 }
 
-/* A count's loop whose block has batch forms throughout runs a batch of its
- * rounds at a time (module-batch.c, docs/design/024): lane forms, a local
- * set (a number, an index or a bool) and read only after every round sets
- * it, a branch with nothing else on the stack to a place in the block, and
- * a number or bool set in an item (not its key). PURE_BATCH=0 in the
- * environment: none does (the executor alone, to measure it). */
-PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input) {
-    static int off = -1;
-    if (off < 0) {
-        const char *batches = getenv("PURE_BATCH");
-        off = batches && !strcmp(batches, "0");
-    }
-    const PureOp *loop = &m->code[pc];
-    uint32_t start = pc + 1, end = start + (loop->arg >> 16), arms = start;
-    if (off || loop->arg & PURE_LOOP_INTEGER || start >= end || m->height[start]) return false;
-    uint64_t set[4] = {0}, sure[4] = {0}; /* the locals the block sets; set before here in every round */
-    for (uint32_t at = start; at < end; ++at)
-        if (m->code[at].op == PURE_OP_LOCAL_STORE) set[(m->code[at].arg & 0xFF) / 64] |= UINT64_C(1) << (m->code[at].arg & 63);
-    for (uint32_t at = start; at < end; ++at) { /* a local read before a round sets it: an earlier round's (no batch has it) */
-        const PureOp *op = &m->code[at];
-        unsigned local = op->arg & 0xFF;
-        if ((op->op == PURE_OP_JZ || op->op == PURE_OP_JMP) && op->arg > arms) arms = op->arg; /* code before arms: in a branch's way */
-        if (op->op == PURE_OP_LOCAL_STORE && at >= arms) sure[local / 64] |= UINT64_C(1) << (local % 64);
-        if (op->op == PURE_OP_LOCAL_LOAD && (set[local / 64] & ~sure[local / 64]) >> (local % 64) & 1) return false;
-    }
+/* Whether the block [start, end) of a loop a batch runs (depth: the loops
+ * around it the batch runs too) has batch forms throughout: lane forms, a
+ * local set (a number, an index or a bool), read only after its round sets
+ * it (sure: set for certain since the round began) or a reduction's
+ * (reduced: x = x op e alone), a branch with nothing else on the stack to a
+ * place in the block, a loop in it (one deep: its rounds run together, a
+ * BREAK leaving it), and a number or bool set in an item (not its key; not
+ * in a nested loop). shape: 1 a nested loop, 2 a set. */
+PURE_COLD static bool batch_block(const PureModule *m, uint32_t start, uint32_t end, int input, unsigned depth, uint64_t *sure,
+                                  const uint64_t *set, const uint64_t *reduced, unsigned *shape) {
+    uint32_t arms = start; /* code before arms: in a branch's way */
     for (uint32_t at = start; at < end; ++at) {
         const PureOp *op = &m->code[at];
+        unsigned local = op->arg & 0xFF;
+        uint64_t bit = UINT64_C(1) << (local % 64);
         switch (op->op) {
-        case PURE_OP_LOCAL_STORE:
-            if (local_type(op->arg) == T_I64) return false;
+        case PURE_OP_LOOP: {
+            uint32_t inner = at + 1, stop = inner + (op->arg >> 16);
+            if (depth || op->arg & PURE_LOOP_INTEGER || stop > end || m->height[inner]) return false;
+            uint64_t scope[4];
+            memcpy(scope, sure, sizeof(scope));
+            scope[local / 64] |= bit; /* its slot, set as each round begins */
+            *shape |= 1;
+            if (!batch_block(m, inner, stop, input, depth + 1, scope, set, reduced, shape)) return false;
+            at = stop - 1;
+            break;
+        }
+        case PURE_OP_BREAK:
+            if (!depth) return false; /* a nested loop's alone */
             break;
         case PURE_OP_JZ: case PURE_OP_JMP:
             if (op->arg > end || m->height[at] != (op->op == PURE_OP_JZ)) return false;
+            if (op->arg > arms) arms = op->arg;
+            break;
+        case PURE_OP_LOCAL_STORE:
+            if (local_type(op->arg) == T_I64) return false;
+            if (at >= arms) sure[local / 64] |= bit;
+            break;
+        case PURE_OP_LOCAL_LOAD:
+            if (!has_lanes(m, op, input) || set[local / 64] & ~sure[local / 64] & ~reduced[local / 64] & bit) return false;
             break;
         case PURE_OP_ITEM_SET: {
             unsigned char type = field_type(m, list_of(op->arg), item_field(op->arg));
-            if ((type != T_NUM && type != T_BOOL) || item_field(op->arg) == m->state_key[list_of(op->arg)] - 1u) return false;
+            if (depth || (type != T_NUM && type != T_BOOL) || item_field(op->arg) == m->state_key[list_of(op->arg)] - 1u) return false;
+            *shape |= 2;
             break;
         }
         default:
@@ -730,6 +738,43 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input) 
         }
     }
     return true;
+}
+
+/* A count's loop whose block has batch forms throughout (batch_block) runs a
+ * batch of its rounds at a time (module-batch.c, docs/design/024), unless it
+ * sets items and has a nested loop (not yet), or PURE_BATCH=0 in the
+ * environment says none does (the executor alone, to measure it). A local is
+ * a reduction when every read of it begins x = x op e and every set of it
+ * ends one. */
+PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input) {
+    static int off = -1;
+    if (off < 0) {
+        const char *batches = getenv("PURE_BATCH");
+        off = batches && !strcmp(batches, "0");
+    }
+    const PureOp *loop = &m->code[pc];
+    uint32_t start = pc + 1, end = start + (loop->arg >> 16);
+    if (off || loop->arg & PURE_LOOP_INTEGER || start >= end || m->height[start]) return false;
+    uint8_t *ends = calloc(end - start, 1); /* the sets that end x = x op e */
+    if (!ends) return false;
+    uint64_t set[4] = {0}, sure[4] = {0}, reduced[4] = {0}, plain[4] = {0}; /* plain: read or set otherwise */
+    for (uint32_t at = start; at < end; ++at) {
+        const PureOp *op = &m->code[at];
+        uint64_t bit = UINT64_C(1) << (op->arg & 63);
+        unsigned word = (op->arg & 0xFF) / 64;
+        uint32_t by;
+        if (op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP) set[word] |= bit;
+        if (op->op == PURE_OP_LOCAL_LOAD && local_type(op->arg) == T_NUM && pure_batch_reduces(m, at, end, &by))
+            reduced[word] |= bit, ends[by + 1 - start] = 1;
+        else if (op->op == PURE_OP_LOCAL_LOAD)
+            plain[word] |= bit;
+    }
+    for (uint32_t at = start; at < end; ++at)
+        if (m->code[at].op == PURE_OP_LOCAL_STORE && !ends[at - start]) plain[(m->code[at].arg & 0xFF) / 64] |= UINT64_C(1) << (m->code[at].arg & 63);
+    free(ends);
+    for (unsigned w = 0; w < 4; ++w) reduced[w] &= set[w] & ~plain[w];
+    unsigned shape = 0;
+    return batch_block(m, start, end, input, 0, sure, set, reduced, &shape) && shape != 3;
 }
 
 /* A fold in a verified block whose own block has lane forms throughout runs

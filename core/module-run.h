@@ -162,6 +162,10 @@ int pure_run_rest(Frame *, uint32_t pc);
  * runs round by round next, at least until round loop->resume), the frame
  * left as the last of them leaves it, their work counted. */
 unsigned pure_batch_run(Frame *, Loop *);
+/* Whether the LOCAL_LOAD at pc, in a block ending at end, begins x = x op e
+ * (x its local, op ADD, MIN or MAX, e computed above x with no branch or
+ * loop): a reduction across a batch's rounds. *at: op's pc. */
+bool pure_batch_reduces(const PureModule *, uint32_t pc, uint32_t end, uint32_t *at);
 
 /* Where a list keeps what compiled code reads of it (module-list.c owns the
  * layout and says where): its item count, its key set (the words, how many,
