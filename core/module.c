@@ -335,8 +335,6 @@ static bool state_of(const PureModule *m, uint32_t state, uint8_t type) {
 }
 
 /* The list an item operation names: its low 16 bits (the field is above). */
-static uint32_t list_of(uint32_t arg) { return arg & 0xFFFF; }
-static uint32_t item_field(uint32_t arg) { return arg >> 16; }
 
 static unsigned char field_type(const PureModule *m, uint32_t list, uint32_t field) {
     static const unsigned char types[] = {[PURE_RECORD_NUMBER] = T_NUM, [PURE_RECORD_TEXT] = T_TEXT,

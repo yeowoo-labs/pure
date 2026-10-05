@@ -1,4 +1,5 @@
 #include "module-run.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,7 +25,7 @@ struct PureJit {
 
 /* ---- Emitting instructions */
 
-typedef struct { size_t at; int label; unsigned kind; } Fixup; /* kind: 0 B/BL, 1 B.cond, CBZ/CBNZ */
+typedef struct { size_t at; int label; unsigned kind; } Fixup; /* kind: 0 B, 1 B.cond and CBZ/CBNZ, 2 TBZ/TBNZ */
 typedef struct {
     uint32_t *words;
     size_t count, room;
@@ -86,6 +87,9 @@ static bool resolve(Emit *e) {
         if (f.kind == 0) {
             if (offset < -(1L << 25) || offset >= (1L << 25)) return false;
             e->words[f.at] |= (uint32_t)offset & 0x3FFFFFF;
+        } else if (f.kind == 2) {
+            if (offset < -(1L << 13) || offset >= (1L << 13)) return false;
+            e->words[f.at] |= ((uint32_t)offset & 0x3FFF) << 5;
         } else {
             if (offset < -(1L << 18) || offset >= (1L << 18)) return false;
             e->words[f.at] |= ((uint32_t)offset & 0x7FFFF) << 5;
@@ -94,7 +98,9 @@ static bool resolve(Emit *e) {
     return !e->failed;
 }
 
-enum { X0 = 0, X1 = 1, X9 = 9, X10 = 10, X16 = 16, X19 = 19, X20 = 20, X21 = 21, X22 = 22, X29 = 29, X30 = 30, SP = 31, XZR = 31 };
+enum { X0 = 0, X1 = 1, X9 = 9, X10 = 10, X11 = 11, X12 = 12, X13 = 13, X14 = 14, X15 = 15, X16 = 16, X19 = 19, X20 = 20,
+       X21 = 21, X22 = 22, X23 = 23, X24 = 24, X29 = 29, X30 = 30, SP = 31, XZR = 31 };
+enum { D0 = 0, D1 = 1, D2 = 2, D3 = 3, D4 = 4, D8 = 8 };
 enum { EQ = 0, NE = 1, HS = 2, LO = 3, MI = 4, PL = 5, VS = 6, VC = 7, HI = 8, LS = 9, GE = 10, LT = 11, GT = 12, LE = 13 };
 
 /* A 64-bit constant into register d. */
@@ -123,11 +129,54 @@ static void store64(Emit *e, unsigned t, unsigned base, size_t offset) {
     put(e, 0xF8206800 | X16 << 16 | base << 5 | t); /* STR Xt, [Xbase, X16] */
 }
 
-static __attribute__((unused)) void load_d(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0xFD400000 | (uint32_t)(offset / 8) << 10 | base << 5 | t); }
-static __attribute__((unused)) void store_d(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0xFD000000 | (uint32_t)(offset / 8) << 10 | base << 5 | t); }
-static __attribute__((unused)) void store_h(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0x79000000 | (uint32_t)(offset / 2) << 10 | base << 5 | t); }
-static __attribute__((unused)) void store_w(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0xB9000000 | (uint32_t)(offset / 4) << 10 | base << 5 | t); }
+static void load_d(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0xFD400000 | (uint32_t)(offset / 8) << 10 | base << 5 | t); }
+static void store_d(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0xFD000000 | (uint32_t)(offset / 8) << 10 | base << 5 | t); }
+static void store_h(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0x79000000 | (uint32_t)(offset / 2) << 10 | base << 5 | t); }
+static void store_w(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0xB9000000 | (uint32_t)(offset / 4) << 10 | base << 5 | t); }
 static void mov_reg(Emit *e, unsigned d, unsigned n) { put(e, 0xAA0003E0 | n << 16 | d); }
+static void load8(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0x39400000 | (uint32_t)offset << 10 | base << 5 | t); }
+static void store8(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0x39000000 | (uint32_t)offset << 10 | base << 5 | t); }
+static void load16(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0x79400000 | (uint32_t)(offset / 2) << 10 | base << 5 | t); }
+static void load32(Emit *e, unsigned t, unsigned base, size_t offset) { put(e, 0xB9400000 | (uint32_t)(offset / 4) << 10 | base << 5 | t); }
+static void load64_index(Emit *e, unsigned t, unsigned base, unsigned index) { put(e, 0xF8607800 | index << 16 | base << 5 | t); } /* [base, index, LSL #3] */
+static void add_imm(Emit *e, unsigned d, unsigned n, uint32_t imm) { put(e, 0x91000000 | imm << 10 | n << 5 | d); } /* imm < 4096 */
+static void sub_imm(Emit *e, unsigned d, unsigned n, uint32_t imm) { put(e, 0xD1000000 | imm << 10 | n << 5 | d); }
+static void sub_w_imm(Emit *e, unsigned d, unsigned n, uint32_t imm) { put(e, 0x51000000 | imm << 10 | n << 5 | d); }
+static void add_reg(Emit *e, unsigned d, unsigned n, unsigned m) { put(e, 0x8B000000 | m << 16 | n << 5 | d); }
+static void sub_reg(Emit *e, unsigned d, unsigned n, unsigned m) { put(e, 0xCB000000 | m << 16 | n << 5 | d); }
+static void cmp_reg(Emit *e, unsigned n, unsigned m) { put(e, 0xEB00001F | m << 16 | n << 5); }
+static void cmp_imm(Emit *e, unsigned n, uint32_t imm) { put(e, 0xF100001F | imm << 10 | n << 5); }
+static void csel(Emit *e, unsigned d, unsigned n, unsigned m, unsigned cond) { put(e, 0x9A800000 | m << 16 | cond << 12 | n << 5 | d); }
+static void lsr_imm(Emit *e, unsigned d, unsigned n, unsigned shift) { put(e, 0xD340FC00 | shift << 16 | n << 5 | d); }
+static void lsr_reg(Emit *e, unsigned d, unsigned n, unsigned m) { put(e, 0x9AC02400 | m << 16 | n << 5 | d); }
+static void cset(Emit *e, unsigned d, unsigned cond) { put(e, 0x1A9F07E0 | (cond ^ 1) << 12 | d); }
+static void and_w(Emit *e, unsigned d, unsigned n, unsigned m) { put(e, 0x0A000000 | m << 16 | n << 5 | d); }
+static void orr_w(Emit *e, unsigned d, unsigned n, unsigned m) { put(e, 0x2A000000 | m << 16 | n << 5 | d); }
+static void and_w_one(Emit *e, unsigned d, unsigned n) { put(e, 0x12000000 | n << 5 | d); } /* AND Wd, Wn, #1 */
+static void fp3(Emit *e, uint32_t op, unsigned d, unsigned n, unsigned m) { put(e, op | m << 16 | n << 5 | d); }
+static void fp2(Emit *e, uint32_t op, unsigned d, unsigned n) { put(e, op | n << 5 | d); }
+static const uint32_t FADD = 0x1E602800;
+static const uint32_t FSUB = 0x1E603800;
+static const uint32_t FMUL = 0x1E600800;
+static const uint32_t FDIV = 0x1E601800;
+static const uint32_t FMIN = 0x1E605800;
+static const uint32_t FMAX = 0x1E604800;
+static const uint32_t FABS = 0x1E60C000;
+static const uint32_t FNEG = 0x1E614000;
+static const uint32_t FRINTM = 0x1E654000;
+static const uint32_t UCVTF_X = 0x9E630000;
+static const uint32_t UCVTF_W = 0x1E630000;
+static const uint32_t FCVTZU_X = 0x9E790000;
+static const uint32_t FMOV_DX = 0x9E670000;
+static void fcmp(Emit *e, unsigned n, unsigned m) { put(e, 0x1E602000 | m << 16 | n << 5); }
+static void fcmp_zero(Emit *e, unsigned n) { put(e, 0x1E602008 | n << 5); }
+/* STP/LDP of two 64-bit registers at sp + offset (pre-indexed down, or plain). */
+static void stp(Emit *e, unsigned a, unsigned b2, int offset, bool pre) {
+    put(e, (pre ? 0xA9800000 : 0xA9000000) | ((uint32_t)(offset / 8) & 0x7F) << 15 | b2 << 10 | SP << 5 | a);
+}
+static void ldp(Emit *e, unsigned a, unsigned b2, int offset, bool post) {
+    put(e, (post ? 0xA8C00000 : 0xA9400000) | ((uint32_t)(offset / 8) & 0x7F) << 15 | b2 << 10 | SP << 5 | a);
+}
 static void mov_w(Emit *e, unsigned d, uint32_t value) { /* MOVZ (and MOVK) Wd */
     put(e, 0x52800000 | (value & 0xFFFF) << 5 | d);
     if (value >> 16) put(e, 0x72A00000 | (value >> 16) << 5 | d);
@@ -143,13 +192,16 @@ static void b(Emit *e, int label) { branch_to(e, 0x14000000, label, 0); }
 static void b_cond(Emit *e, unsigned cond, int label) { branch_to(e, 0x54000000 | cond, label, 1); }
 static void cbz_w(Emit *e, unsigned t, int label) { branch_to(e, 0x34000000 | t, label, 1); }
 static void cbnz_w(Emit *e, unsigned t, int label) { branch_to(e, 0x35000000 | t, label, 1); }
+static void cbz_x(Emit *e, unsigned t, int label) { branch_to(e, 0xB4000000 | t, label, 1); }
+static void cbnz_x(Emit *e, unsigned t, int label) { branch_to(e, 0xB5000000 | t, label, 1); }
 static void cmp_w_imm(Emit *e, unsigned n, uint32_t imm) { put(e, 0x7100001F | imm << 10 | n << 5); }
 
 /* ---- A block */
 
 enum { SLOT = sizeof(Slot) };
 
-typedef struct { uint32_t start, end; int parent; int again, after; } LoopAt; /* again: its iteration's label; after: past it */
+typedef struct { uint32_t start, end; int parent; int again, after; unsigned depth; uint32_t at; } LoopAt; /* again: its iteration's label; after: past it; depth: the loops open in it; at: its EACH or LOOP */
+typedef struct { int label; PureFault kind; uint32_t pc; } FaultAt;
 
 typedef struct {
     const PureModule *m;
@@ -162,7 +214,34 @@ typedef struct {
     unsigned loop_count;
     int *op_label;    /* each instruction's, and the block's end */
     int exit;         /* w0 holds how it went */
+    FaultAt *faults;  /* the faults its code may give, each a short stub after it */
+    size_t fault_count, fault_room;
 } Block;
+
+/* A label whose code gives a fault of kind at pc. */
+static int fault_at(Block *k, PureFault kind, uint32_t pc) {
+    for (size_t i = 0; i < k->fault_count; ++i)
+        if (k->faults[i].kind == kind && k->faults[i].pc == pc) return k->faults[i].label;
+    if (!grow_array((void **)&k->faults, &k->fault_room, k->fault_count + 1, sizeof(*k->faults))) {
+        k->e->failed = true;
+        return k->exit;
+    }
+    k->faults[k->fault_count] = (FaultAt){new_label(k->e), kind, pc};
+    return k->faults[k->fault_count++].label;
+}
+
+static void fault_stubs(Block *k) {
+    Emit *e = k->e;
+    for (size_t i = 0; i < k->fault_count; ++i) {
+        bind(e, k->faults[i].label);
+        mov_w(e, X9, (uint32_t)k->faults[i].kind);
+        store_w(e, X9, X19, offsetof(Frame, kind));
+        mov_w(e, X9, k->faults[i].pc);
+        store_w(e, X9, X19, offsetof(Frame, fault_pc));
+        mov_w(e, X0, STEP_FAULT);
+        b(e, k->exit);
+    }
+}
 
 static void set_sp(Block *k, unsigned height) {
     mov_imm(k->e, X9, height);
@@ -174,6 +253,82 @@ static int landing(const Block *k, uint32_t from, uint32_t target) {
     for (int l = k->loop_of[from - k->block.start]; l >= 0; l = k->loops[l].parent)
         if (k->loops[l].end == target) return k->loops[l].again;
     return k->op_label[target - k->block.start];
+}
+
+/* A loop's block ran once (iterate, module.c, as code): again (its block's
+ * first instruction, an empty block's being this), or the loop closed. */
+static void iteration(Block *k, const LoopAt *l) {
+    Emit *e = k->e;
+    const PureOp *op = &k->m->code[l->at];
+    int again = l->start == l->end ? l->again : k->op_label[l->start - k->block.start], done = new_label(e);
+    load64(e, X9, X19, offsetof(Frame, loops));
+    add_imm(e, X9, X9, (uint32_t)((l->depth - 1) * sizeof(Loop)));
+    load64(e, X10, X9, offsetof(Loop, mark)); /* the arena as the block began */
+    load64(e, X11, X19, offsetof(Frame, arena));
+    store64(e, X10, X11, offsetof(PureArena, used));
+    if (op->op == PURE_OP_EACH) {
+        int counted = new_label(e);
+        load8(e, X12, X9, offsetof(Loop, walk) + offsetof(Walk, removed));
+        load64(e, X13, X9, offsetof(Loop, walk) + offsetof(Walk, at));
+        cbnz_w(e, X12, counted);
+        add_imm(e, X13, X13, 1);
+        bind(e, counted);
+        store8(e, XZR, X9, offsetof(Loop, walk) + offsetof(Walk, removed));
+        store64(e, X13, X9, offsetof(Loop, walk) + offsetof(Walk, at));
+        load64(e, X14, X9, offsetof(Loop, walk) + offsetof(Walk, end));
+        cmp_reg(e, X13, X14);
+        b_cond(e, HS, done);
+        load64(e, X10, X24, (op->arg >> 8 & 0xFF) * sizeof(PureList *)); /* the list walked: at most its items now */
+        load64(e, X10, X10, pure_list_layout[LIST_COUNT_AT]);
+        cmp_reg(e, X13, X10);
+        b_cond(e, HS, done);
+        store64(e, X13, X22, offsetof(Event, row));
+        b(e, again);
+        bind(e, done);
+        load64(e, X10, X9, offsetof(Loop, around));
+        store64(e, X10, X22, offsetof(Event, walk));
+        load64(e, X10, X9, offsetof(Loop, row));
+        store64(e, X10, X22, offsetof(Event, row));
+    } else {
+        load64(e, X13, X9, offsetof(Loop, k));
+        add_imm(e, X13, X13, 1);
+        load64(e, X14, X9, offsetof(Loop, count));
+        cmp_reg(e, X13, X14);
+        b_cond(e, HS, done);
+        store64(e, X13, X9, offsetof(Loop, k));
+        /* its work counts each time round: its block and the LOOP, past the budget a fault at the LOOP */
+        uint64_t cost = (uint64_t)(l->end - l->start) + 1;
+        int budgeted = new_label(e);
+        load64(e, X10, X23, offsetof(PureApp, work_budget));
+        cbnz_x(e, X10, budgeted);
+        mov_imm(e, X10, PURE_WORK_DEFAULT);
+        bind(e, budgeted);
+        load64(e, X11, X23, offsetof(PureApp, work));
+        sub_reg(e, X12, X10, X11);
+        mov_imm(e, X15, cost);
+        cmp_reg(e, X12, X15);
+        b_cond(e, LO, fault_at(k, PURE_FAULT_WORK, l->at));
+        add_reg(e, X11, X11, X15);
+        store64(e, X11, X23, offsetof(PureApp, work));
+        load64(e, X10, X9, offsetof(Loop, slot)); /* the slot: low + k */
+        if (op->arg & PURE_LOOP_INTEGER) {
+            load64(e, X11, X9, offsetof(Loop, low));
+            add_reg(e, X11, X11, X13);
+            store64(e, X11, X10, 0);
+        } else {
+            load_d(e, D0, X9, offsetof(Loop, low));
+            fp2(e, UCVTF_X, D1, X13);
+            fp3(e, FADD, D0, D0, D1);
+            store_d(e, D0, X10, 0);
+        }
+        b(e, again);
+        bind(e, done);
+    }
+    load32(e, X10, X9, offsetof(Loop, outer)); /* closed */
+    store_w(e, X10, X19, offsetof(Frame, end));
+    load32(e, X10, X19, offsetof(Frame, depth));
+    sub_w_imm(e, X10, X10, 1);
+    store_w(e, X10, X19, offsetof(Frame, depth));
 }
 
 /* The iterations of the loops ending at pc, innermost first. */
@@ -190,13 +345,7 @@ static void loop_ends(Block *k, uint32_t pc) {
         if (pick < 0) break;
         done |= UINT64_C(1) << pick;
         bind(e, k->loops[pick].again);
-        mov_reg(e, X0, X19);
-        call(e, (uintptr_t)pure_run_iterate);
-        /* again: its block's first instruction; an empty block's is this */
-        const LoopAt *l = &k->loops[pick];
-        cbz_w(e, X0, l->start == l->end ? l->again : k->op_label[l->start - k->block.start]);
-        cmp_w_imm(e, X0, STEP_DONE);
-        b_cond(e, NE, k->exit);
+        iteration(k, &k->loops[pick]);
         bind(e, k->loops[pick].after);
     }
 }
@@ -209,11 +358,227 @@ static void call_step(Block *k, uintptr_t function, uint32_t pc, unsigned height
     call(e, function);
 }
 
+/* Slots: a value's 8 bytes at its start, an index's list at owner. */
+#define AT(h) ((size_t)(h) * SLOT)
+enum { OWNER = offsetof(Slot, bytes) + offsetof(PureBytes, owner) };
+
+static void owner_is(Emit *e, unsigned height, uint32_t owner) {
+    mov_w(e, X11, owner & 0xFFFF);
+    store_h(e, X11, X20, AT(height) + OWNER);
+}
+
+/* The key in d0 as a bit of a list's (in x10) key set when it keeps one as
+ * bits: the bit in w15 (0 or 1); to slow when it keeps none or a table. */
+static void member_bit(Block *k, int slow, int out) {
+    Emit *e = k->e;
+    int none = new_label(e), got = new_label(e);
+    load64(e, X11, X10, pure_list_layout[LIST_MEMBERS_AT]);
+    cbz_x(e, X11, slow);
+    load8(e, X12, X10, pure_list_layout[LIST_BITMAP_AT]);
+    cbz_w(e, X12, slow);
+    fp2(e, FCVTZU_X, X13, D0); /* a whole number from 0 below 2^22 (-0 as 0), else none */
+    fp2(e, UCVTF_X, D1, X13);
+    fcmp(e, D0, D1);
+    b_cond(e, NE, none);
+    mov_imm(e, X14, (uint64_t)1 << 22);
+    cmp_reg(e, X13, X14);
+    b_cond(e, HS, none);
+    load64(e, X14, X10, pure_list_layout[LIST_MEMBER_CAPACITY_AT]);
+    lsr_imm(e, X15, X13, 6);
+    cmp_reg(e, X15, X14);
+    b_cond(e, HS, none);
+    load64_index(e, X15, X11, X15);
+    lsr_reg(e, X15, X15, X13);
+    and_w_one(e, X15, X15);
+    b(e, got);
+    bind(e, none);
+    mov_w(e, X15, 0);
+    bind(e, got);
+    (void)out;
+}
+
+/* Two numbers (d0 below d1) to one, a fault past the finite (NON_FINITE). */
+static void binary(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
+    Emit *e = k->e;
+    load_d(e, D0, X20, AT(height - 2));
+    load_d(e, D1, X20, AT(height - 1));
+    unsigned cond = EQ;
+    switch (op->op) {
+    case PURE_OP_ADD: fp3(e, FADD, D0, D0, D1); break;
+    case PURE_OP_SUB: fp3(e, FSUB, D0, D0, D1); break;
+    case PURE_OP_MUL: fp3(e, FMUL, D0, D0, D1); break;
+    case PURE_OP_DIV:
+        fcmp_zero(e, D1);
+        b_cond(e, EQ, fault_at(k, PURE_FAULT_DIVIDE, pc));
+        fp3(e, FDIV, D0, D0, D1);
+        break;
+    case PURE_OP_MIN: fp3(e, FMIN, D0, D0, D1); break;
+    case PURE_OP_MAX: fp3(e, FMAX, D0, D0, D1); break;
+    case PURE_OP_AND: case PURE_OP_OR:
+        fcmp_zero(e, D0);
+        cset(e, X9, NE);
+        fcmp_zero(e, D1);
+        cset(e, X10, NE);
+        if (op->op == PURE_OP_AND) and_w(e, X9, X9, X10);
+        else orr_w(e, X9, X9, X10);
+        fp2(e, UCVTF_W, D0, X9);
+        store_d(e, D0, X20, AT(height - 2));
+        return;
+    default: /* a comparison: a bool */
+        cond = op->op == PURE_OP_LT ? MI : op->op == PURE_OP_LE ? LS : op->op == PURE_OP_GT ? GT : op->op == PURE_OP_GE ? GE
+             : op->op == PURE_OP_EQ ? EQ : NE;
+        fcmp(e, D0, D1);
+        cset(e, X9, cond);
+        fp2(e, UCVTF_W, D0, X9);
+        store_d(e, D0, X20, AT(height - 2));
+        return;
+    }
+    fp2(e, FABS, D2, D0); /* finite: below infinity (a NaN is unordered: HS too) */
+    fcmp(e, D2, D8);
+    b_cond(e, HS, fault_at(k, PURE_FAULT_NON_FINITE, pc));
+    store_d(e, D0, X20, AT(height - 2));
+}
+
 static void compile_op(Block *k, uint32_t pc) {
     Emit *e = k->e;
     const PureOp *op = &k->m->code[pc];
     unsigned height = k->height[pc - k->block.start];
+    uint32_t arg = op->arg;
     switch (op->op) {
+    case PURE_OP_CONST:
+        mov_imm(e, X9, (uint64_t)op->integer); /* the bits: a number's, a bool's or an i64's */
+        store64(e, X9, X20, AT(height));
+        return;
+    case PURE_OP_LOAD:
+        load64(e, X9, X21, arg * sizeof(PureValue));
+        store64(e, X9, X20, AT(height));
+        return;
+    case PURE_OP_STORE: case PURE_OP_CUR_STORE:
+        load64(e, X9, X20, AT(height - 1));
+        store64(e, X9, X21, arg * sizeof(PureValue));
+        return;
+    case PURE_OP_LOCAL_LOAD:
+        load64(e, X10, X22, offsetof(Event, locals));
+        load64(e, X9, X10, (arg & 0xFF) * sizeof(PureValue));
+        store64(e, X9, X20, AT(height));
+        owner_is(e, height, arg >> 16);
+        return;
+    case PURE_OP_LOCAL_STORE:
+        load64(e, X9, X20, AT(height - 1));
+        load64(e, X10, X22, offsetof(Event, locals));
+        store64(e, X9, X10, (arg & 0xFF) * sizeof(PureValue));
+        return;
+    case PURE_OP_ROW: case PURE_OP_OUTER_ROW:
+        load64(e, X9, X22, op->op == PURE_OP_ROW ? offsetof(Event, row) : offsetof(Event, outer));
+        fp2(e, UCVTF_X, D0, X9);
+        store_d(e, D0, X20, AT(height));
+        owner_is(e, height, arg);
+        return;
+    case PURE_OP_INDEX_FIRST:
+        store64(e, XZR, X20, AT(height));
+        owner_is(e, height, arg);
+        return;
+    case PURE_OP_LIST_COUNT:
+        load64(e, X10, X24, arg * sizeof(PureList *));
+        load64(e, X9, X10, pure_list_layout[LIST_COUNT_AT]);
+        fp2(e, UCVTF_X, D0, X9);
+        store_d(e, D0, X20, AT(height));
+        return;
+    case PURE_OP_NOT:
+        load_d(e, D0, X20, AT(height - 1));
+        fcmp_zero(e, D0);
+        cset(e, X9, EQ);
+        fp2(e, UCVTF_W, D0, X9);
+        store_d(e, D0, X20, AT(height - 1));
+        return;
+    case PURE_OP_NEG: case PURE_OP_FLOOR:
+        load_d(e, D0, X20, AT(height - 1));
+        fp2(e, op->op == PURE_OP_NEG ? FNEG : FRINTM, D0, D0);
+        store_d(e, D0, X20, AT(height - 1));
+        return;
+    case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_MIN: case PURE_OP_MAX:
+    case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE:
+    case PURE_OP_AND: case PURE_OP_OR:
+        binary(k, op, pc, height);
+        return;
+    case PURE_OP_INDEX_MOVE: { /* within its list: from 0 to its last item, by a whole number (else LIMIT) */
+        load_d(e, D0, X20, AT(height - 2));
+        load_d(e, D1, X20, AT(height - 1));
+        fp2(e, FRINTM, D2, D1);
+        fcmp(e, D1, D2);
+        b_cond(e, NE, fault_at(k, PURE_FAULT_LIMIT, pc));
+        load16(e, X10, X20, AT(height - 2) + OWNER);
+        load64_index(e, X11, X24, X10);
+        load64(e, X12, X11, pure_list_layout[LIST_COUNT_AT]);
+        sub_imm(e, X13, X12, 1);
+        cmp_imm(e, X12, 0);
+        csel(e, X13, XZR, X13, EQ);
+        fp2(e, UCVTF_X, D3, X13);
+        fp3(e, FADD, D0, D0, D1);
+        fp3(e, FMIN, D0, D0, D3);
+        fp2(e, FMOV_DX, D4, XZR);
+        fp3(e, FMAX, D0, D4, D0);
+        store_d(e, D0, X20, AT(height - 2));
+        return;
+    }
+    case PURE_OP_LIST_HAS: {
+        if (op->plan & PLAN_TEXT) break;
+        int slow = new_label(e), done = new_label(e);
+        load64(e, X10, X24, arg * sizeof(PureList *));
+        load_d(e, D0, X20, AT(height - 1));
+        member_bit(k, slow, done);
+        fp2(e, UCVTF_W, D0, X15);
+        store_d(e, D0, X20, AT(height - 1));
+        b(e, done);
+        bind(e, slow);
+        call_step(k, (uintptr_t)pure_run_step, pc, height);
+        cbnz_w(e, X0, k->exit);
+        bind(e, done);
+        return;
+    }
+    case PURE_OP_LIST_FIND: { /* joined to its ITEM_GET: a DENSE list's field at its key */
+        const PureOp *get = &k->m->code[pc + 1];
+        if (!(op->plan & PLAN_JOINED) || op->plan & PLAN_TEXT || get->plan & PLAN_TEXT) break;
+        int slow = new_label(e), done = new_label(e);
+        load64(e, X10, X24, arg * sizeof(PureList *));
+        load8(e, X12, X10, pure_list_layout[LIST_FORM_AT]);
+        cmp_w_imm(e, X12, 2); /* DENSE */
+        b_cond(e, NE, slow);
+        load_d(e, D0, X20, AT(height - 1));
+        member_bit(k, slow, done);
+        cbz_w(e, X15, fault_at(k, PURE_FAULT_NOT_FOUND, pc));
+        load64(e, X14, X10, pure_list_layout[LIST_COLUMNS_AT] + item_field(get->arg) * sizeof(void *));
+        load64_index(e, X9, X14, X13);
+        store64(e, X9, X20, AT(height - 1));
+        b(e, done);
+        bind(e, slow);
+        call_step(k, (uintptr_t)pure_run_step, pc, height);
+        cbnz_w(e, X0, k->exit);
+        bind(e, done);
+        return;
+    }
+    case PURE_OP_ITEM_GET: { /* a FLAT list's cell by its column */
+        if (op->plan & PLAN_TEXT) break;
+        int slow = new_label(e), done = new_label(e);
+        load64(e, X10, X24, list_of(arg) * sizeof(PureList *));
+        load8(e, X12, X10, pure_list_layout[LIST_FORM_AT]);
+        cmp_w_imm(e, X12, 1); /* FLAT */
+        b_cond(e, NE, slow);
+        load_d(e, D0, X20, AT(height - 1));
+        fp2(e, FCVTZU_X, X13, D0);
+        load64(e, X12, X10, pure_list_layout[LIST_COUNT_AT]);
+        cmp_reg(e, X13, X12);
+        b_cond(e, HS, fault_at(k, PURE_FAULT_NOT_FOUND, pc));
+        load64(e, X14, X10, pure_list_layout[LIST_COLUMNS_AT] + item_field(arg) * sizeof(void *));
+        load64_index(e, X9, X14, X13);
+        store64(e, X9, X20, AT(height - 1));
+        b(e, done);
+        bind(e, slow);
+        call_step(k, (uintptr_t)pure_run_step, pc, height);
+        cbnz_w(e, X0, k->exit);
+        bind(e, done);
+        return;
+    }
     case PURE_OP_JZ:
         load_d(e, 0, X20, (height - 1) * SLOT);
         put(e, 0x1E602008); /* FCMP d0, #0.0 */
@@ -239,11 +604,10 @@ static void compile_op(Block *k, uint32_t pc) {
         b(e, k->loops[l].after);
         return;
     }
-    default:
-        call_step(k, (uintptr_t)pure_run_step, pc, height);
-        cbnz_w(e, X0, k->exit);
-        return;
+    default: break;
     }
+    call_step(k, (uintptr_t)pure_run_step, pc, height);
+    cbnz_w(e, X0, k->exit);
 }
 
 /* The block's heights (absolute: a loop's block is verified from its own start), its loops, and each instruction's. */
@@ -268,7 +632,8 @@ static bool shape_block(Block *k) {
         if (op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP) {
             unsigned pops = op->op == PURE_OP_LOOP || op->arg & PURE_EACH_SLICED ? 2 : 0;
             LoopAt *l = &k->loops[k->loop_count];
-            *l = (LoopAt){pc + 1, pc + 1 + (op->arg >> 16), depth ? open[depth - 1] : -1, new_label(k->e), new_label(k->e)};
+            *l = (LoopAt){pc + 1, pc + 1 + (op->arg >> 16), depth ? open[depth - 1] : -1, new_label(k->e), new_label(k->e), depth + 1,
+                          pc};
             k->opens[pc - k->block.start] = (int)k->loop_count;
             open[depth] = (int)k->loop_count++;
             base[++depth] = at - pops;
@@ -291,14 +656,21 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
     bool ok = shape_block(&k);
     if (ok) {
         *entry = e->count;
-        put(e, 0xA9BC7BFD);         /* STP x29, x30, [sp, #-64]! */
+        stp(e, X29, X30, -80, true);
         put(e, 0x910003FD);         /* MOV x29, sp */
-        put(e, 0xA90153F3);         /* STP x19, x20, [sp, #16] */
-        put(e, 0xA9025BF5);         /* STP x21, x22, [sp, #32] */
+        stp(e, X19, X20, 16, false);
+        stp(e, X21, X22, 32, false);
+        stp(e, X23, X24, 48, false);
+        put(e, 0xFD000000 | (64 / 8) << 10 | SP << 5 | D8); /* STR d8, [sp, #64] */
         mov_reg(e, X19, X0);
         load64(e, X20, X19, offsetof(Frame, stack));
         load64(e, X21, X19, offsetof(Frame, values));
         load64(e, X22, X19, offsetof(Frame, ev));
+        load64(e, X23, X19, offsetof(Frame, app));
+        mov_imm(e, X24, offsetof(PureApp, lists));
+        add_reg(e, X24, X23, X24);        /* the app's lists */
+        mov_imm(e, X9, UINT64_C(0x7FF0000000000000));
+        fp2(e, FMOV_DX, D8, X9);          /* infinity */
         for (uint32_t pc = block.start; pc < block.start + block.length;) {
             loop_ends(&k, pc);
             bind(e, k.op_label[pc - block.start]);
@@ -312,16 +684,20 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
         set_sp(&k, end_height); /* the block ran: what it leaves (a view's value) is the frame's to give */
         mov_w(e, X0, STEP_NEXT);
         bind(e, k.exit);
-        put(e, 0xA94153F3);         /* LDP x19, x20, [sp, #16] */
-        put(e, 0xA9425BF5);         /* LDP x21, x22, [sp, #32] */
-        put(e, 0xA8C47BFD);         /* LDP x29, x30, [sp], #64 */
+        put(e, 0xFD400000 | (64 / 8) << 10 | SP << 5 | D8); /* LDR d8, [sp, #64] */
+        ldp(e, X23, X24, 48, false);
+        ldp(e, X21, X22, 32, false);
+        ldp(e, X19, X20, 16, false);
+        ldp(e, X29, X30, 80, true);
         put(e, 0xD65F03C0);         /* RET */
+        fault_stubs(&k);
     }
     free(k.height);
     free(k.loop_of);
     free(k.op_label);
     free(k.loops);
     free(k.opens);
+    free(k.faults);
     return ok && !e->failed;
 }
 
@@ -359,6 +735,12 @@ struct PureJit *pure_jit_make(const PureModule *m) {
     Emit e = {0};
     for (size_t i = 0; ok && i < count; ++i) ok = compile_block(m, made[i].block, made[i].leaves, &e, &made[i].entry);
     ok = ok && resolve(&e);
+    const char *dump = getenv("PURE_JIT_DUMP"); /* the code as it is made, to read with objdump -b binary -m aarch64 */
+    FILE *file = ok && dump ? fopen(dump, "wb") : NULL;
+    if (file) {
+        fwrite(e.words, sizeof(uint32_t), e.count, file);
+        fclose(file);
+    }
     struct PureJit *jit = NULL;
     /* by start, an empty block's at the code's end too */
     if (ok && (jit = calloc(1, sizeof(*jit))) && (jit->by_start = calloc(m->code_count + 1, sizeof(*jit->by_start)))) {

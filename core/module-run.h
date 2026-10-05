@@ -8,6 +8,10 @@
 /* An item's or a key's op->plan: its cell a text; a FIND joined to the ITEM_GET after it. */
 enum { PLAN_TEXT = 1, PLAN_JOINED = 2 };
 
+/* An item instruction's argument: its list and its field. */
+static inline uint32_t list_of(uint32_t arg) { return arg & 0xFFFF; }
+static inline uint32_t item_field(uint32_t arg) { return arg >> 16; }
+
 typedef struct { union { double num; int64_t i64; }; PureBytes bytes; } Slot;
 
 /* A walk (EACH): the list, the item it runs for, where it ends (items the
@@ -83,6 +87,12 @@ int pure_run_each(Frame *, uint32_t pc);
 int pure_run_loop(Frame *, uint32_t pc);
 void pure_run_break(Frame *);
 int pure_run_iterate(Frame *);
+
+/* Where a list keeps what compiled code reads of it (module-list.c owns the
+ * layout and says where): its item count, its key set (the words, how many,
+ * whether they are bits), its form (pure_list_form) and its arrays. */
+enum { LIST_COUNT_AT, LIST_MEMBERS_AT, LIST_MEMBER_CAPACITY_AT, LIST_BITMAP_AT, LIST_FORM_AT, LIST_COLUMNS_AT };
+extern const size_t pure_list_layout[];
 
 /* A module's code compiled (AArch64 Linux; elsewhere, or with PURE_JIT=0 in
  * the environment, none): a block's code runs a frame as run does, giving how

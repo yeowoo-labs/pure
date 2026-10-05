@@ -1,6 +1,8 @@
 #include "module-list.h"
+#include "module-run.h"
 #include "module-text.h"
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1131,6 +1133,11 @@ bool pure_list_arrays(PureList *list) {
 }
 
 unsigned pure_list_form(const PureList *list) { return list->form; }
+
+const size_t pure_list_layout[] = {
+    [LIST_COUNT_AT] = offsetof(PureList, count), [LIST_MEMBERS_AT] = offsetof(PureList, members),
+    [LIST_MEMBER_CAPACITY_AT] = offsetof(PureList, member_capacity), [LIST_BITMAP_AT] = offsetof(PureList, bitmap),
+    [LIST_FORM_AT] = offsetof(PureList, form), [LIST_COLUMNS_AT] = offsetof(PureList, columns)};
 
 bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, unsigned field, PureCell *cell) {
     bool found;
