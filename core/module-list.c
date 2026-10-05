@@ -1147,7 +1147,8 @@ bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, un
 size_t pure_list_count(const PureList *list) { return list->count; }
 
 PureList *pure_list_share(PureList *list, PureRetired *retired, uint64_t epoch) {
-    if (!make_tree(list)) return NULL; /* a copy reads a tree */
+    /* A copy reads a tree; an empty list (an event's, between events) stays as it is. */
+    if (list->count && !make_tree(list)) return NULL;
     PureList *copy = malloc(sizeof(*copy));
     if (!copy) return NULL;
     *copy = (PureList){.layout = list->layout, .root = list->root, .count = list->count, .bytes = list->bytes,

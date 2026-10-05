@@ -1483,6 +1483,24 @@ static void arrays_equivalence(void) {
         pure_list_free(t);
     }
     CHECK(forms[0] > 10000 && forms[1] > 10000 && forms[2] > 10000 && conversions > 100);
+    /* A snapshot shares every list: an event's, empty between events, stays in arrays; one with items is a tree for its copy. */
+    {
+        PureList *list = pure_list_new(2, fields);
+        PureRetired retired = {0};
+        CHECK(list && pure_list_arrays(list));
+        PureList *copy = pure_list_share(list, &retired, 1);
+        CHECK(copy && pure_list_count(copy) == 0 && pure_list_form(list) == 1);
+        pure_list_free(copy);
+        for (unsigned i = 0; i < 100; ++i)
+            CHECK(pure_list_insert(list, i, (PureCell[]){{.num = i}, {.size = 0}}, NULL) == PURE_OK);
+        CHECK((copy = pure_list_share(list, &retired, 2)) && pure_list_form(list) == 0 && pure_list_count(copy) == 100);
+        CHECK(pure_list_get(copy, 99, 0).num == 99);
+        pure_list_free(copy);
+        pure_list_clear(list);
+        CHECK(pure_list_form(list) == 1); /* arrays again, the next event */
+        pure_list_free(list);
+        pure_retired_free(&retired);
+    }
     printf("{\"arrays\":{\"steps\":%zu,\"tree\":%zu,\"flat\":%zu,\"dense\":%zu,\"conversions\":%zu}}\n", steps, forms[0], forms[1],
            forms[2], conversions);
 }
