@@ -1798,6 +1798,24 @@ bool pure_list_arrays(PureList *list) {
 
 unsigned pure_list_form(const PureList *list) { return list->form; }
 
+bool pure_list_cells(PureList *list, PureCells *out) {
+    if (list->form != FLAT && !(list->form == DENSE && pure_list_full(list))) return false;
+    const Layout *l = &list->layout;
+    out->count = list->count;
+    out->owned = list->arrays && !list->pack && !list->copy;
+    for (unsigned f = 0; f < l->fields; ++f) {
+        out->columns[f] = list->columns[f];
+        out->width[f] = list->width[f] == 0 || ((l->kinds[f] == PURE_CELL_NUMBER || l->kinds[f] == PURE_CELL_BOOL) &&
+                                                (list->width[f] == 1 || list->width[f] == 4 || list->width[f] == 8))
+                            ? list->width[f] : 255;
+    }
+    return true;
+}
+
+bool pure_list_widen(PureList *list, unsigned field, uint8_t bytes) { return widen(list, field, bytes); }
+
+void pure_list_touched(PureList *list) { ++list->version; }
+
 bool pure_list_settle(PureList *list) {
     if (list->pack || list->copy || list->arrays || list->form != TREE || list->layout.key < 0 || list->count < PACK_ITEMS ||
         list->searched_version != list->version || list->searched < list->count / PACK_SEARCHES)

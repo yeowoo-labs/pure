@@ -1173,6 +1173,52 @@ on go {
 }
 """
 
+# Loops a batch runs (Pure docs/design/024) where it must give its rounds
+# back or change a list's form (BATCH_SOURCE): cells past a byte and past
+# four, a fraction and -0 set in the middle of a batch (the columns widened),
+# 0 divided by at round q (a fault halfway through a batch: the executor's,
+# at its round), each round reading the last one's set (not apart: run one
+# by one), keys going down with an if and an else, two sets of one field.
+BATCH_SOURCE = """record Cell {
+  at = 0
+  v = 0
+  w = 0
+}
+state out = 0
+state low = 0
+input go = message {
+  n: u32
+  q: u32
+}
+on go {
+  let t: list of Cell by at
+  for i in 0 .. go.n {
+    t.add(Cell { at: i })
+  }
+  for k in 0 .. go.n {
+    t[k].v = k * k * 1000
+    t[k].w = k * (0 - 1)
+  }
+  for k in 0 .. go.n {
+    if k == go.q { t[k].v = 0.25 } else { t[k].w = t[k].w + 1 }
+  }
+  for k in 1 .. go.n {
+    t[k].v = t[k - 1].v + 1
+  }
+  for k in 0 .. go.n {
+    let x = t[go.n - 1 - k].v
+    if x > 5000 { t[go.n - 1 - k].w = x - 5000 } else { t[go.n - 1 - k].w = 7 }
+    t[go.n - 1 - k].v = x + 1
+  }
+  for k in 0 .. go.n {
+    t[k].w = 1000 / (k - go.q)
+  }
+  out = t[go.n - 1].v + t[0].w
+  low = t[floor(go.n / 2)].w
+}
+"""
+
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -1211,6 +1257,19 @@ def module_assumptions(aup, pure, work):
                                        capture_output=True, text=True, timeout=120, env=dict(os.environ, PURE_JIT=jit)).stdout
                    for jit in ('all', '0')}
         assert outputs['all'] == outputs['0'], (name, next((a, b) for a, b in zip(outputs['all'].splitlines(), outputs['0'].splitlines()) if a != b))
+    source, program = work / 'batch.aup', work / 'batch.pmod'  # batches against the executor's rounds one by one
+    source.write_text(BATCH_SOURCE)
+    compile_module(aup, source, program)
+    given = ''.join(f'message go {struct.pack("<II", n, q).hex()}\nwork\n' for n, q in
+                    ((600, 9999), (600, 300), (3000, 2900), (40, 9999), (5, 1), (3000, 70000), (257, 256)))
+    given += 'budget 4099\n' + given + 'budget 50000\n' + given
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=120, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('batch', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
+    faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
+    assert 'divide' in faults and 'none' in faults and 'work' in faults, faults
     return len(runs)
 
 
@@ -1219,8 +1278,9 @@ def tier_program(rng):
     numbers in locals and states, a keyed list read and set by key, one
     whose keys came out of order read by key alone (HASHED), one of small
     keys read by key alone (full, or not where keys are left out), ifs and
-    breaks, with what fails (a key not there, not whole, 0 divided by, a
-    cell past its column's width) as likely as not."""
+    breaks, loops whose rounds are apart (a batch's, 024), with what fails
+    (a key not there, not whole, 0 divided by, a cell past its column's
+    width) as likely as not."""
     names = iter('jklpqrxyz')
     def number(depth, loops):
         choices = ['const', 'const', 'loop', 'local', 'field']
@@ -1267,7 +1327,8 @@ def tier_program(rng):
     def statements(depth, loops, indent, inside):
         lines = []
         for _ in range(rng.randint(1, 3)):
-            kind = rng.choice(['s', 's', 'u', 'acc', 'if', 'loop', 'walk', 'set', 'set', 'break', 'sweep'] if depth < 3 else ['s', 'u', 'set', 'break'])
+            kind = rng.choice(['s', 's', 'u', 'acc', 'if', 'loop', 'walk', 'set', 'set', 'break', 'sweep', 'lanes', 'lanes'] if depth < 3
+                              else ['s', 'u', 'set', 'break'])
             pad = '  ' * indent
             if kind == 's':
                 lines.append(f'{pad}s = s + {number(1, loops)}')
@@ -1304,6 +1365,23 @@ def tier_program(rng):
                 if rng.random() < 0.5:
                     lines += statements(depth + 1, loops + [name], indent + 1, True)
                 lines.append(f'{pad}}}')
+            elif kind == 'lanes':  # rounds apart (locals each sets first, cells at keys stepping with it): a batch's (024)
+                name = next(names, None)
+                if not name:
+                    continue
+                low, high = rng.choice([('0', 'go.n'), ('1', 'go.n'), ('go.q', 'go.n'), ('0', 'go.n + 1'), ('0', 'floor(go.n / 2)')])
+                inner = loops + [name, f'w{name}']
+                def at():
+                    return rng.choice([name, f'{name} + 1', f'go.n - 1 - {name}', f'{name} * 2', f'{name} - 1', key(2, inner)])
+                lines.append(f'{pad}for {name} in {low} .. {high} {{')
+                lines.append(f'{pad}  let w{name} = {number(1, loops + [name])}')
+                for _ in range(rng.randint(1, 3)):
+                    if rng.random() < 0.5:
+                        lines.append(f'{pad}  t[{at()}].v = {number(1, inner)}')
+                    else:
+                        lines.append(f'{pad}  if {cond(1, inner)} {{ t[{at()}].v = {number(1, inner)} }}' +
+                                     (f' else {{ t[{at()}].v = {number(1, inner)} }}' if rng.random() < 0.4 else ''))
+                lines.append(f'{pad}}}')
             elif kind == 'walk' and 'c' not in loops:
                 lines.append(f'{pad}for c in f {{')
                 lines += statements(depth + 1, loops + ['c'], indent + 1, True)
@@ -1325,8 +1403,9 @@ def tier_program(rng):
 def module_tier(aup, pure, work, programs=150):
     """The tier (Pure docs/design/023) against the executor: random handlers
     (tier_program) whose loops the tier runs where it can, each run on a few
-    messages by the executor alone (PURE_JIT=0), with the compiled code
-    (PURE_JIT=1, all) and without the tier (PURE_TIER=0): the same states,
+    messages by the executor alone (PURE_JIT=0, its loops in batches where
+    they can, docs/design/024), without batches (PURE_BATCH=0), with the
+    compiled code (PURE_JIT=1, all) and without the tier (PURE_TIER=0): the same states,
     faults, errors and work, byte for byte, with the default work budget
     and a few small ones (where each runs out). Their failures (keys not there, not
     whole, 0 divided by, cells past their columns' widths, a list not yet
@@ -1348,12 +1427,12 @@ def module_tier(aup, pure, work, programs=150):
             continue  # not a program aup takes (its types): another
         outputs = {}
         for name, env in (('0', {'PURE_JIT': '0'}), ('1', {'PURE_JIT': '1'}), ('all', {'PURE_JIT': 'all'}),
-                          ('tierless', {'PURE_JIT': 'all', 'PURE_TIER': '0'})):
+                          ('tierless', {'PURE_JIT': 'all', 'PURE_TIER': '0'}), ('batchless', {'PURE_JIT': '0', 'PURE_BATCH': '0'})):
             done = subprocess.run([str(pure / 'build/pure-run'), str(module)], input=commands, capture_output=True, text=True,
                                   timeout=120, env=dict(os.environ, **env))
             assert done.returncode in (0, 1), (i, name, done.stderr)
             outputs[name] = done.stdout
-        for name in ('1', 'all', 'tierless'):
+        for name in ('1', 'all', 'tierless', 'batchless'):
             assert outputs[name] == outputs['0'], (i, name, source.read_text(),
                                                    next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['0'].splitlines()) if a != b))
         checked += 1

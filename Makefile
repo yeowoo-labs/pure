@@ -23,7 +23,7 @@ BUILD ?= build
 # store/test-log.c, link/test-link.c, serve/test-message-json.c);
 # tests/check.py checks the hosts end to end.
 INCLUDES = -Icore
-MODEL = core/module.c core/module-jit.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c
+MODEL = core/module.c core/module-batch.c core/module-jit.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c
 STORE = store/store-tree.c store/store-log.c
 LINK = link/link-protocol.c link/link.c link/sending.c link/crypto.c
 SERVE = serve/serve.c serve/deliver.c serve/message-json.c serve/sha256.c
@@ -43,6 +43,8 @@ $(BUILD)/obj/%.o: %.c $(HEADERS)
 # (docs/design/020: 8% of a breadth first search).
 LIST_OPTIMIZE ?= -O3
 $(BUILD)/obj/core/module-list.o: CFLAGS += $(LIST_OPTIMIZE)
+# A batch's instructions are loops over its lanes: vector instructions too (docs/design/024).
+$(BUILD)/obj/core/module-batch.o: CFLAGS += $(LIST_OPTIMIZE)
 
 # The links know nothing of the core: they build without its headers.
 $(BUILD)/obj/link/%.o: link/%.c $(wildcard link/*.h)

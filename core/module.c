@@ -142,20 +142,11 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
 
 static uint32_t read16(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
 
-static uint32_t read32(const unsigned char *p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
 
 static void write32(unsigned char *p, uint32_t value) {
     for (unsigned i = 0; i < 4; ++i) p[i] = (unsigned char)(value >> (8 * i));
 }
 
-static double read_double(const unsigned char *p) {
-    uint64_t bits = read32(p) | (uint64_t)read32(p + 4) << 32;
-    double value;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
 
 static void write_double(unsigned char *p, double value) {
     uint64_t bits;
@@ -695,11 +686,59 @@ PURE_COLD static bool block_has_lanes(const PureModule *m, PureBlock block, int 
     return true;
 }
 
+/* A count's loop whose block has batch forms throughout runs a batch of its
+ * rounds at a time (module-batch.c, docs/design/024): lane forms, a local
+ * set (a number, an index or a bool) and read only after every round sets
+ * it, a branch with nothing else on the stack to a place in the block, and
+ * a number or bool set in an item (not its key). PURE_BATCH=0 in the
+ * environment: none does (the executor alone, to measure it). */
+PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input) {
+    static int off = -1;
+    if (off < 0) {
+        const char *batches = getenv("PURE_BATCH");
+        off = batches && !strcmp(batches, "0");
+    }
+    const PureOp *loop = &m->code[pc];
+    uint32_t start = pc + 1, end = start + (loop->arg >> 16), arms = start;
+    if (off || loop->arg & PURE_LOOP_INTEGER || start >= end || m->height[start]) return false;
+    uint64_t set[4] = {0}, sure[4] = {0}; /* the locals the block sets; set before here in every round */
+    for (uint32_t at = start; at < end; ++at)
+        if (m->code[at].op == PURE_OP_LOCAL_STORE) set[(m->code[at].arg & 0xFF) / 64] |= UINT64_C(1) << (m->code[at].arg & 63);
+    for (uint32_t at = start; at < end; ++at) { /* a local read before a round sets it: an earlier round's (no batch has it) */
+        const PureOp *op = &m->code[at];
+        unsigned local = op->arg & 0xFF;
+        if ((op->op == PURE_OP_JZ || op->op == PURE_OP_JMP) && op->arg > arms) arms = op->arg; /* code before arms: in a branch's way */
+        if (op->op == PURE_OP_LOCAL_STORE && at >= arms) sure[local / 64] |= UINT64_C(1) << (local % 64);
+        if (op->op == PURE_OP_LOCAL_LOAD && (set[local / 64] & ~sure[local / 64]) >> (local % 64) & 1) return false;
+    }
+    for (uint32_t at = start; at < end; ++at) {
+        const PureOp *op = &m->code[at];
+        switch (op->op) {
+        case PURE_OP_LOCAL_STORE:
+            if (local_type(op->arg) == T_I64) return false;
+            break;
+        case PURE_OP_JZ: case PURE_OP_JMP:
+            if (op->arg > end || m->height[at] != (op->op == PURE_OP_JZ)) return false;
+            break;
+        case PURE_OP_ITEM_SET: {
+            unsigned char type = field_type(m, list_of(op->arg), item_field(op->arg));
+            if ((type != T_NUM && type != T_BOOL) || item_field(op->arg) == m->state_key[list_of(op->arg)] - 1u) return false;
+            break;
+        }
+        default:
+            if (!has_lanes(m, op, input)) return false;
+        }
+    }
+    return true;
+}
+
 /* A fold in a verified block whose own block has lane forms throughout runs
- * a leaf of its list at a time. */
+ * a leaf of its list at a time; a count's loop so planned, a batch of its
+ * rounds. */
 PURE_COLD static void plan_folds(PureModule *m, PureBlock block, int input) {
     for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
         PureOp *op = &m->code[pc];
+        if (op->op == PURE_OP_LOOP && (op->plan = loop_batches(m, pc, input) ? PLAN_BATCH : 0)) m->batches = true;
         if (op->op != PURE_OP_FOLD) continue;
         op->plan = !(op->arg & PURE_FOLD_INTEGER) && block_has_lanes(m, (PureBlock){pc + 1, op->arg >> 16}, input);
         pc += op->arg >> 16;
@@ -1018,6 +1057,7 @@ PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *e
 void pure_module_release(PureModule *m) {
     pure_jit_free(m->jit);
     m->jit = NULL;
+    m->batches = false;
     free(m->height);
     m->height = NULL;
     free(m->storage);
@@ -1546,8 +1586,6 @@ int pure_module_column(const PureModule *m, uint32_t table, const char *name) {
 /* ---- Execution ------------------------------------------------------ */
 
 /* IEEE 754-2019 minimum/maximum on finite values: -0 orders below +0. */
-static double minimum(double a, double b) { return a < b || (a == b && signbit(a)) ? a : b; }
-static double maximum(double a, double b) { return a > b || (a == b && !signbit(a)) ? a : b; }
 
 
 /* Whether two values that order as order (below zero: the first below) are related as a relation says (PureRelation). */
@@ -1813,37 +1851,6 @@ static const double *lanes_of(const Lanes *v, double *scratch, const PureRun *it
     return scratch;
 }
 
-/* a op b as run computes it; false where run faults. */
-static bool number_op(uint8_t op, double a, double b, double *out) {
-    double value;
-    switch (op) {
-    case PURE_OP_ADD: value = a + b; break;
-    case PURE_OP_SUB: value = a - b; break;
-    case PURE_OP_MUL: value = a * b; break;
-    case PURE_OP_DIV:
-        if (b == 0) return false;
-        value = a / b;
-        break;
-    case PURE_OP_LT: value = a < b; break;
-    case PURE_OP_LE: value = a <= b; break;
-    case PURE_OP_GT: value = a > b; break;
-    case PURE_OP_GE: value = a >= b; break;
-    case PURE_OP_EQ: value = a == b; break;
-    case PURE_OP_NE: value = a != b; break;
-    case PURE_OP_AND: value = a != 0 && b != 0; break;
-    case PURE_OP_OR: value = a != 0 || b != 0; break;
-    case PURE_OP_MIN: value = minimum(a, b); break;
-    case PURE_OP_MOD:
-        if (b == 0) return false;
-        value = fmod(a, b);
-        if (value != 0 && (value < 0) != (b < 0)) value += b;
-        else if (value == 0) value = copysign(0.0, b);
-        break;
-    default: value = maximum(a, b); break;
-    }
-    *out = value;
-    return isfinite(value);
-}
 
 /* a op b for every item into out: a loop per operation, reading a value for
  * all with stride 0. false where run faults for some item. */
@@ -2586,13 +2593,69 @@ static inline __attribute__((always_inline)) int iterate(Frame *frame, uint32_t 
     return STEP_NEXT;
 }
 
+/* A loop planned PLAN_BATCH from its round loop->k (set up and counted)
+ * on: batches while they run (module-batch.c), the rounds of one that failed
+ * one by one, then batches again, until the loop ends or batches stop
+ * (then *next its block: the rest of it as any loop's). STEP_NEXT with *next
+ * past its block when it ended here, or how a round stopped. */
+static __attribute__((noinline, cold)) int batches(Frame *frame, Loop *loop, uint32_t *next) {
+    unsigned depth = frame->depth;
+    for (;;) {
+        unsigned done = pure_batch_run(frame, loop);
+        if (done) {
+            if ((loop->k += done) >= loop->count) { /* it ended */
+                frame->arena->used = loop->mark;
+                frame->end = loop->outer;
+                --frame->depth;
+                *next = loop->end;
+                return STEP_NEXT;
+            }
+            if (!charge(frame->app, (uint64_t)(loop->end - loop->start) + 1)) {
+                frame->kind = PURE_FAULT_WORK;
+                frame->fault_pc = loop->start - 1;
+                return STEP_FAULT;
+            }
+            loop->slot->num = loop->low.num + (double)loop->k;
+            continue;
+        }
+        if (loop->resume == UINT64_MAX) break;
+        while (loop->k < loop->resume) { /* a failed batch's rounds */
+            int how = pure_run_rest(frame, loop->start);
+            if (how == STEP_SKIP) { /* it left the loop */
+                *next = loop->end;
+                return STEP_NEXT;
+            }
+            if (how != STEP_NEXT) return how;
+            uint32_t pc = loop->end;
+            if ((how = iterate(frame, &pc)) != STEP_NEXT) return how;
+            if (frame->depth < depth) {
+                *next = loop->end;
+                return STEP_NEXT;
+            }
+        }
+    }
+    *next = loop->start;
+    return STEP_NEXT;
+}
+
+/* A LOOP planned PLAN_BATCH the executor runs (step leaves it to its
+ * caller): opened, then in batches. */
+static __attribute__((noinline, cold)) int open_batches(Frame *frame, uint32_t pc, uint32_t *next) {
+    unsigned depth = frame->depth;
+    int how = enter_loop(frame, &frame->m->code[pc], pc, next);
+    if (how != STEP_NEXT || frame->depth == depth) return how;
+    Loop *loop = &frame->loops[depth];
+    loop->resume = 0, loop->failures = 0, loop->reverse = false;
+    return batches(frame, loop, next);
+}
+
 #define NEXT do { frame->sp = sp; return STEP_NEXT; } while (0)
 #define FAILED do { frame->sp = sp; frame->kind = kind; frame->fault_pc = pc; return STEP_FAULT; } while (0)
 #define REFUSED do { frame->sp = sp; frame->status = status; frame->fault_pc = pc; return STEP_REFUSED; } while (0)
 #define STOPPED(why) do { frame->status = (why); return STEP_RETURN; } while (0)
 
 /* The instruction op at pc; *next the one to run after it. */
-static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp *op, uint32_t pc, uint32_t *next) {
+static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp *op, uint32_t pc, uint32_t *next, bool batches) {
     const PureModule *m = frame->m;
     PureValue *values = frame->values;
     Event *ev = frame->ev;
@@ -2612,7 +2675,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         return STEP_NEXT;
     case PURE_OP_JMP: *next = arg; return STEP_NEXT;
     case PURE_OP_EACH: return enter_each(frame, op, pc, next);
-    case PURE_OP_LOOP: return enter_loop(frame, op, pc, next);
+    case PURE_OP_LOOP: return batches && op->plan & PLAN_BATCH ? STEP_BATCH : enter_loop(frame, op, pc, next);
     case PURE_OP_BREAK: *next = leave_loop(frame); return STEP_NEXT;
     case PURE_OP_CONST: stack[sp++].i64 = op->integer; NEXT; /* the bits: a number's, a bool's or an i64's */
     case PURE_OP_LOAD: stack[sp++].i64 = values[arg].i64; NEXT;
@@ -3073,7 +3136,7 @@ static inline __attribute__((always_inline)) PureResult finish(Frame *frame, int
 /* The steps compiled code calls (module-run.h). */
 int pure_run_step(Frame *frame, uint32_t pc) {
     uint32_t next;
-    return step(frame, &frame->m->code[pc], pc, &next);
+    return step(frame, &frame->m->code[pc], pc, &next, false);
 }
 
 int pure_run_each(Frame *frame, uint32_t pc) {
@@ -3105,7 +3168,7 @@ int pure_run_item(Frame *frame, uint32_t pc) {
         for (unsigned f = 0; f < 16; ++f) frame->run.columns[f] = run.column[f].numbers;
     }
     uint32_t next;
-    return step(frame, op, pc, &next);
+    return step(frame, op, pc, &next, false);
 }
 
 int pure_run_rest(Frame *frame, uint32_t pc) {
@@ -3118,7 +3181,7 @@ int pure_run_rest(Frame *frame, uint32_t pc) {
             if (how != STEP_NEXT) return how;
             continue;
         }
-        int how = step(frame, &frame->m->code[pc], pc, &pc);
+        int how = step(frame, &frame->m->code[pc], pc, &pc, false);
         if (how != STEP_NEXT) return how;
     }
 }
@@ -3135,7 +3198,7 @@ int pure_run_iterate(Frame *frame) {
 static inline __attribute__((always_inline)) void open_frame(Frame *frame, const PureModule *m, PureValue *values, PureBlock block,
                                                              Event *ev, Slot *stack, Loop *loops) {
     frame->m = m, frame->values = values, frame->ev = ev, frame->app = ev->app, frame->arena = ev->arena;
-    frame->stack = stack, frame->sp = 0, frame->loops = loops, frame->depth = 0;
+    frame->stack = stack, frame->sp = 0, frame->loops = loops, frame->depth = 0, frame->kind = PURE_FAULT_NONE;
     frame->end = block.start + block.length;
 }
 
@@ -3150,9 +3213,38 @@ static __attribute__((noinline)) PureResult run_compiled(PureCompiled code, cons
     return finish(&frame, code(&frame), result);
 }
 
-static PureResult run(const PureModule *m, PureValue *values, PureBlock block, Event *ev, Slot *result) {
+/* The executor's run of a block of a module with loops planned PLAN_BATCH:
+ * run's, those loops in batches (module-batch.c). Its own copy of the
+ * steps: in run's, a batch's way among them would cost every instruction
+ * registers (research 126). */
+static __attribute__((noinline, aligned(64))) PureResult run_batches(const PureModule *m, PureValue *values, PureBlock block, Event *ev,
+                                                        Slot *result) {
+    Slot stack[PURE_MODULE_STACK];
+    Loop loops[PURE_MODULE_NESTING];
+    Frame frame;
+    open_frame(&frame, m, values, block, ev, stack, loops);
+    int how = STEP_NEXT;
+    for (uint32_t pc = block.start;;) {
+        if (pc >= frame.end) {
+            if (!frame.depth || (how = iterate(&frame, &pc)) != STEP_NEXT) break;
+            continue;
+        }
+        if ((how = step(&frame, &m->code[pc], pc, &pc, true)) == STEP_NEXT) continue;
+        if (how != STEP_BATCH) break;
+        Frame apart = frame; /* the frame's copy (no call sees the frame itself: its fields stay in registers) */
+        uint32_t past = 0;
+        how = open_batches(&apart, pc - 1, &past);
+        frame = apart, pc = past;
+        if (how != STEP_NEXT) break;
+    }
+    return finish(&frame, how, result);
+}
+
+/* At a cache line's start: the steps' branches land where they would (research 126: else 10% more cycles, as many instructions). */
+static __attribute__((aligned(64))) PureResult run(const PureModule *m, PureValue *values, PureBlock block, Event *ev, Slot *result) {
     PureCompiled code = m->jit ? pure_jit_code(m->jit, block) : NULL;
     if (code) return run_compiled(code, m, values, block, ev, result);
+    if (m->batches) return run_batches(m, values, block, ev, result);
     Slot stack[PURE_MODULE_STACK];
     Loop loops[PURE_MODULE_NESTING];
     Frame frame;
@@ -3163,7 +3255,7 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
             if (!frame.depth || (how = iterate(&frame, &pc)) != STEP_NEXT) break;
             continue;
         }
-        if ((how = step(&frame, &m->code[pc], pc, &pc)) != STEP_NEXT) break;
+        if ((how = step(&frame, &m->code[pc], pc, &pc, false)) != STEP_NEXT) break;
     }
     return finish(&frame, how, result);
 }

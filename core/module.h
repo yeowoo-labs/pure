@@ -257,6 +257,7 @@ typedef struct {
     bool state_indexed[PURE_MODULE_STATES]; /* list: an index state refers to it (set at load) */
     uint8_t *height;    /* the operand stack's height at each instruction, from its block's start (the verifier's) */
     struct PureJit *jit; /* its blocks compiled (module-jit.c, docs/design/021), or NULL */
+    bool batches;        /* a loop of it is planned to run in batches (module-batch.c, docs/design/024) */
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
     PureValue initial[PURE_MODULE_STATES];

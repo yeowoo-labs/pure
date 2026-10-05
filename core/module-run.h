@@ -4,9 +4,59 @@
  * (module-jit.c): their frame, and the steps the compiled code calls. Not a
  * public interface. */
 #include "module.h"
+#include <math.h>
+#include <string.h>
 
-/* An item's or a key's op->plan: its cell a text; a FIND joined to the ITEM_GET after it. */
-enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_ROW = 4 };
+/* Read from a message's bytes (little-endian). */
+static inline uint32_t read32(const unsigned char *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static inline double read_double(const unsigned char *p) {
+    uint64_t bits = read32(p) | (uint64_t)read32(p + 4) << 32;
+    double value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static inline double minimum(double a, double b) { return a < b || (a == b && signbit(a)) ? a : b; }
+static inline double maximum(double a, double b) { return a > b || (a == b && !signbit(a)) ? a : b; }
+
+/* a op b as run computes it; false where run faults. */
+static inline bool number_op(uint8_t op, double a, double b, double *out) {
+    double value;
+    switch (op) {
+    case PURE_OP_ADD: value = a + b; break;
+    case PURE_OP_SUB: value = a - b; break;
+    case PURE_OP_MUL: value = a * b; break;
+    case PURE_OP_DIV:
+        if (b == 0) return false;
+        value = a / b;
+        break;
+    case PURE_OP_LT: value = a < b; break;
+    case PURE_OP_LE: value = a <= b; break;
+    case PURE_OP_GT: value = a > b; break;
+    case PURE_OP_GE: value = a >= b; break;
+    case PURE_OP_EQ: value = a == b; break;
+    case PURE_OP_NE: value = a != b; break;
+    case PURE_OP_AND: value = a != 0 && b != 0; break;
+    case PURE_OP_OR: value = a != 0 || b != 0; break;
+    case PURE_OP_MIN: value = minimum(a, b); break;
+    case PURE_OP_MOD:
+        if (b == 0) return false;
+        value = fmod(a, b);
+        if (value != 0 && (value < 0) != (b < 0)) value += b;
+        else if (value == 0) value = copysign(0.0, b);
+        break;
+    default: value = maximum(a, b); break;
+    }
+    *out = value;
+    return isfinite(value);
+}
+
+/* An item's or a key's op->plan: its cell a text; a FIND joined to the ITEM_GET after it; a FIND whose row an ITEM_SET
+ * takes; a LOOP whose block a batch may run (module-batch.c). */
+enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_ROW = 4, PLAN_BATCH = 8 };
 
 /* An item instruction's argument: its list and its field. */
 static inline uint32_t list_of(uint32_t arg) { return arg & 0xFFFF; }
@@ -20,7 +70,8 @@ typedef struct { uint32_t list; size_t at, end; bool removed; } Walk;
 /* A loop that runs in its block's run (LOOP, EACH): its block and where
  * the code around it ends, the arena as it began, a walk's walk and the
  * event's walk and row around it, a count's values (low + k of count) and
- * slot. */
+ * slot, and the round from which batches may run its rounds (UINT64_MAX:
+ * none), how many failed and which way their lanes run. */
 typedef struct {
     uint32_t start, end, outer;
     size_t mark;
@@ -29,6 +80,9 @@ typedef struct {
     size_t row;
     uint64_t count, k;
     PureValue low, *slot;
+    uint64_t resume;
+    unsigned failures;
+    bool reverse; /* a batch's lanes run its rounds backwards */
 } Loop;
 typedef struct {
     PureApp *app;
@@ -83,8 +137,9 @@ static inline uint32_t after(const PureOp *op, uint32_t pc) {
  * instruction but a branch or a loop's (how; the next is after()); a walk or
  * a loop opened at pc (STEP_NEXT: its block next, STEP_SKIP: none, past its
  * block); BREAK; a loop's block ran once (STEP_NEXT: again, STEP_DONE: the
- * loop ended). */
-enum { STEP_SKIP = 4, STEP_DONE = 5 };
+ * loop ended). STEP_BATCH: step leaves a LOOP planned PLAN_BATCH to its
+ * caller (module.c). */
+enum { STEP_SKIP = 4, STEP_DONE = 5, STEP_BATCH = 6 };
 int pure_run_step(Frame *, uint32_t pc);
 int pure_run_each(Frame *, uint32_t pc);
 int pure_run_loop(Frame *, uint32_t pc);
@@ -100,6 +155,13 @@ int pure_run_item(Frame *, uint32_t pc);
  * STEP_SKIP when it left the loop (BREAK: past its block), else how it
  * stopped. */
 int pure_run_rest(Frame *, uint32_t pc);
+
+/* Loops a batch of rounds at a time (module-batch.c, docs/design/024): the
+ * innermost loop's rounds from loop->k (set up and counted; its LOOP
+ * planned PLAN_BATCH) run as one batch: how many (0: none ran, its block
+ * runs round by round next, at least until round loop->resume), the frame
+ * left as the last of them leaves it, their work counted. */
+unsigned pure_batch_run(Frame *, Loop *);
 
 /* Where a list keeps what compiled code reads of it (module-list.c owns the
  * layout and says where): its item count, its key set (the words, how many,

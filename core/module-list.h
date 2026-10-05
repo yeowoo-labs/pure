@@ -173,6 +173,19 @@ size_t pure_list_extra(const PureList *);
  * gets allow; a clear makes it FLAT again. Answers are the tree's. False
  * when the list cannot (it stays a tree). */
 bool pure_list_arrays(PureList *);
+/* A list's cells as a batch reads and sets them (docs/design/024): FLAT (a
+ * position its row) or DENSE with every key below its count (a key its
+ * position and its row); each field's column and its cells' bytes (0: a
+ * DENSE list's key, the row itself; 1 or 4: whole numbers; 8: numbers; 255:
+ * neither, a text or an i64); owned when a batch may set them in place (an
+ * event's list, not a pack's). false when it is neither form. */
+typedef struct { size_t count; void *columns[16]; uint8_t width[16]; bool owned; } PureCells;
+bool pure_list_cells(PureList *, PureCells *);
+/* Field's column of an owned list's cells widened to bytes (wider than it
+ * is) before a batch sets cells that need it; false without memory (as it was). */
+bool pure_list_widen(PureList *, unsigned field, uint8_t bytes);
+/* A batch set cells of it in place: it changed (its version). */
+void pure_list_touched(PureList *);
 /* What it keeps its items in now: 0 a tree, 1 FLAT arrays, 2 DENSE (for tests and counts). */
 unsigned pure_list_form(const PureList *);
 /* Field of the item whose key_field is key, in a list ordered by key_field
