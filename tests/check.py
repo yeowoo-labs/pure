@@ -1217,14 +1217,15 @@ def module_assumptions(aup, pure, work):
 def tier_program(rng):
     """A random handler for module_tier: loops over counts and a list,
     numbers in locals and states, a keyed list read and set by key, one
-    whose keys came out of order read by key alone (HASHED), ifs and
+    whose keys came out of order read by key alone (HASHED), one of small
+    keys read by key alone (full, or not where keys are left out), ifs and
     breaks, with what fails (a key not there, not whole, 0 divided by, a
     cell past its column's width) as likely as not."""
     names = iter('jklpqrxyz')
     def number(depth, loops):
         choices = ['const', 'const', 'loop', 'local', 'field']
         if depth < 3:
-            choices += ['add', 'sub', 'mul', 'div', 'floor', 'minmax', 'cell', 'add', 'sub', 'hashed']
+            choices += ['add', 'sub', 'mul', 'div', 'floor', 'minmax', 'cell', 'add', 'sub', 'hashed', 'keyed']
         kind = rng.choice(choices)
         if kind == 'const':
             return rng.choice(['0', '1', '2', '3', '7', '255', '256', '1000', '0.5', '2.25', '(0 - 3)', '(0 - 0)', '65536'])
@@ -1238,6 +1239,8 @@ def tier_program(rng):
             return f't[{key(depth + 1, loops)}].v' if rng.random() < 0.7 else 'c.v' if 'c' in loops else 's'
         if kind == 'hashed':
             return f'h[{hashed_key(depth + 1, loops)}].v'
+        if kind == 'keyed':  # g: read by key alone (by a pointer where the key steps with a loop's round)
+            return f'g[{key(depth + 1, loops)}].v'
         if kind == 'floor':
             return f'floor({number(depth + 1, loops)} / {rng.choice(["2", "3", "7", "go.q", "u"])})'
         if kind == 'minmax':
@@ -1264,7 +1267,7 @@ def tier_program(rng):
     def statements(depth, loops, indent, inside):
         lines = []
         for _ in range(rng.randint(1, 3)):
-            kind = rng.choice(['s', 's', 'u', 'acc', 'if', 'loop', 'walk', 'set', 'set', 'break'] if depth < 3 else ['s', 'u', 'set', 'break'])
+            kind = rng.choice(['s', 's', 'u', 'acc', 'if', 'loop', 'walk', 'set', 'set', 'break', 'sweep'] if depth < 3 else ['s', 'u', 'set', 'break'])
             pad = '  ' * indent
             if kind == 's':
                 lines.append(f'{pad}s = s + {number(1, loops)}')
@@ -1290,6 +1293,17 @@ def tier_program(rng):
                 lines.append(f'{pad}for {name} in {rng.choice(["0", "1", "go.q"])} .. {rng.choice(["3", "go.n", "go.m", name if False else "5"])} {{')
                 lines += statements(depth + 1, loops + [name], indent + 1, True)
                 lines.append(f'{pad}}}')
+            elif kind == 'sweep':  # keys stepping with a round: read by pointers (023), in range at both ends or not
+                name = next(names, None)
+                if not name:
+                    continue
+                low, high = rng.choice([('0', 'go.n'), ('1', 'go.n'), ('0', 'floor(go.n / 2)'), ('go.q', 'go.n'), ('0', 'go.n + 1')])
+                affine = rng.choice([name, f'{name} * 2', f'{name} + 3', f'go.n - 1 - {name}', f'{name} * 3 - {name}'])
+                lines.append(f'{pad}for {name} in {low} .. {high} {{')
+                lines.append(f'{pad}  s = s + {rng.choice(["g", "t", "g"])}[{affine}].v')
+                if rng.random() < 0.5:
+                    lines += statements(depth + 1, loops + [name], indent + 1, True)
+                lines.append(f'{pad}}}')
             elif kind == 'walk' and 'c' not in loops:
                 lines.append(f'{pad}for c in f {{')
                 lines += statements(depth + 1, loops + ['c'], indent + 1, True)
@@ -1299,9 +1313,10 @@ def tier_program(rng):
     return '\n'.join([
         'record Cell {', '  at = 0', '  v = 0', '}', 'state out = 0', 'state acc = 0',
         'input go = message {', '  n: u32', '  m: u32', '  q: u32', '}',
-        'on go {', '  let t: list of Cell by at', '  let f: list of Cell', '  let h: list of Cell by at',
+        'on go {', '  let t: list of Cell by at', '  let f: list of Cell', '  let h: list of Cell by at', '  let g: list of Cell by at',
         '  for i in 0 .. go.n {', f'    t.add(Cell {{ at: i, v: {rng.choice(["i", "0", "(i * 3)", "1"])} }})',
-        '    f.append(Cell { at: i * 2, v: i })', '    h.add(Cell { at: i * 7919 - floor(i * 7919 / 1009) * 1009 + 5000000, v: i * 5 })', '  }',
+        '    f.append(Cell { at: i * 2, v: i })', '    h.add(Cell { at: i * 7919 - floor(i * 7919 / 1009) * 1009 + 5000000, v: i * 5 })',
+        f'    g.add(Cell {{ at: {rng.choice(["i", "i", "i + floor(i / 40)"])}, v: i * 3 }})', '  }',
         '  let s = 0', '  let u = 1',
         '  for i in 0 .. go.m {', *body, '  }',
         '  out = s', '  acc = acc + u', '}', ''])

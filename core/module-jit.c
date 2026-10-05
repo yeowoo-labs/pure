@@ -2965,14 +2965,15 @@ static void compile_ints(Block *k, unsigned li) {
 enum { R_NUM, R_INT, R_BOOL }; /* a value's register: d a number; x a whole number as an integer; x 0 or 1 */
 enum {
     T_CONST, T_IN, T_FIELD, T_PHI, T_COUNT, T_ADD, T_SUB, T_MUL, T_DIV, T_MIN, T_MAX, T_NEG, T_FLOOR,
-    T_LT, T_LE, T_GT, T_GE, T_EQ, T_NE, T_NOT, T_AND, T_OR, T_GET, T_FIND_GET, T_FIND, T_HAS, T_SET, T_MOVE, T_SPAN
+    T_LT, T_LE, T_GT, T_GE, T_EQ, T_NE, T_NOT, T_AND, T_OR, T_GET, T_FIND_GET, T_FIND, T_HAS, T_SET, T_MOVE, T_SPAN, T_STEP0, T_STRIDE
 };
 /* T_IN's variables past the locals, states and stack: the outermost loop's round, its rounds or items, its low value. */
 enum { V_ROUND0 = -10, V_COUNT0 = -11, V_LOW0 = -12 };
 /* What a number is to the code that reads it: a number, a bool, an index (of the list in list). */
 enum { K_NUM, K_BOOL, K_INDEX };
 /* A variable: a local (0-63), a state (64-95), a stack slot where ways meet (96-160). */
-enum { V_STATE = 64, V_STACK = 96, VARS = 96 + PURE_MODULE_STACK + 1 };
+/* Past them, a loop's pointer to a column (tier_steps): a phi at its head, no other code's variable. */
+enum { V_STATE = 64, V_STACK = 96, V_STEP = 96 + PURE_MODULE_STACK + 1, STEPS = 8, VARS = V_STEP + STEPS };
 
 typedef struct {
     uint8_t op, rep, kind;
@@ -2982,6 +2983,7 @@ typedef struct {
     bool proven;       /* a list access whose key or position its loop's opening found in range */
     bool fused;        /* a comparison only the branch right after it reads: its flags, no register */
     bool deferred;     /* a number's arithmetic whose finiteness its one reader, right after it, checks (tier_defer) */
+    int step;          /* a list access: the pointer to its cell (a loop's phi, tier_steps), or -1 */
     int retry;         /* where its finiteness check gives up, the first of such a run's snapshot; or -1: its own */
     bool aliased;      /* a full list's position found: its key's register (they are equal) */
     uint16_t list, field;
@@ -3091,7 +3093,7 @@ static int tval(Tier *t, unsigned op, unsigned rep, int a, int b, int c) {
     TVal *v = &t->vals[t->val_count];
     memset(v, 0, sizeof(*v));
     v->op = (uint8_t)op, v->rep = (uint8_t)rep, v->a = a, v->b = b, v->c = c;
-    v->snap = -1, v->loop = t->cur_loop, v->var = -1, v->label = -1, v->reg = -1, v->d = -1, v->retry = -1;
+    v->snap = -1, v->loop = t->cur_loop, v->var = -1, v->label = -1, v->reg = -1, v->d = -1, v->retry = -1, v->step = -1;
     v->lo = -INFINITY, v->hi = INFINITY;
     int made = (int)t->val_count++;
     if (op == T_PHI) return made; /* bound at its merge */
@@ -3839,6 +3841,7 @@ static void tbound_nodes(Tier *t, int x, int l) {
     TVal *v = &t->vals[x];
     if (x == t->loops[l].k || !tin_loop(t, v->loop, l) || v->loop == -1) return;
     v->bounded = true;
+    v->snap = -1; /* nothing to give up: needed only where something reads it */
     tbound_nodes(t, v->a, l);
     tbound_nodes(t, v->b, l);
 }
@@ -4164,6 +4167,89 @@ static void tier_lists(Tier *t, TList *lists) {
     }
 }
 
+/* Each access of an inner count's own by a key or position its opening
+ * found in range for every round (tier_bounds), affine in its round, in a
+ * full list (the tier's code reads its cell at its key): a pointer to its
+ * cell, a phi at the loop's head (V_STEP), made as the loop opens (the
+ * column plus the key at round 0, times four: T_STEP0) and stepped at its
+ * latch (the key's step a round, times four: T_STRIDE). A list found by
+ * key alone with such an access is taken as full where the tier begins
+ * (else the generic code runs the nest). The access reads its pointer, not
+ * its key (dead unless read elsewhere), and gives up nowhere. */
+/* Whether affine x moves with loop l's round (its round in it). */
+static bool tvaries(const Tier *t, int x, int l) {
+    const TVal *v = &t->vals[x];
+    if (x == t->loops[l].k) return true;
+    if (!tin_loop(t, v->loop, l) || v->loop == -1) return false;
+    return (v->a >= 0 && tvaries(t, v->a, l)) || (v->b >= 0 && tvaries(t, v->b, l));
+}
+
+static void tier_steps(Tier *t) {
+    TList *lists = t->lists;
+    unsigned made = 0;
+    size_t values = t->val_count;
+    for (size_t i = 0; i < values && !t->failed; ++i) {
+        TVal *v = &t->vals[i];
+        int l = v->loop;
+        if (!v->proven || (v->op != T_GET && v->op != T_FIND_GET) || l <= 0 || t->loops[l].walk || !tvaries(t, v->a, l)) continue;
+        if (v->op == T_FIND_GET && !lists[v->list].full) { /* by key alone: full where the tier begins */
+            lists[v->list].full = true;
+            (void)tlist(t, lists, v->list, L_COUNT);
+        }
+        int key = v->a, column = v->c, phi = -1;
+        for (size_t j = values; j < t->val_count && phi < 0; ++j) /* one for a key and a column */
+            if (t->vals[j].op == T_PHI && t->vals[j].var >= V_STEP && t->vals[j].loop == l) {
+                const TVal *start = &t->vals[t->vals[j].in[0]];
+                if (start->a == key && start->b == column) phi = (int)j;
+            }
+        if (phi < 0) {
+            if (made == STEPS) continue;
+            TLoop *loop = &t->loops[l];
+            TMerge *head = &t->merges[loop->head];
+            size_t open = SIZE_MAX, latch = SIZE_MAX;
+            for (size_t k = 0; k < t->item_count; ++k) {
+                if (t->items[k].kind == I_OPEN && t->items[k].loop == l) open = k;
+                if (t->items[k].kind == I_LATCH && t->items[k].loop == l) latch = k;
+            }
+            if (open == SIZE_MAX || latch == SIZE_MAX || head->way_count != 2 || !head->phis) continue;
+            int saved = t->cur_loop;
+            t->cur_loop = -1; /* made with no item (placed below) */
+            int start = tval(t, T_STEP0, R_INT, key, column, l), stride = tval(t, T_STRIDE, R_INT, key, -1, l);
+            phi = tval(t, T_PHI, R_INT, -1, -1, -1);
+            int next = tval(t, T_ADD, R_INT, phi, stride, -1);
+            t->cur_loop = saved;
+            t->entry_count -= 3; /* (tval put three where the tier begins; the phi none) */
+            if (t->failed || !grow_array((void **)&t->items, &t->item_room, t->item_count + 3, sizeof(*t->items))) {
+                t->failed = true;
+                break;
+            }
+            int parent = loop->parent;
+            t->vals[start].loop = parent, t->vals[stride].loop = parent, t->vals[next].loop = l;
+            t->vals[phi].var = V_STEP + (int)made, t->vals[phi].label = loop->head, t->vals[phi].loop = l;
+            tphi_in(t, phi, start);
+            tphi_in(t, phi, next);
+            head->phis[V_STEP + made] = phi;
+            for (int w = start; w <= next; ++w) {
+                TVal *x = &t->vals[w];
+                x->whole = true, x->lo = 0, x->hi = 0x1p62, x->zero = false, x->rep = R_INT;
+            }
+            t->vals[stride].lo = -0x1p62; /* a key may step down */
+            t->vals[next].bounded = true; /* a pointer: no check of its own */
+            /* the latch's step before it; the start and stride after the opening (as it goes on: rounds to run) */
+            memmove(&t->items[latch + 1], &t->items[latch], (t->item_count - latch) * sizeof(TItem));
+            t->items[latch] = (TItem){I_VALUE, next, -1, l, -1, -1};
+            memmove(&t->items[open + 3], &t->items[open + 1], (t->item_count + 1 - open - 1) * sizeof(TItem));
+            t->items[open + 1] = (TItem){I_VALUE, start, -1, parent, -1, -1};
+            t->items[open + 2] = (TItem){I_VALUE, stride, -1, parent, -1, -1};
+            t->item_count += 3;
+            ++made;
+        }
+        v = &t->vals[i];
+        v->step = phi;
+        v->snap = -1; /* in range, in a full list: nothing to give up */
+    }
+}
+
 /* ---- The tier: where each value lives, and its register */
 
 /* Registers the tier gives values: x ones for integers and bools, d ones for numbers (x0, x1, x9, x10, x16, x17, d0-d3 scratch). */
@@ -4303,6 +4389,14 @@ static void tier_needed(Tier *t, bool *need) {
             NEED_SNAP(v->snap);
             continue;
         }
+        if (v->op == T_STEP0 || v->op == T_STRIDE) { /* the key's nodes made outside its loop, and the column */
+            tneed_affine(t, need, work, &top, v->a, v->c);
+            continue;
+        }
+        if (v->step >= 0) { /* an access by its pointer: its key, bits, column and limit not read */
+            NEED(v->step);
+            continue;
+        }
         NEED(v->a);
         NEED(v->b);
         NEED(v->c);
@@ -4339,6 +4433,14 @@ static bool tier_registers(Tier *t) {
         switch (it->kind) {
         case I_VALUE: {
             TVal *v = &t->vals[it->value];
+            if (v->op == T_STEP0 || v->op == T_STRIDE) {
+                tuse_affine(t, v->a, v->c, p);
+                break;
+            }
+            if (v->step >= 0) { /* by its pointer alone */
+                tuse(t, v->step, p);
+                break;
+            }
             tuse(t, v->a, p), tuse(t, v->b, p), tuse(t, v->c, p), tuse(t, v->d, p);
             tuse_snap(t, v->snap, p);
             tuse_snap(t, v->retry, p); /* the run's first snapshot: given up to from here */
@@ -4576,6 +4678,35 @@ static void tier_affine_at(Tier *t, int x, int l, unsigned kr, unsigned into, co
         mul_reg(e, into, into, temps[0]);
     }
     tsmall_from_0(t, into, fail);
+}
+
+/* The step of an affine x (tier_bounds) a round of loop l: 1 for its round,
+ * 0 for what the loop does not make, a sum's or difference's of its sides',
+ * a product's its varying side's times the other. */
+static void tier_affine_step(Tier *t, int x, int l, unsigned into, const unsigned *temps) {
+    Emit *e = t->k->e;
+    const TVal *v = &t->vals[x];
+    if (x == t->loops[l].k) {
+        mov_imm(e, into, 1);
+        return;
+    }
+    if (!tin_loop(t, v->loop, l) || v->loop == -1) {
+        mov_imm(e, into, 0);
+        return;
+    }
+    if (v->op == T_MUL) {
+        bool a_out = !tin_loop(t, t->vals[v->a].loop, l) || t->vals[v->a].loop == -1;
+        int same = a_out ? v->a : v->b, varies = a_out ? v->b : v->a;
+        tier_affine_step(t, varies, l, into, temps);
+        if (t->vals[same].op == T_CONST) mov_imm(e, temps[0], (uint64_t)(int64_t)t->vals[same].num);
+        else mov_reg(e, temps[0], treg(t, same));
+        mul_reg(e, into, into, temps[0]);
+        return;
+    }
+    tier_affine_step(t, v->a, l, into, temps);
+    tier_affine_step(t, v->b, l, temps[0], temps + 1);
+    if (v->op == T_ADD) add_reg(e, into, into, temps[0]);
+    else sub_reg(e, into, into, temps[0]);
 }
 
 /* The moves a way into merge g makes: each phi given its input (a parallel move: what a move would overwrite is moved first, a cycle through scratch). */
@@ -4884,6 +5015,10 @@ static void tier_value(Tier *t, int vi) {
     unsigned r = v->reg >= 0 ? (unsigned)v->reg : X16;
     int fail = v->snap >= 0 ? tfail(t, v->snap) : -1;
     const TVal *a = v->a >= 0 ? &t->vals[v->a] : NULL, *b2 = v->b >= 0 ? &t->vals[v->b] : NULL;
+    if (v->step >= 0 && (v->op == T_GET || v->op == T_FIND_GET)) { /* its cell where its pointer is (tier_steps) */
+        put(e, 0xB9400000 | treg(t, v->step) << 5 | r); /* LDR Wr, [pointer] */
+        return;
+    }
     switch (v->op) {
     case T_CONST:
         if (v->rep == R_INT) mov_imm(e, r, (uint64_t)(int64_t)v->num);
@@ -4979,6 +5114,21 @@ static void tier_value(Tier *t, int vi) {
         return;
     }
     case T_COUNT: mov_reg(e, r, treg(t, v->b)); return;
+    case T_STEP0: { /* a loop's pointer at its first round: the column (read from its list: no register kept for it) plus the key there, times four */
+        static const unsigned temps[] = {X16, X17, X9};
+        tier_affine_at(t, v->a, v->c, XZR, X0, temps, tfail(t, t->loops[v->c].open_snap));
+        const TVal *column = &t->vals[v->b];
+        load64(e, X16, tbase(t, B_LISTS, X16), (size_t)column->list * sizeof(PureList *));
+        load64(e, X16, X16, pure_list_layout[LIST_COLUMNS_AT] + column->field * sizeof(void *));
+        add_lsl(e, r, X16, X0, 2);
+        return;
+    }
+    case T_STRIDE: { /* its step a round, times four */
+        static const unsigned temps[] = {X16, X17, X9};
+        tier_affine_step(t, v->a, v->c, X0, temps);
+        lsl_imm(e, r, X0, 2);
+        return;
+    }
     case T_SPAN: { /* a count's rounds: its bounds whole within 2^53, else LIMIT */
         unsigned low = tx(t, v->a, X0, fail), high = tx(t, v->b, X1, fail);
         if (a->rep == R_NUM) tsmall_check(t, low, fail);
@@ -5408,7 +5558,7 @@ static int tier_input(const PureModule *m, PureBlock block) {
 /* The tier's values and items on stderr (PURE_TIER_DUMP), to read what it made. */
 static void tier_dump(const Tier *t) {
     static const char *ops[] = {"const", "in", "field", "phi", "count", "add", "sub", "mul", "div", "min", "max", "neg", "floor",
-                                "lt", "le", "gt", "ge", "eq", "ne", "not", "and", "or", "get", "find_get", "find", "has", "set", "move", "span"};
+                                "lt", "le", "gt", "ge", "eq", "ne", "not", "and", "or", "get", "find_get", "find", "has", "set", "move", "span", "step0", "stride"};
     static const char *items[] = {"value", "merge", "unless", "jump", "open", "latch", "break", "done"};
     for (size_t i = 0; i < t->val_count; ++i) {
         const TVal *v = &t->vals[i];
@@ -5458,6 +5608,8 @@ static Tier *tier_plan(Block *k, unsigned li) {
     if (!t->failed) tier_defer(t);
     const char *bounds = getenv("PURE_TIER_BOUNDS");
     if (!t->failed && !(bounds && !strcmp(bounds, "0"))) tier_bounds(t);
+    const char *steps = getenv("PURE_TIER_STEPS");
+    if (!t->failed && !(steps && !strcmp(steps, "0"))) tier_steps(t);
     if (t->failed || !tier_registers(t)) {
         if (getenv("PURE_TIER_DUMP")) {
             fprintf(stderr, "tier: nest %u not taken (%s)\n", li, t->why ? t->why : "built");
