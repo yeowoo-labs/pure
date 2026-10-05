@@ -96,8 +96,12 @@ int pure_run_item(Frame *, uint32_t pc);
 
 /* Where a list keeps what compiled code reads of it (module-list.c owns the
  * layout and says where): its item count, its key set (the words, how many,
- * whether they are bits), its form (pure_list_form) and its arrays. */
-enum { LIST_COUNT_AT, LIST_MEMBERS_AT, LIST_MEMBER_CAPACITY_AT, LIST_BITMAP_AT, LIST_FORM_AT, LIST_COLUMNS_AT, LIST_VERSION_AT };
+ * whether they are bits), its form (pure_list_form), its arrays and the rows
+ * they hold, its version, how many keys its set holds and its stored bytes. */
+enum {
+    LIST_COUNT_AT, LIST_MEMBERS_AT, LIST_MEMBER_CAPACITY_AT, LIST_BITMAP_AT, LIST_FORM_AT, LIST_COLUMNS_AT, LIST_VERSION_AT,
+    LIST_ROOM_AT, LIST_MEMBER_COUNT_AT, LIST_BYTES_AT
+};
 extern const size_t pure_list_layout[];
 
 /* A module's code compiled (AArch64 Linux; elsewhere, or with PURE_JIT=0 in

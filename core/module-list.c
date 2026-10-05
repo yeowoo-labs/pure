@@ -1361,7 +1361,8 @@ const size_t pure_list_layout[] = {
     [LIST_COUNT_AT] = offsetof(PureList, count), [LIST_MEMBERS_AT] = offsetof(PureList, members),
     [LIST_MEMBER_CAPACITY_AT] = offsetof(PureList, member_capacity), [LIST_BITMAP_AT] = offsetof(PureList, bitmap),
     [LIST_FORM_AT] = offsetof(PureList, form), [LIST_COLUMNS_AT] = offsetof(PureList, columns),
-    [LIST_VERSION_AT] = offsetof(PureList, version)};
+    [LIST_VERSION_AT] = offsetof(PureList, version), [LIST_ROOM_AT] = offsetof(PureList, room),
+    [LIST_MEMBER_COUNT_AT] = offsetof(PureList, member_count), [LIST_BYTES_AT] = offsetof(PureList, bytes)};
 
 bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, unsigned field, PureCell *cell) {
     bool found;
