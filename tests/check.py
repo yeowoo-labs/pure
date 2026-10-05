@@ -1051,12 +1051,40 @@ on go {
 }
 """
 
+# A local's products and sums, whole, of a size the code does not know: where
+# a check gives up, the result's register may be its operand's, and the
+# executor takes the operands again as they were.
+LOCALS_SOURCE = """record Cell {
+  at = 0
+}
+state small = 0
+state big = 0
+input go = message {
+  n: u32
+}
+on go {
+  let cells: list of Cell
+  for i in 0 .. go.n {
+    cells.append(Cell { at: i })
+  }
+  for i in 0 .. go.n {
+    let c = cells.first + i
+    let v = c.at
+    small = small + v * 1048576
+    let w = c.at * 1099511627776
+    let u = w + w
+    big = big + w * 3 + u + w * 1024
+  }
+}
+"""
+
 
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
     an item with a fraction (and -0) widens them and a fraction's key takes
-    a keyed list out of its DENSE form; a product past 2^53. Each event's
+    a keyed list out of its DENSE form; a product past 2^53; a local's
+    products and sum past 2^53 and 2^64 (LOCALS_SOURCE). Each event's
     states, compiled with every loop (PURE_JIT=all) and run by the executor
     alone (PURE_JIT=0), are the same byte for byte."""
     import os
@@ -1065,15 +1093,20 @@ def module_assumptions(aup, pure, work):
     source.write_text(ASSUMPTIONS_SOURCE)
     compile_module(aup, source, module)
     runs = [(10, 3), (10, 99), (70, 65), (70, 5), (200, 150), (9000, 4000), (9000, 9999), (3, 0)]
-    commands = ''.join(f'message go {struct.pack("<II", n, half).hex()}\n' for n, half in runs)
-    outputs = {}
-    for jit in ('all', '0'):
-        done = subprocess.run([str(pure / 'build/pure-run'), str(module)], input=commands, capture_output=True, text=True,
-                              timeout=120, env=dict(os.environ, PURE_JIT=jit))
-        assert done.returncode == 0, done.stderr
-        outputs[jit] = done.stdout
-    assert outputs['all'] == outputs['0'], next((a, b) for a, b in zip(outputs['all'].splitlines(), outputs['0'].splitlines()) if a != b)
-    assert all(json.loads(line)['fault'] == 'none' for line in outputs['0'].splitlines())
+    locals_source, locals_module = work / 'locals.aup', work / 'locals.pmod'
+    locals_source.write_text(LOCALS_SOURCE)
+    compile_module(aup, locals_source, locals_module)
+    for program, commands in (
+            (module, ''.join(f'message go {struct.pack("<II", n, half).hex()}\n' for n, half in runs)),
+            (locals_module, ''.join(f'message go {struct.pack("<I", n).hex()}\n' for n in (3, 70, 5000, 9000)))):
+        outputs = {}
+        for jit in ('all', '0'):
+            done = subprocess.run([str(pure / 'build/pure-run'), str(program)], input=commands, capture_output=True, text=True,
+                                  timeout=120, env=dict(os.environ, PURE_JIT=jit))
+            assert done.returncode == 0, done.stderr
+            outputs[jit] = done.stdout
+        assert outputs['all'] == outputs['0'], next((a, b) for a, b in zip(outputs['all'].splitlines(), outputs['0'].splitlines()) if a != b)
+        assert all(json.loads(line)['fault'] == 'none' for line in outputs['0'].splitlines())
     return len(runs)
 
 

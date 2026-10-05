@@ -166,6 +166,7 @@ static void add_reg(Emit *e, unsigned d, unsigned n, unsigned m) { put(e, 0x8B00
 static void sub_reg(Emit *e, unsigned d, unsigned n, unsigned m) { put(e, 0xCB000000 | m << 16 | n << 5 | d); }
 static void cmp_reg(Emit *e, unsigned n, unsigned m) { put(e, 0xEB00001F | m << 16 | n << 5); }
 static void cmp_imm(Emit *e, unsigned n, uint32_t imm) { put(e, 0xF100001F | imm << 10 | n << 5); }
+static void subs_imm(Emit *e, unsigned d, unsigned n, uint32_t imm) { put(e, 0xF1000000 | imm << 10 | n << 5 | d); }
 static void csel(Emit *e, unsigned d, unsigned n, unsigned m, unsigned cond) { put(e, 0x9A800000 | m << 16 | cond << 12 | n << 5 | d); }
 static void lsr_imm(Emit *e, unsigned d, unsigned n, unsigned shift) { put(e, 0xD340FC00 | shift << 16 | n << 5 | d); }
 static void lsl_imm(Emit *e, unsigned d, unsigned n, unsigned shift) { put(e, 0xD3400000 | ((64 - shift) & 63) << 16 | (63 - shift) << 10 | n << 5 | d); }
@@ -268,15 +269,17 @@ typedef struct {
  * (docs/design/022): the count of a FLAT list it appends to, as its appends
  * have made it (LIVE), the items added to a DENSE one since it was read
  * (PENDING), and the bytes the event may still grow by (HEADROOM); they go
- * to the list and the app before a call (write_back) and as the nest ends. A column's
+ * to the list and the app before a call (write_back) and as the nest ends;
+ * so does the work the event may still do (WORK: its budget less what it
+ * did), which its slices and counts take from as they run. A column's
  * address carries its cells' width in its top byte (bit 56 one byte, 58
  * four, 59 eight): loads on AArch64 Linux leave the top byte out
  * (Documentation/arch/arm64/tagged-pointers.rst), so the code reads through
  * it as it is. */
-enum { C_COLUMN, C_DENSE, C_BITS, C_LIMIT, C_COUNT, C_AT, C_END, C_K, C_N, C_LIVE, C_PENDING, C_HEADROOM };
+enum { C_COLUMN, C_DENSE, C_BITS, C_LIMIT, C_COUNT, C_AT, C_END, C_K, C_N, C_LIVE, C_PENDING, C_HEADROOM, C_WORK };
 typedef struct { uint8_t kind, field; uint16_t list; uint8_t reg; int loop; } Kept;
 enum { KEPT_MOST = 64, NO_REG = 0xFF };
-static const uint8_t kept_registers[] = {2, 3, 4, 5, 6, 7, 8, 14, 15, 18, 25, 26};
+static const uint8_t kept_registers[] = {2, 3, 4, 5, 6, 7, 8, 14, 15, 18, 25, 26, 30}; /* x30: a call writes it, and what is kept is read again after one */
 
 typedef struct {
     uint32_t start, end; /* its block */
@@ -492,6 +495,16 @@ static void kept_load(Block *k, unsigned c) {
         bind(e, unbudgeted);
         break;
     }
+    case C_WORK: { /* its budget (else the default) less what it did */
+        int budgeted = new_label(e);
+        load64(e, r, X23, offsetof(PureApp, work_budget));
+        cbnz_x(e, r, budgeted);
+        mov_imm(e, r, PURE_WORK_DEFAULT);
+        bind(e, budgeted);
+        load64(e, X9, X23, offsetof(PureApp, work));
+        sub_reg(e, r, r, X9);
+        break;
+    }
     case C_K: load64(e, r, X27, loop_offset(&k->loops[v->list]) + offsetof(Loop, k)); break;
     case C_N: load64(e, r, X27, loop_offset(&k->loops[v->list]) + offsetof(Loop, count)); break;
     }
@@ -523,6 +536,16 @@ static void books_back(Block *k, uint64_t mask) {
     Emit *e = k->e;
     for (unsigned c = 0; c < k->kept_count; ++c) {
         const Kept *v = &k->kept[c];
+        if (mask >> c & 1 && v->kind == C_WORK) { /* what it did: its budget less what it may still do */
+            int budgeted = new_label(e);
+            load64(e, X10, X23, offsetof(PureApp, work_budget));
+            cbnz_x(e, X10, budgeted);
+            mov_imm(e, X10, PURE_WORK_DEFAULT);
+            bind(e, budgeted);
+            sub_reg(e, X10, X10, v->reg);
+            store64(e, X10, X23, offsetof(PureApp, work));
+            continue;
+        }
         if (!(mask >> c & 1) || (v->kind != C_LIVE && v->kind != C_PENDING)) continue;
         int none = new_label(e);
         size_t bytes = row_bytes(k->m, v->list);
@@ -1114,30 +1137,60 @@ static void binary(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
         unsigned r = alloc_x(k, h), ma = mag_of(a), mb = mag_of(bv), mag = (ma > mb ? ma : mb) + 1;
         int give_up = deopt_at(k, pc, height);
         bool sign = may_be_negative(a) || may_be_negative(bv) || op->op == PURE_OP_SUB;
+        /* r may be an operand's register: where a check may give up, the result is made in x16 and moved
+         * to r after it, the operands as they were for the executor to take them again */
+        unsigned t = r;
         if (op->op == PURE_OP_MUL) {
             bool left = a->kind == V_CONST && num_of(a->bits) > 0 && num_of(a->bits) < 0x1p32;
-            unsigned x = value_whole(k, left ? h + 1 : h, X9);
-            mov_imm(e, X10, (uint64_t)num_of((left ? a : bv)->bits));
-            mag = ma + mb;
-            put(e, 0x9B007C00 | X10 << 16 | x << 5 | r); /* MUL */
-            if (mag > 63) { /* past 64 bits: the high half other than the sign */
-                smulh(e, X10, x, X10);
-                cmp_asr(e, X10, r, 63);
+            unsigned x = value_whole(k, left ? h + 1 : h, X9), p = 0;
+            uint64_t c = (uint64_t)num_of((left ? a : bv)->bits);
+            bool shift = !(c & (c - 1)); /* a power of two: a shift, below 2^(the other's size + its exponent) */
+            if (shift) {
+                while (c >> p != 1) ++p;
+                mag = mag_of(left ? bv : a) + p;
+            } else
+                mag = ma + mb;
+            if (mag > 53) t = X16;
+            if (shift) lsl_imm(e, t, x, p);
+            else {
+                mov_imm(e, X10, c);
+                put(e, 0x9B007C00 | X10 << 16 | x << 5 | t); /* MUL */
+            }
+            if (mag > 63) { /* past 64 bits: what the shift dropped, or the high half other than the sign */
+                if (shift) cmp_asr(e, x, t, p);
+                else {
+                    smulh(e, X17, x, X10);
+                    cmp_asr(e, X17, t, 63);
+                }
                 b_cond(e, NE, give_up);
             }
             sign = may_be_negative(left ? bv : a);
         } else {
-            unsigned x = value_whole(k, h, X9), y = value_whole(k, h + 1, X10);
-            if (op->op == PURE_OP_ADD) add_reg(e, r, x, y);
-            else if (op->op == PURE_OP_SUB) sub_reg(e, r, x, y);
-            else {
-                cmp_reg(e, x, y);
-                csel(e, r, x, y, op->op == PURE_OP_MIN ? LT : GT);
-                k->vs[h] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1, sign, (uint8_t)(mag - 1)};
-                return;
+            double cy = bv->kind == V_CONST ? num_of(bv->bits) : -1, cx = a->kind == V_CONST ? num_of(a->bits) : -1;
+            bool add = op->op == PURE_OP_ADD || op->op == PURE_OP_SUB;
+            if (add && cy >= 0 && cy < 2) mag = ma + (cy > 0);
+            else if (op->op == PURE_OP_ADD && cx >= 0 && cx < 2) mag = mb + (cx > 0);
+            if (add && mag > 53) t = X16;
+            if (add && cy >= 0 && cy < 4096) { /* a small constant: in the instruction */
+                unsigned x = value_whole(k, h, X9);
+                if (op->op == PURE_OP_ADD) add_imm(e, t, x, (uint32_t)cy);
+                else sub_imm(e, t, x, (uint32_t)cy);
+            } else if (op->op == PURE_OP_ADD && cx >= 0 && cx < 4096) {
+                add_imm(e, t, value_whole(k, h + 1, X10), (uint32_t)cx);
+            } else {
+                unsigned x = value_whole(k, h, X9), y = value_whole(k, h + 1, X10);
+                if (op->op == PURE_OP_ADD) add_reg(e, t, x, y);
+                else if (op->op == PURE_OP_SUB) sub_reg(e, t, x, y);
+                else {
+                    cmp_reg(e, x, y);
+                    csel(e, r, x, y, op->op == PURE_OP_MIN ? LT : GT);
+                    k->vs[h] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1, sign, (uint8_t)(mag - 1)};
+                    return;
+                }
             }
         }
-        if (mag > 53) in_range(k, r, give_up);
+        if (mag > 53) in_range(k, t, give_up);
+        if (t != r) mov_reg(e, r, t);
         k->vs[h] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1, sign, (uint8_t)(mag > 53 ? 53 : mag)};
         return;
     }
@@ -1309,6 +1362,7 @@ static void append_books(Block *k, const PureOp *op, uint32_t pc, unsigned heigh
         pending = kept_reg(k, kept_find(k, loop, C_PENDING, list, 0));
     }
     unsigned some = key == 1 ? columns[1] : columns[0]; /* a column kept: 0 when the list is not in that form */
+    size_t bytes = row_bytes(m, list);
     cbz_x(e, some, slow);
     if (!key) {
         load64(e, X16, X24, list * sizeof(PureList *));
@@ -1327,24 +1381,20 @@ static void append_books(Block *k, const PureOp *op, uint32_t pc, unsigned heigh
         cmp_reg(e, X9, X17);
         b_cond(e, HS, slow);
         lsr_imm(e, X10, X9, 6);
-        load64_index(e, X17, bits, X10); /* its word: the key there already is EXISTS */
-        lsr_reg(e, X17, X17, X9);
+        load64_index(e, X16, bits, X10); /* its word (x16, at x10, kept to the end): the key there already is EXISTS */
+        lsr_reg(e, X17, X16, X9);
         tbnz(e, X17, 0, fault_at(k, PURE_FAULT_EXISTS, pc));
     }
     for (unsigned f = 0; f < fields; ++f)
         if (columns[f]) store_tagged(k, base + f, columns[f], at, slow);
-    mov_imm(e, X10, row_bytes(m, list));
-    cmp_reg(e, head, X10);
-    b_cond(e, LT, slow); /* past the budget or the room: the step says MEMORY */
-    sub_reg(e, head, head, X10);
+    subs_imm(e, head, head, (uint32_t)bytes);
+    b_cond(e, LT, slow); /* past the budget or the room: the step says MEMORY (the headroom read again after) */
     if (!key) add_imm(e, at, at, 1);
     else {
-        lsr_imm(e, X10, X9, 6);
-        load64_index(e, X1, bits, X10);
         mov_imm(e, X17, 1);
         lsl_reg(e, X17, X17, X9);
-        orr_reg(e, X1, X1, X17);
-        store64_index(e, X1, bits, X10);
+        orr_reg(e, X16, X16, X17);
+        store64_index(e, X16, bits, X10);
         add_imm(e, pending, pending, 1);
     }
     slow_back(k, s, V_MEM, 0);
@@ -1614,8 +1664,9 @@ static void compile_op(Block *k, uint32_t pc) {
         bool known = vs[height - 2].kind != V_MEM && owner >= 0;
         if (!known && loop >= 0 && k->loops[k->loops[loop].nest].books) break; /* whose count: the step's, the books written back */
         if (k->copy && known && whole(&vs[height - 2]) && whole(&vs[height - 1])) { /* the integers' code */
-            unsigned r = alloc_x(k, height - 2), x = value_whole(k, height - 2, X9), by = value_whole(k, height - 1, X10);
-            add_reg(e, r, x, by);
+            unsigned r = alloc_x(k, height - 2);
+            if (vs[height - 2].kind == V_CONST && num_of(vs[height - 2].bits) == 0) mov_reg(e, r, value_whole(k, height - 1, X10));
+            else add_reg(e, r, value_whole(k, height - 2, X9), value_whole(k, height - 1, X10));
             unsigned n = count_reg(k, loop, (uint32_t)owner, X17);
             sub_imm(e, X9, n, 1);
             cmp_imm(e, n, 0);
@@ -1817,6 +1868,7 @@ static void compile_op(Block *k, uint32_t pc) {
             v = vs[height - 1];
         }
         spill_all(k, height - 1);
+        books_back(k, k->fresh & ~kept_at(k, target_loop)); /* out of the nest: its books back (both ways: they hold) */
         refresh(k, kept_at(k, target_loop));
         switch (v.kind) {
         case V_FLAG: b_cond(e, v.cond ^ 1, target); break;
@@ -1940,17 +1992,25 @@ static void open_slice(Block *k, uint32_t pc, unsigned height, LoopAt *l, int sl
     sub_reg(e, X10, X10, X0);
     mov_imm(e, X9, length);
     mul_reg(e, X10, X10, X9);
-    int budgeted = new_label(e);
-    load64(e, X9, X23, offsetof(PureApp, work_budget));
-    cbnz_x(e, X9, budgeted);
-    mov_imm(e, X9, PURE_WORK_DEFAULT);
-    bind(e, budgeted);
-    load64(e, X17, X23, offsetof(PureApp, work));
-    sub_reg(e, X9, X9, X17);
-    cmp_reg(e, X10, X9);
-    b_cond(e, HI, fault_at(k, PURE_FAULT_WORK, pc));
-    add_reg(e, X17, X17, X10);
-    store64(e, X17, X23, offsetof(PureApp, work));
+    int work_c = kept_find(k, k->loop_of[pc - k->block.start], C_WORK, 0, 0);
+    if (work_c >= 0) { /* what the event may still do, kept */
+        unsigned left = kept_reg(k, work_c);
+        cmp_reg(e, X10, left);
+        b_cond(e, HI, fault_at(k, PURE_FAULT_WORK, pc));
+        sub_reg(e, left, left, X10);
+    } else {
+        int budgeted = new_label(e);
+        load64(e, X9, X23, offsetof(PureApp, work_budget));
+        cbnz_x(e, X9, budgeted);
+        mov_imm(e, X9, PURE_WORK_DEFAULT);
+        bind(e, budgeted);
+        load64(e, X17, X23, offsetof(PureApp, work));
+        sub_reg(e, X9, X9, X17);
+        cmp_reg(e, X10, X9);
+        b_cond(e, HI, fault_at(k, PURE_FAULT_WORK, pc));
+        add_reg(e, X17, X17, X10);
+        store64(e, X17, X23, offsetof(PureApp, work));
+    }
     cmp_reg(e, X0, X1); /* none: past its block */
     b_cond(e, HS, skip);
     load64(e, X9, X16, pure_list_layout[LIST_COUNT_AT]);
@@ -2082,6 +2142,7 @@ static void iteration(Block *k, LoopAt *l, unsigned li) {
     const PureOp *op = &k->m->code[l->at];
     int again = l->start == l->end ? AGAIN(k, l) : OP_LABEL(k, l->start - k->block.start), done = new_label(e);
     size_t at = loop_offset(l);
+    (void)li;
     if (l->arena) { /* the arena as the block began */
         load64(e, X10, X27, at + offsetof(Loop, mark));
         load64(e, X9, X19, offsetof(Frame, arena));
@@ -2128,18 +2189,27 @@ static void iteration(Block *k, LoopAt *l, unsigned li) {
         store64(e, round, X27, at + offsetof(Loop, k));
         /* its work counts each time round: its block and the LOOP, past the budget a fault at the LOOP */
         uint64_t cost = (uint64_t)(l->end - l->start) + 1;
-        int budgeted = new_label(e);
-        load64(e, X10, X23, offsetof(PureApp, work_budget));
-        cbnz_x(e, X10, budgeted);
-        mov_imm(e, X10, PURE_WORK_DEFAULT);
-        bind(e, budgeted);
-        load64(e, X17, X23, offsetof(PureApp, work));
-        sub_reg(e, X9, X10, X17);
-        mov_imm(e, X0, cost);
-        cmp_reg(e, X9, X0);
-        b_cond(e, LO, fault_at(k, PURE_FAULT_WORK, l->at));
-        add_reg(e, X17, X17, X0);
-        store64(e, X17, X23, offsetof(PureApp, work));
+        int work_c = kept_find(k, (int)li, C_WORK, 0, 0);
+        if (work_c >= 0 && cost < 4096) { /* what the event may still do, kept */
+            unsigned left = kept_reg(k, work_c);
+            cmp_imm(e, left, (uint32_t)cost);
+            b_cond(e, LO, fault_at(k, PURE_FAULT_WORK, l->at));
+            sub_imm(e, left, left, (uint32_t)cost);
+        } else {
+            if (work_c >= 0) books_back(k, UINT64_C(1) << work_c), k->fresh &= ~(UINT64_C(1) << work_c);
+            int budgeted = new_label(e);
+            load64(e, X10, X23, offsetof(PureApp, work_budget));
+            cbnz_x(e, X10, budgeted);
+            mov_imm(e, X10, PURE_WORK_DEFAULT);
+            bind(e, budgeted);
+            load64(e, X17, X23, offsetof(PureApp, work));
+            sub_reg(e, X9, X10, X17);
+            mov_imm(e, X0, cost);
+            cmp_reg(e, X9, X0);
+            b_cond(e, LO, fault_at(k, PURE_FAULT_WORK, l->at));
+            add_reg(e, X17, X17, X0);
+            store64(e, X17, X23, offsetof(PureApp, work));
+        }
         size_t slot = (op->arg & 0xFF) * sizeof(PureValue); /* the slot: low + k */
         if (op->arg & PURE_LOOP_INTEGER) {
             load64(e, X10, X27, at + offsetof(Loop, low));
@@ -2313,6 +2383,14 @@ static void plan_kept(Block *k) {
                     }
                 }
             }
+    for (unsigned li = 0; li < k->loop_count; ++li) { /* what the event may still do: a nest's counts and slices take from it */
+        const LoopAt *l = &k->loops[li];
+        const PureOp *op = &m->code[l->at];
+        if (l->parent >= 0 && ((!l->walk && !(op->arg & PURE_LOOP_INTEGER)) || (l->walk && op->arg & PURE_EACH_SLICED && !event_list(m, l->list))))
+            KEEP(l->nest, C_WORK, 0, 0);
+        else if (l->parent < 0 && !l->walk && l->start < l->end)
+            KEEP(l->nest, C_WORK, 0, 0);
+    }
 #undef KEEP
     for (unsigned c = 0; c < k->kept_count; ++c) k->loops[k->kept[c].loop].region |= UINT64_C(1) << c;
     for (unsigned li = 0; li < k->loop_count; ++li) k->loops[li].region = k->loops[k->loops[li].nest].region;
