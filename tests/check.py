@@ -1016,6 +1016,67 @@ def module_ranges(aup, pure, work):
     return row
 
 
+ASSUMPTIONS_SOURCE = """record Cell {
+  at = 0
+  v = 0
+}
+state total = 0
+state big = 0
+state count = 0
+input go = message {
+  n: u32
+  half: u32
+}
+on go {
+  let cells: list of Cell
+  let keyed: list of Cell by at
+  for i in 0 .. go.n {
+    cells.append(Cell { at: i, v: i * 3 })
+    keyed.add(Cell { at: i, v: i + 1 })
+  }
+  for i in 0 .. go.n * 2 {
+    if i >= cells.count { break }
+    if i == go.half {
+      cells.append(Cell { at: 0.5, v: -0.0 })
+      keyed.add(Cell { at: go.n + 0.5, v: 0.25 })
+    }
+    let c = cells.first + i
+    total = total + c.v + c.at * 2
+    if keyed.has(c.at) {
+      total = total + keyed[c.at].v
+    }
+    big = big + c.at * 1099511627776
+    count = count + cells.count
+  }
+}
+"""
+
+
+def module_assumptions(aup, pure, work):
+    """The compiled code's integers (Pure docs/design/022) where they stop
+    holding: a loop whose columns hold small whole numbers until, halfway,
+    an item with a fraction (and -0) widens them and a fraction's key takes
+    a keyed list out of its DENSE form; a product past 2^53. Each event's
+    states, compiled with every loop (PURE_JIT=all) and run by the executor
+    alone (PURE_JIT=0), are the same byte for byte."""
+    import os
+    import struct
+    source, module = work / 'assumptions.aup', work / 'assumptions.pmod'
+    source.write_text(ASSUMPTIONS_SOURCE)
+    compile_module(aup, source, module)
+    runs = [(10, 3), (10, 99), (70, 65), (70, 5), (200, 150), (9000, 4000), (9000, 9999), (3, 0)]
+    commands = ''.join(f'message go {struct.pack("<II", n, half).hex()}\n' for n, half in runs)
+    outputs = {}
+    for jit in ('all', '0'):
+        done = subprocess.run([str(pure / 'build/pure-run'), str(module)], input=commands, capture_output=True, text=True,
+                              timeout=120, env=dict(os.environ, PURE_JIT=jit))
+        assert done.returncode == 0, done.stderr
+        outputs[jit] = done.stdout
+    assert outputs['all'] == outputs['0'], next((a, b) for a, b in zip(outputs['all'].splitlines(), outputs['0'].splitlines()) if a != b)
+    assert all(json.loads(line)['fault'] == 'none' for line in outputs['0'].splitlines())
+    return len(runs)
+
+
 def server_links_refused(aup, pure, work):
     """A link to an input the receiver's app does not have: the receiver
     says so (REFUSED), and the sender says it once on stderr, as a wire says
@@ -5074,6 +5135,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='pure-check-') as directory:
         work = Path(directory)
         report['module_ranges'] = module_ranges(aup, pure, work)
+        report['module_assumptions'] = module_assumptions(aup, pure, work)
         report['server_parity_requests'] = sum(server_parity(aup, pure, work, range(args.seeds), threads=threads)
                                                for threads in (1, 3))
         report['server_pipelined_answers'] = server_pipelining(aup, pure, work)

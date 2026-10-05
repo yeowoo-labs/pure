@@ -93,6 +93,13 @@ int pure_run_iterate(Frame *);
 /* ITEM_GET at pc whose list is a tree its kept run does not hold: the
  * item's run kept, then the step. */
 int pure_run_item(Frame *, uint32_t pc);
+/* The rest of the innermost loop's round from pc, as the executor runs it
+ * (the compiled code assumed what no longer holds, docs/design/022): the
+ * frame as the code left it (the stack in its slots, the walks' places
+ * written back). STEP_NEXT at the round's end (the loop's iteration next),
+ * STEP_SKIP when it left the loop (BREAK: past its block), else how it
+ * stopped. */
+int pure_run_rest(Frame *, uint32_t pc);
 
 /* Where a list keeps what compiled code reads of it (module-list.c owns the
  * layout and says where): its item count, its key set (the words, how many,

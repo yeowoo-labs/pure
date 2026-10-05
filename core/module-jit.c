@@ -232,6 +232,9 @@ static void store8_index(Emit *e, unsigned t, unsigned base, unsigned index) { p
 static void orr_lsl(Emit *e, unsigned d, unsigned n, unsigned m, unsigned shift) { put(e, 0xAA000000 | m << 16 | shift << 10 | n << 5 | d); }
 static void add_lsl(Emit *e, unsigned d, unsigned n, unsigned m, unsigned shift) { put(e, 0x8B000000 | m << 16 | shift << 10 | n << 5 | d); }
 static void prefetch(Emit *e, unsigned base) { put(e, 0xF9800000 | base << 5); } /* PRFM PLDL1KEEP, [base] */
+static void cmp_lsl(Emit *e, unsigned n, unsigned m, unsigned shift) { put(e, 0xEB00001F | m << 16 | shift << 10 | n << 5); }
+static void smulh(Emit *e, unsigned d, unsigned n, unsigned m) { put(e, 0x9B407C00 | m << 16 | n << 5 | d); }
+static void cmp_asr(Emit *e, unsigned n, unsigned m, unsigned shift) { put(e, 0xEB80001F | m << 16 | shift << 10 | n << 5); }
 
 /* ---- What the compiler knows */
 
@@ -253,8 +256,10 @@ typedef struct {
     int16_t owner;
     uint64_t bits;
     int16_t walk; /* a fast walk's place (its kept register), or -1 */
+    bool sign;    /* V_X: may be below 0 (else 0 or more) */
+    uint8_t mag;  /* V_X: below 2^mag in size (0: not known) */
 } Value;
-#define MEMORY ((Value){V_MEM, 0, 0, false, false, -1, 0, -1})
+#define MEMORY ((Value){V_MEM, 0, 0, false, false, -1, 0, -1, false, 0})
 
 /* What a loop keeps in a register: of a list, a FLAT column's cells (0
  * when it is not FLAT), a DENSE one's, its key set's bits (NULL when it keeps
@@ -272,7 +277,7 @@ static const uint8_t kept_registers[] = {2, 3, 4, 5, 6, 7, 8, 14, 15, 25, 26};
 typedef struct {
     uint32_t start, end; /* its block */
     int parent;          /* the loop around it, or -1 */
-    int again, after;    /* its iteration's label, and past it */
+    int again[2], after[2]; /* its iteration's label, and past it (each copy's) */
     unsigned depth;      /* the loops open in it, itself too */
     uint32_t at;         /* its EACH or LOOP */
     unsigned base;       /* the stack's height in its block (its bounds taken) */
@@ -285,6 +290,8 @@ typedef struct {
     int nest;            /* the outermost loop around it (itself when none is) */
     uint64_t region;     /* what its nest keeps: each in a register of its own, all read at each label in it */
     int ahead;           /* a slice it opens whose key it reads ahead (an Ahead), or -1 */
+    uint64_t stores;     /* the locals its block stores (a count's slot too) */
+    uint64_t ints;       /* the integers' code: the locals that hold whole numbers at its labels */
 } LoopAt;
 
 /* A key as a loop computes it, followed from its block's start (reading
@@ -306,7 +313,7 @@ typedef struct {
     uint32_t pc;
     uintptr_t function;
     unsigned height, base; /* the stack's height at the instruction, and its operands' first */
-    Value operands[PURE_RECORD_FIELDS + 2];
+    Value vs[PURE_MODULE_STACK + 1]; /* the stack at the branch: its operands base up, what lies below kept in registers */
     int result;            /* its result's height, or -1 */
     uint8_t result_kind, result_reg;
     uint64_t fresh;        /* what is kept at its end */
@@ -314,10 +321,24 @@ typedef struct {
     int tree_list;         /* ITEM_GET whose kept column was none: the run a tree's code keeps tried first (else -1) */
     unsigned tree_field;
     bool two;              /* the step at pc, then the one at pc + 1 (an ITEM_GET and its HAS, run as one) */
+    int deopt;             /* the integers' code: where it gives up when the result is no whole number (else -1) */
 } Slow;
 
-/* A cell of eight bytes or one, read out of the line a four-byte one is read in. */
-typedef struct { int label, back; uint8_t result, column, at; } Wide;
+/* A cell of eight bytes or one, read out of the line a four-byte one is read in
+ * (in the integers' code, into an x register: eight bytes give it up, deopt). */
+typedef struct { int label, back; uint8_t result, column, at; int deopt; } Wide;
+
+/* Where the integers' code gives up (docs/design/022): the stack as it was
+ * then, to its slots as numbers; the executor runs the rest of the round
+ * from pc (pure_run_rest); then the code's own iteration, or past the loop. */
+typedef struct {
+    int label;
+    uint32_t pc;
+    unsigned height;
+    int loop;
+    uint64_t fresh;
+    Value vs[PURE_MODULE_STACK + 1];
+} Deopt;
 
 typedef struct {
     const PureModule *m;
@@ -328,7 +349,8 @@ typedef struct {
     int *opens;       /* the loop an EACH or a LOOP opens */
     LoopAt *loops;
     unsigned loop_count;
-    int *op_label;    /* each instruction's, and the block's end */
+    int *labels[2];   /* each instruction's, and the block's end: the code's, and the integers' (a nest's again, docs/design/022) */
+    unsigned copy;    /* which code is being made: 0, or 1 the integers' */
     bool *target;     /* each instruction a branch lands on */
     int exit;         /* w0 holds how it went */
     FaultAt *faults;  /* the faults its code may give, each a short stub after it */
@@ -337,6 +359,9 @@ typedef struct {
     size_t slow_count, slow_room;
     Wide *wides;
     size_t wide_count, wide_room;
+    Deopt *deopts;
+    size_t deopt_count, deopt_room;
+    uint64_t ints;    /* the integers' code: the locals known to hold whole numbers (as their slots' numbers) */
     Kept kept[KEPT_MOST];
     unsigned kept_count;
     Ahead *aheads;
@@ -345,6 +370,10 @@ typedef struct {
     bool joined;      /* the instruction just compiled took the next one too */
     Value vs[PURE_MODULE_STACK + 1];
 } Block;
+
+#define OP_LABEL(k, i) ((k)->labels[(k)->copy][i])
+#define AGAIN(k, l) ((l)->again[(k)->copy])
+#define AFTER(k, l) ((l)->after[(k)->copy])
 
 /* A label whose code gives a fault of kind at pc. */
 static int fault_at(Block *k, PureFault kind, uint32_t pc) {
@@ -527,7 +556,7 @@ static void spill(Block *k, unsigned h) {
     case V_MEM: return;
     case V_CONST: mov_imm(e, X9, v->bits); store64(e, X9, X20, AT(h)); break;
     case V_D: store_d(e, v->reg, X20, AT(h)); break;
-    case V_X: fp2(e, UCVTF_X, D0, v->reg); store_d(e, D0, X20, AT(h)); break;
+    case V_X: fp2(e, SCVTF_X, D0, v->reg); store_d(e, D0, X20, AT(h)); break;
     case V_BIT:
         and_w_one(e, X9, v->reg);
         if (v->negate) eor_w_one(e, X9, X9);
@@ -551,7 +580,7 @@ static void unflag(Block *k, unsigned h, unsigned live) {
     if (v->kind != V_FLAG) return;
     unsigned r = alloc_x(k, live);
     cset(k->e, r, v->cond);
-    *v = (Value){V_BIT, (uint8_t)r, 0, false, false, v->owner, 0, -1};
+    *v = (Value){V_BIT, (uint8_t)r, 0, false, false, v->owner, 0, -1, false, 0};
 }
 
 /* Every comparison below height out of the flags (the code next sets them). */
@@ -573,7 +602,7 @@ static unsigned value_d(Block *k, unsigned h, unsigned scratch) {
     case V_D: return v->reg;
     case V_MEM: load_d(e, scratch, X20, AT(h)); return scratch;
     case V_CONST: mov_imm(e, X9, v->bits); fp2(e, FMOV_DX, scratch, X9); return scratch;
-    case V_X: fp2(e, UCVTF_X, scratch, v->reg); return scratch;
+    case V_X: fp2(e, SCVTF_X, scratch, v->reg); return scratch;
     case V_BIT:
         and_w_one(e, X9, v->reg);
         if (v->negate) eor_w_one(e, X9, X9);
@@ -597,6 +626,11 @@ static unsigned value_bits(Block *k, unsigned h, unsigned scratch) {
  * fraction cut, below 0 or NaN as 0) in an x register. */
 static unsigned value_index(Block *k, unsigned h, unsigned scratch) {
     Value *v = &k->vs[h];
+    if (v->kind == V_X && v->sign) { /* below 0 as 0 (size_t of a number below 0 here) */
+        cmp_imm(k->e, v->reg, 0);
+        csel(k->e, scratch, v->reg, XZR, GE);
+        return scratch;
+    }
     if (v->kind == V_X) return v->reg;
     if (v->kind == V_BIT) {
         and_w_one(k->e, scratch, v->reg);
@@ -628,19 +662,53 @@ static unsigned value_key(Block *k, unsigned h, unsigned scratch, int other) {
     return scratch;
 }
 
-/* An integer comparison may be made of a value that is a whole number: in an x register, or a constant one. */
+/* Integer code may be made of a value that is a whole number below 2^53 in
+ * size: in an x register, or a constant one (not -0). */
 static bool whole(const Value *v) {
     if (v->kind == V_X) return true;
     if (v->kind != V_CONST) return false;
     double x = num_of(v->bits);
-    return x >= 0 && x < 0x1p53 && x == floor(x) && !(x == 0 && signbit(x));
+    return fabs(x) < 0x1p53 && x == floor(x) && !(x == 0 && signbit(x));
 }
 
 static unsigned value_whole(Block *k, unsigned h, unsigned scratch) {
     Value *v = &k->vs[h];
     if (v->kind == V_X) return v->reg;
-    mov_imm(k->e, scratch, (uint64_t)num_of(v->bits));
+    mov_imm(k->e, scratch, (uint64_t)(int64_t)num_of(v->bits));
     return scratch;
+}
+
+static bool may_be_negative(const Value *v) { return v->kind == V_X ? v->sign : num_of(v->bits) < 0; }
+
+/* How many bits a whole value's size takes at most (64: not known). */
+static unsigned mag_of(const Value *v) {
+    if (v->kind == V_X) return v->mag ? v->mag : 64;
+    double x = fabs(num_of(v->bits));
+    unsigned m = 0;
+    while (m < 64 && x >= ldexp(1.0, (int)m)) ++m;
+    return m;
+}
+
+/* A whole number in r, below 2^53 in size, else to fail (x9, x10 spent). */
+static void in_range(Block *k, unsigned r, int fail) {
+    mov_imm(k->e, X9, UINT64_C(1) << 53);
+    add_reg(k->e, X10, r, X9);
+    cmp_lsl(k->e, X10, X9, 1);
+    b_cond(k->e, HS, fail);
+}
+
+/* The number in d as a whole number in x register r (below 2^53 in size, not -0), else to fail (d1, x9, x10 spent). */
+static void int_from_d(Block *k, unsigned r, unsigned d, int fail) {
+    Emit *e = k->e;
+    fp2(e, FCVTZS_X, r, d);
+    fp2(e, SCVTF_X, D1, r);
+    fcmp(e, d, D1);
+    b_cond(e, NE, fail);
+    fp2(e, FMOV_XD, X9, d);
+    mov_imm(e, X10, UINT64_C(1) << 63);
+    cmp_reg(e, X9, X10);
+    b_cond(e, EQ, fail); /* -0 */
+    in_range(k, r, fail);
 }
 
 /* ---- Branches and joins: every value in its slot, what is kept read */
@@ -650,10 +718,10 @@ static int landing(const Block *k, uint32_t from, uint32_t target, int *loop) {
     for (int l = k->loop_of[from - k->block.start]; l >= 0; l = k->loops[l].parent)
         if (k->loops[l].end == target) {
             *loop = l;
-            return k->loops[l].again;
+            return AGAIN(k, &k->loops[l]);
         }
     *loop = target < k->block.start + k->block.length ? k->loop_of[target - k->block.start] : -1;
-    return k->op_label[target - k->block.start];
+    return OP_LABEL(k, target - k->block.start);
 }
 
 /* Before the code reaches a label (by a branch or by going on): the values
@@ -662,6 +730,7 @@ static void join(Block *k, unsigned height, int loop) {
     spill_all(k, height);
     refresh(k, kept_at(k, loop));
     k->fresh = kept_at(k, loop); /* as every way here has it */
+    k->ints = k->copy && loop >= 0 ? k->loops[loop].ints : 0;
 }
 
 /* ---- Out of the way: steps */
@@ -675,9 +744,10 @@ static Slow *slow_at(Block *k, uint32_t pc, uintptr_t function, unsigned height,
     memset(s, 0, sizeof(*s));
     s->label = new_label(k->e), s->back = new_label(k->e);
     s->pc = pc, s->function = function, s->height = height, s->base = base, s->result = result;
-    for (unsigned h = base; h < height; ++h) s->operands[h - base] = k->vs[h];
+    memcpy(s->vs, k->vs, sizeof(s->vs));
     s->loop = k->loop_of[pc - k->block.start];
     s->tree_list = -1;
+    s->deopt = -1;
     return s;
 }
 
@@ -694,8 +764,8 @@ static void slow_back(Block *k, size_t s, unsigned kind, unsigned reg) {
  * again; then back. */
 static void stub_call(Block *k, const Slow *s, uintptr_t function) {
     Emit *e = k->e;
-    for (unsigned h = s->base; h < s->height; ++h) k->vs[h] = s->operands[h - s->base];
-    for (unsigned h = s->base; h < s->height; ++h) spill(k, h);
+    memcpy(k->vs, s->vs, sizeof(k->vs));
+    for (unsigned h = 0; h < s->height; ++h) spill(k, h);
     k->fresh = s->fresh;
     write_back(k, s->loop);
     set_sp(k, s->height);
@@ -711,9 +781,22 @@ static void stub_call(Block *k, const Slow *s, uintptr_t function) {
     }
     if (s->result >= 0) {
         if (s->result_kind == V_D) load_d(e, s->result_reg, X20, AT(s->result));
-        else { /* a bool or a whole number: its number back to an integer */
+        else if (s->deopt >= 0) { /* the integers' code: a whole number, else it gives up */
+            load_d(e, D0, X20, AT(s->result));
+            int_from_d(k, s->result_reg, D0, s->deopt);
+        } else { /* a bool or a whole number: its number back to an integer */
             load_d(e, D0, X20, AT(s->result));
             fp2(e, FCVTZU_X, s->result_reg, D0);
+        }
+    }
+    for (unsigned h = 0; h < s->base; ++h) { /* what lies below its operands, back where the fast way keeps it */
+        const Value *v = &s->vs[h];
+        if (v->borrowed) continue;
+        if (v->kind == V_D) load_d(e, v->reg, X20, AT(h));
+        else if (v->kind == V_X || v->kind == V_BIT) {
+            load_d(e, D0, X20, AT(h));
+            fp2(e, v->kind == V_X ? FCVTZS_X : FCVTZU_X, v->reg, D0);
+            if (v->kind == V_BIT && v->negate) eor_w_one(e, v->reg, v->reg);
         }
     }
     k->fresh = 0;
@@ -730,7 +813,7 @@ static void slow_stubs(Block *k) {
         bind(e, s.label);
         if (s.tree_list >= 0) { /* a tree's item: the run kept, else its run kept by the step (pure_run_item); DENSE: the step */
             int item = new_label(e), step = new_label(e);
-            for (unsigned h = s.base; h < s.height; ++h) k->vs[h] = s.operands[h - s.base];
+            memcpy(k->vs, s.vs, sizeof(k->vs));
             load64(e, X16, X24, (size_t)s.tree_list * sizeof(PureList *));
             load8(e, X17, X16, pure_list_layout[LIST_FORM_AT]);
             cbnz_w(e, X17, step);
@@ -748,7 +831,11 @@ static void slow_stubs(Block *k) {
             cmp_reg(e, X0, X10);
             b_cond(e, HS, item);
             load64(e, X17, X19, offsetof(Frame, run.columns) + s.tree_field * sizeof(void *));
-            load_d_index(e, s.result_reg, X17, X0);
+            if (s.deopt >= 0) {
+                load_d_index(e, D0, X17, X0);
+                int_from_d(k, s.result_reg, D0, s.deopt);
+            } else
+                load_d_index(e, s.result_reg, X17, X0);
             b(e, s.back);
             bind(e, item);
             stub_call(k, &s, (uintptr_t)pure_run_item);
@@ -767,10 +854,24 @@ static void load_cell(Block *k, unsigned r, unsigned column, unsigned at) {
         return;
     }
     Wide *w = &k->wides[k->wide_count++];
-    *w = (Wide){new_label(e), new_label(e), (uint8_t)r, (uint8_t)column, (uint8_t)at};
+    *w = (Wide){new_label(e), new_label(e), (uint8_t)r, (uint8_t)column, (uint8_t)at, -1};
     tbz(e, column, 58, w->label);
     load32_index(e, X10, column, at);
     fp2(e, UCVTF_W, r, X10);
+    bind(e, w->back);
+}
+
+/* The integers' code: a cell of four bytes or one into x register r; eight bytes, to deopt. */
+static void load_int(Block *k, unsigned r, unsigned column, unsigned at, int deopt) {
+    Emit *e = k->e;
+    if (!grow_array((void **)&k->wides, &k->wide_room, k->wide_count + 1, sizeof(*k->wides))) {
+        e->failed = true;
+        return;
+    }
+    Wide *w = &k->wides[k->wide_count++];
+    *w = (Wide){new_label(e), new_label(e), (uint8_t)r, (uint8_t)column, (uint8_t)at, deopt};
+    tbz(e, column, 58, w->label);
+    load32_index(e, r, column, at);
     bind(e, w->back);
 }
 
@@ -781,13 +882,77 @@ static void wide_stubs(Block *k) {
         int one = new_label(e);
         bind(e, w->label);
         tbz(e, w->column, 59, one);
-        load_d_index(e, w->result, w->column, w->at);
-        b(e, w->back);
+        if (w->deopt >= 0) b(e, w->deopt);
+        else {
+            load_d_index(e, w->result, w->column, w->at);
+            b(e, w->back);
+        }
         bind(e, one);
-        load8_index(e, X10, w->column, w->at);
-        fp2(e, UCVTF_W, w->result, X10);
+        if (w->deopt >= 0) load8_index(e, w->result, w->column, w->at);
+        else {
+            load8_index(e, X10, w->column, w->at);
+            fp2(e, UCVTF_W, w->result, X10);
+        }
         b(e, w->back);
     }
+}
+
+/* Where the integers' code gives up at pc, the stack as it is now (height high). */
+static int deopt_at(Block *k, uint32_t pc, unsigned height) {
+    Emit *e = k->e;
+    if (!grow_array((void **)&k->deopts, &k->deopt_room, k->deopt_count + 1, sizeof(*k->deopts))) {
+        e->failed = true;
+        return k->exit;
+    }
+    Deopt *d = &k->deopts[k->deopt_count++];
+    d->label = new_label(e), d->pc = pc, d->height = height, d->loop = k->loop_of[pc - k->block.start], d->fresh = k->fresh;
+    memcpy(d->vs, k->vs, sizeof(d->vs));
+    return d->label;
+}
+
+/* Where it gives up after a step at pc ran (the stack in its slots, height high, nothing kept read), the executor on from next. */
+static int deopt_after(Block *k, uint32_t pc, uint32_t next, unsigned height) {
+    Value saved[PURE_MODULE_STACK + 1];
+    uint64_t fresh = k->fresh;
+    memcpy(saved, k->vs, sizeof(saved));
+    for (unsigned h = 0; h <= PURE_MODULE_STACK; ++h) k->vs[h] = MEMORY;
+    k->fresh = 0;
+    int label = deopt_at(k, pc, height);
+    k->deopts[k->deopt_count - 1].pc = next;
+    memcpy(k->vs, saved, sizeof(saved));
+    k->fresh = fresh;
+    return label;
+}
+
+static void deopt_stubs(Block *k) {
+    Emit *e = k->e;
+    Value saved[PURE_MODULE_STACK + 1];
+    memcpy(saved, k->vs, sizeof(saved));
+    for (size_t i = 0; i < k->deopt_count; ++i) {
+        const Deopt *d = &k->deopts[i];
+        const LoopAt *l = &k->loops[d->loop];
+        int left = new_label(e);
+        bind(e, d->label);
+        memcpy(k->vs, d->vs, sizeof(k->vs));
+        spill_all(k, d->height);
+        k->fresh = d->fresh;
+        write_back(k, d->loop);
+        set_sp(k, d->height);
+        mov_reg(e, X0, X19);
+        mov_w(e, X1, d->pc);
+        call(e, (uintptr_t)pure_run_rest);
+        k->fresh = 0;
+        cbnz_w(e, X0, left);
+        refresh(k, kept_at(k, d->loop)); /* the round ran: the code's own iteration, as made first */
+        b(e, l->again[0]);
+        bind(e, left);
+        k->fresh = 0;
+        cmp_w_imm(e, X0, STEP_SKIP);
+        b_cond(e, NE, k->exit);
+        refresh(k, kept_at(k, l->parent)); /* it left the loop */
+        b(e, l->after[0]);
+    }
+    memcpy(k->vs, saved, sizeof(saved));
 }
 
 /* An instruction the step runs, in line: the stack in its slots, what was kept read again when needed. */
@@ -817,15 +982,16 @@ static void binary(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
         if (whole(a) && whole(bv)) { /* whole numbers below 2^53: compared as integers */
             unsigned x = value_whole(k, h, X9), y = value_whole(k, h + 1, X10);
             cmp_reg(e, x, y);
-            cond = op->op == PURE_OP_LT ? LO : op->op == PURE_OP_LE ? LS : op->op == PURE_OP_GT ? HI : op->op == PURE_OP_GE ? HS
+            cond = op->op == PURE_OP_LT ? LT : op->op == PURE_OP_LE ? LE : op->op == PURE_OP_GT ? GT : op->op == PURE_OP_GE ? GE
                  : op->op == PURE_OP_EQ ? EQ : NE;
+            (void)pc;
         } else {
             unsigned x = value_d(k, h, D0), y = value_d(k, h + 1, D1);
             fcmp(e, x, y);
             cond = op->op == PURE_OP_LT ? MI : op->op == PURE_OP_LE ? LS : op->op == PURE_OP_GT ? GT : op->op == PURE_OP_GE ? GE
                  : op->op == PURE_OP_EQ ? EQ : NE;
         }
-        k->vs[h] = (Value){V_FLAG, 0, (uint8_t)cond, false, false, -1, 0, -1};
+        k->vs[h] = (Value){V_FLAG, 0, (uint8_t)cond, false, false, -1, 0, -1, false, 0};
         return;
     case PURE_OP_AND: case PURE_OP_OR: {
         unsigned r = alloc_x(k, h);
@@ -837,10 +1003,45 @@ static void binary(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
         cset(e, X9, NE);
         if (op->op == PURE_OP_AND) and_w(e, r, X10, X9);
         else orr_w(e, r, X10, X9);
-        k->vs[h] = (Value){V_BIT, (uint8_t)r, 0, false, false, -1, 0, -1};
+        k->vs[h] = (Value){V_BIT, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
         return;
     }
     default: break;
+    }
+    if (k->copy && whole(a) && whole(bv) &&
+        (op->op == PURE_OP_ADD || op->op == PURE_OP_SUB || op->op == PURE_OP_MIN || op->op == PURE_OP_MAX ||
+         (op->op == PURE_OP_MUL && ((a->kind == V_CONST && num_of(a->bits) > 0 && num_of(a->bits) < 0x1p32) ||
+                                    (bv->kind == V_CONST && num_of(bv->bits) > 0 && num_of(bv->bits) < 0x1p32))))) {
+        /* the integers' code: whole numbers stay whole (below 2^53 in size, else it gives up; a positive constant's product is never -0) */
+        unsigned r = alloc_x(k, h), ma = mag_of(a), mb = mag_of(bv), mag = (ma > mb ? ma : mb) + 1;
+        int give_up = deopt_at(k, pc, height);
+        bool sign = may_be_negative(a) || may_be_negative(bv) || op->op == PURE_OP_SUB;
+        if (op->op == PURE_OP_MUL) {
+            bool left = a->kind == V_CONST && num_of(a->bits) > 0 && num_of(a->bits) < 0x1p32;
+            unsigned x = value_whole(k, left ? h + 1 : h, X9);
+            mov_imm(e, X10, (uint64_t)num_of((left ? a : bv)->bits));
+            mag = ma + mb;
+            put(e, 0x9B007C00 | X10 << 16 | x << 5 | r); /* MUL */
+            if (mag > 63) { /* past 64 bits: the high half other than the sign */
+                smulh(e, X10, x, X10);
+                cmp_asr(e, X10, r, 63);
+                b_cond(e, NE, give_up);
+            }
+            sign = may_be_negative(left ? bv : a);
+        } else {
+            unsigned x = value_whole(k, h, X9), y = value_whole(k, h + 1, X10);
+            if (op->op == PURE_OP_ADD) add_reg(e, r, x, y);
+            else if (op->op == PURE_OP_SUB) sub_reg(e, r, x, y);
+            else {
+                cmp_reg(e, x, y);
+                csel(e, r, x, y, op->op == PURE_OP_MIN ? LT : GT);
+                k->vs[h] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1, sign, (uint8_t)(mag - 1)};
+                return;
+            }
+        }
+        if (mag > 53) in_range(k, r, give_up);
+        k->vs[h] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1, sign, (uint8_t)(mag > 53 ? 53 : mag)};
+        return;
     }
     unsigned r = alloc_d(k, h), x = value_d(k, h, D0), y = value_d(k, h + 1, D1);
     switch (op->op) {
@@ -858,7 +1059,7 @@ static void binary(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
     fp2(e, FABS, D2, r); /* finite: below infinity (a NaN is unordered: HS too) */
     fcmp(e, D2, D8);
     b_cond(e, HS, fault_at(k, PURE_FAULT_NON_FINITE, pc));
-    k->vs[h] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1};
+    k->vs[h] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
 }
 
 /* A key's bit in a list's bits (in bits, reaching limit keys): r's bit 0,
@@ -948,7 +1149,6 @@ static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
     unsigned fields = m->record[m->state_ref[list]].count, base = height - fields;
     bool keyed = m->state_key[list] != 0;
     unflag_below(k, height);
-    spill_all(k, base);
     size_t s = (size_t)(slow_at(k, pc, (uintptr_t)pure_run_step, height, base, -1) - k->slows);
     if (e->failed) return;
     int slow = k->slows[s].label;
@@ -1048,7 +1248,6 @@ static bool item_has(Block *k, uint32_t pc, unsigned height) {
         bits_c = kept_find(k, loop, C_BITS, has->arg, 0), limit_c = kept_find(k, loop, C_LIMIT, has->arg, 0);
     if (col_c < 0 || bits_c < 0 || limit_c < 0) return false;
     unflag_below(k, height);
-    spill_all(k, height - 1);
     size_t s = (size_t)(slow_at(k, pc, (uintptr_t)pure_run_step, height, height - 1, (int)height - 1) - k->slows);
     if (e->failed) return true;
     k->slows[s].two = true;
@@ -1093,13 +1292,14 @@ static bool item_has(Block *k, uint32_t pc, unsigned height) {
     bind(e, absent);
     mov_w(e, r, 0);
     bind(e, done);
-    k->vs[height - 1] = (Value){V_BIT, (uint8_t)r, 0, false, false, -1, 0, -1};
+    k->vs[height - 1] = (Value){V_BIT, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
     slow_back(k, s, V_BIT, r);
     return true;
 }
 
 static void loop_open(Block *k, uint32_t pc, unsigned height);
 static void loop_ends(Block *k, uint32_t pc);
+static void enter_body(Block *k, unsigned li);
 
 static void compile_op(Block *k, uint32_t pc) {
     Emit *e = k->e;
@@ -1111,12 +1311,12 @@ static void compile_op(Block *k, uint32_t pc) {
     Value *vs = k->vs;
     switch (op->op) {
     case PURE_OP_CONST:
-        vs[height] = (Value){V_CONST, 0, 0, false, false, -1, (uint64_t)op->integer, -1}; /* the bits: a number's, a bool's or an i64's */
+        vs[height] = (Value){V_CONST, 0, 0, false, false, -1, (uint64_t)op->integer, -1, false, 0}; /* the bits: a number's, a bool's or an i64's */
         return;
     case PURE_OP_LOAD: {
         unsigned r = alloc_d(k, height);
         load_d(e, r, X21, arg * sizeof(PureValue));
-        vs[height] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1};
+        vs[height] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
         return;
     }
     case PURE_OP_STORE: case PURE_OP_CUR_STORE:
@@ -1124,12 +1324,23 @@ static void compile_op(Block *k, uint32_t pc) {
         else store64(e, value_bits(k, height - 1, X9), X21, arg * sizeof(PureValue));
         return;
     case PURE_OP_LOCAL_LOAD: {
+        if (k->copy && k->ints >> (arg & 0x3F) & 1 && (arg & 0xFF) < 64) { /* a whole number its slot holds */
+            unsigned r = alloc_x(k, height);
+            load_d(e, D0, X28, (arg & 0xFF) * sizeof(PureValue));
+            fp2(e, FCVTZS_X, r, D0);
+            vs[height] = (Value){V_X, (uint8_t)r, 0, false, false, (int16_t)(arg >> 16), 0, -1, true, 53};
+            return;
+        }
         unsigned r = alloc_d(k, height);
         load_d(e, r, X28, (arg & 0xFF) * sizeof(PureValue));
-        vs[height] = (Value){V_D, (uint8_t)r, 0, false, false, (int16_t)(arg >> 16), 0, -1};
+        vs[height] = (Value){V_D, (uint8_t)r, 0, false, false, (int16_t)(arg >> 16), 0, -1, false, 0};
         return;
     }
     case PURE_OP_LOCAL_STORE:
+        if ((arg & 0xFF) < 64) { /* whether its slot holds a whole number now (the integers' code reads it as one) */
+            uint64_t bit = UINT64_C(1) << (arg & 0x3F);
+            k->ints = vs[height - 1].kind == V_X ? k->ints | bit : k->ints & ~bit;
+        }
         if (vs[height - 1].kind == V_D) store_d(e, vs[height - 1].reg, X28, (arg & 0xFF) * sizeof(PureValue));
         else store64(e, value_bits(k, height - 1, X9), X28, (arg & 0xFF) * sizeof(PureValue));
         return;
@@ -1139,27 +1350,27 @@ static void compile_op(Block *k, uint32_t pc) {
             if (k->loops[l].walk) walk = l;
         int c = walk >= 0 && k->loops[walk].fast ? kept_find(k, loop, C_AT, (unsigned)walk, 0) : -1;
         if (c >= 0) {
-            vs[height] = (Value){V_X, (uint8_t)kept_reg(k, c), 0, true, false, (int16_t)arg, 0, (int16_t)walk};
+            vs[height] = (Value){V_X, (uint8_t)kept_reg(k, c), 0, true, false, (int16_t)arg, 0, (int16_t)walk, false, 25};
             return;
         }
         unsigned r = alloc_x(k, height);
         load64(e, r, X22, op->op == PURE_OP_ROW ? offsetof(Event, row) : offsetof(Event, outer));
-        vs[height] = (Value){V_X, (uint8_t)r, 0, false, false, (int16_t)arg, 0, -1};
+        vs[height] = (Value){V_X, (uint8_t)r, 0, false, false, (int16_t)arg, 0, -1, false, 25};
         return;
     }
     case PURE_OP_INDEX_FIRST:
-        vs[height] = (Value){V_CONST, 0, 0, false, false, (int16_t)arg, 0, -1};
+        vs[height] = (Value){V_CONST, 0, 0, false, false, (int16_t)arg, 0, -1, false, 0};
         return;
     case PURE_OP_LIST_COUNT: {
         int c = kept_find(k, loop, C_COUNT, arg, 0);
         if (c >= 0) {
-            vs[height] = (Value){V_X, (uint8_t)kept_reg(k, c), 0, true, false, -1, 0, -1};
+            vs[height] = (Value){V_X, (uint8_t)kept_reg(k, c), 0, true, false, -1, 0, -1, false, 25};
             return;
         }
         unsigned r = alloc_x(k, height);
         load64(e, X16, X24, arg * sizeof(PureList *));
         load64(e, r, X16, pure_list_layout[LIST_COUNT_AT]);
-        vs[height] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1};
+        vs[height] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1, false, 25};
         return;
     }
     case PURE_OP_NOT: {
@@ -1172,10 +1383,10 @@ static void compile_op(Block *k, uint32_t pc) {
             memcpy(&v->bits, x == 0 ? &one : &zero, sizeof(v->bits));
         } else if (v->kind == V_X) {
             cmp_imm(e, v->reg, 0);
-            *v = (Value){V_FLAG, 0, EQ, false, false, -1, 0, -1};
+            *v = (Value){V_FLAG, 0, EQ, false, false, -1, 0, -1, false, 0};
         } else {
             fcmp_zero(e, value_d(k, height - 1, D0));
-            *v = (Value){V_FLAG, 0, EQ, false, false, -1, 0, -1};
+            *v = (Value){V_FLAG, 0, EQ, false, false, -1, 0, -1, false, 0};
         }
         v->owner = -1;
         return;
@@ -1183,7 +1394,7 @@ static void compile_op(Block *k, uint32_t pc) {
     case PURE_OP_NEG: case PURE_OP_FLOOR: {
         unsigned r = alloc_d(k, height - 1), x = value_d(k, height - 1, D0);
         fp2(e, op->op == PURE_OP_NEG ? FNEG : FRINTM, r, x);
-        vs[height - 1] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1};
+        vs[height - 1] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
         return;
     }
     case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_MIN: case PURE_OP_MAX:
@@ -1195,6 +1406,21 @@ static void compile_op(Block *k, uint32_t pc) {
         unflag_below(k, height);
         int owner = vs[height - 2].owner;
         bool known = vs[height - 2].kind != V_MEM && owner >= 0;
+        if (k->copy && known && whole(&vs[height - 2]) && whole(&vs[height - 1])) { /* the integers' code */
+            unsigned r = alloc_x(k, height - 2), x = value_whole(k, height - 2, X9), by = value_whole(k, height - 1, X10);
+            add_reg(e, r, x, by);
+            load64(e, X16, X24, (size_t)owner * sizeof(PureList *));
+            load64(e, X17, X16, pure_list_layout[LIST_COUNT_AT]);
+            sub_imm(e, X9, X17, 1);
+            cmp_imm(e, X17, 0);
+            csel(e, X9, XZR, X9, EQ);
+            cmp_reg(e, r, X9);
+            csel(e, r, r, X9, LT);
+            cmp_imm(e, r, 0);
+            csel(e, r, r, XZR, GT);
+            vs[height - 2] = (Value){V_X, (uint8_t)r, 0, false, false, (int16_t)owner, 0, -1, false, 25};
+            return;
+        }
         unsigned r = alloc_d(k, height - 2), x = value_d(k, height - 2, D0), by = value_d(k, height - 1, D1);
         fp2(e, FRINTM, D2, by);
         fcmp(e, by, D2);
@@ -1213,7 +1439,7 @@ static void compile_op(Block *k, uint32_t pc) {
         fp3(e, FMIN, r, r, D3);
         fp2(e, FMOV_DX, D4, XZR);
         fp3(e, FMAX, r, D4, r);
-        vs[height - 2] = (Value){V_D, (uint8_t)r, 0, false, false, (int16_t)(known ? owner : -1), 0, -1};
+        vs[height - 2] = (Value){V_D, (uint8_t)r, 0, false, false, (int16_t)(known ? owner : -1), 0, -1, false, 0};
         if (!known) spill(k, height - 2); /* the owner only its slot knows: kept there */
         return;
     }
@@ -1221,7 +1447,6 @@ static void compile_op(Block *k, uint32_t pc) {
         if (op->plan & PLAN_TEXT) break;
         int bits_c = kept_find(k, loop, C_BITS, arg, 0), limit_c = kept_find(k, loop, C_LIMIT, arg, 0);
         unflag_below(k, height);
-        spill_all(k, height - 1);
         size_t s = (size_t)(slow_at(k, pc, (uintptr_t)pure_run_step, height, height - 1, (int)height - 1) - k->slows);
         if (e->failed) return;
         int slow = k->slows[s].label, absent = new_label(e), done = new_label(e);
@@ -1242,7 +1467,7 @@ static void compile_op(Block *k, uint32_t pc) {
         bind(e, absent);
         mov_w(e, r, 0);
         bind(e, done);
-        vs[height - 1] = (Value){V_BIT, (uint8_t)r, 0, false, false, -1, 0, -1};
+        vs[height - 1] = (Value){V_BIT, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
         slow_back(k, s, V_BIT, r);
         return;
     }
@@ -1253,11 +1478,12 @@ static void compile_op(Block *k, uint32_t pc) {
         int col_c = kept_find(k, loop, C_DENSE, arg, field), bits_c = kept_find(k, loop, C_BITS, arg, 0),
             limit_c = kept_find(k, loop, C_LIMIT, arg, 0);
         unflag_below(k, height);
-        spill_all(k, height - 1);
         size_t s = (size_t)(slow_at(k, pc, (uintptr_t)pure_run_step, height, height - 1, (int)height - 1) - k->slows);
         if (e->failed) return;
         int slow = k->slows[s].label;
-        unsigned column, bits, limit, r = alloc_d(k, height);
+        bool ints = k->copy && col_c >= 0 && bits_c >= 0 && limit_c >= 0;
+        if (ints) k->slows[s].deopt = deopt_after(k, pc, pc + 2, height);
+        unsigned column, bits, limit, r = ints ? alloc_x(k, height) : alloc_d(k, height);
         if (col_c >= 0 && bits_c >= 0 && limit_c >= 0) column = kept_reg(k, col_c), bits = kept_reg(k, bits_c), limit = kept_reg(k, limit_c);
         else {
             load64(e, X16, X24, arg * sizeof(PureList *));
@@ -1281,8 +1507,14 @@ static void compile_op(Block *k, uint32_t pc) {
         load64_index(e, X10, bits, X10);
         lsr_reg(e, X10, X10, key);
         tbz(e, X10, 0, fault_at(k, PURE_FAULT_NOT_FOUND, pc));
+        if (ints) {
+            load_int(k, r, column, key, deopt_at(k, pc, height));
+            vs[height - 1] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1, false, 32};
+            slow_back(k, s, V_X, r);
+            return;
+        }
         load_cell(k, r, column, key);
-        vs[height - 1] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1};
+        vs[height - 1] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
         slow_back(k, s, V_D, r);
         return;
     }
@@ -1295,11 +1527,12 @@ static void compile_op(Block *k, uint32_t pc) {
         uint32_t list = list_of(arg), field = item_field(arg);
         int col_c = kept_find(k, loop, C_COLUMN, list, field), count_c = kept_find(k, loop, C_COUNT, list, 0);
         unflag_below(k, height);
-        spill_all(k, height - 1);
         size_t s = (size_t)(slow_at(k, pc, (uintptr_t)pure_run_step, height, height - 1, (int)height - 1) - k->slows);
         if (e->failed) return;
         int slow = k->slows[s].label;
-        unsigned r = alloc_d(k, height);
+        bool ints = k->copy && col_c >= 0;
+        if (ints) k->slows[s].deopt = deopt_after(k, pc, pc + 1, height);
+        unsigned r = ints ? alloc_x(k, height) : alloc_d(k, height);
         if (col_c >= 0) {
             unsigned column = kept_reg(k, col_c);
             k->slows[s].tree_list = (int)list, k->slows[s].tree_field = field;
@@ -1315,6 +1548,12 @@ static void compile_op(Block *k, uint32_t pc) {
                 }
                 cmp_reg(e, at, count);
                 b_cond(e, HS, fault_at(k, PURE_FAULT_NOT_FOUND, pc));
+            }
+            if (ints) {
+                load_int(k, r, column, at, deopt_at(k, pc, height));
+                vs[height - 1] = (Value){V_X, (uint8_t)r, 0, false, false, -1, 0, -1, false, 32};
+                slow_back(k, s, V_X, r);
+                return;
             }
             load_cell(k, r, column, at);
         } else { /* FLAT: its column; a tree: the run kept, or the step keeps the item's run (pure_run_item) */
@@ -1352,13 +1591,13 @@ static void compile_op(Block *k, uint32_t pc) {
             orr_lsl(e, X17, X17, X10, 56);
             load_cell(k, r, X17, at);
             bind(e, done);
-            vs[height - 1] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1};
+            vs[height - 1] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
             slow_back(k, fill, V_D, r);
             k->slows[s].back = k->slows[fill].back; /* both steps come back here */
             k->slows[s].result_kind = V_D, k->slows[s].result_reg = (uint8_t)r, k->slows[s].fresh = k->fresh;
             return;
         }
-        vs[height - 1] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1};
+        vs[height - 1] = (Value){V_D, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
         slow_back(k, s, V_D, r);
         return;
     }
@@ -1405,7 +1644,7 @@ static void compile_op(Block *k, uint32_t pc) {
         call(e, (uintptr_t)pure_run_break);
         k->fresh = 0;
         refresh(k, kept_at(k, k->loops[l].parent));
-        b(e, k->loops[l].after);
+        b(e, AFTER(k, &k->loops[l]));
         return;
     }
     default: break;
@@ -1469,7 +1708,7 @@ static void open_slice(Block *k, uint32_t pc, unsigned height, LoopAt *l, int sl
     const PureModule *m = k->m;
     const PureOp *op = &m->code[pc];
     unsigned li = (unsigned)(l - k->loops), length = op->arg >> 16, key = m->state_key[l->list] - 1u;
-    int skip = new_label(e), body = l->start < l->end ? k->op_label[l->start - k->block.start] : l->again;
+    int skip = new_label(e), body = l->start < l->end ? OP_LABEL(k, l->start - k->block.start) : AGAIN(k, l);
     uint64_t fresh = k->fresh;
     load64(e, X16, X24, l->list * sizeof(PureList *));
     load64(e, X17, X16, pure_list_layout[LIST_PACK_AT]);
@@ -1551,13 +1790,52 @@ static void open_slice(Block *k, uint32_t pc, unsigned height, LoopAt *l, int sl
         csel(e, k->kept[l->end_kept].reg, X1, X10, LO);
         k->fresh |= UINT64_C(1) << l->at_kept | UINT64_C(1) << l->end_kept;
     }
-    refresh(k, kept_at(k, (int)li));
-    b(e, body);
+    enter_body(k, li);
+    (void)body;
     bind(e, skip);
     k->fresh = fresh;
     refresh(k, kept_at(k, l->parent));
-    b(e, l->after);
+    b(e, AFTER(k, l));
     k->fresh = fresh;
+}
+
+/* A count's low value whole (below 2^53 in size, not -0), else to fail: its slot then holds whole numbers. */
+static void whole_low(Block *k, const LoopAt *l, int fail) {
+    load_d(k->e, D0, X27, loop_offset(l) + offsetof(Loop, low));
+    int_from_d(k, X0, D0, fail);
+}
+
+/* Loop li opened: what its block keeps read, then its block. The code made
+ * first, at a nest's outermost loop, goes on in the integers' code when
+ * what it assumes holds: the columns kept are of one or four bytes, a
+ * count's low value whole. The integers' code at a count: its slot whole,
+ * else it gives up. */
+static void enter_body(Block *k, unsigned li) {
+    Emit *e = k->e;
+    LoopAt *l = &k->loops[li];
+    const PureOp *op = &k->m->code[l->at];
+    refresh(k, kept_at(k, (int)li));
+    if (l->start == l->end) {
+        b(e, AGAIN(k, l));
+        return;
+    }
+    bool counted = !l->walk && !(op->arg & PURE_LOOP_INTEGER) && (op->arg & 0xFF) < 64;
+    if (!k->copy && l->parent < 0) {
+        int made = new_label(e);
+        for (unsigned c = 0; c < k->kept_count; ++c)
+            if (l->region >> c & 1 && (k->kept[c].kind == C_COLUMN || k->kept[c].kind == C_DENSE))
+                tbnz(e, k->kept[c].reg, 59, made); /* eight bytes */
+        if (counted) whole_low(k, l, made);
+        b(e, k->labels[1][l->start - k->block.start]);
+        bind(e, made);
+    } else if (k->copy) {
+        l->ints = k->ints & ~l->stores;
+        if (counted) {
+            whole_low(k, l, deopt_at(k, l->start, l->base));
+            l->ints |= UINT64_C(1) << (op->arg & 0x3F);
+        }
+    }
+    b(e, OP_LABEL(k, l->start - k->block.start));
 }
 
 /* EACH or LOOP at pc: opened by its step (its block next, or none: past it),
@@ -1588,13 +1866,10 @@ static void loop_open(Block *k, uint32_t pc, unsigned height) {
     cmp_w_imm(e, X0, STEP_SKIP);
     b_cond(e, NE, k->exit);
     refresh(k, kept_at(k, l->parent)); /* none: past its block, where its iteration would end */
-    b(e, l->after);
+    b(e, AFTER(k, l));
     k->fresh = 0;
     bind(e, open);
-    if (l->start < l->end) { /* what its block keeps, read: then its block, as the code above goes there too */
-        refresh(k, kept_at(k, k->opens[pc - k->block.start]));
-        b(e, k->op_label[l->start - k->block.start]);
-    }
+    enter_body(k, (unsigned)k->opens[pc - k->block.start]);
 }
 
 /* A loop's block ran once (iterate, module.c, as code): again (its block's
@@ -1602,7 +1877,7 @@ static void loop_open(Block *k, uint32_t pc, unsigned height) {
 static void iteration(Block *k, LoopAt *l, unsigned li) {
     Emit *e = k->e;
     const PureOp *op = &k->m->code[l->at];
-    int again = l->start == l->end ? l->again : k->op_label[l->start - k->block.start], done = new_label(e);
+    int again = l->start == l->end ? AGAIN(k, l) : OP_LABEL(k, l->start - k->block.start), done = new_label(e);
     size_t at = loop_offset(l);
     (void)li;
     if (l->arena) { /* the arena as the block began */
@@ -1699,10 +1974,10 @@ static void loop_ends(Block *k, uint32_t pc) {
         done |= UINT64_C(1) << pick;
         LoopAt *l = &k->loops[pick];
         join(k, l->base, pick);
-        bind(e, l->again);
+        bind(e, AGAIN(k, l));
         iteration(k, l, (unsigned)pick);
         join(k, l->base, l->parent);
-        bind(e, l->after);
+        bind(e, AFTER(k, l));
     }
 }
 
@@ -2065,11 +2340,12 @@ static bool shape_block(Block *k) {
     uint32_t n = k->block.length;
     k->height = malloc(n + 1);
     k->loop_of = malloc((n + 1) * sizeof(*k->loop_of));
-    k->op_label = malloc((n + 1) * sizeof(*k->op_label));
+    k->labels[0] = malloc((n + 1) * sizeof(*k->labels[0]));
+    k->labels[1] = malloc((n + 1) * sizeof(*k->labels[1]));
     k->loops = malloc((n + 1) * sizeof(*k->loops));
     k->opens = malloc((n + 1) * sizeof(*k->opens));
     k->target = calloc(n + 1, sizeof(*k->target));
-    if (!k->height || !k->loop_of || !k->op_label || !k->loops || !k->opens || !k->target) return false;
+    if (!k->height || !k->loop_of || !k->labels[0] || !k->labels[1] || !k->loops || !k->opens || !k->target) return false;
     memset(k->height, 0, n + 1);
     for (uint32_t i = 0; i <= n; ++i) k->loop_of[i] = -1; /* an instruction joined to the one before: never compiled alone */
     int open[PURE_MODULE_NESTING + 1];
@@ -2088,7 +2364,8 @@ static bool shape_block(Block *k) {
             LoopAt *l = &k->loops[k->loop_count];
             memset(l, 0, sizeof(*l));
             l->start = pc + 1, l->end = pc + 1 + (op->arg >> 16), l->parent = depth ? open[depth - 1] : -1;
-            l->again = new_label(k->e), l->after = new_label(k->e), l->depth = depth + 1, l->at = pc;
+            for (unsigned c = 0; c < 2; ++c) l->again[c] = new_label(k->e), l->after[c] = new_label(k->e);
+            l->depth = depth + 1, l->at = pc;
             l->walk = op->op == PURE_OP_EACH, l->list = op->arg >> 8 & 0xFF, l->base = at - pops;
             l->nest = depth ? k->loops[open[0]].nest : (int)k->loop_count;
             l->ahead = -1;
@@ -2108,17 +2385,48 @@ static bool shape_block(Block *k) {
     for (unsigned li = 0; li < k->loop_count; ++li) { /* what each loop's block may change */
         LoopAt *l = &k->loops[li];
         for (uint32_t pc = l->start; pc < l->end; pc = after(&m->code[pc], pc)) {
-            l->writes |= changes(m, &m->code[pc]);
-            l->arena = l->arena || arena_kept(&m->code[pc]);
+            const PureOp *op = &m->code[pc];
+            l->writes |= changes(m, op);
+            l->arena = l->arena || arena_kept(op);
+            if (op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP) l->stores |= UINT64_C(1) << (op->arg & 0x3F);
         }
         l->fast = l->walk && !(l->writes >> (l->list & 31) & 1);
     }
-    for (uint32_t i = 0; i <= n; ++i) k->op_label[i] = new_label(k->e);
+    for (uint32_t i = 0; i <= n; ++i) k->labels[0][i] = new_label(k->e), k->labels[1][i] = new_label(k->e);
     k->exit = new_label(k->e);
     plan_kept(k);
     for (unsigned li = 0; li < k->loop_count; ++li)
         if (k->loops[li].start < k->loops[li].end && (k->loops[li].walk ? k->loops[li].fast : true)) plan_ahead(k, li);
     return !k->e->failed;
+}
+
+/* The integers' code for the nest of loop li (docs/design/022): its block
+ * again, values read from narrow columns and their arithmetic as integers;
+ * where that does not hold it gives up (deopt_stubs) into the code made
+ * first, which it also leaves for past the loop. */
+static void compile_ints(Block *k, unsigned li) {
+    Emit *e = k->e;
+    LoopAt *l = &k->loops[li];
+    const PureOp *op = &k->m->code[l->at];
+    k->copy = 1;
+    for (unsigned h = 0; h <= PURE_MODULE_STACK; ++h) k->vs[h] = MEMORY;
+    k->fresh = kept_at(k, (int)li);
+    l->ints = !l->walk && !(op->arg & PURE_LOOP_INTEGER) && (op->arg & 0xFF) < 64 ? UINT64_C(1) << (op->arg & 0x3F) : 0;
+    k->ints = l->ints;
+    for (uint32_t pc = l->start; pc < l->end;) {
+        loop_ends(k, pc);
+        if (k->target[pc - k->block.start]) join(k, k->height[pc - k->block.start], k->loop_of[pc - k->block.start]);
+        bind(e, OP_LABEL(k, pc - k->block.start));
+        int in = k->loop_of[pc - k->block.start];
+        if (in >= 0 && k->loops[in].start == pc && k->loops[in].ahead >= 0) read_ahead(k, (unsigned)in);
+        compile_op(k, pc);
+        const PureOp *at = &k->m->code[pc];
+        pc = at->op == PURE_OP_EACH || at->op == PURE_OP_LOOP ? pc + 1 : after(at, pc) + k->joined;
+        k->joined = false;
+    }
+    loop_ends(k, l->end);
+    b(e, l->after[0]); /* past the loop: the code made first goes on */
+    k->copy = 0;
 }
 
 /* The block's code into e (leaving the stack end_height high), its start's word in *entry. */
@@ -2152,7 +2460,7 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
         for (uint32_t pc = block.start; pc < block.start + block.length;) {
             loop_ends(k, pc);
             if (k->target[pc - block.start]) join(k, k->height[pc - block.start], k->loop_of[pc - block.start]);
-            bind(e, k->op_label[pc - block.start]);
+            bind(e, OP_LABEL(k, pc - block.start));
             int l = k->loop_of[pc - block.start];
             if (l >= 0 && k->loops[l].start == pc && k->loops[l].ahead >= 0) read_ahead(k, (unsigned)l);
             compile_op(k, pc);
@@ -2163,7 +2471,7 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
         uint32_t end = block.start + block.length;
         loop_ends(k, end);
         join(k, end_height, -1);
-        bind(e, k->op_label[block.length]);
+        bind(e, OP_LABEL(k, block.length));
         set_sp(k, end_height); /* the block ran: what it leaves (a view's value) is the frame's to give */
         mov_w(e, X0, STEP_NEXT);
         bind(e, k->exit);
@@ -2175,20 +2483,25 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
         ldp(e, X19, X20, 16, false);
         ldp(e, X29, X30, 112, true);
         put(e, 0xD65F03C0);         /* RET */
+        for (unsigned li = 0; li < k->loop_count; ++li) /* each nest's integers' code */
+            if (k->loops[li].parent < 0 && k->loops[li].start < k->loops[li].end) compile_ints(k, li);
         fault_stubs(k);
         slow_stubs(k);
         wide_stubs(k);
+        deopt_stubs(k);
     }
     ok = ok && !e->failed;
     free(k->height);
     free(k->loop_of);
-    free(k->op_label);
+    free(k->labels[0]);
+    free(k->labels[1]);
     free(k->loops);
     free(k->opens);
     free(k->target);
     free(k->faults);
     free(k->slows);
     free(k->wides);
+    free(k->deopts);
     free(k->aheads);
     free(k);
     return ok;

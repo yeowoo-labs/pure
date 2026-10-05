@@ -3064,6 +3064,21 @@ int pure_run_item(Frame *frame, uint32_t pc) {
     return step(frame, op, pc, &next);
 }
 
+int pure_run_rest(Frame *frame, uint32_t pc) {
+    unsigned depth = frame->depth;
+    for (;;) {
+        if (frame->depth < depth) return STEP_SKIP; /* it left the loop (BREAK) */
+        if (pc >= frame->end) { /* a loop's block ran: the compiled code's, done; one opened here, its iteration */
+            if (frame->depth == depth) return STEP_NEXT;
+            int how = iterate(frame, &pc);
+            if (how != STEP_NEXT) return how;
+            continue;
+        }
+        int how = step(frame, &frame->m->code[pc], pc, &pc);
+        if (how != STEP_NEXT) return how;
+    }
+}
+
 int pure_run_iterate(Frame *frame) {
     uint32_t next = UINT32_MAX;
     int how = iterate(frame, &next);
