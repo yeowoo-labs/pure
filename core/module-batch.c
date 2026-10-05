@@ -79,6 +79,9 @@ typedef struct {
     unsigned reduce_count;
     Nest nest;                  /* the nested loop running (nest.count NULL: none) */
     uint64_t work;              /* the nested loops' rounds' work */
+    double *var;                /* the loop's value in each lane, or NULL (not made yet) */
+    double var_start, var_step; /* the loop's value as an affine value */
+    bool breaks;                /* a lane broke out of the nested loop running */
     bool items;                 /* the block sets items: its reads are kept to check against them */
     bool none;                  /* no lane runs here */
     Split splits[SPLITS];
@@ -163,9 +166,21 @@ static inline double lane_of(const Val *v, unsigned l) {
 /* v as numbers, one per lane (lanes of its own, or new ones); NULL when no lanes are left. */
 static const double *numbers(Batch *b, const Val *v) {
     if (v->kind == LANES && !v->u32) return v->lane;
+    if (v->kind == AFFINE && v->value == b->var_start && v->step == b->var_step) { /* the loop's value: made once a batch */
+        if (!b->var && (b->var = fresh(b)))
+            for (unsigned l = 0; l < b->n; ++l) b->var[l] = v->value + v->step * l;
+        return b->var;
+    }
     double *out = fresh(b);
-    if (out)
-        for (unsigned l = 0; l < b->n; ++l) out[l] = lane_of(v, l);
+    if (!out) return NULL;
+    if (v->kind == LANES) {
+        const uint32_t *from = v->lane;
+        for (unsigned l = 0; l < b->n; ++l) out[l] = from[l];
+    } else if (v->kind == AFFINE) {
+        double value = v->value, step = v->step;
+        for (unsigned l = 0; l < b->n; ++l) out[l] = value + step * l;
+    } else
+        for (unsigned l = 0; l < b->n; ++l) out[l] = v->value;
     return out;
 }
 
@@ -192,14 +207,16 @@ static bool any_running(Batch *b, const uint8_t *bad) {
     return any != 0;
 }
 
-/* Whether every running lane's number is finite (as the executor checks each result). */
+/* Whether every running lane's number is finite (as the executor checks
+ * each result): its exponent's bits not all ones, in integers (vector code). */
 static bool finite_running(Batch *b, const double *x) {
     const uint32_t *run = running(b);
-    uint32_t bad = 0;
+    const uint64_t *bits = (const uint64_t *)(const void *)x;
+    uint64_t bad = 0;
     if (!run)
-        for (unsigned l = 0; l < b->n; ++l) bad |= !isfinite(x[l]);
+        for (unsigned l = 0; l < b->n; ++l) bad |= (~bits[l] & UINT64_C(0x7FF0000000000000)) == 0;
     else
-        for (unsigned l = 0; l < b->n; ++l) bad |= (uint32_t)!isfinite(x[l]) & run[l];
+        for (unsigned l = 0; l < b->n; ++l) bad |= ((~bits[l] & UINT64_C(0x7FF0000000000000)) == 0) & run[l];
     return !bad;
 }
 
@@ -260,14 +277,38 @@ static bool words_op(uint8_t op, uint32_t *restrict out, const uint32_t *restric
     return !over;
 }
 
-/* x op y as numbers, as the executor computes each; whether a result may be not finite (then checked). */
+/* A number's exponent bits all ones: not finite (in integers, vector code). */
+static inline uint64_t not_finite(double v) {
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    return (~bits & UINT64_C(0x7FF0000000000000)) == 0;
+}
+
+/* Each form of operands its own loop as EACH, each result checked finite in
+ * the running lanes (run: NULL every lane) as it is made. */
+#define CHECKED(expr)                                                                                             \
+    do {                                                                                                          \
+        uint64_t bad = 0;                                                                                         \
+        if (!run) {                                                                                               \
+            if (ux) for (unsigned l = 0; l < n; ++l) { double a = xk, c = ys[l], v = (expr); out[l] = v, bad |= not_finite(v); } \
+            else if (uy) for (unsigned l = 0; l < n; ++l) { double a = xs[l], c = yk, v = (expr); out[l] = v, bad |= not_finite(v); } \
+            else for (unsigned l = 0; l < n; ++l) { double a = xs[l], c = ys[l], v = (expr); out[l] = v, bad |= not_finite(v); } \
+        } else {                                                                                                  \
+            if (ux) for (unsigned l = 0; l < n; ++l) { double a = xk, c = ys[l], v = (expr); out[l] = v, bad |= not_finite(v) & run[l]; } \
+            else if (uy) for (unsigned l = 0; l < n; ++l) { double a = xs[l], c = yk, v = (expr); out[l] = v, bad |= not_finite(v) & run[l]; } \
+            else for (unsigned l = 0; l < n; ++l) { double a = xs[l], c = ys[l], v = (expr); out[l] = v, bad |= not_finite(v) & run[l]; } \
+        }                                                                                                         \
+        return !bad;                                                                                              \
+    } while (0)
+
+/* x op y as numbers, as the executor computes each: false when a running lane's is not finite (the executor's fault). */
 static bool numbers_op(uint8_t op, double *restrict out, const double *restrict xs, double xk, bool ux,
-                       const double *restrict ys, double yk, bool uy, unsigned n) {
+                       const double *restrict ys, double yk, bool uy, unsigned n, const uint32_t *restrict run) {
     switch (op) {
-    case PURE_OP_ADD: EACH(double, a + c); return true;
-    case PURE_OP_SUB: EACH(double, a - c); return true;
-    case PURE_OP_MUL: EACH(double, a * c); return true;
-    case PURE_OP_DIV: EACH(double, a / c); return true; /* by 0: not finite, as the executor's fault */
+    case PURE_OP_ADD: CHECKED(a + c);
+    case PURE_OP_SUB: CHECKED(a - c);
+    case PURE_OP_MUL: CHECKED(a * c);
+    case PURE_OP_DIV: CHECKED(a / c); /* by 0: not finite, as the executor's fault */
     case PURE_OP_MOD:
         for (unsigned l = 0; l < n; ++l) {
             double a = ux ? xk : xs[l], c = uy ? yk : ys[l], value = fmod(a, c);
@@ -275,17 +316,25 @@ static bool numbers_op(uint8_t op, double *restrict out, const double *restrict 
             else if (value == 0) value = copysign(0.0, c);
             out[l] = value;
         }
-        return true;
-    case PURE_OP_MIN: EACH(double, minimum(a, c)); return false;
-    case PURE_OP_MAX: EACH(double, maximum(a, c)); return false;
-    case PURE_OP_LT: EACH(double, a < c); return false;
-    case PURE_OP_LE: EACH(double, a <= c); return false;
-    case PURE_OP_GT: EACH(double, a > c); return false;
-    case PURE_OP_GE: EACH(double, a >= c); return false;
-    case PURE_OP_EQ: EACH(double, a == c); return false;
-    case PURE_OP_NE: EACH(double, a != c); return false;
-    case PURE_OP_AND: EACH(double, a != 0 && c != 0); return false;
-    default: EACH(double, a != 0 || c != 0); return false;
+        return true; /* checked by the caller */
+    case PURE_OP_MIN: EACH(double, minimum(a, c)); return true;
+    default: EACH(double, maximum(a, c)); return true;
+    }
+}
+#undef CHECKED
+
+/* x op y for a test of numbers (a comparison, AND, OR): 1 or 0 in four bytes, a branch's mask as it is. */
+static void numbers_test(uint8_t op, uint32_t *restrict out, const double *restrict xs, double xk, bool ux,
+                         const double *restrict ys, double yk, bool uy, unsigned n) {
+    switch (op) {
+    case PURE_OP_LT: EACH(double, a < c); break;
+    case PURE_OP_LE: EACH(double, a <= c); break;
+    case PURE_OP_GT: EACH(double, a > c); break;
+    case PURE_OP_GE: EACH(double, a >= c); break;
+    case PURE_OP_EQ: EACH(double, a == c); break;
+    case PURE_OP_NE: EACH(double, a != c); break;
+    case PURE_OP_AND: EACH(double, a != 0 && c != 0); break;
+    default: EACH(double, a != 0 || c != 0); break;
     }
 }
 #undef EACH
@@ -323,13 +372,16 @@ static bool word_op(Batch *b, uint8_t op, Val *x, const Val *y) {
 static void number_lanes(Batch *b, uint8_t op, Val *x, const Val *y) {
     bool ux = x->kind == UNIFORM, uy = y->kind == UNIFORM;
     const double *xs = ux ? NULL : numbers(b, x), *ys = uy ? NULL : numbers(b, y);
-    double *out = (ux || xs) && (uy || ys) ? fresh(b) : NULL;
+    void *out = (ux || xs) && (uy || ys) ? fresh(b) : NULL;
+    bool test = op >= PURE_OP_LT && op <= PURE_OP_OR && op != PURE_OP_NOT;
     if (!out) return;
-    if (numbers_op(op, out, xs, x->value, ux, ys, y->value, uy, b->n) && !finite_running(b, out)) b->failed = true;
-    if (xs && xs != x->lane) b->spare[b->spare_count++] = (void *)xs; /* numbers made for this */
-    if (ys && ys != y->lane) b->spare[b->spare_count++] = (void *)ys;
+    if (test) numbers_test(op, out, xs, x->value, ux, ys, y->value, uy, b->n);
+    else if (!numbers_op(op, out, xs, x->value, ux, ys, y->value, uy, b->n, running(b)) || (op == PURE_OP_MOD && !finite_running(b, out)))
+        b->failed = true;
+    if (xs && xs != x->lane && xs != b->var) b->spare[b->spare_count++] = (void *)xs; /* numbers made for this */
+    if (ys && ys != y->lane && ys != b->var) b->spare[b->spare_count++] = (void *)ys;
     release(b, x), release(b, y);
-    *x = lanes_val(out, false);
+    *x = lanes_val(out, test);
 }
 
 static void reduce_step(Batch *b, Reduce *r, const Val *e);
@@ -376,7 +428,7 @@ static void unary(Batch *b, uint8_t op) {
     if (op == PURE_OP_NEG) for (unsigned l = 0; l < b->n; ++l) out[l] = -xs[l];
     else if (op == PURE_OP_NOT) for (unsigned l = 0; l < b->n; ++l) out[l] = xs[l] == 0;
     else for (unsigned l = 0; l < b->n; ++l) out[l] = floor(xs[l]);
-    if (xs != x->lane) b->spare[b->spare_count++] = (void *)xs;
+    if (xs != x->lane && xs != b->var) b->spare[b->spare_count++] = (void *)xs;
     release(b, x);
     *x = lanes_val(out, false);
 }
@@ -731,7 +783,11 @@ static void branch(Batch *b, uint32_t pc) {
     else {
         uint32_t *out = fresh(b);
         if (!out) return;
-        for (unsigned l = 0; l < b->n; ++l) out[l] = (parent ? parent[l] : 1) & (lane_of(&c, l) != 0);
+        if (c.kind == LANES && c.u32) { /* a comparison's 1s and 0s, in the running lanes */
+            const uint32_t *yes = c.lane;
+            for (unsigned l = 0; l < b->n; ++l) out[l] = parent[l] & yes[l];
+        } else
+            for (unsigned l = 0; l < b->n; ++l) out[l] = (parent ? parent[l] : 1) & (lane_of(&c, l) != 0);
         release(b, &c);
         on = out;
     }
@@ -794,6 +850,7 @@ static void reduce_step(Batch *b, Reduce *r, const Val *e) {
         if (!run) for (unsigned l = 0; l < n; ++l) p[l] += v, c[l] += 1;
         else for (unsigned l = 0; l < n; ++l) p[l] = run[l] ? p[l] + v : p[l], c[l] += run[l];
         r->loose |= v != floor(v);
+        if (v == floor(v) && fabs(v) <= 0x1p20) return; /* a lane's at most 2^31 of them: below 2^53 */
     } else {
         const double *es = numbers(b, e);
         if (!es) return;
@@ -804,7 +861,7 @@ static void reduce_step(Batch *b, Reduce *r, const Val *e) {
             p[l] = r->op == PURE_OP_ADD ? p[l] + v : r->op == PURE_OP_MIN ? minimum(p[l], v) : maximum(p[l], v);
             ++c[l], fraction |= v != floor(v);
         }
-        if (es != e->lane) b->spare[b->spare_count++] = (void *)es;
+        if (es != e->lane && es != b->var) b->spare[b->spare_count++] = (void *)es;
         r->loose |= r->op == PURE_OP_ADD && fraction;
     }
     if (r->op == PURE_OP_ADD) { /* past 2^53, a lane's sum of whole numbers may round */
@@ -887,7 +944,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             }
             if (!run) for (unsigned l = 0; l < b->n; ++l) broken[l] = 1;
             else for (unsigned l = 0; l < b->n; ++l) broken[l] |= run[l];
-            b->none = true;
+            b->none = b->breaks = true;
             break;
         }
         case PURE_OP_JMP: send(b, arg, b->active), b->none = true; break;
@@ -917,7 +974,7 @@ static void mark_mask(Batch *b, bool *kept, bool *kept_mask, const Mask *m) {
 }
 
 static void mark_val(bool *kept, const Val *v) {
-    if (v->kind == LANES) mark_lanes(kept, v->lane);
+    if (v->lane) mark_lanes(kept, v->lane);
 }
 
 /* Between a nested loop's rounds (the stack empty): the lanes and masks
@@ -932,6 +989,7 @@ static void sweep(Batch *b) {
         }
     mark_mask(b, kept, kept_mask, b->active);
     mark_mask(b, kept, kept_mask, b->nest.entry);
+    mark_lanes(kept, b->var);
     mark_lanes(kept, b->nest.count), mark_lanes(kept, b->nest.broken), mark_val(kept, &b->nest.low);
     for (unsigned r = 0; r < b->reduce_count; ++r) mark_lanes(kept, b->reduce[r].partial), mark_lanes(kept, b->reduce[r].count);
     for (unsigned r = 0; r < b->read_count; ++r) mark_val(kept, &b->reads[r].rows);
@@ -954,7 +1012,7 @@ static void set_slot(Batch *b, unsigned slot, const Val *low, uint32_t t, const 
         double *out = fresh(b);
         if (!out) return;
         for (unsigned l = 0; l < b->n; ++l)
-            out[l] = live[l] ? (t ? lane_of(low, l) + t : lane_of(low, l))
+            out[l] = !live || live[l] ? (t ? lane_of(low, l) + t : lane_of(low, l))
                    : b->state[slot] ? lane_of(&b->local[slot], l) : b->ev->locals[slot].num;
         v = lanes_val(out, false);
         v.temp = false;
@@ -973,6 +1031,16 @@ static void nested(Batch *b, const PureOp *op, uint32_t pc) {
     if (!count || !broken) return;
     const uint32_t *entry = running(b);
     uint8_t bad[BATCH];
+    if (low.kind == UNIFORM && high.kind == UNIFORM) { /* the same rounds in every lane */
+        double lo = low.value, hi = high.value;
+        if (!(fabs(lo) <= 0x1p53 && fabs(hi) <= 0x1p53 && lo == floor(lo) && hi == floor(hi)) || hi - lo > 0x1p31) {
+            b->failed = true;
+            return;
+        }
+        uint32_t rounds = hi > lo ? (uint32_t)(hi - lo) : 0;
+        for (unsigned l = 0; l < n; ++l) count[l] = entry && !entry[l] ? 0 : rounds, broken[l] = 0;
+        memset(bad, 0, n);
+    } else
     for (unsigned l = 0; l < n; ++l) { /* as the LOOP opens: whole ends within 2^53 */
         double lo = lane_of(&low, l), hi = lane_of(&high, l);
         bad[l] = !(fabs(lo) <= 0x1p53 && fabs(hi) <= 0x1p53 && lo == floor(lo) && hi == floor(hi)) || hi - lo > 0x1p31;
@@ -988,15 +1056,24 @@ static void nested(Batch *b, const PureOp *op, uint32_t pc) {
     Nest saved = b->nest;
     b->nest = (Nest){outer, count, broken, low};
     uint64_t per = (uint64_t)(end - start) + 1;
+    uint32_t least = UINT32_MAX; /* the fewest rounds a lane that came has */
+    unsigned came = 0;
+    for (unsigned l = 0; l < n; ++l)
+        if (!entry || entry[l]) least = count[l] < least ? count[l] : least, ++came;
+    b->breaks = false;
     for (uint32_t t = 0; !b->failed; ++t) {
-        uint32_t *live = fresh(b);
-        if (!live) break;
+        uint32_t *live;
         unsigned alive = 0;
-        for (unsigned l = 0; l < n; ++l) live[l] = (t < count[l]) & (broken[l] ^ 1), alive += live[l];
+        if (t < least && !b->breaks) /* every lane that came: no mask to make */
+            live = (uint32_t *)entry, alive = came;
+        else {
+            if (!(live = fresh(b))) break;
+            for (unsigned l = 0; l < n; ++l) live[l] = (t < count[l]) & (broken[l] ^ 1), alive += live[l];
+        }
         if (!alive) break;
         b->work += alive * per; /* each lane's round: its block and its LOOP, as written */
         set_slot(b, slot, &low, t, live, alive);
-        b->active = alive == n ? NULL : new_mask(b, live, outer, alive);
+        b->active = alive == n ? NULL : live == entry ? outer : new_mask(b, live, outer, alive);
         b->none = false;
         if (!pass(b, start, end)) break;
         arrive(b, end);
@@ -1190,8 +1267,9 @@ unsigned pure_batch_run(Frame *frame, Loop *loop) {
     Batch *b = &batch;
     b->frame = frame, b->m = m, b->app = app, b->ev = frame->ev, b->n = n, b->first = first;
     b->reverse = loop->reverse, b->backward = 0;
+    b->var_start = b->reverse ? first + (n - 1) : first, b->var_step = b->reverse ? -1 : 1;
     b->slot = (uint32_t)(loop->slot - frame->ev->locals), b->end = loop->end;
-    b->failed = b->none = b->items = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0;
+    b->failed = b->none = b->items = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
     b->mask_free_count = b->reduce_count = 0;
     memset(b->sets, 0, sizeof(b->sets));
