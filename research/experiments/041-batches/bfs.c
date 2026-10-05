@@ -12,7 +12,8 @@
  *          lane's bit read again first (an earlier lane may have added it)
  * Against natural.h's c_bfs (offsets per node: CSR) and c_bfs_ahead (that
  * read ahead), on the suite's graph and routes (100,000 nodes, 1,000,000
- * edges drawn, seed 121). Built cc -O2. */
+ * edges drawn, seed 121). Built cc -O2; with -DLANES_TEST the edges' lanes
+ * are 16 (a node with more edges runs its round alone: the answers the same). */
 #define _POSIX_C_SOURCE 200809L
 #include <math.h>
 #include <stdbool.h>
@@ -29,7 +30,11 @@ static double now(void) {
     return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 
+#ifdef LANES_TEST
+enum { B = 256, LANES = 16 };
+#else
 enum { B = 256, LANES = 8192 };
+#endif
 
 /* seen: list of Seen by node, DENSE */
 typedef struct { uint64_t *bits; uint32_t *depth; size_t count; } Seen;
@@ -81,6 +86,12 @@ static void batch_bfs(uint32_t from, uint32_t target, uint32_t nodes, double *ou
         unsigned e = 0, rounds = 0; /* the edges into lanes, as many rounds as fit */
         for (; rounds < m && e + (hi[rounds] - lo[rounds]) <= LANES; ++rounds)
             for (uint32_t k = lo[rounds]; k < hi[rounds]; ++k) edge_to[e] = to_col[k], edge_round[e] = rounds, ++e;
+        if (!rounds) { /* a node with more edges than the lanes: its round alone, round by round */
+            for (uint32_t k = lo[0]; k < hi[0]; ++k)
+                if (!seen_has(&seen, to_col[k])) seen_add(&seen, to_col[k], depth[0]), queue[count++] = to_col[k];
+            ++i;
+            continue;
+        }
         for (unsigned q = 0; q < e; ++q) has[q] = seen_has(&seen, edge_to[q]); /* seen.has(e.to), each lane */
         for (unsigned q = 0; q < e; ++q) /* the adds and appends, in order */
             if (!has[q] && !seen_has(&seen, edge_to[q])) seen_add(&seen, edge_to[q], depth[edge_round[q]]), queue[count++] = edge_to[q];
