@@ -255,6 +255,8 @@ typedef struct {
      * (numbers by value, texts by bytes), each key once, and keys do not change. */
     uint8_t state_key[PURE_MODULE_STATES];
     bool state_indexed[PURE_MODULE_STATES]; /* list: an index state refers to it (set at load) */
+    uint8_t *height;    /* the operand stack's height at each instruction, from its block's start (the verifier's) */
+    struct PureJit *jit; /* its blocks compiled (module-jit.c, docs/design/021), or NULL */
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
     PureValue initial[PURE_MODULE_STATES];

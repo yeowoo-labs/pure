@@ -3,6 +3,7 @@
 #define _DARWIN_C_SOURCE /* mkdtemp, which _POSIX_C_SOURCE hides there */
 #endif
 #include "module.h"
+#include "module-run.h"
 #include "module-save.h"
 #include "module-store.h"
 #include "module-text.h"
@@ -3171,6 +3172,8 @@ static void lane_folds(void) {
         }
         planned += module_a.view_plan[VIEWS];
         memset(module_b.view_plan, 0, sizeof(module_b.view_plan));
+        pure_jit_free(module_b.jit); /* its code changed: compiled again (021) */
+        module_b.jit = pure_jit_make(&module_b);
         PureApp a, b;
         CHECK(pure_app_start(&a, &module_a, (PureData){0}) == PURE_OK && pure_app_start(&b, &module_b, (PureData){0}) == PURE_OK);
         pure_app_work(&a, UINT64_MAX); /* counted, never past it */
@@ -3765,6 +3768,8 @@ static void ranges(void) {
           !module_a.code[118].range && module_a.code[118].plan);
     for (uint32_t i = 0; i < module_b.code_count; ++i) module_b.code[i].range = 0;
     memset(module_b.view_range, 0, sizeof(module_b.view_range));
+    pure_jit_free(module_b.jit); /* its code changed: compiled again (021) */
+    module_b.jit = pure_jit_make(&module_b);
     uint32_t seed = 0x7a45e11u;
     unsigned compared = 0, walked = 0;
     for (unsigned round = 0; round < 60; ++round) {

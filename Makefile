@@ -23,7 +23,7 @@ BUILD ?= build
 # store/test-log.c, link/test-link.c, serve/test-message-json.c);
 # tests/check.py checks the hosts end to end.
 INCLUDES = -Icore
-MODEL = core/module.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c
+MODEL = core/module.c core/module-jit.c core/module-list.c core/module-save.c core/module-text.c core/module-store.c core/flow.c
 STORE = store/store-tree.c store/store-log.c
 LINK = link/link-protocol.c link/link.c link/sending.c link/crypto.c
 SERVE = serve/serve.c serve/deliver.c serve/message-json.c serve/sha256.c
