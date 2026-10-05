@@ -730,8 +730,18 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
 
 typedef struct { PureBlock block; unsigned leaves; size_t entry; } Made;
 
-/* A block to make, leaving leaves values on the stack. */
-static bool want(PureBlock block, unsigned leaves, Made **made, size_t *count, size_t *room) {
+/* Whether a block has a loop: compiled code pays where blocks repeat; a
+ * short block runs once (a view's cell, a fold's item, most handlers) as
+ * fast in the executor, without the code's entry and its calls of step. */
+static bool loops_in(const PureModule *m, PureBlock block) {
+    for (uint32_t pc = block.start; pc < block.start + block.length; ++pc)
+        if (m->code[pc].op == PURE_OP_EACH || m->code[pc].op == PURE_OP_LOOP) return true;
+    return false;
+}
+
+/* A block to make (one with a loop), leaving leaves values on the stack. */
+static bool want(const PureModule *m, PureBlock block, unsigned leaves, Made **made, size_t *count, size_t *room) {
+    if (!loops_in(m, block)) return true;
     for (size_t i = 0; i < *count; ++i)
         if ((*made)[i].block.start == block.start && (*made)[i].block.length == block.length) return true;
     if (!grow_array((void **)made, room, *count + 1, sizeof(**made))) return false;
@@ -746,17 +756,21 @@ struct PureJit *pure_jit_make(const PureModule *m) {
     size_t count = 0, room = 0;
     bool ok = true;
     /* The handlers' and the views' code, then the folds' blocks in what is made (they run as blocks of their own). */
-    for (uint32_t h = 0; ok && h < m->handlers; ++h) ok = want(m->handler[h].code, 0, &made, &count, &room);
+    for (uint32_t h = 0; ok && h < m->handlers; ++h) ok = want(m, m->handler[h].code, 0, &made, &count, &room);
     for (uint32_t v = 0; ok && v < m->views; ++v)
-        if (m->view_code[v].length) ok = want(m->view_code[v], 1, &made, &count, &room);
+        if (m->view_code[v].length) ok = want(m, m->view_code[v], 1, &made, &count, &room);
     for (size_t i = 0; ok && i < count; ++i)
         for (uint32_t pc = made[i].block.start; ok && pc < made[i].block.start + made[i].block.length; ++pc) {
             const PureOp *op = &m->code[pc];
             unsigned how = op->arg & PURE_FOLD_KIND; /* count and first leave a bool; the others a value and a bool */
             if (op->op == PURE_OP_FOLD)
-                ok = want((PureBlock){pc + 1, op->arg >> 16}, how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? 1 : 2, &made, &count,
-                          &room);
+                ok = want(m, (PureBlock){pc + 1, op->arg >> 16}, how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? 1 : 2, &made,
+                          &count, &room);
         }
+    if (ok && !count) { /* nothing worth it: run() then looks for no code at all */
+        free(made);
+        return NULL;
+    }
     Emit e = {0};
     for (size_t i = 0; ok && i < count; ++i) ok = compile_block(m, made[i].block, made[i].leaves, &e, &made[i].entry);
     ok = ok && resolve(&e);

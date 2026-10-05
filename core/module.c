@@ -2294,7 +2294,7 @@ static size_t group_slot(uint64_t bits, size_t capacity) {
 }
 
 /* key's group, added when absent (with add); NULL when absent, or without room. */
-static Group *group_of(struct PurePass *pass, double key, unsigned how, bool add) {
+static inline __attribute__((always_inline)) Group *group_of(struct PurePass *pass, double key, unsigned how, bool add) {
     key = key == 0 ? 0 : key;
     if (pass->capacity) {
         for (size_t at = group_slot(order_bits(key), pass->capacity);; at = (at + 1) & (pass->capacity - 1)) {
@@ -3071,13 +3071,24 @@ int pure_run_iterate(Frame *frame) {
     return how != STEP_NEXT ? how : next != UINT32_MAX ? STEP_NEXT : STEP_DONE;
 }
 
+/* A frame for block, its fields set one by one: a block runs often (a
+ * fold's item, a view's cell), and filling the whole frame each time (the
+ * compiled code's run among it) costs more than the block. */
+static inline __attribute__((always_inline)) void open_frame(Frame *frame, const PureModule *m, PureValue *values, PureBlock block,
+                                                             Event *ev, Slot *stack, Loop *loops) {
+    frame->m = m, frame->values = values, frame->ev = ev, frame->app = ev->app, frame->arena = ev->arena;
+    frame->stack = stack, frame->sp = 0, frame->loops = loops, frame->depth = 0;
+    frame->end = block.start + block.length;
+}
+
 /* A block run by its compiled code. */
 static __attribute__((noinline)) PureResult run_compiled(PureCompiled code, const PureModule *m, PureValue *values,
                                                          PureBlock block, Event *ev, Slot *result) {
     Slot stack[PURE_MODULE_STACK];
     Loop loops[PURE_MODULE_NESTING];
-    Frame frame = {.m = m, .values = values, .ev = ev, .app = ev->app, .arena = ev->arena, .stack = stack,
-                   .end = block.start + block.length, .loops = loops};
+    Frame frame;
+    open_frame(&frame, m, values, block, ev, stack, loops);
+    frame.run.list = NULL; /* no run kept yet */
     return finish(&frame, code(&frame), result);
 }
 
@@ -3086,8 +3097,8 @@ static PureResult run(const PureModule *m, PureValue *values, PureBlock block, E
     if (code) return run_compiled(code, m, values, block, ev, result);
     Slot stack[PURE_MODULE_STACK];
     Loop loops[PURE_MODULE_NESTING];
-    Frame frame = {.m = m, .values = values, .ev = ev, .app = ev->app, .arena = ev->arena, .stack = stack,
-                   .end = block.start + block.length, .loops = loops};
+    Frame frame;
+    open_frame(&frame, m, values, block, ev, stack, loops);
     int how = STEP_NEXT;
     for (uint32_t pc = block.start;;) {
         if (pc >= frame.end) { /* the block ran; or a loop's ran once: again, or the loop ends (its end may be its outer's) */
