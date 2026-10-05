@@ -2198,18 +2198,48 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
 
 typedef struct { PureBlock block; unsigned leaves; size_t entry; } Made;
 
-/* Whether a block has a loop: compiled code pays where blocks repeat; a
- * short block runs once (a view's cell, a fold's item, most handlers) as
- * fast in the executor, without the code's entry and its calls of step. */
-static bool loops_in(const PureModule *m, PureBlock block) {
-    for (uint32_t pc = block.start; pc < block.start + block.length; ++pc)
-        if (m->code[pc].op == PURE_OP_EACH || m->code[pc].op == PURE_OP_LOOP) return true;
-    return false;
+/* Whether an instruction has code of its own here (else it calls its step). */
+static bool in_code(const PureModule *m, const PureOp *op) {
+    switch (op->op) {
+    case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_STORE: case PURE_OP_CUR_STORE: case PURE_OP_LOCAL_LOAD:
+    case PURE_OP_LOCAL_STORE: case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_MOVE:
+    case PURE_OP_LIST_COUNT: case PURE_OP_NOT: case PURE_OP_NEG: case PURE_OP_FLOOR: case PURE_OP_ADD: case PURE_OP_SUB:
+    case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT:
+    case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE: case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_JZ: case PURE_OP_JMP:
+    case PURE_OP_EACH: case PURE_OP_LOOP: case PURE_OP_BREAK:
+        return true;
+    case PURE_OP_ITEM_GET: case PURE_OP_LIST_HAS: return !(op->plan & PLAN_TEXT);
+    case PURE_OP_LIST_FIND: return op->plan & PLAN_JOINED && !(op->plan & PLAN_TEXT) && !(op[1].plan & PLAN_TEXT) && event_list(m, op->arg);
+    case PURE_OP_LIST_APPEND: return event_list(m, op->arg) && numbers_only(m, op->arg) && !m->state_indexed[op->arg];
+    default: return false;
+    }
 }
 
-/* A block to make (one with a loop), leaving leaves values on the stack. */
+/* Whether a block is worth code: it has a loop, and its loops' blocks have
+ * code for every instruction. Each step a loop calls gives back what the
+ * code keeps in registers (read again after it), and costs more than the
+ * executor's own dispatch: a loop of steps (TPC-C's lines, 123) runs as
+ * fast in the executor. PURE_JIT=all makes every block with a loop (for
+ * the checks). */
+static bool worth(const PureModule *m, PureBlock block) {
+    const char *all = getenv("PURE_JIT");
+    bool loops = false, steps = false;
+    uint32_t end = 0;
+    for (uint32_t pc = block.start; pc < block.start + block.length; pc = after(&m->code[pc], pc)) {
+        const PureOp *op = &m->code[pc];
+        if (op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP) {
+            loops = true;
+            uint32_t ends = pc + 1 + (op->arg >> 16);
+            if (ends > end) end = ends;
+        } else if (pc < end && !in_code(m, op))
+            steps = true;
+    }
+    return loops && (!steps || (all && !strcmp(all, "all")));
+}
+
+/* A block to make (one worth it), leaving leaves values on the stack. */
 static bool want(const PureModule *m, PureBlock block, unsigned leaves, Made **made, size_t *count, size_t *room) {
-    if (!loops_in(m, block)) return true;
+    if (!worth(m, block)) return true;
     for (size_t i = 0; i < *count; ++i)
         if ((*made)[i].block.start == block.start && (*made)[i].block.length == block.length) return true;
     if (!grow_array((void **)made, room, *count + 1, sizeof(**made))) return false;
