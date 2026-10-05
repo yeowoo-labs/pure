@@ -7,6 +7,8 @@
 #                                Linux AArch64), the executor alone
 #                                (PURE_JIT=0), and BFS without reading ahead
 #                                (PURE_AHEAD=0)
+#   runs.sh floor ROUNDS         floor.c's three modes (bare, hoisted, naive),
+#                                each against natural.h's C
 set -e
 here=research/experiments/040-against-c
 builds=$HOME/.cache/pure-040
@@ -33,6 +35,12 @@ suite)
     quiet
     PURE_AHEAD=0 python3 research/guard.py --most 3072 -- "$builds/$2/suite-run" "$builds/$2" "$3" bfs bfs_ahead \
         | sed "s/^{/{\"version\":\"$2\",\"jit\":1,\"ahead\":0,/" >> "$here/$day-suite.jsonl" ;;
-*) echo "runs.sh build NAME COMMIT | suite NAME ROUNDS" >&2
+floor)
+    for mode in 0 1 2; do
+        cc -O2 -std=c17 -DMODE=$mode -o "$builds/floor-$mode" $here/floor.c -lm
+        quiet
+        python3 research/guard.py --most 2048 -- "$builds/floor-$mode" "$2" >> "$here/$day-floor.jsonl"
+    done ;;
+*) echo "runs.sh build NAME COMMIT | suite NAME ROUNDS | floor ROUNDS" >&2
     exit 2 ;;
 esac
