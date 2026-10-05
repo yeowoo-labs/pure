@@ -21,9 +21,13 @@
  *  narrow_ahead  narrow, read ahead as ahead
  *  c_ahead  bfs.c read ahead as ahead (context: what C would gain)
  *
- * bfsfloor NODES EDGES SEARCHES [FAR NEAR]: a JSON line per search and form
- * (the forms in turns; the answers must agree), with this thread's counters
- * (user space), then the medians. */
+ * bfsfloor NODES EDGES SEARCHES [FAR NEAR [PER_BUCKET [FORM REPEATS]]]: a
+ * JSON line per search and form (the forms in turns; the answers must
+ * agree), with this thread's counters (user space), then the medians. With
+ * FORM, that form alone, each search REPEATS times and its median, as bfs.c
+ * measures (the tables stay warm). PER_BUCKET: about how many items a bucket
+ * (8; the width is then 2^20 keys, a node's: other widths make a slice's
+ * bounds fall inside buckets). */
 #define _GNU_SOURCE
 #include <math.h>
 #include <stdbool.h>
@@ -255,10 +259,13 @@ static Answer search_c_ahead(uint32_t s, uint32_t t) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4) { fputs("bfsfloor NODES EDGES SEARCHES [FAR NEAR]\n", stderr); return 2; }
+    if (argc < 4) { fputs("bfsfloor NODES EDGES SEARCHES [FAR NEAR [PER_BUCKET [FORM REPEATS]]]\n", stderr); return 2; }
     n = (uint32_t)atol(argv[1]);
     size_t want = (size_t)atol(argv[2]), searches = (size_t)atol(argv[3]);
     far_ = argc > 4 ? atoi(argv[4]) : 16, near_ = argc > 5 ? atoi(argv[5]) : 8;
+    size_t per_bucket = argc > 6 ? (size_t)atol(argv[6]) : 8;
+    const char *only = argc > 7 ? argv[7] : NULL;
+    size_t repeats = argc > 8 ? (size_t)atol(argv[8]) : 21;
     /* bfs-run's graph: from and to uniform, no loops, each pair once, sorted */
     uint64_t *keys = malloc(want * sizeof(*keys));
     size_t count = 0;
@@ -278,7 +285,7 @@ int main(int argc, char **argv) {
     for (size_t k = 0; k < m; ++k) edges.key[k] = (double)keys[k], edges.to[k] = (double)(keys[k] & 0xFFFFF);
     double span = edges.key[m - 1] - edges.key[0];
     int exponent;
-    frexp(span / (double)(m / 8 + 1), &exponent);
+    frexp(span / (double)(m / per_bucket + 1), &exponent);
     edges.scale = ldexp(1.0, -exponent);
     edges.low = floor(edges.key[0] * edges.scale) / edges.scale;
     edges.buckets = (size_t)floor((edges.key[m - 1] - edges.low) * edges.scale) + 2;
@@ -302,6 +309,40 @@ int main(int argc, char **argv) {
     const char *names[] = {"c", "c_bits", "packed", "ahead", "narrow", "narrow_ahead", "c_ahead"};
     Answer (*forms[])(uint32_t, uint32_t) = {search_c, search_c_bits, packed_plain, packed_ahead, narrow_plain, narrow_ahead,
                                              search_c_ahead};
+    if (only) { /* one form, each search repeated: the median run's line */
+        int f = 0;
+        while (f < FORMS && strcmp(names[f], only)) ++f;
+        if (f == FORMS) { fprintf(stderr, "no form %s\n", only); return 2; }
+        double *each = malloc(searches * sizeof(double));
+        typedef struct { double ms; uint64_t c[COUNTERS]; Answer got; } Run;
+        Run *runs = malloc(repeats * sizeof(*runs));
+        for (size_t r = 0; r < searches; ++r) {
+            uint32_t s = (uint32_t)(next() % n), t = (uint32_t)(next() % n);
+            for (size_t k = 0; k < repeats; ++k) {
+                uint64_t c0[COUNTERS], c1[COUNTERS];
+                counters_read(c0);
+                double a = now();
+                runs[k].got = forms[f](s, t);
+                runs[k].ms = now() - a;
+                counters_read(c1);
+                for (int i = 0; i < COUNTERS; ++i) runs[k].c[i] = c1[i] - c0[i];
+            }
+            for (size_t i = 1; i < repeats; ++i) /* by time, few: insertion */
+                for (size_t j = i; j > 0 && runs[j].ms < runs[j - 1].ms; --j) { Run x = runs[j]; runs[j] = runs[j - 1]; runs[j - 1] = x; }
+            Run *mid = &runs[repeats / 2];
+            each[r] = mid->ms;
+            printf("{\"form\":\"%s\",\"alone\":true,\"from\":%u,\"to\":%u,\"hops\":%d,\"reached\":%u,\"ms\":%.3f,"
+                   "\"instructions\":%llu,\"cycles\":%llu,\"branch_misses\":%llu,\"l1d_misses\":%llu,\"llc_misses\":%llu,"
+                   "\"work\":%llu}\n", names[f], s, t, mid->got.hops, mid->got.reached, mid->ms, (unsigned long long)mid->c[0],
+                   (unsigned long long)mid->c[1], (unsigned long long)mid->c[2], (unsigned long long)mid->c[3],
+                   (unsigned long long)mid->c[4], (unsigned long long)mid->got.work);
+        }
+        qsort(each, searches, sizeof(double), by_num);
+        printf("{\"nodes\":%u,\"edges\":%u,\"far\":%d,\"near\":%d,\"per_bucket\":%zu,\"buckets\":%zu,\"form\":\"%s\","
+               "\"repeats\":%zu,\"ms\":%.3f}\n", n, m, far_, near_, per_bucket, edges.buckets, names[f], repeats,
+               each[searches / 2]);
+        return 0;
+    }
     double *took[FORMS];
     for (int f = 0; f < FORMS; ++f) took[f] = malloc(searches * sizeof(double));
     for (size_t r = 0; r < searches; ++r) {
@@ -324,7 +365,8 @@ int main(int argc, char **argv) {
                    (unsigned long long)got.work);
         }
     }
-    printf("{\"nodes\":%u,\"edges\":%u,\"far\":%d,\"near\":%d", n, m, far_, near_);
+    printf("{\"nodes\":%u,\"edges\":%u,\"far\":%d,\"near\":%d,\"per_bucket\":%zu,\"buckets\":%zu", n, m, far_, near_,
+           per_bucket, edges.buckets);
     for (int f = 0; f < FORMS; ++f) {
         qsort(took[f], searches, sizeof(double), by_num);
         printf(",\"%s_ms\":%.3f", names[f], took[f][searches / 2]);

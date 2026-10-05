@@ -13,6 +13,12 @@
 #                               without (PURE_JIT=0), in turns
 #   runs.sh bfs NAME            033's bfs.py on that build (100,000 nodes,
 #                               1,000,000 edges, 5 searches, 3 rounds)
+#   runs.sh floor               bfsfloor's forms in turns (9 searches)
+#   runs.sh alone               bfsfloor's forms each alone, warm (5
+#                               searches of 21 runs, 3 rounds)
+#   runs.sh widths              narrow and narrow_ahead alone with buckets
+#                               of 4, 16 and 32 items (2 rounds)
+#   runs.sh roundtrip           roundtrip.py on after (3 times)
 set -e
 here=research/experiments/038-past-c
 builds=$HOME/.cache/pure-038
@@ -70,6 +76,30 @@ bfs)
     until awk '{ exit !($1 < 1.5) }' /proc/loadavg; do sleep 10; done
     python3 research/guard.py --most 2048 -- python3 research/experiments/033-computing/bfs.py "$builds/$2/pure-serve" \
         ../aup/build/aup 100000 1000000 5 3 > "$here/$day-bfs-$2.jsonl" ;;
-*) echo "runs.sh build NAME COMMIT | core FIRST LAST | pairs FIRST LAST | jit FIRST LAST | counts | bfs NAME" >&2
+floor|alone|widths)
+    cc -O2 -std=gnu17 -o "$builds/bfsfloor" $here/bfsfloor.c -lm
+    floor() { python3 research/guard.py --most 1024 -- "$builds/bfsfloor" 100000 1000000 "$@"; }
+    case "$1" in
+    floor) floor 9 16 8 > "$here/$day-bfsfloor.jsonl" ;;
+    alone)
+        for round in 1 2 3; do
+            for form in c narrow_ahead narrow c_ahead packed; do
+                floor 5 16 8 8 $form 21 | sed "s/^{/{\"round\":$round,/" >> "$here/$day-bfsfloor-alone.jsonl"
+            done
+        done ;;
+    widths)
+        for round in 1 2; do
+            for per in 4 16 32; do
+                for form in narrow_ahead narrow; do
+                    floor 5 16 8 $per $form 21 | sed "s/^{/{\"round\":$round,/" >> "$here/$day-bfsfloor-widths.jsonl"
+                done
+            done
+        done ;;
+    esac ;;
+roundtrip)
+    for i in 1 2 3; do
+        taskset -c 3 python3 $here/roundtrip.py "$builds/after/pure-serve" "$builds/graph.pmod" >> "$here/$day-roundtrip.jsonl"
+    done ;;
+*) echo "runs.sh build NAME COMMIT | core FIRST LAST | pairs FIRST LAST | jit FIRST LAST | counts | bfs NAME | floor | alone | widths | roundtrip" >&2
     exit 2 ;;
 esac
