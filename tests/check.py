@@ -1153,6 +1153,26 @@ on go {
 }
 """
 
+# Numbers' arithmetic in a run, each read by the next alone: only the last
+# checks it is finite, giving up at the run's first snapshot (023); the
+# product passes the largest number at the 56th round.
+CHAIN_SOURCE = """state out = 0
+state steps = 0
+input go = message {
+  n: u32
+}
+on go {
+  let s = 1
+  let c = 0
+  for i in 0 .. go.n {
+    s = (s * 1000000 + i) / 3 * 2 + 1
+    c = c + 1
+  }
+  out = s
+  steps = c
+}
+"""
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -1182,11 +1202,12 @@ def module_assumptions(aup, pure, work):
         assert outputs['all'] == outputs['0'], next((a, b) for a, b in zip(outputs['all'].splitlines(), outputs['0'].splitlines()) if a != b)
         assert all(json.loads(line)['fault'] == 'none' for line in outputs['0'].splitlines())
     messages = ''.join(f'message go {struct.pack("<III", n, m, q).hex()}\nwork\n' for n, m, q in ((70, 40, 3), (130, 25, 2)))
-    for name, text in (('merges', MERGES_SOURCE), ('budget', BUDGET_SOURCE)):  # the tier's, as the executor: states, faults, work
+    for name, text in (('merges', MERGES_SOURCE), ('budget', BUDGET_SOURCE), ('chain', CHAIN_SOURCE)):  # the tier's, as the executor
         source, program = work / f'{name}.aup', work / f'{name}.pmod'
         source.write_text(text)
         compile_module(aup, source, program)
-        outputs = {jit: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=messages + 'budget 1201\n' + messages,
+        given = ''.join(f'message go {struct.pack("<I", n).hex()}\nwork\n' for n in (3, 50, 60, 100)) if name == 'chain' else messages
+        outputs = {jit: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given + 'budget 1201\n' + given,
                                        capture_output=True, text=True, timeout=120, env=dict(os.environ, PURE_JIT=jit)).stdout
                    for jit in ('all', '0')}
         assert outputs['all'] == outputs['0'], (name, next((a, b) for a, b in zip(outputs['all'].splitlines(), outputs['0'].splitlines()) if a != b))

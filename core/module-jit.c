@@ -1354,6 +1354,8 @@ static void store_tagged(Block *k, unsigned h, unsigned col, unsigned at, int sl
  * its room and its bits' reach), the count or the items added counted in
  * their register, the event's headroom less the item's bytes; nothing else
  * written until a call or the nest's end (books_back). */
+static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height);
+
 static void append_books(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
     Emit *e = k->e;
     const PureModule *m = k->m;
@@ -1374,7 +1376,8 @@ static void append_books(Block *k, const PureOp *op, uint32_t pc, unsigned heigh
     }
     unsigned some = key == 1 ? columns[1] : columns[0]; /* a column kept: 0 when the list is not in that form */
     size_t bytes = row_bytes(m, list);
-    cbz_x(e, some, slow);
+    int other = new_label(e), done = new_label(e); /* a keyed list not DENSE (HASHED): as append does it, the headroom kept */
+    cbz_x(e, some, key ? other : slow);
     if (!key) {
         load64(e, X16, X24, list * sizeof(PureList *));
         load64(e, X17, X16, pure_list_layout[LIST_ROOM_AT]);
@@ -1408,6 +1411,12 @@ static void append_books(Block *k, const PureOp *op, uint32_t pc, unsigned heigh
         add_imm(e, pending, pending, 1);
     }
     slow_back(k, s, V_MEM, 0);
+    if (key) {
+        b(e, done);
+        bind(e, other);
+        append(k, op, pc, height);
+    }
+    bind(e, done);
 }
 
 /* A key's bits in a HASHED list's table (module-list.c's key_bits: -0 as +0) into x17. */
@@ -2972,6 +2981,8 @@ typedef struct {
     bool bounded;      /* an integer its loop's opening bounds (its ends checked there: no check of its own) */
     bool proven;       /* a list access whose key or position its loop's opening found in range */
     bool fused;        /* a comparison only the branch right after it reads: its flags, no register */
+    bool deferred;     /* a number's arithmetic whose finiteness its one reader, right after it, checks (tier_defer) */
+    int retry;         /* where its finiteness check gives up, the first of such a run's snapshot; or -1: its own */
     bool aliased;      /* a full list's position found: its key's register (they are equal) */
     uint16_t list, field;
     int a, b, c, d;    /* operands: values, or -1 */
@@ -3080,7 +3091,7 @@ static int tval(Tier *t, unsigned op, unsigned rep, int a, int b, int c) {
     TVal *v = &t->vals[t->val_count];
     memset(v, 0, sizeof(*v));
     v->op = (uint8_t)op, v->rep = (uint8_t)rep, v->a = a, v->b = b, v->c = c;
-    v->snap = -1, v->loop = t->cur_loop, v->var = -1, v->label = -1, v->reg = -1, v->d = -1;
+    v->snap = -1, v->loop = t->cur_loop, v->var = -1, v->label = -1, v->reg = -1, v->d = -1, v->retry = -1;
     v->lo = -INFINITY, v->hi = INFINITY;
     int made = (int)t->val_count++;
     if (op == T_PHI) return made; /* bound at its merge */
@@ -4008,6 +4019,29 @@ static void tier_facts(Tier *t) {
         if (t->vals[i].lo > t->vals[i].hi && t->vals[i].rep != R_BOOL) t->vals[i].lo = -INFINITY, t->vals[i].hi = INFINITY, t->vals[i].whole = false, t->vals[i].zero = true;
 }
 
+/* A run of numbers' arithmetic each read by the next alone, right after it
+ * (no other code between but constants): only the last checks it is finite. A number not
+ * finite stays not finite through an add, a sub, a mul, or as what a
+ * division divides; where it is not, the code gives up at the run's first
+ * snapshot, so the executor makes the run again and fails where the
+ * executor does. */
+static void tier_defer(Tier *t) {
+    for (size_t i = 0; i + 1 < t->item_count; ++i) {
+        size_t next = i + 1; /* the next value but constants (made as they are: no check, nothing changed) */
+        while (next < t->item_count && t->items[next].kind == I_VALUE && t->vals[t->items[next].value].op == T_CONST) ++next;
+        if (t->items[i].kind != I_VALUE || next == t->item_count || t->items[next].kind != I_VALUE) continue;
+        TVal *v = &t->vals[t->items[i].value], *w = &t->vals[t->items[next].value];
+        int vi = t->items[i].value;
+        bool arith = v->rep == R_NUM && v->op >= T_ADD && v->op <= T_DIV && v->snap >= 0 && v->uses == 1;
+        bool reads = w->rep == R_NUM && w->snap >= 0 && w->loop == v->loop &&
+                     (((w->op == T_ADD || w->op == T_SUB || w->op == T_MUL) && (w->a == vi || w->b == vi)) ||
+                      (w->op == T_DIV && w->a == vi && w->b != vi && (t->vals[w->b].lo > 0 || t->vals[w->b].hi < 0)));
+        if (!arith || !reads || tfinite(v) || tfinite(w)) continue;
+        v->deferred = true;
+        w->retry = v->retry >= 0 ? v->retry : v->snap;
+    }
+}
+
 /* Each value's register: a whole number an integer, else a number (a bool's as made). Uses counted. */
 static void tier_reps(Tier *t) {
     for (size_t i = 0; i < t->val_count; ++i) {
@@ -4169,8 +4203,9 @@ static void tuse_affine(Tier *t, int x, int l, int at) {
 static void tuse_snap(Tier *t, int s, int at) {
     if (s < 0) return;
     const TSnap *snap = &t->snaps[s];
-    for (int var = 0; var < VARS; ++var)
-        if (var < V_STACK ? tchanged(t, var, snap->vars[var]) : snap->vars[var] >= 0) tuse(t, snap->vars[var], at);
+    for (int var = 0; var < VARS; ++var) /* (a constant written as the constant it is) */
+        if ((var < V_STACK ? tchanged(t, var, snap->vars[var]) : snap->vars[var] >= 0) && t->vals[snap->vars[var]].op != T_CONST)
+            tuse(t, snap->vars[var], at);
     for (int l = snap->loop; l >= 0; l = t->loops[l].parent) { /* the open loops: their rounds, counts and lows */
         tuse(t, t->loops[l].k, at), tuse(t, t->loops[l].count, at);
         if (t->loops[l].low >= 0 && t->vals[t->loops[l].low].op != T_CONST) tuse(t, t->loops[l].low, at); /* a constant written as one */
@@ -4228,7 +4263,8 @@ static void tier_needed(Tier *t, bool *need) {
     }
 #define NEED(v) do { int v_ = (v); if (v_ >= 0 && !need[v_]) need[v_] = true, work[top++] = v_; } while (0)
 #define NEED_SNAP(s) do { if ((s) >= 0) { const TSnap *sn = &t->snaps[s]; \
-        for (int var = 0; var < VARS; ++var) if (var < V_STACK ? tchanged(t, var, sn->vars[var]) : sn->vars[var] >= 0) NEED(sn->vars[var]); \
+        for (int var = 0; var < VARS; ++var) if ((var < V_STACK ? tchanged(t, var, sn->vars[var]) : sn->vars[var] >= 0) && \
+                                                 t->vals[sn->vars[var]].op != T_CONST) NEED(sn->vars[var]); \
         for (int l = sn->loop; l >= 0; l = t->loops[l].parent) { NEED(t->loops[l].k); NEED(t->loops[l].count); \
             if (t->loops[l].low >= 0 && t->vals[t->loops[l].low].op != T_CONST) NEED(t->loops[l].low); } } } while (0)
     for (size_t i = 0; i < t->item_count; ++i) {
@@ -4272,6 +4308,7 @@ static void tier_needed(Tier *t, bool *need) {
         NEED(v->c);
         NEED(v->d);
         NEED_SNAP(v->snap);
+        NEED_SNAP(v->retry);
         for (unsigned w = 0; w < v->ins; ++w) NEED(v->in[w]);
     }
 #undef NEED
@@ -4304,6 +4341,7 @@ static bool tier_registers(Tier *t) {
             TVal *v = &t->vals[it->value];
             tuse(t, v->a, p), tuse(t, v->b, p), tuse(t, v->c, p), tuse(t, v->d, p);
             tuse_snap(t, v->snap, p);
+            tuse_snap(t, v->retry, p); /* the run's first snapshot: given up to from here */
             break;
         }
         case I_UNLESS: tuse(t, it->value, p); /* fall through */
@@ -4605,6 +4643,19 @@ static bool tier_has_moves(const Tier *t, int g, int way) {
     return false;
 }
 
+/* A value a snapshot holds as a number in d0 (or its own d register): a
+ * constant made there, as the constant it is (its register, if it has one,
+ * not kept for the snapshot: another value's by then). */
+static unsigned tsnap_d(Tier *t, int v) {
+    const TVal *x = &t->vals[v];
+    if (x->op != T_CONST) return td(t, v, D0);
+    uint64_t bits;
+    memcpy(&bits, &x->num, sizeof(bits));
+    mov_imm(t->k->e, X9, bits);
+    fp2(t->k->e, FMOV_DX, D0, X9);
+    return D0;
+}
+
 /* What the tier changed, back where the executor keeps it: the variables
  * whose values differ from memory's (in vars: a snapshot's or the end's),
  * the work, the lists it set (their versions). */
@@ -4615,8 +4666,8 @@ static void tier_write(Tier *t, const int *vars) {
     tbase(t, B_VALUES, X16);
     for (int var = 0; var < V_STACK; ++var) {
         int v = vars[var];
-        if (!tchanged(t, var, v) || t->vals[v].reg < 0) continue;
-        unsigned d = td(t, v, D0);
+        if (!tchanged(t, var, v) || (t->vals[v].reg < 0 && t->vals[v].op != T_CONST)) continue;
+        unsigned d = tsnap_d(t, v);
         if (var < V_STATE) store_d(e, d, X17, (size_t)var * sizeof(PureValue));
         else store_d(e, d, X16, (size_t)(var - V_STATE) * sizeof(PureValue));
     }
@@ -4738,8 +4789,8 @@ static void tier_stub(Tier *t, int s) {
     tbase(t, B_STACK, X17);
     for (unsigned h = l0->base; h < snap->height; ++h) {
         int v = snap->vars[V_STACK + h];
-        if (v < 0 || t->vals[v].reg < 0) continue;
-        store_d(e, td(t, v, D0), X17, AT(h));
+        if (v < 0 || (t->vals[v].reg < 0 && t->vals[v].op != T_CONST)) continue;
+        store_d(e, tsnap_d(t, v), X17, AT(h));
         if (t->vals[v].kind == K_INDEX) {
             mov_w(e, X9, (uint32_t)t->vals[v].list & 0xFFFF);
             store_h(e, X9, X17, AT(h) + OWNER);
@@ -5000,7 +5051,8 @@ static void tier_value(Tier *t, int vi) {
             unsigned x = td(t, v->a, D0), y = td(t, v->b, D1);
             uint32_t fop = v->op == T_ADD ? FADD : v->op == T_SUB ? FSUB : v->op == T_MUL ? FMUL : v->op == T_MIN ? FMIN : FMAX;
             fp3(e, fop, r, x, y);
-            if (fail >= 0 && (v->op == T_ADD || v->op == T_SUB || v->op == T_MUL) && !tfinite(v)) tfinite_check(t, r, fail);
+            if (fail >= 0 && (v->op == T_ADD || v->op == T_SUB || v->op == T_MUL) && !tfinite(v) && !v->deferred)
+                tfinite_check(t, r, v->retry >= 0 ? tfail(t, v->retry) : fail);
             return;
         }
     case T_DIV:
@@ -5015,7 +5067,7 @@ static void tier_value(Tier *t, int vi) {
                 b_cond(e, EQ, fail);
             }
             fp3(e, FDIV, r, x, y);
-            if (!tfinite(v)) tfinite_check(t, r, fail);
+            if (!tfinite(v) && !v->deferred) tfinite_check(t, r, v->retry >= 0 ? tfail(t, v->retry) : fail);
             return;
         }
     case T_NEG:
@@ -5403,6 +5455,7 @@ static Tier *tier_plan(Block *k, unsigned li) {
     const char *hoist = getenv("PURE_TIER_HOIST");
     if (!t->failed && !(hoist && !strcmp(hoist, "0"))) tier_hoist(t);
     if (!t->failed) tier_reps(t);
+    if (!t->failed) tier_defer(t);
     const char *bounds = getenv("PURE_TIER_BOUNDS");
     if (!t->failed && !(bounds && !strcmp(bounds, "0"))) tier_bounds(t);
     if (t->failed || !tier_registers(t)) {
