@@ -108,8 +108,8 @@ extern const size_t pure_list_layout[];
 /* A packed list's index (docs/design/022), where its keys are whole: the
  * first position of each bucket (u32), whether the keys are whole, the
  * buckets' width as a shift, the first bucket's start, the first key and
- * the last (i64). */
-enum { PACK_FIRST_AT, PACK_WHOLE_AT, PACK_SHIFT_AT, PACK_ORIGIN_AT, PACK_LOW_AT, PACK_HIGH_AT };
+ * the last (i64), and how many buckets (size_t). */
+enum { PACK_FIRST_AT, PACK_WHOLE_AT, PACK_SHIFT_AT, PACK_ORIGIN_AT, PACK_LOW_AT, PACK_HIGH_AT, PACK_BUCKETS_AT };
 extern const size_t pure_pack_layout[];
 
 /* A module's code compiled (AArch64 Linux; elsewhere, or with PURE_JIT=0 in

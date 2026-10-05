@@ -1492,7 +1492,7 @@ const size_t pure_list_layout[] = {
 const size_t pure_pack_layout[] = {
     [PACK_FIRST_AT] = offsetof(Pack, first), [PACK_WHOLE_AT] = offsetof(Pack, whole), [PACK_SHIFT_AT] = offsetof(Pack, shift),
     [PACK_ORIGIN_AT] = offsetof(Pack, origin_whole), [PACK_LOW_AT] = offsetof(Pack, low_whole),
-    [PACK_HIGH_AT] = offsetof(Pack, high_whole)};
+    [PACK_HIGH_AT] = offsetof(Pack, high_whole), [PACK_BUCKETS_AT] = offsetof(Pack, buckets)};
 
 bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, unsigned field, PureCell *cell) {
     bool found;

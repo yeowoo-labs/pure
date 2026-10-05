@@ -4,7 +4,8 @@
  * as rows, then ROUNDS searches from fixed starts, each timed. No host, no
  * store: what the interpreter costs.
  *
- * bfs-run MODULE NODES EDGES ROUNDS   a JSON line per search, then the median */
+ * bfs-run MODULE NODES EDGES ROUNDS   a JSON line per search, then the median
+ * (BFS_WARM: one search before them, from node 0 to node 1, not reported) */
 #define _POSIX_C_SOURCE 200809L
 #include "module.h"
 #include <stdio.h>
@@ -60,6 +61,10 @@ int main(int argc, char **argv) {
             fprintf(stderr, "load failed: %s\n", pure_fault_name(app.fault));
             return 1;
         }
+    }
+    if (getenv("BFS_WARM")) { /* one search first, not reported: what packs the edges (022) left out of what is counted */
+        unsigned char eight[8] = {0, 0, 0, 0, 1, 0, 0, 0};
+        if (pure_app_message(&app, (uint32_t)route, NULL, -1, (PureSpan){eight, 8}) != PURE_OK) return 1;
     }
     if (getenv("BFS_WAIT")) { /* loaded: a counter attaches, then a line on stdin starts the searches */
         fprintf(stderr, "loaded\n");
