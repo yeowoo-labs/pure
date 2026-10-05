@@ -1,0 +1,46 @@
+# A join (research 124's suite): customers with ids drawn by MINSTD from
+# seed 1 (sparse, distinct), each in one of 16 regions; orders each of a
+# customer drawn by index and an amount; the amounts summed by the region of
+# each order's customer, found by its id.
+record Customer {
+  id = 0
+  region = 0
+}
+record Total {
+  region = 0
+  amount = 0
+}
+state top = 0
+state sum = 0
+input go = message {
+  customers: u32
+  orders: u32
+}
+on go {
+  let all: list of Customer
+  let byid: list of Customer by id
+  let x = 1
+  for i in 0 .. go.customers {
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    all.append(Customer { id: x, region: i - floor(i / 16) * 16 })
+    byid.add(Customer { id: x, region: i - floor(i / 16) * 16 })
+  }
+  let totals: list of Total by region
+  for r in 0 .. 16 {
+    totals.add(Total { region: r })
+  }
+  for o in 0 .. go.orders {
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    let c = all.first + (x - floor(x / go.customers) * go.customers)
+    let region = byid[c.id].region
+    totals[region].amount = totals[region].amount + (x - floor(x / 1000) * 1000)
+  }
+  let most = 0
+  let all_amounts = 0
+  for t in totals {
+    most = max(most, t.amount)
+    all_amounts = all_amounts + t.amount
+  }
+  top = most
+  sum = all_amounts
+}

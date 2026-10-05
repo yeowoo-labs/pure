@@ -1,0 +1,37 @@
+# Numbers in a grid (research 124's suite): two n by n matrices of whole
+# numbers below 100 drawn by MINSTD from seed 1, kept by row * n + column,
+# multiplied: the sum of the product's cells and its last cell.
+record Cell {
+  at = 0
+  v = 0
+}
+state sum = 0
+state corner = 0
+input go = message {
+  n: u32
+}
+on go {
+  let a: list of Cell by at
+  let b: list of Cell by at
+  let x = 1
+  for i in 0 .. go.n * go.n {
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    a.add(Cell { at: i, v: x - floor(x / 100) * 100 })
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    b.add(Cell { at: i, v: x - floor(x / 100) * 100 })
+  }
+  let total = 0
+  let last = 0
+  for i in 0 .. go.n {
+    for j in 0 .. go.n {
+      let s = 0
+      for k in 0 .. go.n {
+        s = s + a[i * go.n + k].v * b[k * go.n + j].v
+      }
+      total = total + s
+      last = s
+    }
+  }
+  sum = total
+  corner = last
+}

@@ -1,0 +1,34 @@
+# Sorting (research 124's suite): n numbers drawn by MINSTD from seed 1
+# (distinct: its period is 2^31 - 2) into a list kept by them, then read in
+# order: the smallest, the middle one, the largest, and how many follow a
+# larger one (none when sorted).
+record Key {
+  k = 0
+}
+state first = 0
+state middle = 0
+state last = 0
+state disorder = 0
+input go = message {
+  n: u32
+}
+on go {
+  let keys: list of Key by k
+  let x = 1
+  for i in 0 .. go.n {
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    keys.add(Key { k: x })
+  }
+  let at = 0
+  let before = -1
+  let wrong = 0
+  for e in keys {
+    if e.k < before { wrong = wrong + 1 }
+    if at == floor(go.n / 2) { middle = e.k }
+    before = e.k
+    at = at + 1
+  }
+  first = keys.first.k
+  last = keys.last.k
+  disorder = wrong
+}

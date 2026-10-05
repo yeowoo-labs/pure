@@ -2472,6 +2472,8 @@ static bool has_round(const Ahead *a, int n) {
 static void plan_ahead(Block *k, unsigned li) {
     const PureModule *m = k->m;
     LoopAt *l = &k->loops[li];
+    const char *ahead = getenv("PURE_AHEAD"); /* 0: none (measuring what the code costs without it, research 124) */
+    if (ahead && !strcmp(ahead, "0")) return;
     if (!l->walk && m->code[l->at].arg & PURE_LOOP_INTEGER) return;
     Ahead a = {0};
     int stack[PURE_MODULE_STACK + 2], local[PURE_MODULE_LOCALS];

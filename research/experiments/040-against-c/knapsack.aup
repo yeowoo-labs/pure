@@ -1,0 +1,39 @@
+# Whole numbers in a table (research 124's suite): the best worth a
+# knapsack of the given capacity holds of n items, each item's weight and
+# worth drawn by MINSTD (x * 48271 mod 2^31 - 1) from seed 1.
+record Item {
+  weight = 0
+  worth = 0
+}
+record Cell {
+  at = 0
+  best = 0
+}
+state best = 0
+input go = message {
+  n: u32
+  capacity: u32
+}
+on go {
+  let items: list of Item
+  let x = 1
+  for i in 0 .. go.n {
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    let w = x - floor(x / 1000) * 1000 + 1
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    let v = x - floor(x / 1000) * 1000
+    items.append(Item { weight: w, worth: v })
+  }
+  let table: list of Cell by at
+  for c in 0 .. go.capacity + 1 {
+    table.add(Cell { at: c })
+  }
+  for it in items {
+    for k in 0 .. go.capacity + 1 - it.weight {
+      let c = go.capacity - k
+      let with = table[c - it.weight].best + it.worth
+      if with > table[c].best { table[c].best = with }
+    }
+  }
+  best = table[go.capacity].best
+}

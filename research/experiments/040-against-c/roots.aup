@@ -1,0 +1,23 @@
+# Numbers in a loop (research 124's suite): the square roots of 1 .. n by
+# Newton's steps, each until a step stops shrinking, and their sum.
+state total = 0
+state steps = 0
+input go = message {
+  n: u32
+}
+on go {
+  let sum = 0
+  let count = 0
+  for i in 1 .. go.n + 1 {
+    let r = i
+    for s in 0 .. 64 {
+      let next = (r + i / r) / 2
+      if next >= r { break }
+      r = next
+      count = count + 1
+    }
+    sum = sum + r
+  }
+  total = sum
+  steps = count
+}

@@ -1,0 +1,33 @@
+# Text (research 124's suite): n words "w0" .. "w{vocabulary - 1}", each
+# drawn by MINSTD from seed 1, counted in a list kept by the word: how many
+# distinct, and the most any one is seen. A let holds no text (aup), so the
+# word is written where it is used.
+record Count {
+  word: text
+  n = 0
+}
+state distinct = 0
+state most = 0
+input go = message {
+  n: u32
+  vocabulary: u32
+}
+on go {
+  let counts: list of Count by word
+  let x = 1
+  for i in 0 .. go.n {
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    let n = x - floor(x / go.vocabulary) * go.vocabulary
+    if counts.has("w{n}") {
+      counts["w{n}"].n = counts["w{n}"].n + 1
+    } else {
+      counts.add(Count { word: "w{n}", n: 1 })
+    }
+  }
+  distinct = counts.count
+  let m = 0
+  for c in counts {
+    m = max(m, c.n)
+  }
+  most = m
+}
