@@ -2788,7 +2788,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (status == PURE_INVALID) status = pure_list_insert(list, at, cells, undo_for(app, arg));
         arena->used = mark;
         if (status != PURE_OK) REFUSED;
-        move_indices(m, values, arg, pure_list_count(list), at, true);
+        if (m->state_indexed[arg]) move_indices(m, values, arg, pure_list_count(list), at, true);
         if (!grows(app, before, list_held(app, list))) { kind = PURE_FAULT_MEMORY; FAILED; }
         NEXT;
     }
@@ -2798,7 +2798,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if ((status = pure_list_remove(app->lists[arg], at, undo_for(app, arg))) != PURE_OK) REFUSED;
         /* the item goes, its cells kept to undo and its record to save */
         if (!grows(app, before, list_held(app, app->lists[arg]))) { kind = PURE_FAULT_MEMORY; FAILED; }
-        move_indices(m, values, arg, pure_list_count(app->lists[arg]), at, false);
+        if (m->state_indexed[arg]) move_indices(m, values, arg, pure_list_count(app->lists[arg]), at, false);
         if (ev->walk && ev->walk->list == arg) { /* the walk goes on with the item after */
             if (at < ev->walk->at) --ev->walk->at;
             else if (at == ev->walk->at) ev->walk->removed = true;
@@ -3048,6 +3048,22 @@ int pure_run_loop(Frame *frame, uint32_t pc) {
 }
 
 void pure_run_break(Frame *frame) { (void)leave_loop(frame); }
+
+int pure_run_item(Frame *frame, uint32_t pc) {
+    const PureOp *op = &frame->m->code[pc];
+    const PureList *list = frame->app->lists[list_of(op->arg)];
+    size_t at = (size_t)frame->stack[frame->sp - 1].num;
+    PureRun run;
+    if (at < pure_list_count(list) && !pure_list_form(list) && pure_list_run(list, at, &run)) {
+        uint64_t id;
+        frame->run.list = list;
+        pure_list_stamp(list, &id, &frame->run.version);
+        frame->run.start = run.start, frame->run.count = run.count;
+        for (unsigned f = 0; f < 16; ++f) frame->run.columns[f] = run.column[f].numbers;
+    }
+    uint32_t next;
+    return step(frame, op, pc, &next);
+}
 
 int pure_run_iterate(Frame *frame) {
     uint32_t next = UINT32_MAX;

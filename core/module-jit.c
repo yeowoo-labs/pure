@@ -557,13 +557,38 @@ static void compile_op(Block *k, uint32_t pc) {
         bind(e, done);
         return;
     }
-    case PURE_OP_ITEM_GET: { /* a FLAT list's cell by its column */
+    case PURE_OP_ITEM_GET: { /* a FLAT list's cell by its column, a tree's from the run kept */
         if (op->plan & PLAN_TEXT) break;
-        int slow = new_label(e), done = new_label(e);
+        int slow = new_label(e), done = new_label(e), flat = new_label(e), refill = new_label(e);
+        size_t field = item_field(arg) * sizeof(void *);
         load64(e, X10, X24, list_of(arg) * sizeof(PureList *));
         load8(e, X12, X10, pure_list_layout[LIST_FORM_AT]);
         cmp_w_imm(e, X12, 1); /* FLAT */
-        b_cond(e, NE, slow);
+        b_cond(e, EQ, flat);
+        cbnz_w(e, X12, slow); /* DENSE */
+        load_d(e, D0, X20, AT(height - 1));
+        fp2(e, FCVTZU_X, X13, D0);
+        load64(e, X11, X19, offsetof(Frame, run.list));
+        cmp_reg(e, X11, X10);
+        b_cond(e, NE, refill);
+        load64(e, X11, X19, offsetof(Frame, run.version));
+        load64(e, X12, X10, pure_list_layout[LIST_VERSION_AT]);
+        cmp_reg(e, X11, X12);
+        b_cond(e, NE, refill);
+        load64(e, X11, X19, offsetof(Frame, run.start));
+        sub_reg(e, X14, X13, X11);
+        load64(e, X11, X19, offsetof(Frame, run.count));
+        cmp_reg(e, X14, X11);
+        b_cond(e, HS, refill);
+        load64(e, X15, X19, offsetof(Frame, run.columns) + field);
+        load64_index(e, X9, X15, X14);
+        store64(e, X9, X20, AT(height - 1));
+        b(e, done);
+        bind(e, refill);
+        call_step(k, (uintptr_t)pure_run_item, pc, height);
+        cbnz_w(e, X0, k->exit);
+        b(e, done);
+        bind(e, flat);
         load_d(e, D0, X20, AT(height - 1));
         fp2(e, FCVTZU_X, X13, D0);
         load64(e, X12, X10, pure_list_layout[LIST_COUNT_AT]);

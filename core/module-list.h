@@ -37,10 +37,13 @@ typedef struct {
     size_t start;
     unsigned count;
     union { const double *numbers; const int64_t *integers; const PureSpan *texts; } column[16];
-    /* Where the run is in the list's tree, for the next one. */
+    /* Where the run is in the list's tree, for the next one (path[depth]
+     * its leaf); pathless: its leaf alone is known (the next is found from
+     * the root). */
     const void *path[16];
     uint8_t taken[16];
     unsigned depth;
+    bool pathless;
 } PureRun;
 
 /* A list holds up to PURE_LIST_ITEMS items, a run up to PURE_LIST_RUN. */

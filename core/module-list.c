@@ -1137,7 +1137,8 @@ unsigned pure_list_form(const PureList *list) { return list->form; }
 const size_t pure_list_layout[] = {
     [LIST_COUNT_AT] = offsetof(PureList, count), [LIST_MEMBERS_AT] = offsetof(PureList, members),
     [LIST_MEMBER_CAPACITY_AT] = offsetof(PureList, member_capacity), [LIST_BITMAP_AT] = offsetof(PureList, bitmap),
-    [LIST_FORM_AT] = offsetof(PureList, form), [LIST_COLUMNS_AT] = offsetof(PureList, columns)};
+    [LIST_FORM_AT] = offsetof(PureList, form), [LIST_COLUMNS_AT] = offsetof(PureList, columns),
+    [LIST_VERSION_AT] = offsetof(PureList, version)};
 
 bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, unsigned field, PureCell *cell) {
     bool found;
@@ -1757,6 +1758,7 @@ static void open_array_run(const PureList *list, size_t at, PureRun *run) {
     run->start = at;
     run->count = list->form == DENSE ? 1 : (unsigned)(list->count - at < PURE_LIST_RUN ? list->count - at : PURE_LIST_RUN);
     run->depth = 0;
+    run->pathless = false;
     for (unsigned f = 0; f < l->fields; ++f)
         if (pure_cell_text(l->kinds[f])) run->column[f].texts = (const PureSpan *)list->columns[f] + row;
         else if (l->kinds[f] == PURE_CELL_INTEGER) run->column[f].integers = (const int64_t *)list->columns[f] + row;
@@ -1772,6 +1774,16 @@ bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
             return true;
         }
     }
+    size_t within;
+    const Node *kept = fingered(list, at, &within); /* a slice's first item, found by key just before */
+    if (kept) {
+        run->path[0] = kept;
+        run->depth = 0;
+        run->pathless = true; /* the run after it found from the root */
+        run->start = at - within;
+        open_run(&list->layout, kept, run);
+        return true;
+    }
     const Node *node = list->root;
     size_t start = 0;
     unsigned depth = 0;
@@ -1785,6 +1797,7 @@ bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
     run->path[depth] = node;
     run->depth = depth;
     run->start = start;
+    run->pathless = false;
     open_run(&list->layout, node, run);
     return true;
 }
@@ -1796,6 +1809,23 @@ bool pure_list_next(const PureList *list, PureRun *run) {
     if (list->form != TREE) {
         if (run->start + run->count >= list->count) return false;
         open_array_run(list, run->start + run->count, run);
+        return true;
+    }
+    if (run->pathless) { /* the next from the root, with its path */
+        size_t at = run->start + run->count;
+        if (at >= list->count) return false;
+        const Node *node = list->root;
+        size_t start = 0;
+        unsigned depth = 0;
+        while (!node->leaf) {
+            unsigned i = child_at(node, at - start);
+            start += guide(node)->before[i];
+            run->path[depth] = node;
+            run->taken[depth++] = (uint8_t)i;
+            node = child(node, i);
+        }
+        run->path[depth] = node, run->depth = depth, run->start = start, run->pathless = false;
+        open_run(&list->layout, node, run);
         return true;
     }
     size_t start = run->start + run->count;

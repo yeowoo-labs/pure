@@ -64,6 +64,9 @@ typedef struct {
     PureResult status; /* what refused or stopped it */
     uint32_t fault_pc; /* the instruction that faulted or refused */
     Loop *loops;       /* PURE_MODULE_NESTING of them, apart: a walk points into its loop */
+    /* The run of a tree compiled code read an item from last (pure_run_item):
+     * the list as it was (its version), its positions and each field's cells. */
+    struct { const PureList *list; uint64_t version; size_t start, count; const void *columns[16]; } run;
 } Frame;
 
 /* How a step went: on to the next instruction; a fault (kind at fault_pc);
@@ -87,11 +90,14 @@ int pure_run_each(Frame *, uint32_t pc);
 int pure_run_loop(Frame *, uint32_t pc);
 void pure_run_break(Frame *);
 int pure_run_iterate(Frame *);
+/* ITEM_GET at pc whose list is a tree its kept run does not hold: the
+ * item's run kept, then the step. */
+int pure_run_item(Frame *, uint32_t pc);
 
 /* Where a list keeps what compiled code reads of it (module-list.c owns the
  * layout and says where): its item count, its key set (the words, how many,
  * whether they are bits), its form (pure_list_form) and its arrays. */
-enum { LIST_COUNT_AT, LIST_MEMBERS_AT, LIST_MEMBER_CAPACITY_AT, LIST_BITMAP_AT, LIST_FORM_AT, LIST_COLUMNS_AT };
+enum { LIST_COUNT_AT, LIST_MEMBERS_AT, LIST_MEMBER_CAPACITY_AT, LIST_BITMAP_AT, LIST_FORM_AT, LIST_COLUMNS_AT, LIST_VERSION_AT };
 extern const size_t pure_list_layout[];
 
 /* A module's code compiled (AArch64 Linux; elsewhere, or with PURE_JIT=0 in
