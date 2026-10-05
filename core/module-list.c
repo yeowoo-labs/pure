@@ -92,15 +92,6 @@ struct PureList {
     uint8_t form;
     bool arrays;       /* it may be FLAT or DENSE: an event's list */
     uint8_t flattened; /* DENSE made FLAT since it was cleared: twice, and it stays FLAT or a tree */
-    /* A DENSE list's keys as last counted (dense_keys, docs/design/023):
-     * whether they are every number below its count (full: a key is its
-     * position), else the keys below each word of its bits (ranks); for the
-     * keys it had when keys_seen was keys_token (its key count, and removes:
-     * keys taken out or the bits begun again, so a token never comes back). */
-    uint64_t removes, keys_seen;
-    bool full;
-    uint32_t *ranks;
-    size_t ranks_room;
     void *columns[16]; /* each field's cells */
     uint8_t width[16]; /* the bytes of a cell in each: array_width */
     size_t room;       /* the rows the columns hold: FLAT items, DENSE keys */
@@ -114,6 +105,15 @@ struct PureList {
     struct Pack *pack;
     uint64_t searched, searched_version;
     uint8_t aligned;
+    /* Last, apart from what is read often: a DENSE list's keys as last counted (dense_keys, docs/design/023):
+     * whether they are every number below its count (full: a key is its
+     * position), else the keys below each word of its bits (ranks); for the
+     * keys it had when keys_seen was keys_token (its key count, and removes:
+     * keys taken out or the bits begun again, so a token never comes back). */
+    uint64_t removes, keys_seen;
+    bool full;
+    uint32_t *ranks;
+    size_t ranks_room;
 };
 
 /* The log of an event's changes: a removed item's cells wait in the log's
