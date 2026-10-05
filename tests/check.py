@@ -1195,14 +1195,15 @@ def module_assumptions(aup, pure, work):
 
 def tier_program(rng):
     """A random handler for module_tier: loops over counts and a list,
-    numbers in locals and states, a keyed list read and set by key, ifs and
+    numbers in locals and states, a keyed list read and set by key, one
+    whose keys came out of order read by key alone (HASHED), ifs and
     breaks, with what fails (a key not there, not whole, 0 divided by, a
     cell past its column's width) as likely as not."""
     names = iter('jklpqrxyz')
     def number(depth, loops):
         choices = ['const', 'const', 'loop', 'local', 'field']
         if depth < 3:
-            choices += ['add', 'sub', 'mul', 'div', 'floor', 'minmax', 'cell', 'add', 'sub']
+            choices += ['add', 'sub', 'mul', 'div', 'floor', 'minmax', 'cell', 'add', 'sub', 'hashed']
         kind = rng.choice(choices)
         if kind == 'const':
             return rng.choice(['0', '1', '2', '3', '7', '255', '256', '1000', '0.5', '2.25', '(0 - 3)', '(0 - 0)', '65536'])
@@ -1214,6 +1215,8 @@ def tier_program(rng):
             return rng.choice(['s', 'u'])
         if kind == 'cell':
             return f't[{key(depth + 1, loops)}].v' if rng.random() < 0.7 else 'c.v' if 'c' in loops else 's'
+        if kind == 'hashed':
+            return f'h[{hashed_key(depth + 1, loops)}].v'
         if kind == 'floor':
             return f'floor({number(depth + 1, loops)} / {rng.choice(["2", "3", "7", "go.q", "u"])})'
         if kind == 'minmax':
@@ -1223,12 +1226,17 @@ def tier_program(rng):
     def key(depth, loops):
         return rng.choice([rng.choice(loops) if loops else '0', number(depth + 1, loops), 'go.q', '3',
                            f'floor({number(depth + 1, loops)} / 2)'])
+    def hashed_key(depth, loops):  # h's keys: i * 7919 mod 1009, past 5,000,000
+        k = key(depth, loops)
+        return f'(({k}) * 7919 - floor(({k}) * 7919 / 1009) * 1009 + 5000000)' if rng.random() < 0.8 else '5000001'
     def cond(depth, loops):
-        kind = rng.choice(['cmp', 'cmp', 'has', 'not', 'and'] if depth < 2 else ['cmp', 'has'])
+        kind = rng.choice(['cmp', 'cmp', 'has', 'not', 'and', 'hashed'] if depth < 2 else ['cmp', 'has'])
         if kind == 'cmp':
             return f'{number(depth + 1, loops)} {rng.choice(["<", "<=", ">", ">=", "==", "!="])} {number(depth + 1, loops)}'
         if kind == 'has':
             return f't.has({key(depth + 1, loops)})'
+        if kind == 'hashed':
+            return f'h.has({hashed_key(depth + 1, loops)})'
         if kind == 'not':
             return f'!({cond(depth + 1, loops)})'
         return f'({cond(depth + 1, loops)}) && ({cond(depth + 1, loops)})'
@@ -1270,9 +1278,9 @@ def tier_program(rng):
     return '\n'.join([
         'record Cell {', '  at = 0', '  v = 0', '}', 'state out = 0', 'state acc = 0',
         'input go = message {', '  n: u32', '  m: u32', '  q: u32', '}',
-        'on go {', '  let t: list of Cell by at', '  let f: list of Cell',
+        'on go {', '  let t: list of Cell by at', '  let f: list of Cell', '  let h: list of Cell by at',
         '  for i in 0 .. go.n {', f'    t.add(Cell {{ at: i, v: {rng.choice(["i", "0", "(i * 3)", "1"])} }})',
-        '    f.append(Cell { at: i * 2, v: i })', '  }',
+        '    f.append(Cell { at: i * 2, v: i })', '    h.add(Cell { at: i * 7919 - floor(i * 7919 / 1009) * 1009 + 5000000, v: i * 5 })', '  }',
         '  let s = 0', '  let u = 1',
         '  for i in 0 .. go.m {', *body, '  }',
         '  out = s', '  acc = acc + u', '}', ''])

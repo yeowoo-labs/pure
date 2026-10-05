@@ -243,7 +243,7 @@ enum { SLOT = sizeof(Slot) };
 #define AT(h) ((size_t)(h) * SLOT)
 /* An index's list, beside its value in its slot. */
 enum { OWNER = offsetof(Slot, bytes) + offsetof(PureBytes, owner) };
-enum { TREE_FORM = 0, FLAT_FORM = 1, DENSE_FORM = 2 }; /* pure_list_form */
+enum { TREE_FORM = 0, FLAT_FORM = 1, DENSE_FORM = 2, HASHED_FORM = 3 }; /* pure_list_form */
 
 /* A slot's value as compiled: in the slot (MEM), a constant (its bits), a
  * number in a d register, a whole number from 0 below 2^64 in an x register
@@ -3005,7 +3005,12 @@ typedef struct {
     uint64_t *live_in;     /* by instruction from the block's start: the locals read before written from there (tier_liveness) */
     int fields[64];        /* the message's fields read: each once (+1; 0 none yet) */
     uint64_t slots;        /* the nest's loops' slots (kept as live: their loops write them) */
+    struct TProbe *probes; /* HASHED lists' finds, made after the items (tier_probe) */
+    size_t probe_count, probe_room;
 } Tier;
+
+/* A find in a HASHED list, out of the line: value v's, its result r, its key's and bits' registers, its labels. */
+typedef struct TProbe { int v; unsigned r, key, bits; int hashed, fail, done; } TProbe;
 
 static void titem(Tier *t, unsigned kind, int value, int merge, int loop);
 
@@ -4122,6 +4127,11 @@ static void tuse_way(Tier *t, const bool *need, int g, int way, int at, int k, i
     }
 }
 
+/* Whether value v finds by key in a list that may be HASHED (found by key alone, not full). */
+static bool thashes(const Tier *t, const TVal *v) {
+    return (v->op == T_FIND_GET || v->op == T_HAS) && t->lists && !t->lists[v->list].full;
+}
+
 /* Whether loop l's latch pays for its next round: the outermost count's (the generic code opened it); the others paid for all their rounds as they opened. */
 static bool tlatch_pays(const Tier *t, int l) { return l == 0 && !t->loops[l].walk; }
 
@@ -4707,6 +4717,52 @@ static unsigned tcompare(Tier *t, const TVal *v) {
     return v->op == T_LT ? LT : v->op == T_LE ? LE : v->op == T_GT ? GT : v->op == T_GE ? GE : v->op == T_EQ ? EQ : NE;
 }
 
+/* A HASHED list's key (value v's) found by its table, out of the line (at
+ * label hashed): the slot of the key's bits (member_slot) and on while
+ * another key holds it; there, its cell at that slot (FIND_GET) or 1 (HAS);
+ * a VACANT slot, not there: to fail (FIND_GET) or 0 (HAS). Its members
+ * from its bits (their bit 1 cleared), its mask from the list. */
+static void tier_probe(Tier *t, const TVal *v, unsigned r, unsigned key, unsigned bits, int hashed, int fail, int done) {
+    Emit *e = t->k->e;
+    int probe = new_label(e), there = new_label(e);
+    bind(e, hashed);
+    fp2(e, SCVTF_X, D0, key);
+    fp2(e, FMOV_XD, X16, D0); /* the key's bits (a whole number's: never -0) */
+    mov_imm(e, X17, UINT64_C(0xff51afd7ed558ccd));
+    put(e, 0xCA400000 | X16 << 16 | 33u << 10 | X16 << 5 | X10); /* EOR x10, x16, x16, LSR #33 */
+    mul_reg(e, X17, X10, X17);
+    put(e, 0xCA400000 | X17 << 16 | 33u << 10 | X17 << 5 | X17); /* EOR x17, x17, x17, LSR #33 */
+    load64(e, X9, tbase(t, B_LISTS, X9), (size_t)v->list * sizeof(PureList *));
+    load64(e, X10, X9, pure_list_layout[LIST_MEMBER_CAPACITY_AT]);
+    sub_imm(e, X10, X10, 1);
+    put(e, 0x8A000000 | X10 << 16 | X17 << 5 | X17);  /* AND x17, x17, x10: the slot */
+    put(e, 0x927EF400 | bits << 5 | X9);               /* AND x9, bits, #~3: the members */
+    mov_imm(e, X1, UINT64_C(0x7FF8000000000001));      /* VACANT */
+    bind(e, probe);
+    load64_index(e, X0, X9, X17);
+    cmp_reg(e, X0, X16);
+    b_cond(e, EQ, there);
+    cmp_reg(e, X0, X1);
+    if (v->op == T_HAS) {
+        cset(e, r, NE);
+        b_cond(e, EQ, done);
+    } else
+        b_cond(e, EQ, fail);
+    add_imm(e, X17, X17, 1);
+    put(e, 0x8A000000 | X10 << 16 | X17 << 5 | X17);
+    b(e, probe);
+    bind(e, there);
+    if (v->op == T_HAS) mov_w(e, r, 1);
+    else load32_index(e, r, treg(t, v->c), X17); /* its cell at its slot: four bytes (pure_list_suits widened one) */
+    b(e, done);
+}
+
+/* A find in a HASHED list kept to be made after the items. */
+static void tier_later(Tier *t, TProbe probe) {
+    if (!grow_array((void **)&t->probes, &t->probe_room, t->probe_count + 1, sizeof(*t->probes))) t->k->e->failed = true;
+    else t->probes[t->probe_count++] = probe;
+}
+
 /* A value's code. */
 static void tier_value(Tier *t, int vi) {
     Block *k = t->k;
@@ -4738,11 +4794,15 @@ static void tier_value(Tier *t, int vi) {
                 load8(e, X9, X16, pure_list_layout[LIST_WIDTH_AT] + v->field);
                 orr_lsl(e, r, r, X9, 56);
             } else if (v->field == L_COUNT) load64(e, r, X16, pure_list_layout[LIST_COUNT_AT]);
-            else if (v->field == L_BITS) { /* bit 0 set: every key below the count there (as pure_list_suits found it), no bit to test */
+            else if (v->field == L_BITS) { /* bit 0 set: every key below the count there (as pure_list_suits found it), no bit to test; bit 1: HASHED */
                 load64(e, r, X16, pure_list_layout[LIST_MEMBERS_AT]);
                 load8(e, X17, X16, pure_list_layout[LIST_FULL_AT]);
                 orr_reg(e, r, r, X17);
-            } else { /* the keys the bits reach: none without bits; a full list's, its count */
+                load8(e, X17, X16, pure_list_layout[LIST_FORM_AT]);
+                cmp_w_imm(e, X17, HASHED_FORM);
+                cset(e, X17, EQ);
+                orr_lsl(e, r, r, X17, 1);
+            } else if (v->field == L_LIMIT) { /* the keys the bits reach: none without bits; a full list's, its count; a HASHED one's all */
                 load64(e, r, X16, pure_list_layout[LIST_MEMBER_CAPACITY_AT]);
                 lsl_imm(e, r, r, 6);
                 load8(e, X17, X16, pure_list_layout[LIST_BITMAP_AT]);
@@ -4752,6 +4812,9 @@ static void tier_value(Tier *t, int vi) {
                 load64(e, X17, X16, pure_list_layout[LIST_COUNT_AT]);
                 cmp_w_imm(e, X9, 0);
                 csel(e, r, X17, r, NE);
+                load8(e, X17, X16, pure_list_layout[LIST_FORM_AT]);
+                cmp_w_imm(e, X17, HASHED_FORM);
+                put(e, 0xDA9F1000 | r << 5 | r); /* CSINV r, r, xzr, NE: all ones where HASHED */
             }
             return;
         }
@@ -4938,10 +5001,11 @@ static void tier_value(Tier *t, int vi) {
         load32_index(e, r, column, at); /* four bytes (pure_list_suits widened one) */
         return;
     }
-    case T_FIND_GET: case T_FIND: case T_HAS: { /* by key: in the bits (below their reach), its cell at its key */
+    case T_FIND_GET: case T_FIND: case T_HAS: { /* by key: in the bits (below their reach), its cell at its key; a HASHED list's by its table */
         unsigned key = tx(t, v->a, X0, fail), bits = treg(t, v->b);
         unsigned limit = treg(t, v->op == T_FIND_GET ? v->d : v->c);
         bool full = t->lists[v->list].full; /* every key below its count there (pure_list_suits): the bits not read */
+        int hashed = thashes(t, v) ? new_label(e) : -1, done = new_label(e); /* its bits' bit 1: HASHED (its limit all ones) */
         if (v->op == T_HAS && full) {
             if (v->proven) mov_w(e, r, 1);
             else {
@@ -4951,7 +5015,7 @@ static void tier_value(Tier *t, int vi) {
             return;
         }
         if (v->op == T_HAS) {
-            int no = new_label(e), done = new_label(e), bit = new_label(e);
+            int no = new_label(e), bit = new_label(e);
             if (!v->proven) {
                 cmp_reg(e, key, limit);
                 b_cond(e, HS, no);
@@ -4960,13 +5024,16 @@ static void tier_value(Tier *t, int vi) {
             mov_w(e, r, 1); /* full: there */
             b(e, done);
             bind(e, bit);
+            if (hashed >= 0) tbnz(e, bits, 1, hashed);
             lsr_imm(e, X16, key, 6);
             load64_index(e, X16, bits, X16);
             lsr_reg(e, X16, X16, key);
             and_w_one(e, r, X16);
             b(e, done);
             bind(e, no);
+            if (hashed >= 0) tbnz(e, bits, 1, hashed); /* a HASHED list's key past its limit: -1 */
             mov_w(e, r, 0);
+            if (hashed >= 0) tier_later(t, (TProbe){vi, r, key, bits, hashed, -1, done});
             bind(e, done);
             return;
         }
@@ -4977,6 +5044,7 @@ static void tier_value(Tier *t, int vi) {
         if (!full) {
             int there = new_label(e);
             tbnz(e, bits, 0, there); /* full as it began: every key below its count there */
+            if (hashed >= 0) tbnz(e, bits, 1, hashed);
             lsr_imm(e, X16, key, 6);
             load64_index(e, X16, bits, X16);
             lsr_reg(e, X16, X16, key);
@@ -4988,6 +5056,8 @@ static void tier_value(Tier *t, int vi) {
             return;
         }
         load32_index(e, r, treg(t, v->c), key); /* four bytes (pure_list_suits widened one) */
+        if (hashed >= 0) tier_later(t, (TProbe){vi, r, key, bits, hashed, fail, done});
+        bind(e, done);
         return;
     }
     case T_SET: { /* by position (below the count; a position found is), a whole number fitting its column's cells */
@@ -5193,6 +5263,10 @@ static void tier_emit(Tier *t, int entry, int fallback) {
         default: break;
         }
     }
+    for (size_t i = 0; i < t->probe_count; ++i) {
+        const TProbe *p = &t->probes[i];
+        tier_probe(t, &t->vals[p->v], p->r, p->key, p->bits, p->hashed, p->fail, p->done);
+    }
     for (size_t s = 0; s < t->snap_count; ++s)
         if (t->snaps[s].needed) tier_stub(t, (int)s);
 }
@@ -5205,7 +5279,7 @@ static void tier_free(Tier *t) {
         free(t->merges[i].ways);
         free(t->merges[i].phis);
     }
-    free(t->vals), free(t->snaps), free(t->merges), free(t->items), free(t->merge_at), free(t->entry), free(t->lists), free(t->live_in);
+    free(t->vals), free(t->snaps), free(t->merges), free(t->items), free(t->merge_at), free(t->entry), free(t->lists), free(t->live_in), free(t->probes);
 }
 
 /* The handler's message input the block is, or -1. */

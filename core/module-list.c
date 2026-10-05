@@ -86,9 +86,11 @@ struct PureList {
     /* An event's list may keep its items in arrays rather than a tree
      * (pure_list_arrays, docs/design/021): FLAT, each field's cells side by
      * side in the list's order; DENSE (keyed by small whole numbers, its keys
-     * as bits), each field's cells at its key. What the arrays cannot answer
-     * at once (a position in a DENSE list; a change logged to be undone, a
-     * record, a share) makes them FLAT, or a tree, first. */
+     * as bits), each field's cells at its key; HASHED (keyed by numbers that
+     * came out of order), each field's cells at its key's slot in its
+     * members' table (as a DENSE list's at its key). What the arrays cannot answer at
+     * once (a position in a DENSE or HASHED list; a change logged to be
+     * undone, a record, a share) makes them FLAT, or a tree, first. */
     uint8_t form;
     bool arrays;       /* it may be FLAT or DENSE: an event's list */
     uint8_t flattened; /* DENSE made FLAT since it was cleared: twice, and it stays FLAT or a tree */
@@ -777,7 +779,7 @@ static void take_out(PureList *list, Step *path, unsigned depth, unsigned within
 
 /* ---- An event's list in arrays (docs/design/021) */
 
-enum { TREE, FLAT, DENSE };
+enum { TREE, FLAT, DENSE, HASHED };
 /* The arrays a clear keeps for the next event; the most they grow to (a
  * larger list is a tree: doubling arrays would hold twice its items); a
  * DENSE list's slack beyond four times its items (so it never holds far more
@@ -985,7 +987,7 @@ static bool arrays_room(PureList *list, size_t room) {
 
 /* Field f's column bytes wide (wider): false without memory (as it was). */
 static bool widen(PureList *list, unsigned f, uint8_t bytes) {
-    size_t rows = list->form == DENSE ? list->room : list->count;
+    size_t rows = list->form == DENSE || list->form == HASHED ? list->room : list->count;
     void *made = malloc((list->room ? list->room : 1) * bytes);
     if (!made) return false;
     for (size_t i = 0; i < rows; ++i) cell_out(made, bytes, i, array_cell(list, i, f));
@@ -1094,6 +1096,8 @@ static void let_go_rows(PureList *list) {
     if (!l->texts) return;
     for (size_t i = 0; list->form == FLAT && i < list->count; ++i)
         for (unsigned t = 0; t < l->texts; ++t) free_text(array_cell(list, i, l->text_field[t]).text);
+    for (size_t i = 0; list->form == HASHED && i < list->member_capacity; ++i)
+        for (unsigned t = 0; list->members[i] != VACANT && t < l->texts; ++t) free_text(array_cell(list, i, l->text_field[t]).text);
     for (size_t w = 0; list->form == DENSE && w < list->member_capacity; ++w)
         for (uint64_t word = list->members[w]; word; word &= word - 1)
             for (unsigned t = 0; t < l->texts; ++t)
@@ -1178,6 +1182,157 @@ static bool make_flat(PureList *list) {
     return true;
 }
 
+/* Cell from of a column of cells w bytes wide copied to cell to of another. */
+static inline void cell_copy(void *to_column, size_t to, const void *from_column, size_t from, size_t w) {
+    char *t = (char *)to_column + to * w;
+    const char *f = (const char *)from_column + from * w;
+    switch (w) {
+    case 1: *t = *f; break;
+    case 4: memcpy(t, f, 4); break;
+    case 8: memcpy(t, f, 8); break;
+    default: memcpy(t, f, sizeof(PureSpan));
+    }
+}
+
+/* A HASHED list's slot of key (its cells there), or SIZE_MAX. */
+static size_t hashed_slot(const PureList *list, double key) {
+    uint64_t bits = key_bits(key);
+    size_t mask = list->member_capacity - 1;
+    for (size_t at = member_slot(bits, mask);; at = (at + 1) & mask) {
+        if (list->members[at] == bits) return at;
+        if (list->members[at] == VACANT) return SIZE_MAX;
+    }
+}
+
+/* A HASHED list's table and columns of capacity slots (a power of two
+ * above twice its items), each item's cells at its key's slot: from a FLAT
+ * list's rows, or a HASHED one's slots. False without memory (the list as
+ * it was). */
+static bool hashed_table(PureList *list, size_t capacity) {
+    const Layout *l = &list->layout;
+    uint64_t *table = malloc(capacity * sizeof(*table));
+    void *columns[16] = {0};
+    bool ok = table != NULL;
+    for (unsigned f = 0; ok && f < l->fields; ++f) ok = !list->width[f] || (columns[f] = malloc(capacity * list->width[f])) != NULL;
+    if (!ok) {
+        free(table);
+        for (unsigned f = 0; f < 16; ++f) free(columns[f]);
+        return false;
+    }
+    for (size_t i = 0; i < capacity; ++i) table[i] = VACANT;
+    bool hashed = list->form == HASHED;
+    const double *keys = list->columns[l->key];
+    size_t mask = capacity - 1, rows = hashed ? list->member_capacity : list->count;
+    for (size_t row = 0; row < rows; ++row) {
+        if (hashed && list->members[row] == VACANT) continue;
+        uint64_t bits = hashed ? list->members[row] : key_bits(keys[row]);
+        size_t at = member_slot(bits, mask);
+        while (table[at] != VACANT) at = (at + 1) & mask;
+        table[at] = bits;
+        for (unsigned f = 0; f < l->fields; ++f)
+            if (list->width[f]) cell_copy(columns[f], at, list->columns[f], row, list->width[f]);
+    }
+    arrays_free(list);
+    memcpy(list->columns, columns, sizeof(columns));
+    list->room = capacity;
+    free(list->members);
+    ++list->removes;
+    list->members = table, list->member_capacity = capacity, list->member_count = list->count;
+    list->bitmap = false;
+    return true;
+}
+
+/* A FLAT list whose keys come out of order as HASHED; false when it may
+ * not be (made FLAT twice since it was cleared, or packed) or without
+ * memory: it stays FLAT. */
+static bool make_hashed(PureList *list) {
+    if (list->layout.key < 0 || list->pack || list->flattened >= 2) return false;
+    size_t capacity = 16;
+    while (capacity < 2 * (list->count + 1)) capacity *= 2;
+    if (!hashed_table(list, capacity)) return false;
+    list->form = HASHED;
+    list->full = false, list->keys_seen = 0; /* a DENSE list's keys: counted again when it is one again */
+    ++list->version;
+    return true;
+}
+
+/* Whether a HASHED list's next item would grow its arrays past ARRAYS_LARGE. */
+static bool hashed_large(const PureList *list) {
+    return 2 * (list->count + 1) > list->member_capacity && 2 * list->member_capacity * row_width(&list->layout) > ARRAYS_LARGE;
+}
+
+/* An item (its cells the list's own, its key not there) into a HASHED
+ * list at its key's slot; false without memory (as it was). */
+static bool hashed_add(PureList *list, const PureCell *item) {
+    const Layout *l = &list->layout;
+    if (2 * (list->count + 1) > list->member_capacity && !hashed_table(list, 2 * list->member_capacity)) return false;
+    uint64_t bits = key_bits(item[l->key].num);
+    size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+    while (list->members[at] != VACANT) at = (at + 1) & mask;
+    list->members[at] = bits;
+    for (unsigned f = 0; f < l->fields; ++f) array_put(list, at, f, item[f]);
+    ++list->member_count;
+    ++list->count;
+    ++list->version;
+    return true;
+}
+
+typedef struct { uint64_t key; uint32_t slot; } Ordered;
+
+/* A HASHED list as FLAT, its items in key order: its slots sorted by their
+ * keys' bits as unsigned numbers in the keys' order (-0 as +0), eight bits
+ * a pass from the lowest (a pass whose bits every key shares skipped), each
+ * column made again in that order; its members' table stays its keys' set.
+ * False without memory (the list as it was). */
+static bool make_ordered(PureList *list) {
+    const Layout *l = &list->layout;
+    size_t n = list->count, room = n > 16 ? n : 16;
+    Ordered *a = malloc((n ? n : 1) * sizeof(*a)), *b = malloc((n ? n : 1) * sizeof(*b));
+    void *columns[16] = {0};
+    bool ok = a && b;
+    for (unsigned f = 0; ok && f < l->fields; ++f) ok = !list->width[f] || (columns[f] = malloc(room * list->width[f])) != NULL;
+    if (!ok) {
+        free(a), free(b);
+        for (unsigned f = 0; f < 16; ++f) free(columns[f]);
+        return false;
+    }
+    for (size_t slot = 0, i = 0; slot < list->member_capacity; ++slot) {
+        uint64_t bits = list->members[slot];
+        if (bits != VACANT) a[i++] = (Ordered){bits >> 63 ? ~bits : bits | UINT64_C(1) << 63, (uint32_t)slot};
+    }
+    for (unsigned shift = 0; n && shift < 64; shift += 8) {
+        size_t counts[256] = {0};
+        for (size_t i = 0; i < n; ++i) ++counts[a[i].key >> shift & 255];
+        if (counts[a[0].key >> shift & 255] == n) continue;
+        for (size_t d = 0, sum = 0; d < 256; ++d) {
+            size_t c = counts[d];
+            counts[d] = sum, sum += c;
+        }
+        for (size_t i = 0; i < n; ++i) b[counts[a[i].key >> shift & 255]++] = a[i];
+        Ordered *t = a;
+        a = b, b = t;
+    }
+    for (unsigned f = 0; f < l->fields; ++f) {
+        size_t w = list->width[f];
+        for (size_t i = 0; w && i < n; ++i) cell_copy(columns[f], i, list->columns[f], a[i].slot, w);
+    }
+    free(a), free(b);
+    arrays_free(list);
+    memcpy(list->columns, columns, sizeof(columns));
+    list->room = room;
+    list->form = FLAT;
+    list->moved = 0;
+    ++list->flattened;
+    ++list->version;
+    return true;
+}
+
+/* A list read by position that may be HASHED made FLAT: memory for it or
+ * none (the process stops rather than read items out of their order). */
+static void ordered_now(const PureList *list) {
+    if (list->form == HASHED && !make_ordered((PureList *)list)) abort();
+}
+
 /* Every node below node freed, its texts not (they are a FLAT list's still). */
 static void free_nodes(Node *node) {
     if (!node) return;
@@ -1241,6 +1396,7 @@ static bool build_tree(PureList *list, Node **root) {
 static bool make_tree(PureList *list) {
     if (list->form == TREE) return true;
     if (list->form == DENSE && !make_flat(list)) return false;
+    if (list->form == HASHED && !make_ordered(list)) return false;
     Node *root;
     if (!build_tree(list, &root)) return false;
     arrays_free(list);
@@ -1368,6 +1524,7 @@ static bool dense_add(PureList *list, const PureCell *item, double number) {
 /* The list as a form that answers by position (FLAT or a tree): a DENSE
  * one made FLAT, a tree when it was made FLAT too often; false without memory. */
 static bool positioned(PureList *list) {
+    if (list->form == HASHED) return make_ordered(list);
     if (list->form != DENSE) return true;
     if (list->flattened >= 2) return make_tree(list);
     return make_flat(list);
@@ -1510,10 +1667,10 @@ bool pure_list_full(PureList *list) { return list->form == DENSE && list->count 
 
 bool pure_list_suits(PureList *list, unsigned needs, unsigned narrow) {
     if (list->form == DENSE && !dense_keys(list)) return false; /* its keys counted: full as it is (the tier reads it, LIST_FULL_AT) */
-    if (needs & 1 && list->form != DENSE) return false;                                /* by key: at its keys */
+    if (needs & 1 && list->form != DENSE && !(list->form == HASHED && needs == 1)) return false; /* by key: at its keys, or its rows (by key alone) */
     if (needs & 2 && list->form != FLAT && !(list->form == DENSE && dense_keys(list) && list->full)) return false; /* by position */
     if (needs & 4 && !(list->form == DENSE && dense_keys(list) && list->full)) return false; /* a key its position */
-    if (list->form != FLAT && list->form != DENSE) return false;
+    if (list->form != FLAT && list->form != DENSE && list->form != HASHED) return false;
     for (unsigned f = 0; f < list->layout.fields; ++f) { /* its cells of one byte widened to four: the tier's code reads four */
         if (!(narrow >> f & 1)) continue;
         if (list->width[f] == 1 && !widen(list, f, 4)) return false;
@@ -1588,6 +1745,12 @@ bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, un
     if (list->form == DENSE && (int)key_field == list->layout.key) { /* at its key, by its bits */
         if (!pure_list_contains(list, key.num, &found) || !found) return false;
         *cell = array_cell(list, (size_t)key.num, field);
+        return true;
+    }
+    if (list->form == HASHED && (int)key_field == list->layout.key) { /* at its key's slot, by its table */
+        size_t slot = hashed_slot(list, key.num);
+        if (slot == SIZE_MAX) return false;
+        *cell = array_cell(list, slot, field);
         return true;
     }
     size_t at = pure_list_seek(list, key_field, key, &found);
@@ -2018,6 +2181,23 @@ PureResult pure_list_add(PureList *list, const PureCell *cells, PureUndo *undo, 
     if (list->form != TREE) {
         double key = cells[l->key].num;
         bool found = false;
+        if (list->form == HASHED) { /* by its table, at its end: no position, unless asked */
+            if (hashed_slot(list, key) != SIZE_MAX && !at) return *exists = true, PURE_OK;
+            if (!at && !hashed_large(list)) {
+                if (list->count == PURE_LIST_ITEMS) return PURE_LIMIT;
+                PureCell item[16];
+                unsigned owned = 0;
+                for (; owned < l->fields; ++owned)
+                    if (!own_cell(list, owned, cells[owned], &item[owned])) break;
+                if (owned < l->fields || !arrays_fit(list, cells) || !hashed_add(list, item)) {
+                    for (unsigned f = 0; f < owned; ++f) free_text(item[f].text);
+                    return PURE_ALLOCATION;
+                }
+                list->bytes += cells_bytes(l, item);
+                return PURE_OK;
+            }
+            if (!positioned(list)) return PURE_ALLOCATION;
+        }
         if (list->form == DENSE) { /* by its bits, at its key: no position, unless asked */
             if (pure_list_contains(list, key, &found) && found && !at) return *exists = true, PURE_OK;
             if (!at && !found && dense_holds(list, key)) {
@@ -2041,7 +2221,10 @@ PureResult pure_list_add(PureList *list, const PureCell *cells, PureUndo *undo, 
                 if (at) *at = low;
                 return *exists = true, PURE_OK;
             }
-            if (!at && n >= FLAT_SMALL && (low < n || !list->flattened) && make_dense(list, key)) /* small keys: DENSE (in order too, 023) */
+            if (!at && (n >= FLAT_SMALL || (low == n && key == (double)n)) && (low < n || !list->flattened) && make_dense(list, key))
+                /* small keys: DENSE (in order too, and from the first when each is the count, 023) */
+                return pure_list_add(list, cells, undo, at, exists);
+            if (!at && n >= FLAT_SMALL && low < n && make_hashed(list)) /* other keys out of order: HASHED (023) */
                 return pure_list_add(list, cells, undo, at, exists);
             if (low < n && !flat_moves(list, low) && !make_tree(list)) return PURE_ALLOCATION;
             if (list->form == FLAT) {
@@ -2208,6 +2391,7 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
 }
 
 PureCell pure_list_get(const PureList *list, size_t at, unsigned field) {
+    ordered_now(list);
     if (list->form != TREE) { /* a DENSE list by position: FLAT from now, or counted along its bits without memory */
         if (list->form == DENSE) return array_cell(list, dense_slot(list, at), field); /* at its slot (dense_slot) */
         if (list->form == FLAT) return array_cell(list, at, field);
@@ -2251,6 +2435,7 @@ static void open_array_run(const PureList *list, size_t at, PureRun *run) {
 
 bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
     if (at >= list->count) return false;
+    ordered_now(list);
     if (list->form != TREE) {
         {
             open_array_run(list, at, run);
@@ -2289,6 +2474,7 @@ bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
  * first children to a leaf. The leaf after it (a sibling) is fetched ahead:
  * leaves copied at different times lie far apart in memory. */
 bool pure_list_next(const PureList *list, PureRun *run) {
+    ordered_now(list);
     if (list->form != TREE) {
         if (run->start + run->count >= list->count) return false;
         open_array_run(list, run->start + run->count, run);
@@ -2351,6 +2537,7 @@ size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *
     const Layout *l = &list->layout;
     *found = false;
     if (!list->count) return 0;
+    ordered_now(list);
     if (list->form == DENSE && (int)field != l->key) (void)positioned((PureList *)list); /* another field: in order */
     if (list->form == DENSE) { /* the keys below key (whole numbers below its ceiling), counted (dense_rank) */
         size_t all = list->member_capacity * 64;

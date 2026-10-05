@@ -1407,7 +1407,7 @@ static double some_number(unsigned event, uint32_t r) {
 static void arrays_equivalence(void) {
     static const uint8_t fields[3] = {PURE_CELL_NUMBER, PURE_CELL_TEXT, PURE_CELL_NUMBER};
     uint32_t seed = 0x61727261u;
-    size_t forms[3] = {0}, conversions = 0, steps = 0;
+    size_t forms[4] = {0}, conversions = 0, steps = 0;
     for (unsigned keyed = 0; keyed < 2; ++keyed) {
         PureList *a = pure_list_new(3, fields), *t = pure_list_new(3, fields);
         CHECK(a && t);
@@ -1507,7 +1507,7 @@ static void arrays_equivalence(void) {
         pure_list_free(a);
         pure_list_free(t);
     }
-    CHECK(forms[0] > 10000 && forms[1] > 10000 && forms[2] > 10000 && conversions > 100);
+    CHECK(forms[0] > 10000 && forms[1] > 10000 && forms[2] > 10000 && forms[3] > 10000 && conversions > 100);
     /* A snapshot shares every list: an event's, empty between events, stays in arrays; one with items is a tree for its copy. */
     {
         PureList *list = pure_list_new(3, fields);
@@ -1526,8 +1526,8 @@ static void arrays_equivalence(void) {
         pure_list_free(list);
         pure_retired_free(&retired);
     }
-    printf("{\"arrays\":{\"steps\":%zu,\"tree\":%zu,\"flat\":%zu,\"dense\":%zu,\"conversions\":%zu}}\n", steps, forms[0], forms[1],
-           forms[2], conversions);
+    printf("{\"arrays\":{\"steps\":%zu,\"tree\":%zu,\"flat\":%zu,\"dense\":%zu,\"hashed\":%zu,\"conversions\":%zu}}\n", steps,
+           forms[0], forms[1], forms[2], forms[3], conversions);
 }
 
 /* The first position in a model (in key order) whose key is not below key. */
