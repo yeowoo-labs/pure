@@ -1404,9 +1404,11 @@ static double some_number(unsigned event, uint32_t r) {
     }
 }
 
-/* An item into a list keyed by its text field 0, as the executor does: added at once (HASHED), else found and inserted. */
-static PureResult text_add(PureList *list, const PureCell *cells, bool *exists) {
-    PureResult result = pure_list_add(list, cells, NULL, NULL, exists);
+/* An item into a list keyed by its text field 0, as the executor does: added at once (HASHED; not when where it went is
+ * asked, as an index state asks), else found and inserted. */
+static PureResult text_add(PureList *list, const PureCell *cells, bool ask, bool *exists) {
+    size_t where;
+    PureResult result = pure_list_add(list, cells, NULL, ask ? &where : NULL, exists);
     if (result != PURE_INVALID) return result;
     size_t at = pure_list_seek(list, 0, cells[0], exists);
     return *exists ? PURE_OK : pure_list_insert(list, at, cells, NULL);
@@ -1434,7 +1436,7 @@ static void text_keys_equivalence(void) {
             unsigned op = next_random(&seed) % (event % 4 == 1 ? 10 : 16); /* some events by key alone: HASHED stays */
             if (op < 5) {
                 bool ea, et;
-                CHECK(text_add(a, cells, &ea) == PURE_OK && text_add(t, cells, &et) == PURE_OK && ea == et);
+                CHECK(text_add(a, cells, event % 3 == 2 && r % 31 == 0, &ea) == PURE_OK && text_add(t, cells, false, &et) == PURE_OK && ea == et);
             } else if (op < 8) { /* has, and fields by key */
                 bool ha, ht, fa, ft;
                 PureCell ca, ct;
@@ -1483,8 +1485,8 @@ static void text_keys_equivalence(void) {
     }
     pure_list_free(a);
     pure_list_free(t);
-    CHECK(hashed > 10000);
     printf("{\"text_keys\":{\"steps\":%zu,\"hashed\":%zu}}\n", steps, hashed);
+    CHECK(hashed > 8000);
 }
 
 static void arrays_equivalence(void) {
