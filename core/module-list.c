@@ -93,6 +93,7 @@ struct PureList {
     bool arrays;       /* it may be FLAT or DENSE: an event's list */
     uint8_t flattened; /* DENSE made FLAT since it was cleared: twice, and it stays FLAT or a tree */
     void *columns[16]; /* each field's cells */
+    uint8_t width[16]; /* the bytes of a cell in each: array_width */
     size_t room;       /* the rows the columns hold: FLAT items, DENSE keys */
     size_t moved;      /* FLAT: items moved by changes inside it since it was cleared */
     /* A stored list keyed by a number and searched by key often at one
@@ -779,10 +780,16 @@ enum { ARRAYS_KEPT = 1 << 22, ARRAYS_LARGE = 1 << 26, DENSE_SLACK = 1 << 21, FLA
 typedef struct Pack {
     unsigned refs;            /* the list and its copies */
     void *columns[16];
+    uint8_t bytes[16];        /* their cells' (each as a list's width) */
     double low, high;         /* the first key and the last */
     double origin, width, scale; /* the first bucket's start, a bucket's width, 1 / width */
     size_t buckets;           /* 0: none (searched by halves) */
     uint32_t *first;          /* by bucket, and the end past the last */
+    /* Keys all whole numbers below 2^53 in size and buckets 2^shift wide
+     * (shift 0 or more): the same in integers, for compiled code too. */
+    bool whole;
+    uint32_t shift;
+    int64_t origin_whole, low_whole, high_whole;
 } Pack;
 
 /* Searched by key at least an eighth of its items' times at one version, a
@@ -831,6 +838,11 @@ static bool pack_index(Pack *pack, const double *keys, size_t n, unsigned aligne
         if (buckets <= (double)n) break;
     }
     pack->origin = origin, pack->width = width, pack->scale = 1 / width, pack->buckets = (size_t)buckets;
+    pack->whole = exponent >= 0 && fabs(low) < 0x1p53 && fabs(high) < 0x1p53;
+    for (size_t i = 0; pack->whole && i < n; ++i) pack->whole = keys[i] == floor(keys[i]);
+    if (pack->whole)
+        pack->shift = (uint32_t)exponent, pack->origin_whole = (int64_t)origin, pack->low_whole = (int64_t)low,
+        pack->high_whole = (int64_t)high;
     if (!(pack->first = malloc((pack->buckets + 1) * sizeof(*pack->first)))) return false;
     size_t filled = 0;
     for (size_t i = 0; i < n; ++i) {
@@ -847,6 +859,16 @@ static size_t pack_seek(const PureList *list, double key) {
     const Pack *pack = list->pack;
     const double *keys = list->columns[list->layout.key];
     if (!pack->buckets) return lower(keys, (unsigned)list->count, key);
+    if (pack->whole && fabs(key) < 0x1p53 && key == floor(key)) { /* in integers: the bucket a shift */
+        int64_t whole = (int64_t)key;
+        if (whole <= pack->low_whole) return 0;
+        if (whole > pack->high_whole) return list->count;
+        uint64_t from = (uint64_t)(whole - pack->origin_whole), b = from >> pack->shift;
+        size_t at = pack->first[b];
+        if (b << pack->shift == from) return at;
+        for (size_t end = pack->first[b + 1]; at < end && keys[at] < key;) ++at;
+        return at;
+    }
     if (!(key > pack->low)) return 0;
     if (key > pack->high) return list->count;
     double start;
@@ -870,49 +892,104 @@ static void searched_by(const PureList *list, double key) {
 
 static size_t width(const Layout *l, unsigned f) { return pure_cell_text(l->kinds[f]) ? sizeof(PureSpan) : 8; }
 
+/* In arrays a field's cells are as narrow as their values let them be
+ * (docs/design/022): a number's or a bool's 1 byte while every one is a
+ * whole number from 0 below 2^8, 4 below 2^32 (never -0), else 8; a text's
+ * span; an i64's 8; a FLAT list's key 8 (searched as numbers); a DENSE
+ * list's key none (a cell's key is its slot). A value that does not fit
+ * makes its column wider first, once for each width. Widths change with
+ * the values, never what a cell reads. */
+static bool narrows(uint8_t kind) { return kind == PURE_CELL_NUMBER || kind == PURE_CELL_BOOL; }
+
+static uint8_t width_of(double v) {
+    if (!(v >= 0 && v == floor(v)) || (v == 0 && signbit(v))) return 8;
+    return v < 256 ? 1 : v < 4294967296.0 ? 4 : 8;
+}
+
+static PureCell cell_in(const void *column, uint8_t bytes, size_t i) {
+    PureCell cell = {0};
+    switch (bytes) {
+    case 0: cell.num = (double)i; break;
+    case 1: cell.num = ((const uint8_t *)column)[i]; break;
+    case 4: cell.num = ((const uint32_t *)column)[i]; break;
+    case 8: memcpy(&cell.i64, (const char *)column + 8 * i, 8); break;
+    default: {
+        PureSpan text = ((const PureSpan *)column)[i];
+        cell.text = (unsigned char *)text.data, cell.size = text.size;
+    }
+    }
+    return cell;
+}
+
+/* A cell into a column of cells of bytes each (one it fits). */
+static void cell_out(void *column, uint8_t bytes, size_t i, PureCell cell) {
+    switch (bytes) {
+    case 0: break;
+    case 1: ((uint8_t *)column)[i] = (uint8_t)cell.num; break;
+    case 4: ((uint32_t *)column)[i] = (uint32_t)cell.num; break;
+    case 8: memcpy((char *)column + 8 * i, &cell.i64, 8); break;
+    default: ((PureSpan *)column)[i] = (PureSpan){cell.text, cell.size};
+    }
+}
+
+/* The widths a list's arrays start with: narrow fields at 1. */
+static void widths_start(PureList *list) {
+    const Layout *l = &list->layout;
+    for (unsigned f = 0; f < l->fields; ++f)
+        list->width[f] = (uint8_t)((int)f == l->key || !narrows(l->kinds[f]) ? width(l, f) : 1);
+}
+
 static size_t row_width(const Layout *l) {
     size_t row = 0;
     for (unsigned f = 0; f < l->fields; ++f) row += width(l, f);
     return row ? row : 1;
 }
 
-static PureCell array_cell(const PureList *list, size_t i, unsigned f) {
-    PureCell cell = {0};
-    if (!pure_cell_text(list->layout.kinds[f])) memcpy(&cell.i64, (const char *)list->columns[f] + 8 * i, 8);
-    else {
-        PureSpan text = ((const PureSpan *)list->columns[f])[i];
-        cell.text = (unsigned char *)text.data, cell.size = text.size;
-    }
-    return cell;
-}
+static PureCell array_cell(const PureList *list, size_t i, unsigned f) { return cell_in(list->columns[f], list->width[f], i); }
 
-static void array_put(PureList *list, size_t i, unsigned f, PureCell cell) {
-    if (pure_cell_text(list->layout.kinds[f])) ((PureSpan *)list->columns[f])[i] = (PureSpan){cell.text, cell.size};
-    else memcpy((char *)list->columns[f] + 8 * i, &cell.i64, 8);
-}
-
-/* Row from's cells to row to, of the same columns or of others. */
-static void array_copy(const Layout *l, void *const *to_columns, size_t to, void *const *from_columns, size_t from) {
-    for (unsigned f = 0; f < l->fields; ++f)
-        memcpy((char *)to_columns[f] + to * width(l, f), (const char *)from_columns[f] + from * width(l, f), width(l, f));
-}
+static void array_put(PureList *list, size_t i, unsigned f, PureCell cell) { cell_out(list->columns[f], list->width[f], i, cell); }
 
 static void array_move(PureList *list, size_t to, size_t from, size_t count) {
     const Layout *l = &list->layout;
     for (unsigned f = 0; f < l->fields; ++f)
-        memmove((char *)list->columns[f] + to * width(l, f), (const char *)list->columns[f] + from * width(l, f),
-                count * width(l, f));
+        if (list->width[f])
+            memmove((char *)list->columns[f] + to * list->width[f], (const char *)list->columns[f] + from * list->width[f],
+                    count * list->width[f]);
 }
 
 /* Columns of room rows each; false without memory (each as it was or grown). */
 static bool arrays_room(PureList *list, size_t room) {
     const Layout *l = &list->layout;
     for (unsigned f = 0; f < l->fields; ++f) {
-        void *grown = realloc(list->columns[f], room * width(l, f));
+        if (!list->width[f]) continue;
+        void *grown = realloc(list->columns[f], (room ? room : 1) * list->width[f]);
         if (!grown) return false;
         list->columns[f] = grown;
     }
     list->room = room;
+    return true;
+}
+
+/* Field f's column bytes wide (wider): false without memory (as it was). */
+static bool widen(PureList *list, unsigned f, uint8_t bytes) {
+    size_t rows = list->form == DENSE ? list->room : list->count;
+    void *made = malloc((list->room ? list->room : 1) * bytes);
+    if (!made) return false;
+    for (size_t i = 0; i < rows; ++i) cell_out(made, bytes, i, array_cell(list, i, f));
+    free(list->columns[f]);
+    list->columns[f] = made;
+    list->width[f] = bytes;
+    return true;
+}
+
+/* Every column wide enough for an item's cells; false without memory. */
+static bool arrays_fit(PureList *list, const PureCell *cells) {
+    for (unsigned f = 0; f < list->layout.fields; ++f) {
+        uint8_t now = list->width[f];
+        if ((now != 1 && now != 4) || !narrows(list->layout.kinds[f])) continue;
+        uint8_t need = width_of(cells[f].num);
+        if (need > now && !widen(list, f, need)) return false;
+    }
     return true;
 }
 
@@ -963,7 +1040,9 @@ static bool flat_large(const PureList *list) {
     return list->count == list->room && 2 * list->room * row_width(&list->layout) > ARRAYS_LARGE;
 }
 
-static bool dense_holds(const PureList *list, double key) { return small_key(key) && (size_t)key < dense_limit(list); }
+static bool dense_holds(const PureList *list, double key) {
+    return small_key(key) && !(key == 0 && signbit(key)) && (size_t)key < dense_limit(list); /* -0 keeps its column */
+}
 
 /* A FLAT list keyed by small whole numbers (its keys as bits) as DENSE,
  * room for key too; false when it cannot be (it stays FLAT). */
@@ -980,15 +1059,22 @@ static bool make_dense(PureList *list, double key) {
     size_t room = top + 1 + (top + 1) / 2, limit = dense_limit(list);
     if (room > limit) room = limit;
     if (room <= top) return false;
+    for (size_t i = 0; i < list->count; ++i)
+        if (keys[i] == 0 && signbit(keys[i])) return false; /* -0 keeps its column */
     void *columns[16] = {0};
+    uint8_t widths[16];
+    memcpy(widths, list->width, sizeof(widths));
+    widths[l->key] = 0; /* a DENSE list's keys are its slots */
     for (unsigned f = 0; f < l->fields; ++f)
-        if (!(columns[f] = malloc(room * width(l, f)))) {
+        if (widths[f] && !(columns[f] = malloc(room * widths[f]))) {
             for (unsigned g = 0; g < f; ++g) free(columns[g]);
             return false;
         }
-    for (size_t i = 0; i < list->count; ++i) array_copy(l, columns, (size_t)keys[i], list->columns, i);
+    for (size_t i = 0; i < list->count; ++i)
+        for (unsigned f = 0; f < l->fields; ++f) cell_out(columns[f], widths[f], (size_t)keys[i], array_cell(list, i, f));
     arrays_free(list);
     memcpy(list->columns, columns, sizeof(columns));
+    memcpy(list->width, widths, sizeof(widths));
     list->room = room;
     list->form = DENSE;
     return true;
@@ -999,16 +1085,21 @@ static bool make_flat(PureList *list) {
     const Layout *l = &list->layout;
     size_t room = list->count > 16 ? list->count : 16, row = 0;
     void *columns[16] = {0};
+    uint8_t widths[16];
+    memcpy(widths, list->width, sizeof(widths));
+    widths[l->key] = 8; /* its keys a column again, searched as numbers */
     for (unsigned f = 0; f < l->fields; ++f)
-        if (!(columns[f] = malloc(room * width(l, f)))) {
+        if (!(columns[f] = malloc(room * widths[f]))) {
             for (unsigned g = 0; g < f; ++g) free(columns[g]);
             return false;
         }
     for (size_t w = 0; w < list->member_capacity; ++w)
-        for (uint64_t word = list->members[w]; word; word &= word - 1)
-            array_copy(l, columns, row++, list->columns, w * 64 + (size_t)__builtin_ctzll(word));
+        for (uint64_t word = list->members[w]; word; word &= word - 1, ++row)
+            for (unsigned f = 0; f < l->fields; ++f)
+                cell_out(columns[f], widths[f], row, array_cell(list, w * 64 + (size_t)__builtin_ctzll(word), f));
     arrays_free(list);
     memcpy(list->columns, columns, sizeof(columns));
+    memcpy(list->width, widths, sizeof(widths));
     list->room = room;
     list->form = FLAT;
     list->moved = 0;
@@ -1042,7 +1133,10 @@ static bool build_tree(PureList *list, Node **root) {
         }
         unsigned items = (unsigned)(n - i * FANOUT < FANOUT ? n - i * FANOUT : FANOUT);
         for (unsigned f = 0; f < l->fields; ++f)
-            memcpy((char *)leaf + l->column[f], (const char *)list->columns[f] + i * FANOUT * width(l, f), items * width(l, f));
+            if (list->width[f] == width(l, f))
+                memcpy((char *)leaf + l->column[f], (const char *)list->columns[f] + i * FANOUT * width(l, f), items * width(l, f));
+            else
+                for (unsigned j = 0; j < items; ++j) numbers(l, leaf, f)[j] = array_cell(list, i * FANOUT + j, f).num;
         leaf->count = items;
         sum(list, leaf);
         level[i] = leaf;
@@ -1087,13 +1181,31 @@ static bool make_tree(PureList *list) {
 
 static bool visit_leaves(const Node *node, bool (*visit)(void *, const Node *), void *context);
 
-typedef struct { const Layout *layout; void *const *columns; size_t at; } Packing;
+typedef struct { const Layout *layout; Pack *pack; size_t at; } Packing;
+
+/* The widths a pack's columns need: each narrow field's widest value. */
+static bool pack_widths(void *context, const Node *leaf) {
+    Packing *p = context;
+    const Layout *l = p->layout;
+    for (unsigned f = 0; f < l->fields; ++f)
+        if ((int)f != l->key && narrows(l->kinds[f]))
+            for (unsigned i = 0; i < leaf->count && p->pack->bytes[f] < 8; ++i) {
+                uint8_t need = width_of(numbers(l, leaf, f)[i]);
+                if (need > p->pack->bytes[f]) p->pack->bytes[f] = need;
+            }
+    return true;
+}
 
 static bool pack_leaf(void *context, const Node *leaf) {
     Packing *p = context;
     const Layout *l = p->layout;
-    for (unsigned f = 0; f < l->fields; ++f)
-        memcpy((char *)p->columns[f] + p->at * width(l, f), (const char *)leaf + l->column[f], leaf->count * width(l, f));
+    for (unsigned f = 0; f < l->fields; ++f) {
+        uint8_t bytes = p->pack->bytes[f];
+        if (bytes == width(l, f))
+            memcpy((char *)p->pack->columns[f] + p->at * bytes, (const char *)leaf + l->column[f], leaf->count * bytes);
+        else
+            for (unsigned i = 0; i < leaf->count; ++i) cell_out(p->pack->columns[f], bytes, p->at + i, cell_at(l, leaf, i, f));
+    }
     p->at += leaf->count;
     return true;
 }
@@ -1107,9 +1219,14 @@ static bool pack(PureList *list) {
     size_t n = list->count;
     Pack *made = calloc(1, sizeof(*made));
     bool ok = made != NULL;
-    for (unsigned f = 0; ok && f < l->fields; ++f) ok = (made->columns[f] = malloc(n * width(l, f))) != NULL;
     if (ok) {
-        Packing packing = {l, made->columns, 0};
+        for (unsigned f = 0; f < l->fields; ++f) made->bytes[f] = (uint8_t)((int)f == l->key || !narrows(l->kinds[f]) ? width(l, f) : 1);
+        Packing widths = {l, made, 0};
+        visit_leaves(list->root, pack_widths, &widths);
+    }
+    for (unsigned f = 0; ok && f < l->fields; ++f) ok = (made->columns[f] = malloc(n * made->bytes[f])) != NULL;
+    if (ok) {
+        Packing packing = {l, made, 0};
         visit_leaves(list->root, pack_leaf, &packing);
         ok = l->key < 0 || pack_index(made, made->columns[l->key], n, list->aligned);
     }
@@ -1123,6 +1240,7 @@ static bool pack(PureList *list) {
     list->root = NULL;
     list->pack = made;
     memcpy(list->columns, made->columns, sizeof(list->columns));
+    memcpy(list->width, made->bytes, sizeof(list->width));
     list->room = n;
     list->form = FLAT;
     list->moved = 0;
@@ -1227,7 +1345,9 @@ PureResult pure_list_keyed(PureList *list, int field) {
     int key = field >= 0 && (unsigned)field < l->fields && l->kinds[field] == PURE_CELL_NUMBER ? field : -1;
     if (key == l->key) return PURE_OK;
     if (list->count && !make_tree(list)) return PURE_ALLOCATION;
+    if (list->arrays) arrays_free(list); /* its columns as wide as the new key wants */
     l->key = key;
+    if (list->arrays) widths_start(list);
     if (list->root && !rekey(list, &list->root)) {
         l->key = -1; /* searched without leads, which some nodes lack */
         return PURE_ALLOCATION;
@@ -1293,11 +1413,14 @@ void pure_list_clear(PureList *list) {
         list->count = list->bytes = 0;
         ++list->version;
     }
-    if (list->arrays) { /* FLAT again, its arrays kept for the next event unless large */
+    if (list->arrays) { /* FLAT again, its arrays kept for the next event unless large or not FLAT's (a DENSE list's has no key column) */
+        if (list->form != FLAT || list->room * row_width(&list->layout) > ARRAYS_KEPT) {
+            arrays_free(list);
+            widths_start(list);
+        }
         list->form = FLAT;
         list->flattened = 0;
         list->moved = 0;
-        if (list->room * row_width(&list->layout) > ARRAYS_KEPT) arrays_free(list);
     }
     if (!had) return;
     if (!list->members) return;
@@ -1343,6 +1466,7 @@ bool pure_list_arrays(PureList *list) {
     if (list->form != TREE || list->copy || list->journaled || list->count) return false;
     list->arrays = true;
     list->form = FLAT;
+    widths_start(list);
     return true;
 }
 
@@ -1362,7 +1486,13 @@ const size_t pure_list_layout[] = {
     [LIST_MEMBER_CAPACITY_AT] = offsetof(PureList, member_capacity), [LIST_BITMAP_AT] = offsetof(PureList, bitmap),
     [LIST_FORM_AT] = offsetof(PureList, form), [LIST_COLUMNS_AT] = offsetof(PureList, columns),
     [LIST_VERSION_AT] = offsetof(PureList, version), [LIST_ROOM_AT] = offsetof(PureList, room),
-    [LIST_MEMBER_COUNT_AT] = offsetof(PureList, member_count), [LIST_BYTES_AT] = offsetof(PureList, bytes)};
+    [LIST_MEMBER_COUNT_AT] = offsetof(PureList, member_count), [LIST_BYTES_AT] = offsetof(PureList, bytes),
+    [LIST_PACK_AT] = offsetof(PureList, pack), [LIST_WIDTH_AT] = offsetof(PureList, width)};
+
+const size_t pure_pack_layout[] = {
+    [PACK_FIRST_AT] = offsetof(Pack, first), [PACK_WHOLE_AT] = offsetof(Pack, whole), [PACK_SHIFT_AT] = offsetof(Pack, shift),
+    [PACK_ORIGIN_AT] = offsetof(Pack, origin_whole), [PACK_LOW_AT] = offsetof(Pack, low_whole),
+    [PACK_HIGH_AT] = offsetof(Pack, high_whole)};
 
 bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, unsigned field, PureCell *cell) {
     bool found;
@@ -1389,6 +1519,7 @@ PureList *pure_list_share(PureList *list, PureRetired *retired, uint64_t epoch) 
         __atomic_add_fetch(&list->pack->refs, 1, __ATOMIC_RELAXED);
         copy->pack = list->pack, copy->form = FLAT, copy->room = list->count;
         memcpy(copy->columns, list->columns, sizeof(copy->columns));
+        memcpy(copy->width, list->width, sizeof(copy->width));
     }
     list->retired = retired;
     list->shares = epoch > list->shares ? epoch : list->shares + 1;
@@ -1760,7 +1891,7 @@ PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, Pu
     for (; owned < l->fields; ++owned)
         if (!own_cell(list, owned, cells[owned], &item[owned])) break;
     if (list->form == FLAT) {
-        if (owned < l->fields || !flat_insert(list, at, item)) {
+        if (owned < l->fields || !arrays_fit(list, cells) || !flat_insert(list, at, item)) {
             for (unsigned f = 0; f < owned; ++f) free_text(item[f].text);
             return PURE_ALLOCATION;
         }
@@ -1805,7 +1936,7 @@ PureResult pure_list_add(PureList *list, const PureCell *cells, PureUndo *undo, 
                 unsigned owned = 0;
                 for (; owned < l->fields; ++owned)
                     if (!own_cell(list, owned, cells[owned], &item[owned])) break;
-                if (owned < l->fields || !dense_add(list, item, key)) {
+                if (owned < l->fields || !arrays_fit(list, cells) || !dense_add(list, item, key)) {
                     for (unsigned f = 0; f < owned; ++f) free_text(item[f].text);
                     return PURE_ALLOCATION;
                 }
@@ -1931,6 +2062,8 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
     if (!logged(list, undo) || !positioned(list)) return PURE_ALLOCATION;
     if (list->form == FLAT) {
         PureCell copy, old = array_cell(list, at, field);
+        uint8_t need = narrows(l->kinds[field]) && (list->width[field] == 1 || list->width[field] == 4) ? width_of(value.num) : 0;
+        if (need > list->width[field] && !widen(list, field, need)) return PURE_ALLOCATION;
         if (!own_cell(list, field, value, &copy)) return PURE_ALLOCATION;
         list->bytes += cell_bytes(l, field, copy) - cell_bytes(l, field, old);
         array_put(list, at, field, copy);
@@ -2011,7 +2144,11 @@ static void open_array_run(const PureList *list, size_t at, PureRun *run) {
     for (unsigned f = 0; f < l->fields; ++f)
         if (pure_cell_text(l->kinds[f])) run->column[f].texts = (const PureSpan *)list->columns[f] + row;
         else if (l->kinds[f] == PURE_CELL_INTEGER) run->column[f].integers = (const int64_t *)list->columns[f] + row;
-        else run->column[f].numbers = (const double *)list->columns[f] + row;
+        else if (list->width[f] == 8) run->column[f].numbers = (const double *)list->columns[f] + row;
+        else { /* narrow cells as numbers */
+            for (unsigned i = 0; i < run->count; ++i) run->cells[f][i] = array_cell(list, row + i, f).num;
+            run->column[f].numbers = run->cells[f];
+        }
 }
 
 bool pure_list_run(const PureList *list, size_t at, PureRun *run) {

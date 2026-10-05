@@ -97,12 +97,20 @@ int pure_run_item(Frame *, uint32_t pc);
 /* Where a list keeps what compiled code reads of it (module-list.c owns the
  * layout and says where): its item count, its key set (the words, how many,
  * whether they are bits), its form (pure_list_form), its arrays and the rows
- * they hold, its version, how many keys its set holds and its stored bytes. */
+ * they hold, its version, how many keys its set holds, its stored bytes,
+ * its pack (a packed list's, else NULL) and its columns' cell widths (u8
+ * each: 0 a DENSE list's key, 1, 4 or 8 a number's, more a text's). */
 enum {
     LIST_COUNT_AT, LIST_MEMBERS_AT, LIST_MEMBER_CAPACITY_AT, LIST_BITMAP_AT, LIST_FORM_AT, LIST_COLUMNS_AT, LIST_VERSION_AT,
-    LIST_ROOM_AT, LIST_MEMBER_COUNT_AT, LIST_BYTES_AT
+    LIST_ROOM_AT, LIST_MEMBER_COUNT_AT, LIST_BYTES_AT, LIST_PACK_AT, LIST_WIDTH_AT
 };
 extern const size_t pure_list_layout[];
+/* A packed list's index (docs/design/022), where its keys are whole: the
+ * first position of each bucket (u32), whether the keys are whole, the
+ * buckets' width as a shift, the first bucket's start, the first key and
+ * the last (i64). */
+enum { PACK_FIRST_AT, PACK_WHOLE_AT, PACK_SHIFT_AT, PACK_ORIGIN_AT, PACK_LOW_AT, PACK_HIGH_AT };
+extern const size_t pure_pack_layout[];
 
 /* A module's code compiled (AArch64 Linux; elsewhere, or with PURE_JIT=0 in
  * the environment, none): a block's code runs a frame as run does, giving how

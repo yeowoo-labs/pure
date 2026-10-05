@@ -1387,17 +1387,29 @@ static void same_list(const PureList *a, const PureList *t) {
     CHECK(pure_list_count(a) == pure_list_count(t) && pure_list_size(a) == pure_list_size(t));
     size_t n = pure_list_count(t);
     for (size_t i = 0; i < n; i += 1 + i / 64) {
-        PureCell x = pure_list_get(a, i, 0), y = pure_list_get(t, i, 0), u = pure_list_get(a, i, 1), v = pure_list_get(t, i, 1);
-        CHECK(x.i64 == y.i64 && u.size == v.size && (!u.size || !memcmp(u.text, v.text, u.size)));
+        PureCell x = pure_list_get(a, i, 0), y = pure_list_get(t, i, 0), u = pure_list_get(a, i, 1), v = pure_list_get(t, i, 1),
+                 w = pure_list_get(a, i, 2), z = pure_list_get(t, i, 2);
+        CHECK(x.i64 == y.i64 && u.size == v.size && (!u.size || !memcmp(u.text, v.text, u.size)) && w.i64 == z.i64);
+    }
+}
+
+/* A third field's number: in some events small, in some large, in some
+ * anything (fractions, -0, below 0), so its column narrows and widens
+ * (docs/design/022). */
+static double some_number(unsigned event, uint32_t r) {
+    switch (event % 4) {
+    case 0: case 3: return (double)(r % 250);
+    case 1: return (double)(r % 4000000000u);
+    default: return r % 5 == 0 ? -0.0 : r % 5 == 1 ? -(double)(r % 77) : r % 5 == 2 ? (double)(r % 1000) / 8 : (double)(r % 300);
     }
 }
 
 static void arrays_equivalence(void) {
-    static const uint8_t fields[2] = {PURE_CELL_NUMBER, PURE_CELL_TEXT};
+    static const uint8_t fields[3] = {PURE_CELL_NUMBER, PURE_CELL_TEXT, PURE_CELL_NUMBER};
     uint32_t seed = 0x61727261u;
     size_t forms[3] = {0}, conversions = 0, steps = 0;
     for (unsigned keyed = 0; keyed < 2; ++keyed) {
-        PureList *a = pure_list_new(2, fields), *t = pure_list_new(2, fields);
+        PureList *a = pure_list_new(3, fields), *t = pure_list_new(3, fields);
         CHECK(a && t);
         if (keyed) {
             CHECK(pure_list_keyed(a, 0) == PURE_OK && pure_list_keyed(t, 0) == PURE_OK);
@@ -1416,7 +1428,8 @@ static void arrays_equivalence(void) {
                                          : (double)(r % 80000) / 4;
                 char text[16];
                 size_t size = (size_t)snprintf(text, sizeof(text), "t%u", r % 1000);
-                PureCell cells[2] = {{.num = key}, {.text = (unsigned char *)text, .size = r % 11 ? size : 0}};
+                PureCell cells[3] = {{.num = key}, {.text = (unsigned char *)text, .size = r % 11 ? size : 0},
+                                     {.num = some_number(event, r >> 7)}};
                 unsigned op = next_random(&seed) % 20;
                 if (keyed && event % 3 == 1) op = op < 12 ? 1 + op % 8 : 13 + op % 2; /* by key alone, as a search does: DENSE stays */
                 if (keyed && op < 9) { /* add by key, where it went asked or not */
@@ -1434,6 +1447,9 @@ static void arrays_equivalence(void) {
                 } else if (op < 12 && n) { /* a text changed; in a keyed list now and then its key, between its neighbours */
                     size_t at = next_random(&seed) % n;
                     CHECK(pure_list_set(a, at, 1, cells[1], NULL) == PURE_OK && pure_list_set(t, at, 1, cells[1], NULL) == PURE_OK);
+                    if (r % 2) /* the third field: wider now and then */
+                        CHECK(pure_list_set(a, at, 2, (PureCell){.num = some_number(event + r % 3, r >> 9)}, NULL) == PURE_OK &&
+                              pure_list_set(t, at, 2, (PureCell){.num = some_number(event + r % 3, r >> 9)}, NULL) == PURE_OK);
                     if (keyed && at + 1 < n && r % 3 == 0) {
                         double low = pure_list_get(t, at, 0).num, high = pure_list_get(t, at + 1, 0).num, to = low + (high - low) / 2;
                         if (to > low && to < high) {
@@ -1449,10 +1465,17 @@ static void arrays_equivalence(void) {
                     fa = pure_list_lookup(a, 0, cells[0], 1, &ca);
                     ft = pure_list_lookup(t, 0, cells[0], 1, &ct);
                     CHECK(fa == ft && fa == ht && (!fa || (ca.size == ct.size && (!ca.size || !memcmp(ca.text, ct.text, ca.size)))));
+                    fa = pure_list_lookup(a, 0, cells[0], 2, &ca);
+                    ft = pure_list_lookup(t, 0, cells[0], 2, &ct);
+                    CHECK(fa == ft && (!fa || ca.i64 == ct.i64));
+                    fa = pure_list_lookup(a, 0, cells[0], 0, &ca); /* the key itself: a DENSE list's slot */
+                    ft = pure_list_lookup(t, 0, cells[0], 0, &ct);
+                    CHECK(fa == ft && (!fa || ca.i64 == ct.i64));
                 } else if (op < 17 && n) { /* by position */
                     size_t at = next_random(&seed) % n;
-                    PureCell x = pure_list_get(a, at, 0), y = pure_list_get(t, at, 0);
-                    CHECK(x.i64 == y.i64);
+                    PureCell x = pure_list_get(a, at, 0), y = pure_list_get(t, at, 0), w = pure_list_get(a, at, 2),
+                             z = pure_list_get(t, at, 2);
+                    CHECK(x.i64 == y.i64 && w.i64 == z.i64);
                 } else if (op < 18 && n) { /* run by run from somewhere */
                     size_t at = next_random(&seed) % n, seen = 0;
                     PureRun ra, rt;
@@ -1466,6 +1489,7 @@ static void arrays_equivalence(void) {
                             break;
                         }
                         CHECK(ra.column[0].numbers[ia - ra.start] == rt.column[0].numbers[it - rt.start]);
+                        CHECK(!memcmp(&ra.column[2].numbers[ia - ra.start], &rt.column[2].numbers[it - rt.start], sizeof(double)));
                         PureSpan sa = ra.column[1].texts[ia - ra.start], st = rt.column[1].texts[it - rt.start];
                         CHECK(sa.size == st.size && (!sa.size || !memcmp(sa.data, st.data, sa.size)));
                         ++ia, ++it;
@@ -1486,16 +1510,16 @@ static void arrays_equivalence(void) {
     CHECK(forms[0] > 10000 && forms[1] > 10000 && forms[2] > 10000 && conversions > 100);
     /* A snapshot shares every list: an event's, empty between events, stays in arrays; one with items is a tree for its copy. */
     {
-        PureList *list = pure_list_new(2, fields);
+        PureList *list = pure_list_new(3, fields);
         PureRetired retired = {0};
         CHECK(list && pure_list_arrays(list));
         PureList *copy = pure_list_share(list, &retired, 1);
         CHECK(copy && pure_list_count(copy) == 0 && pure_list_form(list) == 1);
         pure_list_free(copy);
         for (unsigned i = 0; i < 100; ++i)
-            CHECK(pure_list_insert(list, i, (PureCell[]){{.num = i}, {.size = 0}}, NULL) == PURE_OK);
+            CHECK(pure_list_insert(list, i, (PureCell[]){{.num = i}, {.size = 0}, {.num = i * 1000.5}}, NULL) == PURE_OK);
         CHECK((copy = pure_list_share(list, &retired, 2)) && pure_list_form(list) == 0 && pure_list_count(copy) == 100);
-        CHECK(pure_list_get(copy, 99, 0).num == 99);
+        CHECK(pure_list_get(copy, 99, 0).num == 99 && pure_list_get(copy, 99, 2).num == 99049.5);
         pure_list_free(copy);
         pure_list_clear(list);
         CHECK(pure_list_form(list) == 1); /* arrays again, the next event */
@@ -1515,6 +1539,18 @@ static size_t model_bound(const Model *m, double key) {
         else high = middle;
     }
     return low;
+}
+
+/* Two lists' stored forms, whole and a part at a time, the same. */
+static bool stored_numbers_same(const PureList *a, const PureList *b) {
+    size_t size = pure_list_size(a);
+    unsigned char *x = malloc(size + 1), *y = malloc(size + 1);
+    CHECK(x && y && size == pure_list_size(b));
+    pure_list_encode(a, x);
+    pure_list_encode(b, y);
+    bool same = !memcmp(x, y, size);
+    free(x), free(y);
+    return same;
 }
 
 /* The stored form of a list a part at a time, against it whole. */
@@ -1703,11 +1739,12 @@ static void packed_lists(void) {
     free(before.items);
     for (unsigned i = 0; i < SHARES; ++i) free(shared[i].items);
 
-    /* The index's edges: each list packed, then searched as its tree (never packed) is. */
-    static const uint8_t number[1] = {PURE_CELL_NUMBER};
+    /* The index's edges: each list packed, then searched as its tree (never packed) is; its second field's
+     * cells packed as narrow as they let (docs/design/022) and read back as they were, by position and by runs. */
+    static const uint8_t number[2] = {PURE_CELL_NUMBER, PURE_CELL_NUMBER};
     size_t indexed = 0;
     for (unsigned kind = 0; kind < 5; ++kind) {
-        PureList *packed = pure_list_new(1, number), *tree = pure_list_new(1, number);
+        PureList *packed = pure_list_new(2, number), *tree = pure_list_new(2, number);
         CHECK(packed && tree && pure_list_keyed(packed, 0) == PURE_OK && pure_list_keyed(tree, 0) == PURE_OK);
         double keys[6000];
         size_t n = 0;
@@ -1719,8 +1756,9 @@ static void packed_lists(void) {
                                      : (double)(i / 7) * 65536 + (double)(i % 7) * 3; /* slices at multiples of 2^16 */
             if (kind == 0 && i == 2800) key = -0.0;
             bool exists;
-            CHECK(pure_list_add(packed, (PureCell[]){{.num = key}}, NULL, NULL, &exists) == PURE_OK);
-            CHECK(pure_list_add(tree, (PureCell[]){{.num = key}}, NULL, NULL, &exists) == PURE_OK);
+            double second = some_number(kind, (uint32_t)(i * 2654435761u)), third = kind == 4 ? (double)(i % 200) : second;
+            CHECK(pure_list_add(packed, (PureCell[]){{.num = key}, {.num = third}}, NULL, NULL, &exists) == PURE_OK);
+            CHECK(pure_list_add(tree, (PureCell[]){{.num = key}, {.num = third}}, NULL, NULL, &exists) == PURE_OK);
             keys[n++] = key;
         }
         for (size_t i = 0; i < 1000; ++i) { /* searched enough, at the slices' starts for the last kind */
@@ -1729,6 +1767,22 @@ static void packed_lists(void) {
             (void)pure_list_seek(packed, 0, (PureCell){.num = key}, &found);
         }
         CHECK(pure_list_settle(packed) && pure_list_packed(packed));
+        for (size_t i = 0; i < n; ++i) {
+            PureCell x = pure_list_get(packed, i, 1), y = pure_list_get(tree, i, 1);
+            CHECK(x.i64 == y.i64);
+        }
+        PureRun rp, rt;
+        size_t at = n / 3, read = 0;
+        CHECK(pure_list_run(packed, at, &rp) && pure_list_run(tree, at, &rt));
+        for (size_t ip = at, it = at; read < 500; ++read, ++ip, ++it) {
+            bool mp = true, mt = true;
+            while (mp && ip >= rp.start + rp.count) mp = pure_list_next(packed, &rp);
+            while (mt && it >= rt.start + rt.count) mt = pure_list_next(tree, &rt);
+            CHECK(mp == mt);
+            if (!mp) break;
+            CHECK(!memcmp(&rp.column[1].numbers[ip - rp.start], &rt.column[1].numbers[it - rt.start], sizeof(double)));
+        }
+        CHECK(stored_numbers_same(packed, tree));
         for (size_t i = 0; i < 20000; ++i) {
             uint32_t r = next_random(&seed);
             double a = keys[r % n], b = keys[(r / 7) % n];

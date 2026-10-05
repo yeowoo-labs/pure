@@ -44,6 +44,7 @@ typedef struct {
     uint8_t taken[16];
     unsigned depth;
     bool pathless;
+    double cells[16][32]; /* an array's narrow cells as numbers (docs/design/022) */
 } PureRun;
 
 /* A list holds up to PURE_LIST_ITEMS items, a run up to PURE_LIST_RUN. */
