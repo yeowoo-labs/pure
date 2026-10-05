@@ -1514,8 +1514,11 @@ bool pure_list_suits(PureList *list, unsigned needs, unsigned narrow) {
     if (needs & 2 && list->form != FLAT && !(list->form == DENSE && dense_keys(list) && list->full)) return false; /* by position */
     if (needs & 4 && !(list->form == DENSE && dense_keys(list) && list->full)) return false; /* a key its position */
     if (list->form != FLAT && list->form != DENSE) return false;
-    for (unsigned f = 0; f < list->layout.fields; ++f)
-        if (narrow >> f & 1 && list->width[f] != 1 && list->width[f] != 4) return false;
+    for (unsigned f = 0; f < list->layout.fields; ++f) { /* its cells of one byte widened to four: the tier's code reads four */
+        if (!(narrow >> f & 1)) continue;
+        if (list->width[f] == 1 && !widen(list, f, 4)) return false;
+        if (list->width[f] != 4) return false;
+    }
     return true;
 }
 
