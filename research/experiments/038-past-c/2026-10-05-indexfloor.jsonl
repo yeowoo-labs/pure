@@ -1,0 +1,10 @@
+{"per_bucket":8,"round":0,"index_ns_per_node":127.3,"c_ns_per_node":16.9,"same":1}
+{"per_bucket":8,"round":1,"index_ns_per_node":126.6,"c_ns_per_node":16.7,"same":1}
+{"per_bucket":8,"round":2,"index_ns_per_node":126.6,"c_ns_per_node":16.7,"same":1}
+{"per_bucket":8,"round":3,"index_ns_per_node":125.9,"c_ns_per_node":16.7,"same":1}
+{"per_bucket":8,"round":4,"index_ns_per_node":131.2,"c_ns_per_node":17.3,"same":1}
+{"per_bucket":32,"round":0,"index_ns_per_node":378.8,"c_ns_per_node":16.7,"same":1}
+{"per_bucket":32,"round":1,"index_ns_per_node":379.5,"c_ns_per_node":16.9,"same":1}
+{"per_bucket":32,"round":2,"index_ns_per_node":382.1,"c_ns_per_node":16.7,"same":1}
+{"per_bucket":32,"round":3,"index_ns_per_node":379.8,"c_ns_per_node":16.6,"same":1}
+{"per_bucket":32,"round":4,"index_ns_per_node":376.3,"c_ns_per_node":16.5,"same":1}
