@@ -292,6 +292,7 @@ typedef struct {
     uint32_t list;       /* a walk's */
     uint32_t writes;     /* the lists its block may change (every bit: any) */
     bool fast;           /* a walk whose list its block does not change: its place kept, its end once */
+    bool sliced;         /* a fast walk of a slice of a stored list (open_slice): the integers' code walks only those it opens */
     bool arena;          /* its block may leave bytes in the arena: given back each round */
     int at_kept, end_kept, k_kept, n_kept; /* its state's kept values */
     int nest;            /* the outermost loop around it (itself when none is) */
@@ -333,6 +334,10 @@ typedef struct {
     uint64_t entry;        /* what was kept as the instruction began: what it reads after holds nothing to write back */
 } Slow;
 
+/* item_has out of the fast way's line: a cell of eight bytes or one read as
+ * a key, and a key past the bits (absent; or no bits at all: the steps). */
+typedef struct { int other, absent, key, back, slow; uint8_t column, at, bits, r; } HasCold;
+
 /* A cell of eight bytes or one, read out of the line a four-byte one is read in
  * (in the integers' code, into an x register: eight bytes give it up, deopt). */
 typedef struct { int label, back; uint8_t result, column, at; int deopt; } Wide;
@@ -370,6 +375,8 @@ typedef struct {
     size_t wide_count, wide_room;
     Deopt *deopts;
     size_t deopt_count, deopt_room;
+    HasCold *colds;
+    size_t cold_count, cold_room;
     uint64_t ints;    /* the integers' code: the locals known to hold whole numbers (as their slots' numbers) */
     Kept kept[KEPT_MOST];
     unsigned kept_count;
@@ -455,10 +462,13 @@ static void kept_load(Block *k, unsigned c) {
         cmp_w_imm(e, X17, 0);
         csel(e, r, r, XZR, NE);
         break;
-    case C_LIMIT:
+    case C_LIMIT: /* none without bits: a key past them asks whether there are any (item_has, append_books) */
         load64(e, X16, X24, list_at);
         load64(e, r, X16, pure_list_layout[LIST_MEMBER_CAPACITY_AT]);
         lsl_imm(e, r, r, 6);
+        load8(e, X17, X16, pure_list_layout[LIST_BITMAP_AT]);
+        cmp_w_imm(e, X17, 0);
+        csel(e, r, r, XZR, NE);
         break;
     case C_COUNT:
         load64(e, X16, X24, list_at);
@@ -1370,11 +1380,10 @@ static void append_books(Block *k, const PureOp *op, uint32_t pc, unsigned heigh
         cmp_reg(e, at, X17);
         b_cond(e, HS, slow);
     } else {
-        cbz_x(e, bits, slow);
         at = value_key(k, base + key - 1u, X9, slow);
         if (at != X9) mov_reg(e, X9, at);
         at = X9;
-        cmp_reg(e, X9, limit); /* the bits reach it (small keys only) */
+        cmp_reg(e, X9, limit); /* the bits reach it (small keys only; none without bits) */
         b_cond(e, HS, slow);
         load64(e, X16, X24, list * sizeof(PureList *));
         load64(e, X17, X16, pure_list_layout[LIST_ROOM_AT]);
@@ -1492,6 +1501,17 @@ static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
     slow_back(k, s, V_MEM, 0);
 }
 
+/* Whether a column kept of list is there for certain at code in loop: in
+ * the integers' code, inside a walk of that list's slice opened in code (a
+ * packed list is FLAT; the step's walks of such slices it gives up to the
+ * executor, loop_open), whose block does not change the list. */
+static bool column_there(const Block *k, int loop, uint32_t list) {
+    if (!k->copy) return false;
+    for (int l = loop; l >= 0; l = k->loops[l].parent)
+        if (k->loops[l].sliced && k->loops[l].list == list) return true;
+    return false;
+}
+
 /* ITEM_GET of a number at pc and the HAS at pc + 1 that takes it, as one:
  * the cell read as a key (a four- or one-byte cell is one already; an
  * eight-byte one when whole) and found in the key bits, kept for the loop
@@ -1517,8 +1537,7 @@ static bool item_has(Block *k, uint32_t pc, unsigned height) {
     int slow = k->slows[s].label, other = new_label(e), key = new_label(e), absent = new_label(e), done = new_label(e),
         one = new_label(e);
     unsigned r = alloc_x(k, height), column = kept_reg(k, col_c), bits = kept_reg(k, bits_c), limit = kept_reg(k, limit_c);
-    cbz_x(e, column, slow);
-    cbz_x(e, bits, slow);
+    if (!column_there(k, loop, list)) cbz_x(e, column, slow);
     unsigned at = value_index(k, height - 1, X1);
     int walk = k->vs[height - 1].walk;
     if (walk < 0 || k->loops[walk].list != list) {
@@ -1526,32 +1545,47 @@ static bool item_has(Block *k, uint32_t pc, unsigned height) {
         cmp_reg(e, at, count);
         b_cond(e, HS, fault_at(k, PURE_FAULT_NOT_FOUND, pc));
     }
+    (void)one;
     tbz(e, column, 58, other);
     load32_index(e, X9, column, at);
     bind(e, key);
-    cmp_reg(e, X9, limit);
+    cmp_reg(e, X9, limit); /* past the bits (none: no bits at all): out of the line */
     b_cond(e, HS, absent);
     lsr_imm(e, X10, X9, 6);
     load64_index(e, X10, bits, X10);
     lsr_reg(e, r, X10, X9);
-    b(e, done);
-    bind(e, other); /* eight bytes: a key when whole; one byte: one */
-    tbz(e, column, 59, one);
-    load_d_index(e, D0, column, at);
-    fp2(e, FCVTZU_X, X9, D0);
-    fp2(e, UCVTF_X, D1, X9);
-    fcmp(e, D0, D1);
-    b_cond(e, EQ, key);
-    b(e, absent);
-    bind(e, one);
-    load8_index(e, X9, column, at);
-    b(e, key);
-    bind(e, absent);
-    mov_w(e, r, 0);
     bind(e, done);
+    if (!grow_array((void **)&k->colds, &k->cold_room, k->cold_count + 1, sizeof(*k->colds))) {
+        e->failed = true;
+        return true;
+    }
+    k->colds[k->cold_count++] = (HasCold){other, absent, key, done, slow, (uint8_t)column, (uint8_t)at, (uint8_t)bits, (uint8_t)r};
     k->vs[height - 1] = (Value){V_BIT, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
     slow_back(k, s, V_BIT, r);
     return true;
+}
+
+static void has_stubs(Block *k) {
+    Emit *e = k->e;
+    for (size_t i = 0; i < k->cold_count; ++i) {
+        const HasCold *c = &k->colds[i];
+        int one = new_label(e);
+        bind(e, c->other); /* eight bytes: a key when whole; one byte: one */
+        tbz(e, c->column, 59, one);
+        load_d_index(e, D0, c->column, c->at);
+        fp2(e, FCVTZU_X, X9, D0);
+        fp2(e, UCVTF_X, D1, X9);
+        fcmp(e, D0, D1);
+        b_cond(e, EQ, c->key);
+        b(e, c->absent);
+        bind(e, one);
+        load8_index(e, X9, c->column, c->at);
+        b(e, c->key);
+        bind(e, c->absent);
+        cbz_x(e, c->bits, c->slow);
+        mov_w(e, c->r, 0);
+        b(e, c->back);
+    }
 }
 
 static void loop_open(Block *k, uint32_t pc, unsigned height);
@@ -1719,10 +1753,11 @@ static void compile_op(Block *k, uint32_t pc) {
             lsl_imm(e, X1, X1, 6);
             bits = X0, limit = X1;
         }
-        cbz_x(e, bits, slow); /* no bits (a table, or none): the step */
+        if (bits_c < 0 || limit_c < 0) cbz_x(e, bits, slow); /* no bits (a table, or none): the step */
         key_bit(k, height - 1, bits, limit, absent, r);
         b(e, done);
         bind(e, absent);
+        if (bits_c >= 0 && limit_c >= 0) cbz_x(e, bits, slow); /* the keys kept reach none without bits */
         mov_w(e, r, 0);
         bind(e, done);
         vs[height - 1] = (Value){V_BIT, (uint8_t)r, 0, false, false, -1, 0, -1, false, 0};
@@ -1794,7 +1829,7 @@ static void compile_op(Block *k, uint32_t pc) {
         if (col_c >= 0) {
             unsigned column = kept_reg(k, col_c);
             k->slows[s].tree_list = (int)list, k->slows[s].tree_field = field;
-            cbz_x(e, column, slow);
+            if (!column_there(k, loop, list)) cbz_x(e, column, slow);
             unsigned at = value_index(k, height - 1, X9), count;
             int walk = vs[height - 1].walk;
             if (walk < 0 || k->loops[walk].list != list) { /* else its place is below its end, which is at most the count */
@@ -2132,6 +2167,10 @@ static void loop_open(Block *k, uint32_t pc, unsigned height) {
     b(e, AFTER(k, l));
     k->fresh = 0;
     bind(e, open);
+    if (k->copy && l->sliced) { /* the integers' code walks only the slices it opens: the executor walks this one */
+        b(e, deopt_at(k, l->start, l->base));
+        return;
+    }
     enter_body(k, (unsigned)k->opens[pc - k->block.start]);
 }
 
@@ -2190,13 +2229,17 @@ static void iteration(Block *k, LoopAt *l, unsigned li) {
         /* its work counts each time round: its block and the LOOP, past the budget a fault at the LOOP */
         uint64_t cost = (uint64_t)(l->end - l->start) + 1;
         int work_c = kept_find(k, (int)li, C_WORK, 0, 0);
-        if (work_c >= 0 && cost < 4096) { /* what the event may still do, kept */
+        if (work_c >= 0) { /* what the event may still do, kept */
             unsigned left = kept_reg(k, work_c);
-            cmp_imm(e, left, (uint32_t)cost);
+            if (cost < 4096) cmp_imm(e, left, (uint32_t)cost);
+            else {
+                mov_imm(e, X0, cost);
+                cmp_reg(e, left, X0);
+            }
             b_cond(e, LO, fault_at(k, PURE_FAULT_WORK, l->at));
-            sub_imm(e, left, left, (uint32_t)cost);
+            if (cost < 4096) sub_imm(e, left, left, (uint32_t)cost);
+            else sub_reg(e, left, left, X0);
         } else {
-            if (work_c >= 0) books_back(k, UINT64_C(1) << work_c), k->fresh &= ~(UINT64_C(1) << work_c);
             int budgeted = new_label(e);
             load64(e, X10, X23, offsetof(PureApp, work_budget));
             cbnz_x(e, X10, budgeted);
@@ -2781,6 +2824,7 @@ static bool shape_block(Block *k) {
             if (op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP) l->stores |= UINT64_C(1) << (op->arg & 0x3F);
         }
         l->fast = l->walk && !(l->writes >> (l->list & 31) & 1);
+        l->sliced = l->fast && m->code[l->at].arg & PURE_EACH_SLICED && !event_list(m, l->list) && l->start < l->end;
     }
     for (uint32_t i = 0; i <= n; ++i) k->labels[0][i] = new_label(k->e), k->labels[1][i] = new_label(k->e);
     k->exit = new_label(k->e);
@@ -2878,6 +2922,7 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
         fault_stubs(k);
         slow_stubs(k);
         wide_stubs(k);
+        has_stubs(k);
         deopt_stubs(k);
     }
     ok = ok && !e->failed;
@@ -2892,6 +2937,7 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
     free(k->slows);
     free(k->wides);
     free(k->deopts);
+    free(k->colds);
     free(k->aheads);
     free(k);
     return ok;
