@@ -92,6 +92,15 @@ struct PureList {
     uint8_t form;
     bool arrays;       /* it may be FLAT or DENSE: an event's list */
     uint8_t flattened; /* DENSE made FLAT since it was cleared: twice, and it stays FLAT or a tree */
+    /* A DENSE list's keys as last counted (dense_keys, docs/design/023):
+     * whether they are every number below its count (full: a key is its
+     * position), else the keys below each word of its bits (ranks); for the
+     * keys it had when keys_seen was keys_token (its key count, and removes:
+     * keys taken out or the bits begun again, so a token never comes back). */
+    uint64_t removes, keys_seen;
+    bool full;
+    uint32_t *ranks;
+    size_t ranks_room;
     void *columns[16]; /* each field's cells */
     uint8_t width[16]; /* the bytes of a cell in each: array_width */
     size_t room;       /* the rows the columns hold: FLAT items, DENSE keys */
@@ -177,6 +186,7 @@ static size_t member_slot(uint64_t bits, size_t mask) {
 
 /* The set given up (memory ran out growing it): the list is searched without it. */
 static void members_drop(PureList *list) {
+    ++list->removes;
     free(list->members);
     list->members = NULL;
     list->member_capacity = list->member_count = 0;
@@ -184,6 +194,7 @@ static void members_drop(PureList *list) {
 
 /* A new set, empty, as bits. */
 static bool members_start(PureList *list) {
+    ++list->removes;
     list->members = calloc(1, sizeof(*list->members));
     list->member_capacity = list->members ? 1 : 0;
     list->member_count = 0;
@@ -204,6 +215,7 @@ static bool members_table(PureList *list, size_t capacity) {
     size_t was = list->member_capacity;
     bool bits = list->bitmap;
     for (size_t i = 0; i < capacity; ++i) table[i] = VACANT;
+    ++list->removes;
     list->members = table, list->member_capacity = capacity, list->member_count = 0, list->bitmap = false;
     for (size_t i = 0; i < was; ++i) {
         if (!bits) { if (old[i] != VACANT) member_put(list, old[i]); continue; }
@@ -240,6 +252,7 @@ static void member_add(PureList *list, double key) {
 /* A key out of the set; in a table the keys after it in its run moved back (no gap left behind them). */
 static void member_remove(PureList *list, double key) {
     if (!list->members) return;
+    ++list->removes;
     if (list->bitmap) {
         if (!small_key(key) || (size_t)key / 64 >= list->member_capacity) return;
         uint64_t *word = &list->members[(size_t)key / 64], mask = UINT64_C(1) << ((size_t)key % 64);
@@ -1004,7 +1017,65 @@ static void arrays_free(PureList *list) {
 }
 
 /* A DENSE list's i-th key's slot, counted along its bits (no memory needed). */
+static uint64_t keys_token(const PureList *list) { return (uint64_t)list->member_count + (list->removes << 40) + 1; }
+
+/* A DENSE list's keys counted again when they changed since: full, else its
+ * ranks; false without memory (then they are counted along the bits). */
+static bool dense_keys(PureList *list) {
+    uint64_t token = keys_token(list);
+    if (list->keys_seen == token) return true;
+    size_t n = list->member_count, words = n / 64;
+    bool full = n <= list->member_capacity * 64;
+    for (size_t w = 0; full && w < words; ++w) full = list->members[w] == UINT64_MAX;
+    if (full && n % 64) full = (~list->members[words] & ((UINT64_C(1) << (n % 64)) - 1)) == 0;
+    if (!full) {
+        if (list->ranks_room < list->member_capacity + 1) {
+            uint32_t *grown = realloc(list->ranks, (list->member_capacity + 1) * sizeof(*grown));
+            if (!grown) return false;
+            list->ranks = grown, list->ranks_room = list->member_capacity + 1;
+        }
+        uint32_t below = 0;
+        for (size_t w = 0; w < list->member_capacity; ++w) list->ranks[w] = below, below += (uint32_t)__builtin_popcountll(list->members[w]);
+        list->ranks[list->member_capacity] = below;
+    }
+    list->full = full;
+    list->keys_seen = token;
+    return true;
+}
+
+/* The keys of a DENSE list below limit: where an item at limit would be. */
+static size_t dense_rank(PureList *list, size_t limit) {
+    if (dense_keys(list)) {
+        if (list->full) return limit < list->count ? limit : list->count;
+        size_t w = limit / 64;
+        if (w >= list->member_capacity) return list->count;
+        return list->ranks[w] + (size_t)__builtin_popcountll(list->members[w] & ((UINT64_C(1) << (limit % 64)) - 1));
+    }
+    size_t below = 0; /* without memory: counted along its bits */
+    for (size_t w = 0; w < list->member_capacity && w * 64 < limit; ++w) {
+        uint64_t word = list->members[w];
+        if ((w + 1) * 64 > limit) word &= (UINT64_C(1) << (limit - w * 64)) - 1;
+        below += (size_t)__builtin_popcountll(word);
+    }
+    return below;
+}
+
+/* The key (its slot) of a DENSE list's item i, or SIZE_MAX past them. */
 static size_t dense_slot(const PureList *list, size_t i) {
+    PureList *counted = (PureList *)list; /* its counts are kept as it is read */
+    if (i >= list->count) return SIZE_MAX;
+    if (dense_keys(counted)) {
+        if (list->full) return i;
+        size_t low = 0, high = list->member_capacity - 1; /* the first word whose keys reach past i */
+        while (low < high) {
+            size_t middle = low + (high - low) / 2;
+            if (list->ranks[middle + 1] > i) high = middle;
+            else low = middle + 1;
+        }
+        uint64_t word = list->members[low];
+        for (size_t skip = i - list->ranks[low]; skip; --skip) word &= word - 1;
+        return low * 64 + (size_t)__builtin_ctzll(word);
+    }
     for (size_t w = 0; w < list->member_capacity; ++w) {
         size_t bits = (size_t)__builtin_popcountll(list->members[w]);
         if (i < bits) {
@@ -1394,6 +1465,7 @@ void pure_list_free(PureList *list) {
         arrays_free(list);
         free(list->journal);
         free(list->members);
+        free(list->ranks);
         let_go_tree(list, list->root);
         for (unsigned kind = 0; kind < 2; ++kind) {
             while (list->spares[kind]) free(list->spare[kind][--list->spares[kind]]);
@@ -1427,6 +1499,7 @@ void pure_list_clear(PureList *list) {
     if (list->bitmap && list->member_capacity <= BITMAP_KEPT) { /* small bits are kept for the next event */
         memset(list->members, 0, list->member_capacity * sizeof(*list->members));
         list->member_count = 0;
+        ++list->removes;
         return;
     }
     members_drop(list); /* else bits again, from few */
@@ -1952,7 +2025,8 @@ PureResult pure_list_add(PureList *list, const PureCell *cells, PureUndo *undo, 
                 if (at) *at = low;
                 return *exists = true, PURE_OK;
             }
-            if (low < n && !at && n >= FLAT_SMALL && make_dense(list, key)) return pure_list_add(list, cells, undo, at, exists);
+            if (!at && n >= FLAT_SMALL && (low < n || !list->flattened) && make_dense(list, key)) /* small keys: DENSE (in order too, 023) */
+                return pure_list_add(list, cells, undo, at, exists);
             if (low < n && !flat_moves(list, low) && !make_tree(list)) return PURE_ALLOCATION;
             if (list->form == FLAT) {
                 if (at) *at = low;
@@ -2059,14 +2133,17 @@ PureResult pure_list_remove(PureList *list, size_t at, PureUndo *undo) {
 PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell value, PureUndo *undo) {
     const Layout *l = &list->layout;
     if (at >= list->count) return PURE_NOT_FOUND;
-    if (!logged(list, undo) || !positioned(list)) return PURE_ALLOCATION;
-    if (list->form == FLAT) {
-        PureCell copy, old = array_cell(list, at, field);
+    if (!logged(list, undo)) return PURE_ALLOCATION;
+    size_t row = at; /* a DENSE list's item at its slot, unless its key changes (then FLAT, in order) */
+    if (list->form == DENSE && (int)field != l->key) row = dense_slot(list, at);
+    else if (!positioned(list)) return PURE_ALLOCATION;
+    if (list->form != TREE) {
+        PureCell copy, old = array_cell(list, row, field);
         uint8_t need = narrows(l->kinds[field]) && (list->width[field] == 1 || list->width[field] == 4) ? width_of(value.num) : 0;
         if (need > list->width[field] && !widen(list, field, need)) return PURE_ALLOCATION;
         if (!own_cell(list, field, value, &copy)) return PURE_ALLOCATION;
         list->bytes += cell_bytes(l, field, copy) - cell_bytes(l, field, old);
-        array_put(list, at, field, copy);
+        array_put(list, row, field, copy);
         let_go_text(list, old.text);
         if ((int)field == l->key && list->members) member_remove(list, old.num), member_add(list, copy.num);
         ++list->version;
@@ -2116,7 +2193,7 @@ PureResult pure_list_set(PureList *list, size_t at, unsigned field, PureCell val
 
 PureCell pure_list_get(const PureList *list, size_t at, unsigned field) {
     if (list->form != TREE) { /* a DENSE list by position: FLAT from now, or counted along its bits without memory */
-        if (list->form == DENSE && !positioned((PureList *)list)) return array_cell(list, dense_slot(list, at), field);
+        if (list->form == DENSE) return array_cell(list, dense_slot(list, at), field); /* at its slot (dense_slot) */
         if (list->form == FLAT) return array_cell(list, at, field);
     }
     size_t within;
@@ -2136,9 +2213,14 @@ static void open_run(const Layout *l, const Node *leaf, PureRun *run) {
  * DENSE one's (made FLAT without memory) its item at alone. */
 static void open_array_run(const PureList *list, size_t at, PureRun *run) {
     const Layout *l = &list->layout;
-    size_t row = list->form == DENSE ? dense_slot(list, at) : at;
+    size_t row = list->form == DENSE ? dense_slot(list, at) : at, most = list->count - at < PURE_LIST_RUN ? list->count - at : PURE_LIST_RUN;
     run->start = at;
-    run->count = list->form == DENSE ? 1 : (unsigned)(list->count - at < PURE_LIST_RUN ? list->count - at : PURE_LIST_RUN);
+    if (list->form == DENSE && !(list->keys_seen == keys_token(list) && list->full)) { /* the items whose keys follow each other from its slot */
+        size_t n = 1;
+        while (n < most && list->members[(row + n) / 64] >> ((row + n) % 64) & 1) ++n;
+        most = n;
+    }
+    run->count = (unsigned)most;
     run->depth = 0;
     run->pathless = false;
     for (unsigned f = 0; f < l->fields; ++f)
@@ -2154,8 +2236,7 @@ static void open_array_run(const PureList *list, size_t at, PureRun *run) {
 bool pure_list_run(const PureList *list, size_t at, PureRun *run) {
     if (at >= list->count) return false;
     if (list->form != TREE) {
-        if (list->form == DENSE) (void)positioned((PureList *)list);
-        if (list->form != TREE) {
+        {
             open_array_run(list, at, run);
             return true;
         }
@@ -2254,16 +2335,12 @@ size_t pure_list_seek(const PureList *list, unsigned field, PureCell key, bool *
     const Layout *l = &list->layout;
     *found = false;
     if (!list->count) return 0;
-    if (list->form == DENSE && !positioned((PureList *)list) && (int)field == l->key) { /* counted along its bits */
-        size_t below = 0, all = list->member_capacity * 64; /* the keys below key: whole numbers below its ceiling */
+    if (list->form == DENSE && (int)field != l->key) (void)positioned((PureList *)list); /* another field: in order */
+    if (list->form == DENSE) { /* the keys below key (whole numbers below its ceiling), counted (dense_rank) */
+        size_t all = list->member_capacity * 64;
         size_t limit = key.num <= 0 ? 0 : key.num >= (double)all ? all : (size_t)ceil(key.num);
-        for (size_t w = 0; w < list->member_capacity && w * 64 < limit; ++w) {
-            uint64_t word = list->members[w];
-            if ((w + 1) * 64 > limit) word &= (UINT64_C(1) << (limit - w * 64)) - 1;
-            below += (size_t)__builtin_popcountll(word);
-        }
         pure_list_contains(list, key.num, found);
-        return below;
+        return dense_rank((PureList *)list, limit);
     }
     if (list->form == FLAT) {
         size_t low = 0, high = list->count;
