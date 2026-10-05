@@ -1079,6 +1079,80 @@ on go {
 """
 
 
+# The tier where its first checks missed (module_tier's seeds 17 and 23): a
+# value in a loop made of a phi where an if's ways meet in it (MERGES_SOURCE:
+# taken as made outside the loop, it was made once for every round), and the
+# outermost loop's round past the work budget (BUDGET_SOURCE: given up at the
+# loop's instruction, with nothing on the stack, rather than its iteration).
+MERGES_SOURCE = """record Cell {
+  at = 0
+  v = 0
+}
+state out = 0
+state acc = 0
+input go = message {
+  n: u32
+  m: u32
+  q: u32
+}
+on go {
+  let t: list of Cell by at
+  let f: list of Cell
+  for i in 0 .. go.n {
+    t.add(Cell { at: i, v: i })
+    f.append(Cell { at: i * 2, v: i })
+  }
+  let s = 0
+  let u = 1
+  for i in 0 .. go.m {
+    for j in 0 .. go.n {
+      if t.has(go.q) {
+        acc = acc + u
+      }
+      for c in f {
+        if go.m != u {
+          s = s + (floor(go.n / 7) - max(u, go.m))
+        }
+        t[3].v = 1000
+      }
+      acc = acc + (go.n + go.m)
+    }
+    t[3].v = ((255 - s) + (1000 - 1000))
+  }
+  out = s
+  acc = acc + u
+}
+"""
+
+BUDGET_SOURCE = """record Cell {
+  at = 0
+  v = 0
+}
+state out = 0
+state acc = 0
+input go = message {
+  n: u32
+  m: u32
+  q: u32
+}
+on go {
+  let t: list of Cell by at
+  let f: list of Cell
+  for i in 0 .. go.n {
+    t.add(Cell { at: i, v: i })
+    f.append(Cell { at: i * 2, v: i })
+  }
+  let s = 0
+  let u = 1
+  for i in 0 .. go.m {
+    if !(go.q != s) { break }
+    t[3].v = (t[floor(go.n / 2)].v + (go.m + go.n))
+  }
+  out = s
+  acc = acc + u
+}
+"""
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -1107,6 +1181,15 @@ def module_assumptions(aup, pure, work):
             outputs[jit] = done.stdout
         assert outputs['all'] == outputs['0'], next((a, b) for a, b in zip(outputs['all'].splitlines(), outputs['0'].splitlines()) if a != b)
         assert all(json.loads(line)['fault'] == 'none' for line in outputs['0'].splitlines())
+    messages = ''.join(f'message go {struct.pack("<III", n, m, q).hex()}\nwork\n' for n, m, q in ((70, 40, 3), (130, 25, 2)))
+    for name, text in (('merges', MERGES_SOURCE), ('budget', BUDGET_SOURCE)):  # the tier's, as the executor: states, faults, work
+        source, program = work / f'{name}.aup', work / f'{name}.pmod'
+        source.write_text(text)
+        compile_module(aup, source, program)
+        outputs = {jit: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=messages + 'budget 1201\n' + messages,
+                                       capture_output=True, text=True, timeout=120, env=dict(os.environ, PURE_JIT=jit)).stdout
+                   for jit in ('all', '0')}
+        assert outputs['all'] == outputs['0'], (name, next((a, b) for a, b in zip(outputs['all'].splitlines(), outputs['0'].splitlines()) if a != b))
     return len(runs)
 
 
@@ -1200,7 +1283,8 @@ def module_tier(aup, pure, work, programs=150):
     (tier_program) whose loops the tier runs where it can, each run on a few
     messages by the executor alone (PURE_JIT=0), with the compiled code
     (PURE_JIT=1, all) and without the tier (PURE_TIER=0): the same states,
-    faults and errors, byte for byte. Their failures (keys not there, not
+    faults, errors and work, byte for byte, with the default work budget
+    and a few small ones (where each runs out). Their failures (keys not there, not
     whole, 0 divided by, cells past their columns' widths, a list not yet
     DENSE) are where the tier gives up to the executor."""
     import os
@@ -1208,7 +1292,8 @@ def module_tier(aup, pure, work, programs=150):
     import struct
     rng = random.Random(23)
     runs = [(0, 0, 0), (5, 3, 1), (70, 40, 3), (130, 25, 2), (300, 7, 299), (70, 70, 64)]
-    commands = ''.join(f'message go {struct.pack("<III", n, m, q).hex()}\n' for n, m, q in runs)
+    messages = ''.join(f'message go {struct.pack("<III", n, m, q).hex()}\nwork\n' for n, m, q in runs)
+    commands = messages + ''.join(f'budget {b}\n' + messages for b in (61, 389, 1201, 4099)) + 'budget 0\n' + messages
     checked = failed = 0
     for i in range(programs):
         source, module = work / f'tier-{i}.aup', work / f'tier-{i}.pmod'
@@ -1228,7 +1313,7 @@ def module_tier(aup, pure, work, programs=150):
             assert outputs[name] == outputs['0'], (i, name, source.read_text(),
                                                    next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['0'].splitlines()) if a != b))
         checked += 1
-        failed += sum(json.loads(line)['fault'] != 'none' for line in outputs['0'].splitlines() if line.startswith('{'))
+        failed += sum(json.loads(line).get('fault', 'none') != 'none' for line in outputs['0'].splitlines() if line.startswith('{'))
     assert checked >= programs // 2, checked
     return {'programs': checked, 'failed_events': failed}
 

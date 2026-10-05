@@ -196,7 +196,13 @@ int main(int argc, char **argv) {
             else active = !active;
         } else if (!strcmp(command, "save")) {
             if (pure_app_save(&app) != PURE_OK) failure = "save failed";
-        } else if (strcmp(command, "show")) failure = "unknown command";
+        } else if (!strcmp(command, "budget")) { /* the work each event may do (0: the default) */
+            char *end;
+            unsigned long long budget = strtoull(argument, &end, 10);
+            if (!*argument || *end) failure = "budget";
+            else pure_app_work(&app, budget);
+        } else if (!strcmp(command, "work")) printf("{\"work\":%llu}\n", (unsigned long long)app.work); /* the last event's */
+        else if (strcmp(command, "show")) failure = "unknown command";
         if (batch && strcmp(command, "show") && ++unsaved == batch) {
             unsaved = 0;
             if (pure_app_save(&app) != PURE_OK) failure = "save failed";
