@@ -1,6 +1,6 @@
 # 024 — 묶음 실행기: 기계어 없이 루프를 C 가까이
 
-작성일: 2026-10-05. 상태: 제안과 시제품([041](../../research/experiments/041-batches/)). 1단계를 만들었다([126](../research/126-batch-executor-stage-one.md): knapsack이 실행기에서 1,041 ms → 13.6 ms, 안쪽 루프는 계층의 1.17배로 기준 미달).
+작성일: 2026-10-05. 상태: 제안과 시제품([041](../../research/experiments/041-batches/)). 1단계를 만들었다([126](../research/126-batch-executor-stage-one.md): knapsack이 실행기에서 1,041 ms → 13.6 ms, 안쪽 루프는 계층의 1.17배로 기준 미달). 2단계(중첩 루프를 함께, 모으기)를 만들었다([127](../research/127-batch-executor-stage-two.md): roots 9.13 ms로 계층 9.57보다 빠름, matmul 50 ms).
 
 [023](023-optimizing-tier.md)의 계층은 루프 묶음을 SSA로 올려 AArch64 기계어를 실행 시간에 만든다. 일곱 가지 일의 기하 평균을
 C의 3–300배에서 1.92배로 줄였지만([125](../research/125-tier-first-steps.md)), 실행 가능한 메모리에 코드를 쓰고 리눅스 AArch64에서만
