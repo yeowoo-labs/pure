@@ -1404,6 +1404,89 @@ static double some_number(unsigned event, uint32_t r) {
     }
 }
 
+/* An item into a list keyed by its text field 0, as the executor does: added at once (HASHED), else found and inserted. */
+static PureResult text_add(PureList *list, const PureCell *cells, bool *exists) {
+    PureResult result = pure_list_add(list, cells, NULL, NULL, exists);
+    if (result != PURE_INVALID) return result;
+    size_t at = pure_list_seek(list, 0, cells[0], exists);
+    return *exists ? PURE_OK : pure_list_insert(list, at, cells, NULL);
+}
+
+/* An event's list keyed by a text (HASHED by its texts' hashes, docs/design
+ * 023) against a tree keyed so: adds, has, a field by key, a set where its
+ * key was found, positions, runs, removes, and the event's end. */
+static void text_keys_equivalence(void) {
+    static const uint8_t fields[3] = {PURE_CELL_TEXT, PURE_CELL_NUMBER, PURE_CELL_TEXT};
+    uint32_t seed = 0x74657874u;
+    size_t hashed = 0, steps = 0;
+    PureList *a = pure_list_new(3, fields), *t = pure_list_new(3, fields);
+    CHECK(a && t && pure_list_keyed(a, 0) == PURE_OK && pure_list_keyed(t, 0) == PURE_OK && pure_list_arrays(a));
+    for (unsigned event = 0; event < 120; ++event) {
+        unsigned changes = 20 + next_random(&seed) % (event % 5 == 0 ? 3000 : 300), words = 1 + next_random(&seed) % 2000;
+        for (unsigned c = 0; c < changes; ++c, ++steps) {
+            uint32_t r = next_random(&seed);
+            char key[24], other[16];
+            size_t size = (size_t)snprintf(key, sizeof(key), r % 7 ? "w%u" : "%u-word", (r >> 3) % words);
+            size_t other_size = (size_t)snprintf(other, sizeof(other), "o%u", r % 97);
+            PureCell cells[3] = {{.text = (unsigned char *)key, .size = size}, {.num = (double)(r % 1000)},
+                                 {.text = (unsigned char *)other, .size = r % 5 ? other_size : 0}};
+            size_t n = pure_list_count(t);
+            unsigned op = next_random(&seed) % (event % 4 == 1 ? 10 : 16); /* some events by key alone: HASHED stays */
+            if (op < 5) {
+                bool ea, et;
+                CHECK(text_add(a, cells, &ea) == PURE_OK && text_add(t, cells, &et) == PURE_OK && ea == et);
+            } else if (op < 8) { /* has, and fields by key */
+                bool ha, ht, fa, ft;
+                PureCell ca, ct;
+                if (!pure_list_contains_text(a, cells[0], &ha)) (void)pure_list_seek(a, 0, cells[0], &ha);
+                (void)pure_list_seek(t, 0, cells[0], &ht);
+                CHECK(ha == ht);
+                fa = pure_list_lookup(a, 0, cells[0], 1, &ca);
+                ft = pure_list_lookup(t, 0, cells[0], 1, &ct);
+                CHECK(fa == ft && fa == ht && (!fa || ca.i64 == ct.i64));
+                fa = pure_list_lookup(a, 0, cells[0], 2, &ca);
+                ft = pure_list_lookup(t, 0, cells[0], 2, &ct);
+                CHECK(fa == ft && (!fa || (ca.size == ct.size && (!ca.size || !memcmp(ca.text, ct.text, ca.size)))));
+            } else if (op < 10) { /* set where its key was found (a slot, in a HASHED list) */
+                bool fa, ft;
+                size_t ra = pure_list_find_row(a, 0, cells[0], &fa), rt = pure_list_seek(t, 0, cells[0], &ft);
+                CHECK(fa == ft);
+                if (fa) {
+                    unsigned field = r % 2 ? 1 : 2;
+                    CHECK(pure_list_set_row(a, ra, field, cells[field], NULL) == PURE_OK &&
+                          pure_list_set(t, rt, field, cells[field], NULL) == PURE_OK);
+                }
+            } else if (op < 12 && n) { /* by position: in order now */
+                size_t at = next_random(&seed) % n;
+                PureCell x = pure_list_get(a, at, 0), y = pure_list_get(t, at, 0), w = pure_list_get(a, at, 1), z = pure_list_get(t, at, 1);
+                CHECK(x.size == y.size && !memcmp(x.text, y.text, x.size) && w.i64 == z.i64);
+            } else if (op < 14 && n) { /* a run from somewhere */
+                size_t at = next_random(&seed) % n;
+                PureRun ra, rt;
+                CHECK(pure_list_run(a, at, &ra) && pure_list_run(t, at, &rt));
+                PureSpan sa = ra.column[0].texts[at - ra.start], st = rt.column[0].texts[at - rt.start];
+                CHECK(sa.size == st.size && (!sa.size || !memcmp(sa.data, st.data, sa.size)));
+            } else if (op < 16 && n) { /* remove */
+                size_t at = next_random(&seed) % n;
+                CHECK(pure_list_remove(a, at, NULL) == PURE_OK && pure_list_remove(t, at, NULL) == PURE_OK);
+            }
+            hashed += pure_list_form(a) == 3;
+        }
+        CHECK(pure_list_count(a) == pure_list_count(t) && pure_list_size(a) == pure_list_size(t));
+        for (size_t i = 0; i < pure_list_count(t); i += 1 + i / 64)
+            for (unsigned f = 0; f < 3; ++f) {
+                PureCell x = pure_list_get(a, i, f), y = pure_list_get(t, i, f);
+                CHECK(f == 1 ? x.i64 == y.i64 : x.size == y.size && (!x.size || !memcmp(x.text, y.text, x.size)));
+            }
+        pure_list_clear(a);
+        pure_list_clear(t);
+    }
+    pure_list_free(a);
+    pure_list_free(t);
+    CHECK(hashed > 10000);
+    printf("{\"text_keys\":{\"steps\":%zu,\"hashed\":%zu}}\n", steps, hashed);
+}
+
 static void arrays_equivalence(void) {
     static const uint8_t fields[3] = {PURE_CELL_NUMBER, PURE_CELL_TEXT, PURE_CELL_NUMBER};
     uint32_t seed = 0x61727261u;
@@ -6280,6 +6363,7 @@ int main(void) {
     list_trees();
     key_sets();
     keyed_journal();
+    text_keys_equivalence();
     arrays_equivalence();
     packed_lists();
     folds();

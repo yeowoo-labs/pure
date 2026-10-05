@@ -116,6 +116,7 @@ struct PureList {
     bool full;
     uint32_t *ranks;
     size_t ranks_room;
+    int text_key;      /* the text field it is keyed by (its layout's key -1), or -1: HASHED by its texts' hashes (023) */
 };
 
 /* The log of an event's changes: a removed item's cells wait in the log's
@@ -1182,6 +1183,20 @@ static bool make_flat(PureList *list) {
     return true;
 }
 
+static int order(const Layout *l, unsigned field, PureCell a, PureCell b);
+
+/* The field a HASHED list is keyed by: its text key, else its number key. */
+static int hashed_field(const PureList *list) { return list->text_key >= 0 ? list->text_key : list->layout.key; }
+
+/* A key's bits in a HASHED list's table: a number's (key_bits), or its
+ * text's hash (FNV-1a over its bytes; never VACANT). */
+static uint64_t cell_bits(const PureList *list, PureCell key) {
+    if (list->text_key < 0) return key_bits(key.num);
+    uint64_t h = UINT64_C(0xcbf29ce484222325);
+    for (size_t i = 0; i < key.size; ++i) h = (h ^ key.text[i]) * UINT64_C(0x100000001b3);
+    return h == VACANT ? h ^ 2 : h;
+}
+
 /* Cell from of a column of cells w bytes wide copied to cell to of another. */
 static inline void cell_copy(void *to_column, size_t to, const void *from_column, size_t from, size_t w) {
     char *t = (char *)to_column + to * w;
@@ -1194,13 +1209,17 @@ static inline void cell_copy(void *to_column, size_t to, const void *from_column
     }
 }
 
-/* A HASHED list's slot of key (its cells there), or SIZE_MAX. */
-static size_t hashed_slot(const PureList *list, double key) {
-    uint64_t bits = key_bits(key);
+/* A HASHED list's slot of key (its cells there; a text's where its bytes are the key's too), or SIZE_MAX. */
+static size_t hashed_slot(const PureList *list, PureCell key) {
+    uint64_t bits = cell_bits(list, key);
     size_t mask = list->member_capacity - 1;
     for (size_t at = member_slot(bits, mask);; at = (at + 1) & mask) {
-        if (list->members[at] == bits) return at;
-        if (list->members[at] == VACANT) return SIZE_MAX;
+        if (list->members[at] == bits) {
+            if (list->text_key < 0) return at;
+            PureCell there = array_cell(list, at, (unsigned)list->text_key);
+            if (there.size == key.size && (!key.size || !memcmp(there.text, key.text, key.size))) return at;
+        } else if (list->members[at] == VACANT)
+            return SIZE_MAX;
     }
 }
 
@@ -1221,11 +1240,10 @@ static bool hashed_table(PureList *list, size_t capacity) {
     }
     for (size_t i = 0; i < capacity; ++i) table[i] = VACANT;
     bool hashed = list->form == HASHED;
-    const double *keys = list->columns[l->key];
     size_t mask = capacity - 1, rows = hashed ? list->member_capacity : list->count;
     for (size_t row = 0; row < rows; ++row) {
         if (hashed && list->members[row] == VACANT) continue;
-        uint64_t bits = hashed ? list->members[row] : key_bits(keys[row]);
+        uint64_t bits = hashed ? list->members[row] : cell_bits(list, array_cell(list, row, (unsigned)hashed_field(list)));
         size_t at = member_slot(bits, mask);
         while (table[at] != VACANT) at = (at + 1) & mask;
         table[at] = bits;
@@ -1246,7 +1264,7 @@ static bool hashed_table(PureList *list, size_t capacity) {
  * not be (made FLAT twice since it was cleared, or packed) or without
  * memory: it stays FLAT. */
 static bool make_hashed(PureList *list) {
-    if (list->layout.key < 0 || list->pack || list->flattened >= 2) return false;
+    if (hashed_field(list) < 0 || list->pack || list->flattened >= 2) return false;
     size_t capacity = 16;
     while (capacity < 2 * (list->count + 1)) capacity *= 2;
     if (!hashed_table(list, capacity)) return false;
@@ -1261,12 +1279,11 @@ static bool hashed_large(const PureList *list) {
     return 2 * (list->count + 1) > list->member_capacity && 2 * list->member_capacity * row_width(&list->layout) > ARRAYS_LARGE;
 }
 
-/* An item (its cells the list's own, its key not there) into a HASHED
- * list at its key's slot; false without memory (as it was). */
-static bool hashed_add(PureList *list, const PureCell *item) {
+/* An item (its cells the list's own, its key not there, its bits those)
+ * into a HASHED list at its key's slot; false without memory (as it was). */
+static bool hashed_add(PureList *list, const PureCell *item, uint64_t bits) {
     const Layout *l = &list->layout;
     if (2 * (list->count + 1) > list->member_capacity && !hashed_table(list, 2 * list->member_capacity)) return false;
-    uint64_t bits = key_bits(item[l->key].num);
     size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
     while (list->members[at] != VACANT) at = (at + 1) & mask;
     list->members[at] = bits;
@@ -1298,9 +1315,30 @@ static bool make_ordered(PureList *list) {
     }
     for (size_t slot = 0, i = 0; slot < list->member_capacity; ++slot) {
         uint64_t bits = list->members[slot];
-        if (bits != VACANT) a[i++] = (Ordered){bits >> 63 ? ~bits : bits | UINT64_C(1) << 63, (uint32_t)slot};
+        if (bits == VACANT) continue;
+        if (list->text_key >= 0) { /* a text's first eight bytes, as a number in their order (past its end, 0) */
+            PureCell text = array_cell(list, slot, (unsigned)list->text_key);
+            bits = 0;
+            for (size_t c = 0; c < 8; ++c) bits = bits << 8 | (c < text.size ? text.text[c] : 0);
+            a[i++] = (Ordered){bits, (uint32_t)slot};
+        } else
+            a[i++] = (Ordered){bits >> 63 ? ~bits : bits | UINT64_C(1) << 63, (uint32_t)slot};
     }
-    for (unsigned shift = 0; n && shift < 64; shift += 8) {
+    for (size_t width = 1; list->text_key >= 0 && width < n; width *= 2) { /* texts: merged in order (their first bytes, then all), a run's width doubling */
+        for (size_t low = 0; low < n; low += 2 * width) {
+            size_t middle = low + width < n ? low + width : n, high = low + 2 * width < n ? low + 2 * width : n, i = low, j = middle, k = low;
+            while (i < middle && j < high)
+                b[k++] = (a[j].key != a[i].key ? a[j].key < a[i].key
+                                               : order(l, (unsigned)list->text_key, array_cell(list, a[j].slot, (unsigned)list->text_key),
+                                                       array_cell(list, a[i].slot, (unsigned)list->text_key)) < 0)
+                             ? a[j++] : a[i++];
+            while (i < middle) b[k++] = a[i++];
+            while (j < high) b[k++] = a[j++];
+        }
+        Ordered *t = a;
+        a = b, b = t;
+    }
+    for (unsigned shift = 0; list->text_key < 0 && n && shift < 64; shift += 8) {
         size_t counts[256] = {0};
         for (size_t i = 0; i < n; ++i) ++counts[a[i].key >> shift & 255];
         if (counts[a[0].key >> shift & 255] == n) continue;
@@ -1320,6 +1358,7 @@ static bool make_ordered(PureList *list) {
     arrays_free(list);
     memcpy(list->columns, columns, sizeof(columns));
     list->room = room;
+    if (list->text_key >= 0) members_drop(list); /* a text's hashes are no key set of a FLAT list (searched by its texts) */
     list->form = FLAT;
     list->moved = 0;
     ++list->flattened;
@@ -1554,6 +1593,7 @@ PureList *pure_list_new(unsigned fields, const uint8_t *kinds) {
     }
     l->leaf_size = at;
     l->key = -1;
+    list->text_key = -1;
     list->id = __atomic_add_fetch(&lists_made, 1, __ATOMIC_RELAXED);
     return list;
 }
@@ -1570,7 +1610,12 @@ static bool rekey(PureList *list, Node **place) {
 
 PureResult pure_list_keyed(PureList *list, int field) {
     Layout *l = &list->layout;
-    int key = field >= 0 && (unsigned)field < l->fields && l->kinds[field] == PURE_CELL_NUMBER ? field : -1;
+    int key = field >= 0 && (unsigned)field < l->fields && l->kinds[field] == PURE_CELL_NUMBER ? field : -1,
+        text = field >= 0 && (unsigned)field < l->fields && pure_cell_text(l->kinds[field]) ? field : -1;
+    if (text != list->text_key) {
+        if (list->form == HASHED && !make_ordered(list)) return PURE_ALLOCATION;
+        list->text_key = text;
+    }
     if (key == l->key) return PURE_OK;
     if (list->count && !make_tree(list)) return PURE_ALLOCATION;
     if (list->arrays) arrays_free(list); /* its columns as wide as the new key wants */
@@ -1689,7 +1734,7 @@ bool pure_list_hashed(PureList *list) {
 }
 
 bool pure_list_contains(const PureList *list, double key, bool *found) {
-    if (!list->members) return false;
+    if (!list->members || list->text_key >= 0) return false; /* a text's hashes: pure_list_contains_text */
     if (list->bitmap) {
         *found = small_key(key) && (size_t)key / 64 < list->member_capacity &&
                  list->members[(size_t)key / 64] >> ((size_t)key % 64) & 1;
@@ -1700,6 +1745,37 @@ bool pure_list_contains(const PureList *list, double key, bool *found) {
     while (list->members[at] != VACANT && list->members[at] != bits) at = (at + 1) & mask;
     *found = list->members[at] == bits;
     return true;
+}
+
+static bool own_cell(const PureList *list, unsigned field, PureCell from, PureCell *to);
+
+bool pure_list_contains_text(const PureList *list, PureCell key, bool *found) {
+    if (list->form != HASHED || list->text_key < 0) return false;
+    *found = hashed_slot(list, key) != SIZE_MAX;
+    return true;
+}
+
+size_t pure_list_find_row(const PureList *list, unsigned field, PureCell key, bool *found) {
+    if (list->form == HASHED && (int)field == hashed_field(list)) {
+        size_t slot = hashed_slot(list, key);
+        *found = slot != SIZE_MAX;
+        return slot;
+    }
+    return pure_list_seek(list, field, key, found);
+}
+
+PureResult pure_list_set_row(PureList *list, size_t row, unsigned field, PureCell value, PureUndo *undo) {
+    const Layout *l = &list->layout;
+    if (list->form != HASHED || undo || (int)field == hashed_field(list)) return pure_list_set(list, row, field, value, undo);
+    PureCell copy, old = array_cell(list, row, field); /* at its key's slot, as found (no position made) */
+    uint8_t need = narrows(l->kinds[field]) && (list->width[field] == 1 || list->width[field] == 4) ? width_of(value.num) : 0;
+    if (need > list->width[field] && !widen(list, field, need)) return PURE_ALLOCATION;
+    if (!own_cell(list, field, value, &copy)) return PURE_ALLOCATION;
+    list->bytes += cell_bytes(l, field, copy) - cell_bytes(l, field, old);
+    array_put(list, row, field, copy);
+    let_go_text(list, old.text);
+    ++list->version;
+    return PURE_OK;
 }
 
 /* An event's arrays are its items, as a tree's nodes are: neither counts
@@ -1747,8 +1823,8 @@ bool pure_list_lookup(const PureList *list, unsigned key_field, PureCell key, un
         *cell = array_cell(list, (size_t)key.num, field);
         return true;
     }
-    if (list->form == HASHED && (int)key_field == list->layout.key) { /* at its key's slot, by its table */
-        size_t slot = hashed_slot(list, key.num);
+    if (list->form == HASHED && (int)key_field == hashed_field(list)) { /* at its key's slot, by its table */
+        size_t slot = hashed_slot(list, key);
         if (slot == SIZE_MAX) return false;
         *cell = array_cell(list, slot, field);
         return true;
@@ -2176,20 +2252,37 @@ PureResult pure_list_insert(PureList *list, size_t at, const PureCell *cells, Pu
 PureResult pure_list_add(PureList *list, const PureCell *cells, PureUndo *undo, size_t *at, bool *exists) {
     const Layout *l = &list->layout;
     *exists = false;
-    if (l->key < 0) return PURE_INVALID; /* searched and inserted apart, then */
+    if (l->key < 0) { /* by a text key: an event's list HASHED by its texts' hashes; else searched and inserted apart */
+        if (list->text_key < 0 || at || undo || list->journaled || list->pack || !list->arrays) return PURE_INVALID;
+        if (list->form == FLAT && !make_hashed(list)) return PURE_INVALID;
+        if (list->form != HASHED) return PURE_INVALID;
+        if (hashed_slot(list, cells[list->text_key]) != SIZE_MAX) return *exists = true, PURE_OK;
+        if (hashed_large(list)) return make_ordered(list) ? PURE_INVALID : PURE_ALLOCATION;
+        if (list->count == PURE_LIST_ITEMS) return PURE_LIMIT;
+        PureCell item[16];
+        unsigned owned = 0;
+        for (; owned < l->fields; ++owned)
+            if (!own_cell(list, owned, cells[owned], &item[owned])) break;
+        if (owned < l->fields || !arrays_fit(list, cells) || !hashed_add(list, item, cell_bits(list, cells[list->text_key]))) {
+            for (unsigned f = 0; f < owned; ++f) free_text(item[f].text);
+            return PURE_ALLOCATION;
+        }
+        list->bytes += cells_bytes(l, item);
+        return PURE_OK;
+    }
     if (!logged(list, undo)) return PURE_ALLOCATION;
     if (list->form != TREE) {
         double key = cells[l->key].num;
         bool found = false;
         if (list->form == HASHED) { /* by its table, at its end: no position, unless asked */
-            if (hashed_slot(list, key) != SIZE_MAX && !at) return *exists = true, PURE_OK;
+            if (hashed_slot(list, cells[l->key]) != SIZE_MAX && !at) return *exists = true, PURE_OK;
             if (!at && !hashed_large(list)) {
                 if (list->count == PURE_LIST_ITEMS) return PURE_LIMIT;
                 PureCell item[16];
                 unsigned owned = 0;
                 for (; owned < l->fields; ++owned)
                     if (!own_cell(list, owned, cells[owned], &item[owned])) break;
-                if (owned < l->fields || !arrays_fit(list, cells) || !hashed_add(list, item)) {
+                if (owned < l->fields || !arrays_fit(list, cells) || !hashed_add(list, item, cell_bits(list, cells[l->key]))) {
                     for (unsigned f = 0; f < owned; ++f) free_text(item[f].text);
                     return PURE_ALLOCATION;
                 }

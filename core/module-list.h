@@ -159,6 +159,12 @@ bool pure_list_suits(PureList *, unsigned needs, unsigned narrow);
 bool pure_list_full(PureList *);
 /* Whether key is there, by the set: false when the list keeps none (search it then). */
 bool pure_list_contains(const PureList *, double key, bool *found);
+/* Whether a HASHED list keyed by a text has key (false: it is not one; search it). */
+bool pure_list_contains_text(const PureList *list, PureCell key, bool *found);
+/* Where key is, for a set of the item found (pure_list_set_row): a HASHED
+ * list's slot (no position made), else its position (pure_list_seek). */
+size_t pure_list_find_row(const PureList *list, unsigned field, PureCell key, bool *found);
+PureResult pure_list_set_row(PureList *list, size_t row, unsigned field, PureCell value, PureUndo *undo);
 /* The bytes it keeps beside its items for that. */
 size_t pure_list_extra(const PureList *);
 /* An event's list (empty, never shared, journaled or undone) may keep its

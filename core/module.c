@@ -1371,6 +1371,48 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if (op->op == PURE_OP_LIST_FIND && next->op == PURE_OP_ITEM_GET && list_of(next->arg) == op->arg && !landed[pc + 1])
             op->plan |= PLAN_JOINED;
     }
+    /* A FIND whose index waits on the stack for an ITEM_SET of its list,
+     * the code between in a line (no jump in or out) that touches no list but
+     * to find by key (joined, or HAS): the item is set where it was found, a
+     * HASHED list's slot, no position made (PLAN_ROW, docs/design/023). */
+    for (uint32_t pc = 0; pc < out->code_count; ++pc) {
+        PureOp *find = &out->code[pc];
+        if (find->op != PURE_OP_LIST_FIND || find->plan & PLAN_JOINED) continue;
+        int height = 1;
+        for (uint32_t at = pc + 1; at < out->code_count && height >= 1 && !landed[at]; ++at) {
+            const PureOp *o = &out->code[at];
+            int pops = -1, pushes = 1;
+            switch (o->op) {
+            case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_LOCAL_LOAD: case PURE_OP_TEXT_CONST: case PURE_OP_TEXT_LOAD:
+            case PURE_OP_FIELD: case PURE_OP_LIST_COUNT:
+                pops = 0;
+                break;
+            case PURE_OP_NEG: case PURE_OP_NOT: case PURE_OP_FLOOR: case PURE_OP_NUM_TEXT: case PURE_OP_I64_NEG:
+            case PURE_OP_I64_FROM: case PURE_OP_NUM_FROM: case PURE_OP_LIST_HAS:
+                pops = 1;
+                break;
+            case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_MIN: case PURE_OP_MAX:
+            case PURE_OP_MOD: case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT:
+            case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE: case PURE_OP_CONCAT: case PURE_OP_TEXT_COMPARE:
+            case PURE_OP_I64_ADD: case PURE_OP_I64_SUB: case PURE_OP_I64_MUL: case PURE_OP_I64_DIV: case PURE_OP_I64_MOD:
+            case PURE_OP_I64_MIN: case PURE_OP_I64_MAX: case PURE_OP_I64_COMPARE:
+                pops = 2;
+                break;
+            case PURE_OP_LIST_FIND: /* joined: its ITEM_GET with it (a key in, the field out) */
+                if (o->plan & PLAN_JOINED && !landed[at + 1]) pops = 1, ++at;
+                break;
+            case PURE_OP_ITEM_SET:
+                if (height == 2 && list_of(o->arg) == find->arg) {
+                    find->plan |= PLAN_ROW;
+                    out->code[at].plan |= PLAN_ROW;
+                }
+                break;
+            default: break;
+            }
+            if (pops < 0) break;
+            height += pushes - pops;
+        }
+    }
     free(landed);
     /* The lists an index state refers to: their inserts tell where (move_indices). */
     for (uint32_t i = 0; i < out->states; ++i)
@@ -2822,10 +2864,10 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         Held before = list_held(app, app->lists[list]);
         PureSpan span = {0};
         status = op->plan & PLAN_TEXT ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
-        if (status == PURE_OK)
-            status = pure_list_set(app->lists[list], at, field,
-                                   (PureCell){.i64 = value.i64, .text = (unsigned char *)span.data, .size = span.size},
-                                   undo_for(app, list));
+        PureCell cell = {.i64 = value.i64, .text = (unsigned char *)span.data, .size = span.size};
+        if (status == PURE_OK) /* where its FIND found it (PLAN_ROW: a HASHED list's slot), else its position */
+            status = op->plan & PLAN_ROW ? pure_list_set_row(app->lists[list], at, field, cell, undo_for(app, list))
+                                         : pure_list_set(app->lists[list], at, field, cell, undo_for(app, list));
         arena->used = mark;
         if (status != PURE_OK) REFUSED;
         if (!grows(app, before, list_held(app, app->lists[list]))) { kind = PURE_FAULT_MEMORY; FAILED; }
@@ -2912,12 +2954,14 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
             else if ((status = keep_bytes(arena, value.text, value.size, &top->bytes)) != PURE_OK) STOPPED(status);
             NEXT;
         }
-        /* An event's list keeps its keys as a set: HAS asks it alone (020). */
-        if (op->op == PURE_OP_LIST_HAS && pure_list_contains(app->lists[arg], cell.num, &found)) {
+        /* An event's list keeps its keys as a set: HAS asks it alone (020); a text key's HASHED list, its table. */
+        if (op->op == PURE_OP_LIST_HAS && (op->plan & PLAN_TEXT ? pure_list_contains_text(app->lists[arg], cell, &found)
+                                                                 : pure_list_contains(app->lists[arg], cell.num, &found))) {
+            arena->used = mark;
             top->num = found;
             NEXT;
         }
-        size_t at = pure_list_seek(app->lists[arg], key, cell, &found);
+        size_t at = op->plan & PLAN_ROW ? pure_list_find_row(app->lists[arg], key, cell, &found) : pure_list_seek(app->lists[arg], key, cell, &found);
         arena->used = mark;
         if (op->op == PURE_OP_LIST_HAS) { top->num = found; NEXT; }
         if (!found) { kind = PURE_FAULT_NOT_FOUND; FAILED; }

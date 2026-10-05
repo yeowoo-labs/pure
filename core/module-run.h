@@ -6,7 +6,7 @@
 #include "module.h"
 
 /* An item's or a key's op->plan: its cell a text; a FIND joined to the ITEM_GET after it. */
-enum { PLAN_TEXT = 1, PLAN_JOINED = 2 };
+enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_ROW = 4 };
 
 /* An item instruction's argument: its list and its field. */
 static inline uint32_t list_of(uint32_t arg) { return arg & 0xFFFF; }
