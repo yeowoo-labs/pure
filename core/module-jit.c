@@ -2581,18 +2581,99 @@ static void emit_key(Block *k, unsigned li, const Ahead *a, int n, unsigned dept
     }
 }
 
-/* The key in d4 as the address of its bucket's first position in a's
- * packed list (x16 the list, x17 its pack, x10 the bucket, x9 the address),
- * or to skip when the list is not packed. Not checked against the index's
- * range: a read ahead may go anywhere (PRFM never faults). */
-static void key_bucket(Block *k, const Ahead *a, int skip) {
+/* The integers' code: the key's node n as an integer into ahead_x[depth]
+ * (what key_ints allows: the round moved on, cells of the columns kept,
+ * whole constants, sums and products); to skip when it reads past a list's
+ * items or an eight-byte cell. What it computes past 64 bits is read ahead
+ * wrong, never read: a bucket past the index is not read. */
+static const unsigned ahead_x[] = {X11, X12, X13, X1};
+
+static bool key_ints(const Block *k, unsigned li, const Ahead *a, int n) {
+    const Sym *s = &a->nodes[n];
+    switch (s->kind) {
+    case S_CONST: return s->value == floor(s->value) && fabs(s->value) < 0x1p62;
+    case S_ROUND: return true;
+    case S_ITEM: return kept_find(k, (int)li, C_COLUMN, s->list, s->field) >= 0 && key_ints(k, li, a, s->a);
+    default: return key_ints(k, li, a, s->a) && key_ints(k, li, a, s->b);
+    }
+}
+
+static void emit_key_x(Block *k, unsigned li, const Ahead *a, int n, unsigned depth, unsigned by, int skip) {
     Emit *e = k->e;
-    fp2(e, FCVTZS_X, X0, D4);
+    const Sym *s = &a->nodes[n];
+    unsigned r = ahead_x[depth];
+    switch (s->kind) {
+    case S_CONST: mov_imm(e, r, (uint64_t)(int64_t)s->value); return;
+    case S_ROUND: {
+        const LoopAt *l = &k->loops[li];
+        if (l->walk) add_imm(e, r, kept_reg(k, l->at_kept), by);
+        else { /* a count's value: whole in the integers' code */
+            load_d(e, D0, X28, (k->m->code[l->at].arg & 0xFF) * sizeof(PureValue));
+            fp2(e, FCVTZS_X, r, D0);
+            add_imm(e, r, r, by);
+        }
+        return;
+    }
+    case S_ITEM: {
+        emit_key_x(k, li, a, s->a, depth, by, skip); /* its position */
+        int column_c = kept_find(k, (int)li, C_COLUMN, s->list, s->field), count_c = kept_find(k, (int)li, C_COUNT, s->list, 0);
+        unsigned column = kept_reg(k, column_c);
+        int one = new_label(e), done = new_label(e);
+        cbz_x(e, column, skip);
+        cmp_reg(e, r, count_c >= 0 ? kept_reg(k, count_c) : count_reg(k, (int)li, s->list, X10));
+        b_cond(e, HS, skip);
+        tbnz(e, column, 59, skip);
+        tbz(e, column, 58, one);
+        load32_index(e, r, column, r);
+        b(e, done);
+        bind(e, one);
+        load8_index(e, r, column, r);
+        bind(e, done);
+        return;
+    }
+    default: {
+        const Sym *x = &a->nodes[s->a], *y = &a->nodes[s->b];
+        if (s->kind == S_ADD && x->kind == S_CONST && x->value >= 0 && x->value < 4096) { /* a small constant and a node */
+            emit_key_x(k, li, a, s->b, depth, by, skip);
+            if (x->value) add_imm(e, r, r, (uint32_t)x->value);
+            return;
+        }
+        emit_key_x(k, li, a, s->a, depth, by, skip);
+        if (y->kind == S_CONST && y->value >= 0 && y->value < 4096 && s->kind != S_MUL) {
+            if (s->kind == S_ADD) add_imm(e, r, r, (uint32_t)y->value);
+            else sub_imm(e, r, r, (uint32_t)y->value);
+            return;
+        }
+        uint64_t c = y->kind == S_CONST && y->value > 0 ? (uint64_t)y->value : 0;
+        if (s->kind == S_MUL && c && !(c & (c - 1))) { /* a power of two: a shift */
+            unsigned p = 0;
+            while (c >> p != 1) ++p;
+            lsl_imm(e, r, r, p);
+            return;
+        }
+        emit_key_x(k, li, a, s->b, depth + 1, by, skip);
+        unsigned q = ahead_x[depth + 1];
+        if (s->kind == S_ADD) add_reg(e, r, r, q);
+        else if (s->kind == S_SUB) sub_reg(e, r, r, q);
+        else put(e, 0x9B007C00 | q << 16 | r << 5 | r); /* MUL */
+        return;
+    }
+    }
+}
+
+/* The key (in d4, or in x register key) as the address of its bucket's
+ * first position in a's packed list (x16 the list, x17 its pack, x10 the
+ * bucket, x9 the address), or to skip when the list is not packed. Not
+ * checked against the index's range: a read ahead may go anywhere (PRFM
+ * never faults). */
+static void key_bucket(Block *k, const Ahead *a, int skip, int key) {
+    Emit *e = k->e;
+    if (key < 0) fp2(e, FCVTZS_X, X0, D4);
     load64(e, X16, X24, (size_t)a->list * sizeof(PureList *));
     load64(e, X17, X16, pure_list_layout[LIST_PACK_AT]);
     cbz_x(e, X17, skip);
     load64(e, X9, X17, pure_pack_layout[PACK_ORIGIN_AT]);
-    sub_reg(e, X10, X0, X9);
+    sub_reg(e, X10, key < 0 ? X0 : (unsigned)key, X9);
     load32(e, X9, X17, pure_pack_layout[PACK_SHIFT_AT]);
     lsr_reg(e, X10, X10, X9);
     load64(e, X9, X17, pure_pack_layout[PACK_FIRST_AT]);
@@ -2607,29 +2688,39 @@ static void read_ahead(Block *k, unsigned li) {
     const LoopAt *l = &k->loops[li];
     const Ahead *a = &k->aheads[l->ahead];
     int near = new_label(e), done = new_label(e), column_c = kept_find(k, (int)li, C_COLUMN, a->list, a->field);
-    emit_key(k, li, a, a->key, 0, AHEAD_FAR, near);
-    key_bucket(k, a, near);
+    bool ints = k->copy && key_ints(k, li, a, a->key); /* the integers' code: the key as an integer */
+    if (ints) emit_key_x(k, li, a, a->key, 0, AHEAD_FAR, near);
+    else emit_key(k, li, a, a->key, 0, AHEAD_FAR, near);
+    key_bucket(k, a, near, ints ? (int)ahead_x[0] : -1);
     prefetch(e, X9);
     bind(e, near);
-    emit_key(k, li, a, a->key, 0, AHEAD_NEAR, done);
-    key_bucket(k, a, done);
-    load64(e, X0, X17, pure_pack_layout[PACK_BUCKETS_AT]); /* a bucket of the index: its first position is read */
+    if (ints) emit_key_x(k, li, a, a->key, 0, AHEAD_NEAR, done);
+    else emit_key(k, li, a, a->key, 0, AHEAD_NEAR, done);
+    key_bucket(k, a, done, ints ? (int)ahead_x[0] : -1);
+    load64(e, X0, X17, pure_pack_layout[PACK_BUCKETS_AT]); /* a bucket of the index: its first position is read, and its end */
     cmp_reg(e, X10, X0);
     b_cond(e, HS, done);
     load32(e, X10, X9, 0);
+    load32(e, X1, X9, 4);
     if (column_c >= 0) { /* the tagged address the inner loop keeps: its top byte the cells' width */
         unsigned column = kept_reg(k, column_c);
         cbz_x(e, column, done);
         lsr_imm(e, X9, column, 56);
         mul_reg(e, X10, X10, X9);
         add_reg(e, X17, column, X10);
+        mul_reg(e, X1, X1, X9);
+        add_reg(e, X1, column, X1);
     } else {
         load64(e, X17, X16, pure_list_layout[LIST_COLUMNS_AT] + a->field * sizeof(void *));
         load8(e, X9, X16, pure_list_layout[LIST_WIDTH_AT] + a->field);
         mul_reg(e, X10, X10, X9);
+        mul_reg(e, X1, X1, X9);
+        add_reg(e, X1, X17, X1);
         add_reg(e, X17, X17, X10);
     }
     prefetch(e, X17);
+    sub_imm(e, X1, X1, 1); /* the bucket's last cell: a slice of more than a line misses there too */
+    prefetch(e, X1);
     bind(e, done);
 }
 
