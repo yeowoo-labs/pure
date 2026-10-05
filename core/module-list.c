@@ -1209,6 +1209,9 @@ static inline void cell_copy(void *to_column, size_t to, const void *from_column
     }
 }
 
+/* Whether a HASHED list's table of capacity slots is too full for items: more than four fifths. */
+static bool hashed_full(size_t items, size_t capacity) { return 5 * items > 4 * capacity; }
+
 /* A HASHED list's slot of key (its cells there; a text's where its bytes are the key's too), or SIZE_MAX. */
 static size_t hashed_slot(const PureList *list, PureCell key) {
     uint64_t bits = cell_bits(list, key);
@@ -1266,7 +1269,7 @@ static bool hashed_table(PureList *list, size_t capacity) {
 static bool make_hashed(PureList *list) {
     if (hashed_field(list) < 0 || list->pack || list->flattened >= 2) return false;
     size_t capacity = 16;
-    while (capacity < 2 * (list->count + 1)) capacity *= 2;
+    while (hashed_full(list->count + 1, capacity)) capacity *= 2;
     if (!hashed_table(list, capacity)) return false;
     list->form = HASHED;
     list->full = false, list->keys_seen = 0; /* a DENSE list's keys: counted again when it is one again */
@@ -1276,14 +1279,14 @@ static bool make_hashed(PureList *list) {
 
 /* Whether a HASHED list's next item would grow its arrays past ARRAYS_LARGE. */
 static bool hashed_large(const PureList *list) {
-    return 2 * (list->count + 1) > list->member_capacity && 2 * list->member_capacity * row_width(&list->layout) > ARRAYS_LARGE;
+    return hashed_full(list->count + 1, list->member_capacity) && 2 * list->member_capacity * row_width(&list->layout) > ARRAYS_LARGE;
 }
 
 /* An item (its cells the list's own, its key not there, its bits those)
  * into a HASHED list at its key's slot; false without memory (as it was). */
 static bool hashed_add(PureList *list, const PureCell *item, uint64_t bits) {
     const Layout *l = &list->layout;
-    if (2 * (list->count + 1) > list->member_capacity && !hashed_table(list, 2 * list->member_capacity)) return false;
+    if (hashed_full(list->count + 1, list->member_capacity) && !hashed_table(list, 2 * list->member_capacity)) return false;
     size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
     while (list->members[at] != VACANT) at = (at + 1) & mask;
     list->members[at] = bits;

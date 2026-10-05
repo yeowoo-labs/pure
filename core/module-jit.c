@@ -1410,9 +1410,22 @@ static void append_books(Block *k, const PureOp *op, uint32_t pc, unsigned heigh
     slow_back(k, s, V_MEM, 0);
 }
 
+/* A key's bits in a HASHED list's table (module-list.c's key_bits: -0 as +0) into x17. */
+static void hashed_bits(Block *k, unsigned h) {
+    Emit *e = k->e;
+    int signed_zero = new_label(e);
+    unsigned bits = value_bits(k, h, X17);
+    if (bits != X17) mov_reg(e, X17, bits);
+    lsl_imm(e, X10, X17, 1);
+    cbnz_x(e, X10, signed_zero);
+    mov_imm(e, X17, 0);
+    bind(e, signed_zero);
+}
+
 /* LIST_APPEND to an event's list of numbers whose places no index follows:
- * at the end of a FLAT one, or at its key in a DENSE one, with room, each
- * cell fitting its column. */
+ * at the end of a FLAT one, at its key in a DENSE one, or at its key's slot
+ * in a HASHED one (its table not to grow), with room, each cell fitting its
+ * column. */
 static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
     Emit *e = k->e;
     const PureModule *m = k->m;
@@ -1425,14 +1438,48 @@ static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
     int slow = k->slows[s].label;
     load64(e, X16, X24, list * sizeof(PureList *));
     load8(e, X17, X16, pure_list_layout[LIST_FORM_AT]);
-    cmp_w_imm(e, X17, keyed ? DENSE_FORM : FLAT_FORM);
-    b_cond(e, NE, slow);
+    int cells = new_label(e);
     if (!keyed) {
+        cmp_w_imm(e, X17, FLAT_FORM);
+        b_cond(e, NE, slow);
         load64(e, X9, X16, pure_list_layout[LIST_COUNT_AT]);
         load64(e, X10, X16, pure_list_layout[LIST_ROOM_AT]);
         cmp_reg(e, X9, X10);
         b_cond(e, HS, slow);
     } else {
+        int dense = new_label(e), probe = new_label(e), vacant = new_label(e);
+        cmp_w_imm(e, X17, DENSE_FORM);
+        b_cond(e, EQ, dense);
+        cmp_w_imm(e, X17, HASHED_FORM);
+        b_cond(e, NE, slow);
+        if (k->vs[base + m->state_key[list] - 1u].kind == V_BIT) b(e, slow); /* (its bits made in x9, the slot's) */
+        load64(e, X10, X16, pure_list_layout[LIST_COUNT_AT]); /* room: its items and the new one four fifths of its table at most, else it grows (the step) */
+        add_imm(e, X10, X10, 1);
+        add_lsl(e, X10, X10, X10, 2); /* five times */
+        load64(e, X1, X16, pure_list_layout[LIST_MEMBER_CAPACITY_AT]);
+        cmp_lsl(e, X10, X1, 2);       /* against four times the slots */
+        b_cond(e, HI, slow);
+        hashed_bits(k, base + m->state_key[list] - 1u);
+        mov_imm(e, X10, UINT64_C(0xff51afd7ed558ccd)); /* member_slot */
+        put(e, 0xCA400000 | X17 << 16 | 33u << 10 | X17 << 5 | X0); /* EOR x0, x17, x17, LSR #33 */
+        mul_reg(e, X9, X0, X10);
+        put(e, 0xCA400000 | X9 << 16 | 33u << 10 | X9 << 5 | X9);  /* EOR x9, x9, x9, LSR #33 */
+        sub_imm(e, X1, X1, 1);
+        put(e, 0x8A000000 | X1 << 16 | X9 << 5 | X9);              /* AND x9, x9, x1 (the mask) */
+        load64(e, X0, X16, pure_list_layout[LIST_MEMBERS_AT]);
+        bind(e, probe);
+        load64_index(e, X10, X0, X9);
+        cmp_reg(e, X10, X17);
+        b_cond(e, EQ, fault_at(k, PURE_FAULT_EXISTS, pc));
+        fp2(e, FMOV_DX, D1, X10);
+        fcmp(e, D1, D1);
+        b_cond(e, VS, vacant); /* a NaN: VACANT (no key is one) */
+        add_imm(e, X9, X9, 1);
+        put(e, 0x8A000000 | X1 << 16 | X9 << 5 | X9);
+        b(e, probe);
+        bind(e, vacant);
+        b(e, cells);
+        bind(e, dense);
         unsigned key = value_key(k, base + m->state_key[list] - 1u, X9, slow);
         if (key != X9) mov_reg(e, X9, key);
         mov_imm(e, X10, (uint64_t)1 << 22); /* a small key (module-list.c's BITMAP_KEYS) */
@@ -1451,6 +1498,7 @@ static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
         lsr_reg(e, X17, X1, X9);
         tbnz(e, X17, 0, fault_at(k, PURE_FAULT_EXISTS, pc));
     }
+    bind(e, cells);
     for (unsigned f = 0; f < fields; ++f) { /* the cells, past the end or in the key's empty slot: not the list's until counted */
         load64(e, X10, X16, pure_list_layout[LIST_COLUMNS_AT] + f * sizeof(void *));
         load8(e, X17, X16, pure_list_layout[LIST_WIDTH_AT] + f);
@@ -1460,6 +1508,15 @@ static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
         add_imm(e, X9, X9, 1);
         store64(e, X9, X16, pure_list_layout[LIST_COUNT_AT]);
     } else {
+        int dense = new_label(e), counted = new_label(e);
+        load8(e, X17, X16, pure_list_layout[LIST_FORM_AT]);
+        cmp_w_imm(e, X17, HASHED_FORM);
+        b_cond(e, NE, dense);
+        hashed_bits(k, base + m->state_key[list] - 1u); /* its key in its slot: the item the list's */
+        load64(e, X0, X16, pure_list_layout[LIST_MEMBERS_AT]);
+        store64_index(e, X17, X0, X9);
+        b(e, counted);
+        bind(e, dense);
         load64(e, X0, X16, pure_list_layout[LIST_MEMBERS_AT]);
         lsr_imm(e, X10, X9, 6);
         load64_index(e, X1, X0, X10);
@@ -1467,6 +1524,7 @@ static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
         lsl_reg(e, X17, X17, X9);
         orr_reg(e, X1, X1, X17);
         store64_index(e, X1, X0, X10);
+        bind(e, counted);
         load64(e, X10, X16, pure_list_layout[LIST_MEMBER_COUNT_AT]);
         add_imm(e, X10, X10, 1);
         store64(e, X10, X16, pure_list_layout[LIST_MEMBER_COUNT_AT]);
@@ -3913,6 +3971,9 @@ static void tier_facts(Tier *t) {
                     double c[4] = {a->lo / b->lo, a->lo / b->hi, a->hi / b->lo, a->hi / b->hi};
                     lo = INFINITY, hi = -INFINITY;
                     for (int j = 0; j < 4; ++j) lo = fmin(lo, isnan(c[j]) ? -INFINITY : c[j]), hi = fmax(hi, isnan(c[j]) ? INFINITY : c[j]);
+                    /* -0 only of -0, of 0 over a number below 0, or of a fraction's underflow: a whole number over a
+                     * whole one is at least 1 / 2^53 in size unless it is 0 */
+                    zero = a->zero || !a->whole || !b->whole || (b->hi < 0 && a->lo <= 0 && a->hi >= 0);
                 }
                 break;
             case T_FLOOR:
