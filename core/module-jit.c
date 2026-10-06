@@ -558,6 +558,7 @@ static void books_back(Block *k, uint64_t mask) {
             continue;
         }
         if (!(mask >> c & 1) || (v->kind != C_LIVE && v->kind != C_PENDING)) continue;
+        if (!(k->loops[v->loop].books >> (v->list & 31) & 1)) continue; /* kept, but its books not (no room for all): the list's own */
         int none = new_label(e);
         size_t bytes = row_bytes(k->m, v->list);
         load64(e, X16, X24, (size_t)v->list * sizeof(PureList *));
