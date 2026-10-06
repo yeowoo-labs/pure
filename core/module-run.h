@@ -55,8 +55,10 @@ static inline bool number_op(uint8_t op, double a, double b, double *out) {
 }
 
 /* An item's or a key's op->plan: its cell a text; a FIND joined to the ITEM_GET after it; a FIND whose row an ITEM_SET
- * takes; a LOOP whose block a batch may run (module-batch.c); a LOCAL_STORE ending x = e of a recurrence in such a block. */
-enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_ROW = 4, PLAN_BATCH = 8, PLAN_RECUR = 16 };
+ * takes; a LOOP whose block a batch may run (module-batch.c); a LOCAL_STORE ending x = e of a recurrence in such a block;
+ * such a LOOP whose block begins if slot >= L.count { break } (L only grows in it: a batch runs to L's count as it opens);
+ * an EACH in a batch's block whose items' rounds may run apart (spread: no break, its locals its items' own or reductions). */
+enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_ROW = 4, PLAN_BATCH = 8, PLAN_RECUR = 16, PLAN_GUARD = 32, PLAN_SPREAD = 64 };
 
 /* An item instruction's argument: its list and its field. */
 static inline uint32_t list_of(uint32_t arg) { return arg & 0xFFFF; }

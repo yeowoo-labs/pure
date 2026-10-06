@@ -713,6 +713,18 @@ PURE_COLD static bool batch_block(const PureModule *m, uint32_t start, uint32_t 
             at = stop - 1;
             break;
         }
+        case PURE_OP_EACH: { /* a walk of a list keyed by a number (its slice), no where's range: each lane's items together */
+            uint32_t inner = at + 1, stop = inner + (op->arg >> 16), walked = op->arg >> 8 & 0xFF;
+            if (depth || stop > end || m->height[inner] || (!(op->arg & PURE_EACH_SLICED) && op->range) ||
+                ((op->arg & PURE_EACH_SLICED) && field_type(m, walked, m->state_key[walked] - 1u) != T_NUM))
+                return false;
+            uint64_t scope[4];
+            memcpy(scope, sure, sizeof(scope));
+            *shape |= 1;
+            if (!batch_block(m, inner, stop, input, depth + 1, scope, set, reduced, shape)) return false;
+            at = stop - 1;
+            break;
+        }
         case PURE_OP_BREAK:
             if (!depth) return false; /* a nested loop's alone */
             break;
@@ -760,7 +772,8 @@ PURE_COLD static int read_list(const PureOp *op) {
 }
 
 /* A count's loop or a walk whose block has batch forms throughout
- * (batch_block) runs a batch of its rounds at a time (module-batch.c,
+ * (batch_block, after a count's guard: if slot >= L.count { break }, *guard)
+ * runs a batch of its rounds at a time (module-batch.c,
  * docs/design/024), unless it
  * sets or appends items or has a recurrence and has a nested loop (not yet),
  * reads a list it appends to, or PURE_BATCH=0 in the environment says none
@@ -768,7 +781,7 @@ PURE_COLD static int read_list(const PureOp *op) {
  * read of it begins x = x op e and every set of it ends one; a recurrence
  * (recurs) when a round reads it before setting it and every set of it is
  * x = e of x alone (pure_batch_recurs), in no branch's way. */
-PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, uint64_t *recurs) {
+PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, uint64_t *recurs, bool *guard, uint64_t *reductions) {
     static int off = -1;
     if (off < 0) {
         const char *batches = getenv("PURE_BATCH");
@@ -778,6 +791,10 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, 
     bool walk = loop->op == PURE_OP_EACH; /* a walk: no slot, its list the block's to read alone */
     uint32_t start = pc + 1, end = start + (loop->arg >> 16);
     if (off || (!walk && loop->arg & PURE_LOOP_INTEGER) || start >= end || m->height[start]) return false;
+    const PureOp *g = &m->code[start];
+    *guard = !walk && end - start > 5 && g[0].op == PURE_OP_LOCAL_LOAD && (g[0].arg & 0xFF) == (loop->arg & 0xFF) &&
+             g[1].op == PURE_OP_LIST_COUNT && g[2].op == PURE_OP_GE && g[3].op == PURE_OP_JZ && g[3].arg == start + 5 &&
+             g[4].op == PURE_OP_BREAK; /* if slot >= L.count { break }: a batch to L's count (its block only adds to L) */
     uint8_t *ends = calloc(end - start, 1); /* the sets that end x = x op e */
     if (!ends) return false;
     uint64_t set[4] = {0}, sure[4] = {0}, reduced[4] = {0}, plain[4] = {0}; /* plain: read or set otherwise */
@@ -803,7 +820,7 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, 
         const PureOp *op = &m->code[at];
         uint64_t bit = UINT64_C(1) << (op->arg & 63);
         unsigned word = (op->arg & 0xFF) / 64;
-        if (op->op == PURE_OP_LOOP) at += op->arg >> 16; /* (none with a nested loop) */
+        if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) at += op->arg >> 16; /* (none with a nested loop) */
         else if ((op->op == PURE_OP_JZ || op->op == PURE_OP_JMP) && op->arg > arms) arms = op->arg;
         else if (op->op == PURE_OP_LOCAL_STORE && at >= arms) sure0[word] |= bit;
         else if (op->op == PURE_OP_LOCAL_LOAD && set[word] & ~sure0[word] & ~reduced[word] & bit) recurs[word] |= bit;
@@ -813,15 +830,16 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, 
         const PureOp *op = &m->code[at];
         unsigned local = op->arg & 0xFF;
         if ((op->op == PURE_OP_JZ || op->op == PURE_OP_JMP) && op->arg > arms) arms = op->arg;
-        if (op->op == PURE_OP_LOOP) arms = at + 1 + (op->arg >> 16) > arms ? at + 1 + (op->arg >> 16) : arms;
+        if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) arms = at + 1 + (op->arg >> 16) > arms ? at + 1 + (op->arg >> 16) : arms;
         if (op->op == PURE_OP_LOCAL_STORE && recurs[local / 64] >> (local % 64) & 1 &&
             (at < arms || local_type(op->arg) != T_NUM || !pure_batch_recurs(m, at, start, set, slot, &from)))
             recurs[local / 64] &= ~(UINT64_C(1) << (local % 64));
     }
-    for (unsigned w = 0; w < 4; ++w) exempt[w] = reduced[w] | recurs[w];
+    for (unsigned w = 0; w < 4; ++w) exempt[w] = reduced[w] | recurs[w], reductions[w] = reduced[w];
     unsigned shape = 0;
     bool any = recurs[0] | recurs[1] | recurs[2] | recurs[3];
-    if (!batch_block(m, start, end, input, 0, sure, set, exempt, &shape) || (shape & 1 && (shape & 6 || any))) return false;
+    if (!batch_block(m, *guard ? start + 5 : start, end, input, 0, sure, set, exempt, &shape) || (shape & 1 && (shape & 6 || any)))
+        return false;
     uint32_t appended = 0; /* a list appended to is read nowhere else in the block (an earlier round's item not there yet), nor walked */
     for (uint32_t at = start; at < end; ++at)
         if (m->code[at].op == PURE_OP_LIST_APPEND) appended |= UINT32_C(1) << m->code[at].arg;
@@ -833,17 +851,54 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, 
     return true;
 }
 
+/* Whether the EACH at each in the block [start, end) of a loop a batch runs
+ * may spread its items' rounds apart (module-batch.c): no BREAK in it, and
+ * each local it sets a reduction's (reduced) or its items' own: set in an
+ * item before it reads it there (in no branch's way), read nowhere else in
+ * the loop's block. */
+PURE_COLD static bool walk_spreads(const PureModule *m, uint32_t start, uint32_t end, uint32_t each, const uint64_t *reduced) {
+    uint32_t inner = each + 1, stop = inner + (m->code[each].arg >> 16), arms = inner;
+    uint64_t own[4] = {0}, sure[4] = {0};
+    for (uint32_t at = inner; at < stop; ++at) {
+        const PureOp *op = &m->code[at];
+        unsigned local = op->arg & 0xFF;
+        if (op->op == PURE_OP_BREAK) return false;
+        if (op->op == PURE_OP_LOCAL_STORE && !(reduced[local / 64] >> (local % 64) & 1)) own[local / 64] |= UINT64_C(1) << (local % 64);
+    }
+    for (uint32_t at = inner; at < stop; ++at) {
+        const PureOp *op = &m->code[at];
+        unsigned local = op->arg & 0xFF;
+        uint64_t bit = UINT64_C(1) << (local % 64);
+        if ((op->op == PURE_OP_JZ || op->op == PURE_OP_JMP) && op->arg > arms) arms = op->arg;
+        else if (op->op == PURE_OP_LOCAL_STORE && at >= arms) sure[local / 64] |= bit;
+        else if (op->op == PURE_OP_LOCAL_LOAD && own[local / 64] & bit & ~sure[local / 64]) return false;
+    }
+    for (uint32_t at = start; at < end; ++at) {
+        if (at == inner) at = stop;
+        if (at >= end) break;
+        const PureOp *op = &m->code[at];
+        if ((op->op == PURE_OP_LOCAL_LOAD || op->op == PURE_OP_LOCAL_STORE) && own[(op->arg & 0xFF) / 64] >> (op->arg & 63) & 1) return false;
+    }
+    return true;
+}
+
 /* A fold in a verified block whose own block has lane forms throughout runs
  * a leaf of its list at a time; a count's loop so planned, a batch of its
  * rounds. */
 PURE_COLD static void plan_folds(PureModule *m, PureBlock block, int input) {
     for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
         PureOp *op = &m->code[pc];
-        uint64_t recurs[4] = {0};
-        if ((op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) && (op->plan = loop_batches(m, pc, input, recurs) ? PLAN_BATCH : 0)) {
+        uint64_t recurs[4] = {0}, reduced[4] = {0};
+        bool guard = false;
+        if ((op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) &&
+            (op->plan = (op->plan & PLAN_SPREAD) | (loop_batches(m, pc, input, recurs, &guard, reduced) ? PLAN_BATCH | (guard ? PLAN_GUARD : 0) : 0)) &
+                PLAN_BATCH) {
             m->batches = true;
+            for (uint32_t at = pc + 1; at < pc + 1 + (op->arg >> 16); ++at) /* its walks whose items may run apart */
+                if (m->code[at].op == PURE_OP_EACH && walk_spreads(m, pc + 1, pc + 1 + (op->arg >> 16), at, reduced))
+                    m->code[at].plan |= PLAN_SPREAD;
             for (uint32_t at = pc + 1; at < pc + 1 + (op->arg >> 16); ++at) /* a recurrence's sets, in the loop's own block */
-                if (m->code[at].op == PURE_OP_LOOP) at += m->code[at].arg >> 16;
+                if (m->code[at].op == PURE_OP_LOOP || m->code[at].op == PURE_OP_EACH) at += m->code[at].arg >> 16;
                 else if (m->code[at].op == PURE_OP_LOCAL_STORE && recurs[(m->code[at].arg & 0xFF) / 64] >> (m->code[at].arg & 63) & 1)
                     m->code[at].plan |= PLAN_RECUR;
         }

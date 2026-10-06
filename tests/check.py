@@ -1338,6 +1338,58 @@ on go {
 """
 
 
+# Walks in a batch's rounds (FRONT_SOURCE): a count's loop to a list's
+# count (if i >= L.count { break }, past it as the loop goes on), each
+# round walking its slice of a keyed list (slices of every length, empty
+# too) with sums of fractions (their order tells), the most, an item's own
+# local and the round's value read in it (its items spread apart into
+# lanes); a walk that breaks out (its items together, round by round); a
+# division by 0 in some round's item; under work budgets that run out
+# within a walk.
+FRONT_SOURCE = """record Cell {
+  at = 0
+  v = 0
+}
+state total = 0
+state most = 0
+state last = 0
+state broke = 0
+input go = message {
+  n: u32
+  q: u32
+}
+on go {
+  let g: list of Cell by at
+  let f: list of Cell
+  for i in 0 .. go.n {
+    g.add(Cell { at: i * 3, v: i * 0.25 + 1 })
+    f.append(Cell { at: i, v: floor(i / 7) })
+  }
+  let s = 0
+  let m = 0
+  let k = 0
+  let z = 0
+  for i in 0 .. go.n * 2 + 5 {
+    if i >= f.count { break }
+    let w = f[f.first + i].v
+    for c in g[i * 3 - w .. i * 3 + w * 2] {
+      let o = c.v * 0.1 + w
+      s = s + o
+      m = max(m, c.v - i)
+      z = z + 1 / (c.at - go.q)
+    }
+    for c in g[i .. i + 9] {
+      if c.v > 3 + w { break }
+      k = k + c.v
+    }
+  }
+  total = s
+  most = m
+  last = k
+  broke = z
+}
+"""
+
 # Items a batch appends at once (APPEND_SOURCE): keys there already, met
 # at round q of a DENSE list and at round p of a HASHED one (the
 # executor's fault at that round); keys past what a DENSE list holds from
@@ -1448,6 +1500,19 @@ def module_assumptions(aup, pure, work):
         assert outputs[name] == outputs['batches'], ('recur', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
     faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
     assert 'divide' in faults and 'none' in faults and 'non_finite' in faults and 'memory' in faults, faults
+    source, program = work / 'front.aup', work / 'front.pmod'  # walks in a batch's rounds, against the rounds one by one
+    source.write_text(FRONT_SOURCE)
+    compile_module(aup, source, program)
+    given = ''.join(f'message go {struct.pack("<II", n, q).hex()}\nwork\n' for n, q in
+                    ((3000, 300), (3000, 2000), (700, 30001), (40, 30001), (5, 30001), (1500, 6)))
+    given += ''.join(f'budget {b}\n' + given for b in (30011, 400000, 1500001)) + 'budget 0\n'
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=120, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('front', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
+    faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
+    assert 'divide' in faults and 'none' in faults and 'work' in faults, faults
     source, program = work / 'append.aup', work / 'append.pmod'  # items appended at once, against the rounds one by one
     source.write_text(APPEND_SOURCE)
     compile_module(aup, source, program)
@@ -1534,7 +1599,7 @@ def tier_program(rng):
         lines = []
         for _ in range(rng.randint(1, 3)):
             kind = rng.choice(['s', 's', 'u', 'acc', 'if', 'loop', 'walk', 'set', 'set', 'break', 'sweep', 'lanes', 'lanes', 'nest', 'nest',
-                               'recur', 'recur', 'walks', 'walks'] if depth < 3 else ['s', 'u', 'set', 'break'])
+                               'recur', 'recur', 'walks', 'walks', 'front', 'front'] if depth < 3 else ['s', 'u', 'set', 'break'])
             pad = '  ' * indent
             if kind == 's':
                 lines.append(f'{pad}s = s + {number(1, loops)}')
@@ -1659,6 +1724,36 @@ def tier_program(rng):
                         lines.append(f'{pad}  if {cond(1, inner)} {{ t[{rng.choice(["c.v", "wc"])}].v = c.at }}')
                     else:
                         lines.append(f'{pad}  rb = {rng.choice(["max", "min"])}(rb, {rng.choice(["c.v", "wc"])})')
+                lines.append(f'{pad}}}')
+            elif kind == 'front' and 'c' not in loops:  # a count's loop to a list's count, a walk in each round (spread apart, or together)
+                name = next(names, None)
+                if not name:
+                    continue
+                w = f'w{name}'
+                lines.append(f'{pad}for {name} in {rng.choice(["0", "1", "go.q"])} .. {rng.choice(["go.n", "go.m + 40", "go.n * 2"])} {{')
+                lines.append(f'{pad}  if {name} >= {rng.choice(["f", "g", "h", "e"])}.count {{ break }}')
+                lines.append(f'{pad}  let {w} = {number(2, loops + [name])}')
+                walked = rng.choice(['f', 'g', f'g[{name} .. {name} + {rng.choice(["3", w, "go.q"])}]', f'g[{w} .. {name} * 2 + 5]',
+                                     f'g[{name} .. {name}]', f'h[5000000 + {name} .. 5000100]', f'f[{name} .. 9]'])
+                inner = loops + [name, w, 'c']
+                lines.append(f'{pad}  for c in {walked} {{')
+                own = False
+                for _ in range(rng.randint(1, 3)):
+                    pick = rng.random()
+                    if pick < 0.3:
+                        lines.append(f'{pad}    ra = ra + {rng.choice(["c.v", "c.at", w, number(2, inner)])}')
+                    elif pick < 0.45:
+                        lines.append(f'{pad}    rb = {rng.choice(["max", "min"])}(rb, {rng.choice(["c.v", w, number(2, inner)])})')
+                    elif pick < 0.65 and not own:  # the item's own local
+                        own = True
+                        lines.append(f'{pad}    let o{name} = {number(2, inner)}')
+                        lines.append(f'{pad}    rc = rc + o{name}')
+                    elif pick < 0.85:
+                        lines.append(f'{pad}    if {cond(1, inner)} {{ ra = ra + {rng.choice(["c.v", w])} }}')
+                    else:
+                        lines.append(f'{pad}    if {cond(1, inner)} {{ break }}')
+                lines.append(f'{pad}  }}')
+                lines.append(f'{pad}  rc = rc + {w}')
                 lines.append(f'{pad}}}')
             elif kind == 'walk' and 'c' not in loops:
                 lines.append(f'{pad}for c in f {{')
