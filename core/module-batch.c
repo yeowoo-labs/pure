@@ -26,7 +26,7 @@
 #include <stdlib.h>
 
 enum { BATCH = 1024, BUFFERS = 24, MASKS = 32, SPLITS = 8, READS = 16, STORES = 8, APPENDS = 8, REDUCES = 8, RECURS = 4, UPDATES = 8,
-       RECORDS = 8, STEPS = 96, LOCALS = 256, LEAST = 16, FAILURES = 3 };
+       RECORDS = 8, STEPS = 96, SUMS = 4, LOCALS = 256, LEAST = 16, FAILURES = 3 };
 
 enum { UNIFORM, AFFINE, LANES, REDUCE }; /* REDUCE: x in x = x op e (value: its reduction) */
 typedef struct {
@@ -53,6 +53,12 @@ enum { S_NUMBER = 250, S_X, S_SLOT };
 typedef struct { uint8_t op, x; double k; } Step;
 typedef struct { uint32_t from, set; unsigned x, first, count; } Update;
 typedef struct { uint32_t pc; unsigned x; double *lanes; } Record;
+/* A sum into a cell, L[k].f = L[k].f + e: its statement's second k from
+ * again to resume (past its find and read, skipped), its ADD and its set;
+ * and as the pass leaves it, its rows and e in the lanes of mask, added at
+ * the end round by round. */
+typedef struct { uint32_t again, resume, add, set; } Sum;
+typedef struct { uint32_t list, field, add, set; Val rows, e; Mask *mask; } Scatter;
 /* An item a LIST_APPEND at pc appends in the lanes of mask (NULL: all): its fields. */
 typedef struct { uint32_t pc; Mask *mask; unsigned count; Val cells[PURE_RECORD_FIELDS]; } Append;
 /* Lanes a branch sent ahead (NULL: every lane): they run again at pc. */
@@ -108,6 +114,9 @@ typedef struct {
     Update updates[UPDATES];
     Record records[RECORDS];
     Step steps[STEPS];
+    unsigned sum_count, scatter_count;
+    Sum sums[SUMS];
+    Scatter scatters[SUMS];
 } Batch;
 
 static _Thread_local Batch batch;
@@ -993,20 +1002,77 @@ static bool recur(Batch *b) {
             unsigned sp = 0;
             for (unsigned i = up->first; i < up->first + up->count; ++i) {
                 const Step *step = &b->steps[i];
-                switch (step->op) {
-                case S_NUMBER: stack[sp++] = step->k; break;
-                case S_X: stack[sp++] = b->recur_value[step->x]; break;
-                case S_SLOT: stack[sp++] = slot; break;
-                case PURE_OP_NEG: stack[sp - 1] = -stack[sp - 1]; break;
-                case PURE_OP_NOT: stack[sp - 1] = stack[sp - 1] == 0; break;
-                case PURE_OP_FLOOR: stack[sp - 1] = floor(stack[sp - 1]); break;
+                double v;
+                switch (step->op) { /* as the executor computes each (a fault: not finite, or 0 divided by) */
+                case S_NUMBER: stack[sp++] = step->k; continue;
+                case S_X: stack[sp++] = b->recur_value[step->x]; continue;
+                case S_SLOT: stack[sp++] = slot; continue;
+                case PURE_OP_NEG: stack[sp - 1] = -stack[sp - 1]; continue;
+                case PURE_OP_NOT: stack[sp - 1] = stack[sp - 1] == 0; continue;
+                case PURE_OP_FLOOR: stack[sp - 1] = floor(stack[sp - 1]); continue;
+                case PURE_OP_ADD: --sp, v = stack[sp - 1] + stack[sp]; break;
+                case PURE_OP_SUB: --sp, v = stack[sp - 1] - stack[sp]; break;
+                case PURE_OP_MUL: --sp, v = stack[sp - 1] * stack[sp]; break;
+                case PURE_OP_DIV:
+                    if (stack[--sp] == 0) return false;
+                    v = stack[sp - 1] / stack[sp];
+                    break;
                 default:
                     --sp;
-                    if (!number_op(step->op, stack[sp - 1], stack[sp], &stack[sp - 1])) return false; /* its fault: the executor's */
+                    if (!number_op(step->op, stack[sp - 1], stack[sp], &v)) return false;
                 }
+                if (not_finite(v)) return false;
+                stack[sp - 1] = v;
             }
             b->recur_value[up->x] = stack[0];
         }
+    }
+    return true;
+}
+
+/* ---- Sums into cells */
+
+/* Whether instructions [a, a + n) and [b, b + n) are the same (a key computed twice). */
+static bool same_code(const PureModule *m, uint32_t a, uint32_t b, uint32_t n) {
+    for (uint32_t i = 0; i < n; ++i)
+        if (m->code[a + i].op != m->code[b + i].op || m->code[a + i].arg != m->code[b + i].arg ||
+            m->code[a + i].integer != m->code[b + i].integer)
+            return false;
+    return true;
+}
+
+/* Whether code [a, b) reads list (its cells or keys), branches or loops. */
+static bool touches(const PureModule *m, uint32_t a, uint32_t b, uint32_t list) {
+    for (uint32_t at = a; at < b; ++at) {
+        const PureOp *op = &m->code[at];
+        if (op->op == PURE_OP_JZ || op->op == PURE_OP_JMP || op->op == PURE_OP_LOOP || op->op == PURE_OP_BREAK) return true;
+        if ((op->op == PURE_OP_ITEM_GET && list_of(op->arg) == list) ||
+            ((op->op == PURE_OP_LIST_FIND || op->op == PURE_OP_LIST_HAS || op->op == PURE_OP_LIST_COUNT) && op->arg == list))
+            return true;
+    }
+    return false;
+}
+
+/* The block's statements L[k].f = L[k].f + e (k computed twice the same,
+ * reading no L; e reading no L; the set at k's row as its find found it). */
+static bool sums(Batch *b, uint32_t start, uint32_t end) {
+    const PureModule *m = b->m;
+    for (uint32_t set = start; set < end; ++set) {
+        const PureOp *op = &m->code[set];
+        if (op->op == PURE_OP_LOOP) set += op->arg >> 16;
+        if (op->op != PURE_OP_ITEM_SET || !(op->plan & PLAN_ROW) || set < start + 4 || m->code[set - 1].op != PURE_OP_ADD) continue;
+        uint32_t list = list_of(op->arg), from = set;
+        while (from > start && m->height[from]) --from; /* the statement's start */
+        uint32_t find = from;
+        while (find < set && !(m->code[find].op == PURE_OP_LIST_FIND && m->code[find].arg == list && m->height[find] == 1)) ++find;
+        uint32_t n = find - from, again = find + 1, read = again + n;
+        if (find == set || read + 2 > set - 1 || !(m->code[find].plan & PLAN_ROW) || m->height[from] || !same_code(m, from, again, n) ||
+            m->code[read].op != PURE_OP_LIST_FIND || m->code[read].arg != list || !(m->code[read].plan & PLAN_JOINED) ||
+            m->code[read + 1].op != PURE_OP_ITEM_GET || m->code[read + 1].arg != op->arg || touches(m, from, find, list) ||
+            touches(m, read + 2, set - 1, list) || m->height[read + 2] != 2 || m->height[set - 1] != 3)
+            continue;
+        if (b->sum_count == SUMS) return false;
+        b->sums[b->sum_count++] = (Sum){again, read + 2, set - 1, set};
     }
     return true;
 }
@@ -1029,7 +1095,25 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             pc = next;
             continue;
         }
-        unsigned u = 0;
+        unsigned u = 0, k = 0;
+        while (k < b->sum_count && b->sums[k].again != pc && b->sums[k].add != pc && b->sums[k].set != pc) ++k;
+        if (k < b->sum_count) { /* a sum into a cell: its row and e, kept for the end */
+            const Sum *sum = &b->sums[k];
+            if (pc == sum->again) pc = sum->resume; /* the key again, its find and the cell's read: not needed */
+            else if (pc == sum->add) pc = sum->set;
+            else {
+                const PureOp *set = &m->code[pc++];
+                if (b->scatter_count == SUMS) {
+                    b->failed = true;
+                    break;
+                }
+                Scatter *sc = &b->scatters[b->scatter_count++];
+                sc->list = list_of(set->arg), sc->field = item_field(set->arg), sc->add = sum->add, sc->set = sum->set;
+                sc->e = b->stack[--b->sp], sc->rows = b->stack[--b->sp], sc->mask = b->active;
+                sc->e.temp = sc->rows.temp = false;
+            }
+            continue;
+        }
         while (u < b->update_count && b->updates[u].from != pc) ++u;
         if (u < b->update_count) { /* a recurrence's x = e: made ahead, round by round */
             pc = b->updates[u].set + 1;
@@ -1168,6 +1252,8 @@ static void sweep(Batch *b) {
         mark_val(kept, &b->stores[s].rows), mark_val(kept, &b->stores[s].value), mark_mask(b, kept, kept_mask, b->stores[s].mask);
     for (unsigned d = 0; d < b->sp; ++d) mark_val(kept, &b->stack[d]);
     for (unsigned r = 0; r < b->record_count; ++r) mark_lanes(kept, b->records[r].lanes);
+    for (unsigned i = 0; i < b->scatter_count; ++i)
+        mark_val(kept, &b->scatters[i].rows), mark_val(kept, &b->scatters[i].e), mark_mask(b, kept, kept_mask, b->scatters[i].mask);
     for (unsigned a = 0; a < b->append_count; ++a) {
         mark_mask(b, kept, kept_mask, b->appends[a].mask);
         for (unsigned f = 0; f < b->appends[a].count; ++f) mark_val(kept, &b->appends[a].cells[f]);
@@ -1365,6 +1451,22 @@ static bool settle(Batch *b) {
     PureCells cells[STORES];
     const uint32_t *mask[STORES];
     if (!fold(b)) return false;
+    for (unsigned i = 0; i < b->scatter_count; ++i) { /* a sum's cells: an event's list's, read and set by nothing else in the batch */
+        const Scatter *sc = &b->scatters[i];
+        PureCells c;
+        if (!pure_list_cells(b->app->lists[sc->list], &c) || !c.owned || c.width[sc->field] == 255 || c.width[sc->field] == 0) return false;
+        Mask *saved = b->active;
+        b->active = sc->mask;
+        bool in = rows_in(b, &sc->rows, c.count);
+        b->active = saved;
+        if (!in) return false;
+        for (unsigned r = 0; r < b->read_count; ++r)
+            if (b->reads[r].list == sc->list && b->reads[r].field == sc->field) return false;
+        for (unsigned t = 0; t < b->store_count; ++t)
+            if (b->stores[t].list == sc->list && b->stores[t].field == sc->field) return false;
+        for (unsigned j = 0; j < i; ++j)
+            if (b->scatters[j].list == sc->list && b->scatters[j].field == sc->field) return false;
+    }
     for (unsigned i = 0; i < b->store_count; ++i) {
         Store *s = &b->stores[i];
         PureList *list = b->app->lists[s->list];
@@ -1447,7 +1549,7 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     b->failed = b->none = b->items = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
     b->mask_free_count = b->reduce_count = b->append_count = 0;
-    b->recur_count = b->update_count = b->record_count = b->step_count = 0;
+    b->recur_count = b->update_count = b->record_count = b->step_count = b->sum_count = b->scatter_count = 0;
     memset(b->sets, 0, sizeof(b->sets));
     for (uint32_t pc = loop->start; pc < loop->end; ++pc) { /* the locals it sets (a nested loop's slot too), and whether it sets items */
         const PureOp *op = &m->code[pc];
@@ -1458,7 +1560,8 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
             b->state[at] = 0;
         }
     }
-    if (!recurrences(b, loop->start, loop->end) || !recur(b)) b->failed = true; /* the recurrences ahead, round by round */
+    if (!recurrences(b, loop->start, loop->end) || !recur(b) || (b->items && !sums(b, loop->start, loop->end)))
+        b->failed = true; /* the recurrences ahead, round by round; the sums into cells */
     if (!b->failed && pass(b, loop->start, loop->end)) {
         arrive(b, loop->end);
         for (unsigned w = 0; w < LOCALS / 64; ++w) /* the lanes each local was set in, made before anything changes */
@@ -1467,11 +1570,62 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
                 if (b->state[at] == 2) mask_lanes(b, b->written[at]);
             }
         for (unsigned a = 0; a < b->append_count; ++a) mask_lanes(b, b->appends[a].mask);
+        for (unsigned i = 0; i < b->scatter_count; ++i) mask_lanes(b, b->scatters[i].mask);
     }
     uint64_t work = (n - 1) * per + b->work; /* the rounds after the first, and every round of their nested loops */
     if (b->failed || work > budget - app->work || !settle(b)) {
         loop->resume = ++loop->failures >= FAILURES ? UINT64_MAX : loop->k + n; /* its rounds one by one, then batches again */
         return STEP_NEXT;
+    }
+    if (b->scatter_count) { /* the sums into cells round by round, as the executor adds and sets (each its own cells) */
+        const double *rows[SUMS], *es[SUMS];
+        const uint32_t *masks[SUMS];
+        PureCells cells[SUMS];
+        for (unsigned i = 0; i < b->scatter_count; ++i) {
+            const Scatter *sc = &b->scatters[i];
+            rows[i] = numbers(b, &sc->rows), es[i] = numbers(b, &sc->e), masks[i] = mask_lanes(b, sc->mask);
+            pure_list_cells(b->app->lists[sc->list], &cells[i]);
+            if (!rows[i] || !es[i]) { /* no lanes left to make them: as the executor, round by round */
+                loop->resume = ++loop->failures >= FAILURES ? UINT64_MAX : loop->k + n;
+                return STEP_NEXT;
+            }
+        }
+        for (unsigned r = 0; r < n; ++r) {
+            unsigned l = round_of(b, r);
+            for (unsigned i = 0; i < b->scatter_count; ++i) {
+                const Scatter *sc = &b->scatters[i];
+                if (masks[i] && !masks[i][l]) continue;
+                size_t row = (size_t)rows[i][l];
+                uint8_t width = cells[i].width[sc->field];
+                void *column = cells[i].columns[sc->field];
+                double cell, v;
+                if (width == 8) memcpy(&cell, (const double *)column + row, sizeof(cell));
+                else cell = width == 4 ? ((const uint32_t *)column)[row] : ((const uint8_t *)column)[row];
+                v = cell + es[i][l];
+                if (!isfinite(v)) { /* its round's fault (the event undone) */
+                    app->work += (uint64_t)r * per;
+                    frame->kind = PURE_FAULT_NON_FINITE, frame->fault_pc = sc->add;
+                    return STEP_FAULT;
+                }
+                bool fits = width == 8 || (v >= 0 && v < (width == 4 ? 4294967296.0 : 256.0) && v == (double)(uint32_t)v &&
+                                           !(v == 0 && signbit(v)));
+                uint8_t need = fits ? width : width_needed(v);
+                if (need > width) { /* wider: the column as the executor's set widens it */
+                    PureList *list = b->app->lists[sc->list];
+                    if (!pure_list_widen(list, sc->field, need)) {
+                        app->work += (uint64_t)r * per;
+                        frame->status = PURE_ALLOCATION, frame->fault_pc = sc->set;
+                        return STEP_REFUSED;
+                    }
+                    pure_list_cells(list, &cells[i]);
+                    column = cells[i].columns[sc->field], width = need;
+                }
+                if (width == 8) memcpy((double *)column + row, &v, sizeof(v));
+                else if (width == 4) ((uint32_t *)column)[row] = (uint32_t)v;
+                else ((uint8_t *)column)[row] = (uint8_t)v;
+            }
+        }
+        for (unsigned i = 0; i < b->scatter_count; ++i) pure_list_touched(b->app->lists[b->scatters[i].list]);
     }
     for (unsigned r = 0; r < n && b->append_count; ++r) { /* the appends round by round, each as the executor's step makes it */
         unsigned l = round_of(b, r);

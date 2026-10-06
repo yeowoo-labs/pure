@@ -1178,7 +1178,8 @@ on go {
 # four, a fraction and -0 set in the middle of a batch (the columns widened),
 # 0 divided by at round q (a fault halfway through a batch: the executor's,
 # at its round), each round reading the last one's set (not apart: run one
-# by one), keys going down with an if and an else, two sets of one field.
+# by one), keys going down with an if and an else, two sets of one field,
+# sums into three cells in turn (the column widened as they grow).
 BATCH_SOURCE = """record Cell {
   at = 0
   v = 0
@@ -1209,6 +1210,9 @@ on go {
     let x = t[go.n - 1 - k].v
     if x > 5000 { t[go.n - 1 - k].w = x - 5000 } else { t[go.n - 1 - k].w = 7 }
     t[go.n - 1 - k].v = x + 1
+  }
+  for k in 0 .. go.n {
+    t[k - floor(k / 3) * 3].v = t[k - floor(k / 3) * 3].v + k * 1000000
   }
   for k in 0 .. go.n {
     t[k].w = 1000 / (k - go.q)
@@ -1519,8 +1523,11 @@ def tier_program(rng):
                         lines.append(f'{pad}  e.append(Cell {{ at: {at()}, v: {number(1, inner)} }})')
                     elif pick < 0.3:
                         lines.append(f'{pad}  d.add(Cell {{ at: {rng.choice([name, f"{name} * 3", key(2, inner)])}, v: {number(1, inner)} }})')
-                    elif pick < 0.6:
+                    elif pick < 0.5:
                         lines.append(f'{pad}  t[{at()}].v = {number(1, inner)}')
+                    elif pick < 0.6:  # a sum into a cell (its rows read and set by the rounds in turn)
+                        cell = at()
+                        lines.append(f'{pad}  t[{cell}].v = t[{cell}].v + {number(1, inner)}')
                     else:
                         lines.append(f'{pad}  if {cond(1, inner)} {{ t[{at()}].v = {number(1, inner)} }}' +
                                      (f' else {{ t[{at()}].v = {number(1, inner)} }}' if rng.random() < 0.4 else ''))
@@ -1564,8 +1571,10 @@ def tier_program(rng):
                         lines.append(f'{pad}  e.append(Cell {{ at: w{name}, v: x1 }})')
                     elif pick < 0.6:
                         lines.append(f'{pad}  t[{rng.choice([name, f"w{name}", f"floor(x1 / 100)"])}].v = x1')
-                    elif pick < 0.8:
+                    elif pick < 0.7:
                         lines.append(f'{pad}  x1 = {step()}')
+                    elif pick < 0.8:
+                        lines.append(f'{pad}  t[w{name}].v = t[w{name}].v + x1')
                     else:
                         lines.append(f'{pad}  ra = ra + w{name}')
                 lines.append(f'{pad}}}')
