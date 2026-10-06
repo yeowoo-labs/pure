@@ -63,6 +63,23 @@ typedef struct { uint32_t again, resume, add, set; } Sum;
 typedef struct { uint32_t list, field, add, set; Val rows, e; Mask *mask; } Scatter;
 /* An item a LIST_APPEND at pc appends in the lanes of mask (NULL: all): its fields. */
 typedef struct { uint32_t pc; Mask *mask; unsigned count; Val cells[PURE_RECORD_FIELDS]; } Append;
+/* A filter, if !L.has(k) { its code } (PLAN_FILTER: L only grows in the
+ * batch's block; its code a line, appending): its HAS, its code's end, L; k
+ * and the lanes its code runs in this pass; its code's appends (their
+ * instructions, lists and cells' counts). The rounds its code ran in are
+ * kept (filtered: a round's number, k, each append's cells), asked again in
+ * the rounds' order at the end, their appends made for those still not there. */
+enum { FILTERS = 2, FILTER_APPENDS = 4, FILTERED = 1 << 16 };
+typedef struct {
+    uint32_t has, end, list;
+    Val key;
+    Mask *mask;
+    bool none, spread;
+    unsigned first, appends, made, stride; /* made: its appends, as its kept rounds hold their cells */
+    uint32_t pc[FILTER_APPENDS], to[FILTER_APPENDS];
+    unsigned cells[FILTER_APPENDS];
+    size_t kept;
+} Filter;
 /* Lanes a branch sent ahead (NULL: every lane): they run again at pc. */
 typedef struct { uint32_t pc; Mask *mask; } Split;
 /* A reduction (x = x op e, x read no other way): each lane's op of its rounds'
@@ -128,9 +145,13 @@ typedef struct {
     unsigned sum_count, scatter_count;
     Sum sums[SUMS];
     Scatter scatters[SUMS];
+    Filter filters[FILTERS];
+    unsigned filter_count;
 } Batch;
 
 static _Thread_local Batch batch;
+static _Thread_local double *filtered[FILTERS]; /* each filter's kept rounds (Filter), grown as needed */
+static _Thread_local size_t filtered_room[FILTERS];
 
 /* A lane's round in the batch (and a round's lane). */
 static inline unsigned round_of(const Batch *b, unsigned l) { return b->reverse ? b->n - 1 - l : l; }
@@ -704,6 +725,49 @@ static bool find(Batch *b, const PureOp *op, uint32_t pc) {
         }
         return true;
     }
+    const uint64_t *bits;
+    size_t words;
+    PureCells at_keys;
+    if ((has || (joined && pure_list_dense(keyed, &at_keys) && at_keys.width[field] != 255)) && pure_list_bits(keyed, &bits, &words)) {
+        /* keys as bits: each lane's asked at once (a key whole, not below 0, below words * 64), a field read at its key */
+        const uint32_t *run = running(b);
+        void *out = fresh(b);
+        if (!out) return true;
+        uint8_t bad[BATCH];
+        size_t top = words * 64;
+        if (has && x->kind == LANES && x->u32) { /* keys in four bytes: whole, not below 0 */
+            const uint32_t *keys = x->lane;
+            for (unsigned l = 0, n = b->n; l < n; ++l) {
+                size_t at = keys[l] < top ? keys[l] : 0;
+                ((uint32_t *)out)[l] = keys[l] < top && bits[at >> 6] >> (at & 63) & 1;
+            }
+            *x = lanes_val(out, true);
+            return true;
+        }
+        for (unsigned l = 0; l < b->n; ++l) {
+            double k = lane_of(x, l);
+            size_t at = k >= 0 && k < (double)top && k == floor(k) ? (size_t)k : top;
+            bool there = at < top && bits[at >> 6] >> (at & 63) & 1;
+            if (has) ((uint32_t *)out)[l] = there;
+            else {
+                bad[l] = !there;
+                at = there ? at : 0;
+                uint8_t width = at_keys.width[field];
+                const void *column = at_keys.columns[field];
+                double v = width == 8 ? ((const double *)column)[at] : width == 4 ? ((const uint32_t *)column)[at]
+                         : width == 1 ? ((const uint8_t *)column)[at] : (double)at; /* (width 0: the key itself) */
+                ((double *)out)[l] = v;
+            }
+        }
+        (void)run;
+        if (!has && any_running(b, bad)) return false;
+        if (joined) {
+            Val rows = {.kind = UNIFORM};
+            read_of(b, list, field, false, &rows);
+        }
+        *x = lanes_val(out, has);
+        return true;
+    }
     double *out = fresh(b); /* any other: each lane's key found as the executor finds it */
     const uint32_t *run = running(b);
     if (!out) return true;
@@ -781,7 +845,11 @@ static Val outer_lanes(Batch *b, const Val *v) {
     void *out = fresh(b);
     if (!out) return *v;
     Val r;
-    if (v->kind == AFFINE) {
+    double last = v->value + v->step * (b->outer_n - 1);
+    if (v->kind == AFFINE && whole32(v->value) && whole32(last)) { /* whole below 2^32 in every outer lane: four bytes */
+        for (unsigned j = 0; j < b->n; ++j) ((uint32_t *)out)[j] = (uint32_t)(v->value + v->step * parent[j]);
+        r = lanes_val(out, true);
+    } else if (v->kind == AFFINE) {
         for (unsigned j = 0; j < b->n; ++j) ((double *)out)[j] = v->value + v->step * parent[j];
         r = lanes_val(out, false);
     } else if (v->u32) {
@@ -1256,6 +1324,62 @@ static bool sums(Batch *b, uint32_t start, uint32_t end) {
 static void nested(Batch *b, const PureOp *op, uint32_t pc);
 static void walk_nested(Batch *b, const PureOp *op, uint32_t pc);
 
+/* The filter whose HAS is at pc, as this pass reaches it: k (the top) kept, its appends from here. false: more than it holds. */
+static bool open_filter(Batch *b, const PureOp *op, uint32_t pc) {
+    unsigned f = 0;
+    while (f < b->filter_count && b->filters[f].has != pc) ++f;
+    if (f == b->filter_count) {
+        if (f == FILTERS) return false;
+        b->filters[b->filter_count++] = (Filter){.has = pc, .end = b->m->code[pc + 2].arg, .list = op->arg, .key = uniform(0, 0)};
+    }
+    Filter *fl = &b->filters[f];
+    Val *k = &b->stack[b->sp - 1];
+    k->temp = false; /* the filter keeps it (HAS gives a new value) */
+    fl->key = *k, fl->mask = NULL, fl->none = false, fl->spread = b->parent != NULL, fl->first = b->append_count, fl->appends = 0;
+    return true;
+}
+
+/* Each filter's rounds whose code ran this pass (spread: a spread walk's
+ * filters', this chunk's; else the batch's own), in the rounds' order: its
+ * round, k and its appends' cells kept; its appends then let go. false: more
+ * rounds than it keeps, or no memory. */
+static bool keep_filtered(Batch *b) {
+    unsigned least = b->append_count;
+    for (unsigned f = 0; f < b->filter_count; ++f) {
+        Filter *fl = &b->filters[f];
+        if (!fl->appends || fl->spread != (b->parent != NULL)) continue;
+        least = fl->first < least ? fl->first : least;
+        if (fl->none) continue;
+        unsigned stride = 2;
+        for (unsigned a = 0; a < fl->appends; ++a) stride += fl->cells[a];
+        fl->stride = stride, fl->made = fl->appends;
+        const uint32_t *mask = fl->mask ? mask_lanes(b, fl->mask) : NULL;
+        for (unsigned k = 0; k < b->n; ++k) {
+            unsigned l = b->parent ? k : round_of(b, k);
+            if (mask && !mask[l]) continue;
+            if (fl->kept == FILTERED) return false;
+            if ((fl->kept + 1) * stride > filtered_room[f]) {
+                size_t room = filtered_room[f] ? 2 * filtered_room[f] : 4096;
+                double *grown = realloc(filtered[f], room * sizeof(double));
+                if (!grown) return false;
+                filtered[f] = grown, filtered_room[f] = room;
+            }
+            double *r = filtered[f] + fl->kept++ * stride;
+            unsigned o = b->parent ? b->parent[l] : 0;
+            r[0] = b->parent ? (double)(b->outer_reverse ? b->outer_n - 1 - o : o) : (double)k;
+            r[1] = lane_of(&fl->key, l);
+            unsigned at = 2;
+            for (unsigned a = 0; a < fl->appends; ++a) {
+                const Append *ap = &b->appends[fl->first + a];
+                for (unsigned c = 0; c < ap->count; ++c) r[at++] = lane_of(&ap->cells[c], l);
+            }
+        }
+        fl->appends = 0, fl->key = uniform(0, 0), fl->mask = NULL;
+    }
+    b->append_count = least;
+    return true;
+}
+
 /* The block from start to end once for the batch's lanes: false where it failed. */
 static bool pass(Batch *b, uint32_t start, uint32_t end) {
     const PureModule *m = b->m;
@@ -1374,6 +1498,12 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             }
             Append *a = &b->appends[b->append_count++];
             a->pc = pc - 1, a->mask = b->active, a->count = count;
+            for (unsigned f = 0; f < b->filter_count; ++f) /* a filter's code's */
+                if (pc - 1 > b->filters[f].has && pc - 1 < b->filters[f].end) {
+                    Filter *fl = &b->filters[f];
+                    if (fl->appends == FILTER_APPENDS) b->failed = true;
+                    else fl->pc[fl->appends] = pc - 1, fl->to[fl->appends] = arg, fl->cells[fl->appends] = count, ++fl->appends;
+                }
             b->sp -= count;
             for (unsigned f = 0; f < count; ++f) {
                 a->cells[f] = b->stack[b->sp + f];
@@ -1382,10 +1512,19 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             break;
         }
         case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS:
+            if (op->plan & PLAN_FILTER && !open_filter(b, op, pc - 1)) {
+                b->failed = true;
+                break;
+            }
             if (!find(b, op, pc - 1)) b->failed = true;
             else if (op->op == PURE_OP_LIST_FIND && op->plan & PLAN_JOINED) ++pc; /* its ITEM_GET with it */
             break;
-        case PURE_OP_JZ: branch(b, arg); break;
+        case PURE_OP_JZ:
+            branch(b, arg);
+            if (pc >= 3 && m->code[pc - 3].op == PURE_OP_LIST_HAS && m->code[pc - 3].plan & PLAN_FILTER) /* a filter's: its lanes */
+                for (unsigned f = 0; f < b->filter_count; ++f)
+                    if (b->filters[f].has == pc - 3) b->filters[f].mask = b->active, b->filters[f].none = b->none;
+            break;
         case PURE_OP_LOOP: nested(b, op, pc - 1), pc += arg >> 16; break;
         case PURE_OP_EACH: walk_nested(b, op, pc - 1), pc += arg >> 16; break;
         case PURE_OP_BREAK: { /* the running lanes leave the nested loop */
@@ -1445,6 +1584,7 @@ static void sweep(Batch *b) {
     mark_lanes(kept, b->var);
     mark_lanes(kept, b->nest.count), mark_lanes(kept, b->nest.broken), mark_val(kept, &b->nest.low), mark_lanes(kept, b->nest.rows);
     mark_lanes(kept, b->parent), mark_lanes(kept, b->item_rows);
+    for (unsigned f = 0; f < b->filter_count; ++f) mark_val(kept, &b->filters[f].key), mark_mask(b, kept, kept_mask, b->filters[f].mask);
     for (unsigned r = 0; r < b->reduce_count; ++r) mark_lanes(kept, b->reduce[r].partial), mark_lanes(kept, b->reduce[r].count);
     for (unsigned r = 0; r < b->read_count; ++r) mark_val(kept, &b->reads[r].rows);
     for (unsigned s = 0; s < b->store_count; ++s)
@@ -1576,6 +1716,10 @@ static void spread(Batch *b, uint32_t start, uint32_t end, const uint32_t *count
         memset(b->own, 0, sizeof(b->own));
         if (!pass(b, start, end)) break;
         arrive(b, end);
+        if (b->filter_count && !keep_filtered(b)) {
+            b->failed = true;
+            break;
+        }
         for (unsigned w = 0; w < LOCALS / 64; ++w) /* each own local: the last item's that set it */
             for (uint64_t bits = b->own[w]; bits; bits &= bits - 1) {
                 unsigned at = w * 64 + (unsigned)__builtin_ctzll(bits), j = m;
@@ -1867,6 +2011,133 @@ static bool settle(Batch *b) {
 
 enum { CHUNK = 128 }; /* items a call of pure_list_add_many takes */
 
+static _Thread_local uint64_t *added_keys;  /* decide's keys added to a filter's list by its kept rounds */
+static _Thread_local double *scratch;       /* and the keys its rounds add, for pure_list_takes */
+static _Thread_local size_t added_room, scratch_room;
+static const uint64_t NO_KEY = UINT64_C(0x7FF8000000000001); /* a NaN: never a key */
+
+static uint64_t key_of(double k) {
+    if (k == 0) k = 0; /* -0 and +0 are one key */
+    uint64_t bits;
+    memcpy(&bits, &k, sizeof(bits));
+    return bits;
+}
+
+/* Whether a list keyed by a number has key k now, as HAS asks it. */
+static bool list_has(const PureList *list, unsigned key, double k) {
+    const uint64_t *bits;
+    size_t words;
+    if (pure_list_bits(list, &bits, &words)) {
+        size_t top = words * 64, at = k >= 0 && k < (double)top && k == floor(k) ? (size_t)k : top;
+        return at < top && bits[at >> 6] >> (at & 63) & 1;
+    }
+    bool found;
+    if (!pure_list_contains(list, k, &found)) pure_list_seek(list, key, (PureCell){.num = k}, &found);
+    return found;
+}
+
+/* Whether k is in (add: put in) decide's keys, mask + 1 slots. */
+static bool added(uint64_t bits, size_t mask, bool add) {
+    size_t at = (size_t)((bits ^ bits >> 33) * UINT64_C(0xff51afd7ed558ccd) >> 20) & mask;
+    for (; added_keys[at] != NO_KEY; at = (at + 1) & mask)
+        if (added_keys[at] == bits) return true;
+    if (add) added_keys[at] = bits;
+    return false;
+}
+
+/* Each filter's kept rounds asked again in the rounds' order, its list as it
+ * is and what the kept rounds before add to it: a round whose k is there by
+ * now is left out (its number -1, as the executor's code skips it then);
+ * then whether each list takes the rest at once (pure_list_takes) and the
+ * memory budget all of them. false: the batch gives its rounds back (a key
+ * an append adds there already, a list that does not take them so, the
+ * memory: the executor's rounds tell where). */
+static bool decide(Batch *b) {
+    const PureModule *m = b->m;
+    PureApp *app = b->app;
+    size_t stored = 0, extra = 0;
+    for (unsigned f = 0; f < b->filter_count; ++f) {
+        Filter *fl = &b->filters[f];
+        if (!fl->kept) continue;
+        const PureList *list = app->lists[fl->list];
+        unsigned key = m->state_key[fl->list] - 1u;
+        size_t slots = 64;
+        while (slots < 2 * fl->kept * (fl->made + 1)) slots *= 2;
+        if (slots > added_room) {
+            uint64_t *grown = realloc(added_keys, slots * sizeof(*grown));
+            if (!grown) return false;
+            added_keys = grown, added_room = slots;
+        }
+        if (fl->kept > scratch_room) {
+            double *grown = realloc(scratch, fl->kept * sizeof(*grown));
+            if (!grown) return false;
+            scratch = grown, scratch_room = fl->kept;
+        }
+        for (size_t i = 0; i < slots; ++i) added_keys[i] = NO_KEY;
+        for (size_t i = 0; i < fl->kept; ++i) {
+            double *r = filtered[f] + i * fl->stride;
+            if (list_has(list, key, r[1]) || added(key_of(r[1]), slots - 1, false)) {
+                r[0] = -1;
+                continue;
+            }
+            for (unsigned a = 0, at = 2; a < fl->made; at += fl->cells[a++]) /* its adds to the list: keys not there yet */
+                if (fl->to[a] == fl->list) {
+                    double k = r[at + key];
+                    if (list_has(list, key, k) || added(key_of(k), slots - 1, true)) return false;
+                }
+        }
+        for (unsigned a = 0, at = 2; a < fl->made; at += fl->cells[a++]) {
+            uint32_t to = fl->to[a];
+            int keyed = m->state_key[to] ? (int)m->state_key[to] - 1 : -1;
+            size_t count = 0, s, e;
+            for (size_t i = 0; i < fl->kept; ++i) {
+                const double *r = filtered[f] + i * fl->stride;
+                if (r[0] < 0) continue;
+                if (keyed >= 0) scratch[count] = r[at + (unsigned)keyed];
+                ++count;
+            }
+            if (!(m->state_flags[to] & PURE_LIST_ROWS >> 8) || m->state_indexed[to] ||
+                !pure_list_takes(app->lists[to], keyed, count, scratch, &s, &e))
+                return false;
+            stored += s, extra += e;
+        }
+    }
+    return !((app->memory && app->grown + (int64_t)stored > (int64_t)app->memory) || app->spent + (int64_t)(stored + extra) > (int64_t)app->room);
+}
+
+/* The filters' appends their kept rounds still make (decide), each list's
+ * at once in the rounds' order. STEP_NEXT, or STEP_REFUSED without memory. */
+static int apply_filters(Batch *b, Frame *frame, uint64_t per) {
+    PureApp *app = b->app;
+    for (unsigned f = 0; f < b->filter_count; ++f) {
+        Filter *fl = &b->filters[f];
+        for (unsigned a = 0, at = 2; fl->kept && a < fl->made; at += fl->cells[a++]) {
+            PureList *list = app->lists[fl->to[a]];
+            size_t was = pure_list_size(list), had = pure_list_extra(list);
+            double cells[PURE_RECORD_FIELDS][CHUNK];
+            const double *fields[PURE_RECORD_FIELDS];
+            for (unsigned c = 0; c < fl->cells[a]; ++c) fields[c] = cells[c];
+            for (size_t i = 0; i < fl->kept;) {
+                size_t count = 0, first = i;
+                for (; i < fl->kept && count < CHUNK; ++i) {
+                    const double *r = filtered[f] + i * fl->stride;
+                    if (r[0] < 0) continue;
+                    for (unsigned c = 0; c < fl->cells[a]; ++c) cells[c][count] = r[at + c];
+                    ++count;
+                }
+                if (count && pure_list_add_many(list, count, fields) != count) { /* no memory (decide left no key there) */
+                    app->work += (uint64_t)filtered[f][first * fl->stride] * per;
+                    frame->status = PURE_ALLOCATION, frame->fault_pc = fl->pc[a], frame->sp = 0;
+                    return STEP_REFUSED;
+                }
+            }
+            app->grown += (int64_t)pure_list_size(list) - (int64_t)was; /* as grows counts them, item by item */
+            app->spent += (int64_t)(pure_list_size(list) + pure_list_extra(list)) - (int64_t)(was + had);
+        }
+    }
+    return STEP_NEXT;
+}
+
 /* v in the k rounds from r on, in their order (each round's lane's). */
 static void rounds_of(const Batch *b, const Val *v, unsigned r, unsigned k, double *out) {
     if (v->kind == UNIFORM)
@@ -2018,7 +2289,18 @@ static int append_items(Batch *b, Frame *frame, unsigned n, uint64_t per) {
     return STEP_NEXT;
 }
 
+static int batch_run(Frame *frame, Loop *loop, unsigned *done);
+
+/* A batch (batch_run), the filters' rounds and keys let go after it (held only while one runs: a thread keeps none). */
 int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
+    int how = batch_run(frame, loop, done);
+    if (added_room || scratch_room) free(added_keys), free(scratch), added_keys = NULL, scratch = NULL, added_room = scratch_room = 0;
+    for (unsigned f = 0; f < FILTERS; ++f)
+        if (filtered_room[f]) free(filtered[f]), filtered[f] = NULL, filtered_room[f] = 0;
+    return how;
+}
+
+static int batch_run(Frame *frame, Loop *loop, unsigned *done) {
     PureApp *app = frame->app;
     const PureModule *m = frame->m;
     bool walking = loop->walking; /* a walk: its rounds its places, their work counted as it opened */
@@ -2055,7 +2337,7 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     b->walk = walking ? (int)loop->walk.list : -1;
     b->failed = b->none = b->items = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
-    b->mask_free_count = b->reduce_count = b->append_count = 0;
+    b->mask_free_count = b->reduce_count = b->append_count = b->filter_count = 0;
     b->recur_count = b->update_count = b->record_count = b->step_count = b->sum_count = b->scatter_count = 0;
     memset(b->sets, 0, sizeof(b->sets));
     for (uint32_t pc = loop->start; pc < loop->end; ++pc) { /* the locals it sets (a nested loop's slot too), and whether it sets items */
@@ -2071,6 +2353,7 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
         b->failed = true; /* the recurrences ahead, round by round; the sums into cells */
     if (!b->failed && pass(b, guard ? loop->start + 5 : loop->start, loop->end)) {
         arrive(b, loop->end);
+        if (b->filter_count && !keep_filtered(b)) b->failed = true; /* the filters' rounds in the batch's own lanes */
         for (unsigned w = 0; w < LOCALS / 64; ++w) /* the lanes each local was set in, made before anything changes */
             for (uint64_t bits = b->sets[w]; bits; bits &= bits - 1) {
                 unsigned at = w * 64 + (unsigned)__builtin_ctzll(bits);
@@ -2080,7 +2363,7 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
         for (unsigned i = 0; i < b->scatter_count; ++i) mask_lanes(b, b->scatters[i].mask);
     }
     uint64_t work = (n - 1) * per + b->work; /* the rounds after the first, and every round of their nested loops */
-    if (b->failed || work > budget - app->work || !settle(b)) {
+    if (b->failed || work > budget - app->work || (b->filter_count && !decide(b)) || !settle(b)) {
         loop->resume = ++loop->failures >= FAILURES ? UINT64_MAX : round + n; /* its rounds one by one, then batches again */
         return STEP_NEXT;
     }
@@ -2136,6 +2419,10 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     }
     if (b->append_count) {
         int how = append_items(b, frame, n, per);
+        if (how != STEP_NEXT) return how;
+    }
+    if (b->filter_count) {
+        int how = apply_filters(b, frame, per);
         if (how != STEP_NEXT) return how;
     }
     app->work += work;

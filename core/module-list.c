@@ -1814,6 +1814,26 @@ bool pure_list_cells(PureList *list, PureCells *out) {
 
 bool pure_list_widen(PureList *list, unsigned field, uint8_t bytes) { return widen(list, field, bytes); }
 
+bool pure_list_bits(const PureList *list, const uint64_t **bits, size_t *words) {
+    if (!list->members || !list->bitmap || list->layout.key < 0) return false;
+    *bits = list->members, *words = list->member_capacity;
+    return true;
+}
+
+bool pure_list_dense(const PureList *list, PureCells *out) {
+    if (list->form != DENSE) return false;
+    const Layout *l = &list->layout;
+    out->count = list->room;
+    out->owned = false;
+    for (unsigned f = 0; f < l->fields; ++f) {
+        out->columns[f] = list->columns[f];
+        out->width[f] = list->width[f] == 0 || ((l->kinds[f] == PURE_CELL_NUMBER || l->kinds[f] == PURE_CELL_BOOL) &&
+                                                (list->width[f] == 1 || list->width[f] == 4 || list->width[f] == 8))
+                            ? list->width[f] : 255;
+    }
+    return true;
+}
+
 void pure_list_touched(PureList *list) { ++list->version; }
 
 bool pure_list_takes(const PureList *list, int key, size_t n, const double *keys, size_t *stored, size_t *extra) {

@@ -186,6 +186,14 @@ bool pure_list_cells(PureList *, PureCells *);
 bool pure_list_widen(PureList *, unsigned field, uint8_t bytes);
 /* A batch set cells of it in place: it changed (its version). */
 void pure_list_touched(PureList *);
+/* A list keyed by a number whose keys are a set of bits (every key a whole
+ * number below its words * 64: pure_list_contains's): the bits, for a
+ * batch's HAS (docs/design/024); false when its keys are kept otherwise. */
+bool pure_list_bits(const PureList *, const uint64_t **bits, size_t *words);
+/* A DENSE list's cells at their keys (count: the keys its columns hold;
+ * width as pure_list_cells's; a key there when its bit is), for a batch's
+ * fields found by key; false when it is not DENSE. */
+bool pure_list_dense(const PureList *, PureCells *);
 /* Whether n items of numbers and bools go into an event's list at once
  * (pure_list_add_many) as one after another they would go, the list
  * staying in its form: a FLAT list not keyed (key -1), at its end; a DENSE

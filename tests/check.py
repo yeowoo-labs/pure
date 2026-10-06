@@ -1390,6 +1390,96 @@ on go {
 }
 """
 
+# Filters in a batch's block (GRAPH_SOURCE): a graph built in the handler
+# (an edge added if not there yet, keys from a recurrence), searched breadth
+# first twice (a count's loop to the queue's count, each node's edges
+# walked and spread, if !seen.has(e.to) { seen.add; queue.append }: asked
+# as the batch opens and again in the rounds' order at its end), the depths
+# summed by a walk; marks whose filter asks one key and adds another (one
+# there already: EXISTS at its round); under work budgets that end within a
+# batch and memory budgets that end in the filters' adds.
+GRAPH_SOURCE = """record Edge {
+  link = 0
+  to = 0
+}
+record Seen {
+  node = 0
+  depth = 0
+}
+record Step {
+  node = 0
+}
+state reached = 0
+state hops = -1
+state far = 0
+state marked = 0
+input go = message {
+  n: u32
+  m: u32
+  from: u32
+  q: u32
+}
+on go {
+  let edges: list of Edge by link
+  let seen: list of Seen by node
+  let queue: list of Step
+  let again: list of Seen by node
+  let next: list of Step
+  let marks: list of Seen by node
+  let order: list of Step
+  let x = 7
+  for k in 0 .. go.m {
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    let a = x - floor(x / go.n) * go.n
+    let b = floor(x / 1000) - floor(x / 1000 / go.n) * go.n
+    if !edges.has(a * 1048576 + b) { edges.add(Edge { link: a * 1048576 + b, to: b }) }
+  }
+  queue.append(Step { node: go.from })
+  seen.add(Seen { node: go.from })
+  for i in 0 .. go.n {
+    if i >= queue.count { break }
+    let q = queue.first + i
+    for e in edges[q.node * 1048576 .. q.node * 1048576 + 1048576] {
+      if !seen.has(e.to) {
+        seen.add(Seen { node: e.to, depth: seen[q.node].depth + 1 })
+        queue.append(Step { node: e.to })
+      }
+    }
+  }
+  next.append(Step { node: go.q })
+  again.add(Seen { node: go.q, depth: 1 })
+  for i in 0 .. go.n * 2 {
+    if i >= next.count { break }
+    let q = next.first + i
+    for e in edges[q.node * 1048576 + 1 .. q.node * 1048576 + 1048576] {
+      if !again.has(e.to) {
+        again.add(Seen { node: e.to, depth: again[q.node].depth * 2 + 0.5 })
+        next.append(Step { node: e.to })
+      }
+    }
+  }
+  let total = 0
+  for s in seen {
+    total = total + s.depth * (s.node + 1)
+  }
+  for s in again {
+    total = total + s.depth
+  }
+  reached = seen.count * 1000 + again.count
+  hops = if seen.has(go.q) { seen[go.q].depth } else { -1 }
+  far = total
+  for v in 0 .. go.n {
+    order.append(Step { node: v * 7 - floor(v * 7 / go.n) * go.n })
+  }
+  for i in 0 .. go.n {
+    if i >= order.count { break }
+    let p = order.first + i
+    if !marks.has(p.node) { marks.add(Seen { node: p.node * 3 - floor(p.node * 3 / (go.n + go.q)) * (go.n + go.q), depth: i }) }
+  }
+  marked = marks.count
+}
+"""
+
 # Items a batch appends at once (APPEND_SOURCE): keys there already, met
 # at round q of a DENSE list and at round p of a HASHED one (the
 # executor's fault at that round); keys past what a DENSE list holds from
@@ -1513,6 +1603,20 @@ def module_assumptions(aup, pure, work):
         assert outputs[name] == outputs['batches'], ('front', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
     faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
     assert 'divide' in faults and 'none' in faults and 'work' in faults, faults
+    source, program = work / 'graph.aup', work / 'graph.pmod'  # filters, against the rounds one by one
+    source.write_text(GRAPH_SOURCE)
+    compile_module(aup, source, program)
+    given = ''.join(f'message go {struct.pack("<IIII", n, m, a, q).hex()}\nwork\n' for n, m, a, q in
+                    ((3000, 20000, 1, 7), (3000, 20000, 1, 0), (300, 1200, 0, 5), (2000, 3000, 7, 11), (40, 200, 3, 1)))
+    given += ''.join(f'budget {b}\n' + given for b in (200011, 900001)) + 'budget 0\n'
+    given += ''.join(f'memory {b}\n' + given for b in (150000, 600000)) + 'memory 0\n'
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=300, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('graph', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
+    faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
+    assert 'exists' in faults and 'none' in faults and 'work' in faults and 'memory' in faults, faults
     source, program = work / 'append.aup', work / 'append.pmod'  # items appended at once, against the rounds one by one
     source.write_text(APPEND_SOURCE)
     compile_module(aup, source, program)
@@ -1654,6 +1758,9 @@ def tier_program(rng):
                         lines.append(f'{pad}  d.add(Cell {{ at: {rng.choice([name, f"{name} * 3", key(2, inner)])}, v: {number(1, inner)} }})')
                     elif pick < 0.5:
                         lines.append(f'{pad}  t[{at()}].v = {number(1, inner)}')
+                    elif pick < 0.55:  # a filter at the batch's own level: d asked, then added to
+                        k = rng.choice([name, f'{name} * 3', f'w{name}', key(2, inner)])
+                        lines.append(f'{pad}  if !d.has({k}) {{ d.add(Cell {{ at: {k}, v: {number(1, inner)} }}) }}')
                     elif pick < 0.6:  # a sum into a cell (its rows read and set by the rounds in turn)
                         cell = at()
                         lines.append(f'{pad}  t[{cell}].v = t[{cell}].v + {number(1, inner)}')
@@ -1737,7 +1844,7 @@ def tier_program(rng):
                                      f'g[{name} .. {name}]', f'h[5000000 + {name} .. 5000100]', f'f[{name} .. 9]'])
                 inner = loops + [name, w, 'c']
                 lines.append(f'{pad}  for c in {walked} {{')
-                own = False
+                own = filtered = False
                 for _ in range(rng.randint(1, 3)):
                     pick = rng.random()
                     if pick < 0.3:
@@ -1748,8 +1855,17 @@ def tier_program(rng):
                         own = True
                         lines.append(f'{pad}    let o{name} = {number(2, inner)}')
                         lines.append(f'{pad}    rc = rc + o{name}')
-                    elif pick < 0.85:
+                    elif pick < 0.75:
                         lines.append(f'{pad}    if {cond(1, inner)} {{ ra = ra + {rng.choice(["c.v", w])} }}')
+                    elif pick < 0.92 and not filtered:  # a filter: d asked, then added to (its key, or one that may be there)
+                        filtered = True
+                        k = rng.choice(['c.v', 'c.at', f'floor(c.v / 2)', f'c.v + {w}'])
+                        added = k if rng.random() < 0.8 else f'{k} + 1'
+                        lines.append(f'{pad}    if !d.has({k}) {{')
+                        lines.append(f'{pad}      d.add(Cell {{ at: {added}, v: {rng.choice([w, "c.at", number(2, inner)])} }})')
+                        if rng.random() < 0.5:
+                            lines.append(f'{pad}      e.append(Cell {{ at: {k}, v: d[{rng.choice(["c.v", "0", w])}].v }})')
+                        lines.append(f'{pad}    }}')
                     else:
                         lines.append(f'{pad}    if {cond(1, inner)} {{ break }}')
                 lines.append(f'{pad}  }}')

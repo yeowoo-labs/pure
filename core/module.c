@@ -686,6 +686,24 @@ PURE_COLD static bool block_has_lanes(const PureModule *m, PureBlock block, int 
     return true;
 }
 
+/* The end of the body of if !L.has(k) { ... } whose HAS is at h, when its
+ * code is a line of lane forms and appends (no jump, loop, break, local set,
+ * item set or HAS) within [h, end): a filter (module-batch.c); else 0. */
+PURE_COLD static uint32_t filter_body(const PureModule *m, uint32_t h, uint32_t end) {
+    const PureOp *op = &m->code[h];
+    if (op->op != PURE_OP_LIST_HAS || h + 3 > end || op[1].op != PURE_OP_NOT || op[2].op != PURE_OP_JZ || op[2].arg > end ||
+        op[2].arg <= h + 3 || m->height[h] != 1)
+        return 0;
+    for (uint32_t at = h + 3; at < op[2].arg; ++at)
+        switch (m->code[at].op) {
+        case PURE_OP_JZ: case PURE_OP_JMP: case PURE_OP_LOOP: case PURE_OP_EACH: case PURE_OP_BREAK: case PURE_OP_LOCAL_STORE:
+        case PURE_OP_ITEM_SET: case PURE_OP_LIST_HAS:
+            return 0;
+        default:;
+        }
+    return op[2].arg;
+}
+
 /* Whether the block [start, end) of a loop a batch runs (depth: the loops
  * around it the batch runs too) has batch forms throughout: lane forms, a
  * local set (a number, an index or a bool), read only after its round sets
@@ -696,11 +714,13 @@ PURE_COLD static bool block_has_lanes(const PureModule *m, PureBlock block, int 
  * in a nested loop). shape: 1 a nested loop, 2 a set. */
 PURE_COLD static bool batch_block(const PureModule *m, uint32_t start, uint32_t end, int input, unsigned depth, uint64_t *sure,
                                   const uint64_t *set, const uint64_t *reduced, unsigned *shape) {
-    uint32_t arms = start; /* code before arms: in a branch's way */
+    uint32_t arms = start, body = 0; /* code before arms: in a branch's way; before body: a filter's */
     for (uint32_t at = start; at < end; ++at) {
         const PureOp *op = &m->code[at];
         unsigned local = op->arg & 0xFF;
         uint64_t bit = UINT64_C(1) << (local % 64);
+        uint32_t filtered = op->op == PURE_OP_LIST_HAS && at >= arms ? filter_body(m, at, end) : 0;
+        if (filtered) body = filtered;
         switch (op->op) {
         case PURE_OP_LOOP: {
             uint32_t inner = at + 1, stop = inner + (op->arg >> 16);
@@ -748,10 +768,10 @@ PURE_COLD static bool batch_block(const PureModule *m, uint32_t start, uint32_t 
         case PURE_OP_LIST_APPEND: { /* an item of numbers and bools, its list read nowhere in the block (appended) */
             for (uint32_t i = 0; i < m->states; ++i) /* an index into it: its moves (state_indexed is set after the plans) */
                 if (m->state_type[i] == PURE_STATE_INDEX && m->state_ref[i] == op->arg) return false;
-            if (depth) return false;
+            if (depth && at >= body) return false; /* in a nested loop: a filter's alone */
             for (unsigned f = 0; f < m->record[m->state_ref[op->arg]].count; ++f)
                 if (field_type(m, op->arg, f) != T_NUM && field_type(m, op->arg, f) != T_BOOL) return false;
-            *shape |= 4;
+            *shape |= at < body ? 8 : 4;
             break;
         }
         default:
@@ -770,6 +790,8 @@ PURE_COLD static int read_list(const PureOp *op) {
     default: return -1;
     }
 }
+
+PURE_COLD static bool walk_spreads(const PureModule *m, uint32_t start, uint32_t end, uint32_t each, const uint64_t *reduced);
 
 /* A count's loop or a walk whose block has batch forms throughout
  * (batch_block, after a count's guard: if slot >= L.count { break }, *guard)
@@ -838,15 +860,55 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, 
     for (unsigned w = 0; w < 4; ++w) exempt[w] = reduced[w] | recurs[w], reductions[w] = reduced[w];
     unsigned shape = 0;
     bool any = recurs[0] | recurs[1] | recurs[2] | recurs[3];
-    if (!batch_block(m, *guard ? start + 5 : start, end, input, 0, sure, set, exempt, &shape) || (shape & 1 && (shape & 6 || any)))
+    if (!batch_block(m, *guard ? start + 5 : start, end, input, 0, sure, set, exempt, &shape) || (shape & 1 && (shape & 6 || any)) ||
+        (shape & 8 && shape & 6)) /* a filter's appends: no other append or set beside them */
         return false;
-    uint32_t appended = 0; /* a list appended to is read nowhere else in the block (an earlier round's item not there yet), nor walked */
-    for (uint32_t at = start; at < end; ++at)
-        if (m->code[at].op == PURE_OP_LIST_APPEND) appended |= UINT32_C(1) << m->code[at].arg;
-    if (walk && appended >> (loop->arg >> 8 & 0xFF) & 1) return false;
+    /* A list appended to is read nowhere else in the block (an earlier round's item not there yet), nor walked; one a
+     * filter's code alone adds to (grown) is read only as no earlier round's item would change: its count in the guard,
+     * its first, an item by its place when it has no key (added at its end), a field by key (found at once: not there,
+     * the batch gives its rounds back), and has only in its filter (asked again at the end). */
+    uint32_t appended = 0, grown = 0, tested = 0, body = 0, each = 0, nest = 0; /* nest: a nested LOOP's end */
     for (uint32_t at = start; at < end; ++at) {
-        int list = read_list(&m->code[at]);
-        if (list >= 0 && list < 32 && appended >> list & 1) return false;
+        const PureOp *op = &m->code[at];
+        uint32_t filtered = filter_body(m, at, end);
+        if (each && at >= each + 1 + (m->code[each].arg >> 16)) each = 0;
+        if (filtered) { /* in the block or in a walk its items' rounds spread (not a nested LOOP's), one a list */
+            if (at < nest || (each && !walk_spreads(m, start, end, each, reduced)) || op->arg >= 32 || tested >> op->arg & 1) return false;
+            body = filtered, tested |= UINT32_C(1) << op->arg;
+        }
+        if (op->op == PURE_OP_EACH) each = at;
+        if (op->op == PURE_OP_LOOP) nest = at + 1 + (op->arg >> 16);
+        if (op->op == PURE_OP_LIST_APPEND) {
+            if (op->arg >= 32) return false;
+            if (at < body) grown |= UINT32_C(1) << op->arg;
+            else appended |= UINT32_C(1) << op->arg;
+        }
+    }
+    if (grown & appended || (walk && (appended | grown) >> (loop->arg >> 8 & 0xFF) & 1)) return false;
+    body = 0;
+    for (uint32_t at = start; at < end; ++at) {
+        const PureOp *op = &m->code[at];
+        uint32_t filtered = filter_body(m, at, end);
+        int list = read_list(op);
+        if (filtered) body = filtered;
+        if (list < 0 || list >= 32 || !((appended | grown) >> list & 1)) continue;
+        if (appended >> list & 1) return false;
+        bool keyed = m->state_key[list] != 0;
+        switch (op->op) {
+        case PURE_OP_LIST_COUNT: if (!(*guard && at == start + 1)) return false; break;
+        case PURE_OP_INDEX_FIRST: break;
+        case PURE_OP_ITEM_GET:
+            if (keyed && !(at > start && m->code[at - 1].op == PURE_OP_LIST_FIND && m->code[at - 1].arg == (uint32_t)list)) return false;
+            break;
+        case PURE_OP_LIST_FIND: if (at + 1 >= end || m->code[at + 1].op != PURE_OP_ITEM_GET || list_of(m->code[at + 1].arg) != (uint32_t)list) return false; break;
+        case PURE_OP_LIST_HAS: if (!filtered || !(tested >> list & 1)) return false; break;
+        default: return false;
+        }
+    }
+    for (uint32_t at = start, b = 0, t = 0; at < end; ++at) { /* a tested list: added to in its filter's code alone */
+        uint32_t filtered = filter_body(m, at, end);
+        if (filtered) b = filtered, t = m->code[at].arg;
+        if (m->code[at].op == PURE_OP_LIST_APPEND && tested >> (m->code[at].arg & 31) & 1 && !(at < b && m->code[at].arg == t)) return false;
     }
     return true;
 }
@@ -894,9 +956,11 @@ PURE_COLD static void plan_folds(PureModule *m, PureBlock block, int input) {
             (op->plan = (op->plan & PLAN_SPREAD) | (loop_batches(m, pc, input, recurs, &guard, reduced) ? PLAN_BATCH | (guard ? PLAN_GUARD : 0) : 0)) &
                 PLAN_BATCH) {
             m->batches = true;
-            for (uint32_t at = pc + 1; at < pc + 1 + (op->arg >> 16); ++at) /* its walks whose items may run apart */
+            for (uint32_t at = pc + 1; at < pc + 1 + (op->arg >> 16); ++at) { /* its walks whose items may run apart; its filters */
                 if (m->code[at].op == PURE_OP_EACH && walk_spreads(m, pc + 1, pc + 1 + (op->arg >> 16), at, reduced))
                     m->code[at].plan |= PLAN_SPREAD;
+                if (filter_body(m, at, pc + 1 + (op->arg >> 16))) m->code[at].plan |= PLAN_FILTER;
+            }
             for (uint32_t at = pc + 1; at < pc + 1 + (op->arg >> 16); ++at) /* a recurrence's sets, in the loop's own block */
                 if (m->code[at].op == PURE_OP_LOOP || m->code[at].op == PURE_OP_EACH) at += m->code[at].arg >> 16;
                 else if (m->code[at].op == PURE_OP_LOCAL_STORE && recurs[(m->code[at].arg & 0xFF) / 64] >> (m->code[at].arg & 63) & 1)
@@ -1557,7 +1621,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         PureOp *op = &out->code[pc];
         if (op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET) op->plan = text_field(out, list_of(op->arg), item_field(op->arg));
         else if (op->op == PURE_OP_LIST_FIND || op->op == PURE_OP_LIST_HAS)
-            op->plan = text_field(out, op->arg, out->state_key[op->arg] - 1u);
+            op->plan = (op->plan & PLAN_FILTER) | text_field(out, op->arg, out->state_key[op->arg] - 1u);
     }
     /* A FIND whose index the next instruction, an ITEM_GET of its list, takes
      * at once (no jump lands between them) reads the field by key, as one
