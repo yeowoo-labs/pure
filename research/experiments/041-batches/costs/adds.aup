@@ -1,0 +1,15 @@
+record Cell {
+  at = 0
+  v = 0
+}
+state out = 0
+input go = message {
+  n: u32
+}
+on go {
+  let table: list of Cell by at
+  for c in 0 .. go.n * 50 {
+    table.add(Cell { at: c })
+  }
+  out = table.count
+}

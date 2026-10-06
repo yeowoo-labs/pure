@@ -1,0 +1,19 @@
+record Cell {
+  at = 0
+  v = 0
+}
+state out = 0
+input go = message {
+  n: u32
+}
+on go {
+  let h: list of Cell by at
+  for i in 0 .. go.n {
+    h.add(Cell { at: i * 7919 - floor(i * 7919 / 100003) * 100003 + 5000000, v: i })
+  }
+  let total = 0
+  for o in 0 .. go.n * 10 {
+    total = total + h[(o - floor(o / go.n) * go.n) * 7919 - floor((o - floor(o / go.n) * go.n) * 7919 / 100003) * 100003 + 5000000].v
+  }
+  out = total
+}

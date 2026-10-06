@@ -1,0 +1,12 @@
+state out = 0
+input go = message {
+  n: u32
+}
+on go {
+  let total = 0
+  for i in 0 .. go.n * 20 {
+    let f = i + 1
+    total = max(total, f)
+  }
+  out = total
+}

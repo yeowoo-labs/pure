@@ -1,0 +1,17 @@
+state out = 0
+input go = message {
+  n: u32
+}
+on go {
+  let total = 0
+  for i in 0 .. go.n {
+    for j in 0 .. go.n {
+      let s = 0
+      for k in 0 .. go.n {
+        s = s + (k + 1) * 2 + j - j + 1
+      }
+      total = total + s
+    }
+  }
+  out = total
+}
