@@ -25,7 +25,8 @@
 #include "module-run.h"
 #include <stdlib.h>
 
-enum { BATCH = 1024, BUFFERS = 24, MASKS = 32, SPLITS = 8, READS = 16, STORES = 8, APPENDS = 8, REDUCES = 8, LOCALS = 256, LEAST = 16, FAILURES = 3 };
+enum { BATCH = 1024, BUFFERS = 24, MASKS = 32, SPLITS = 8, READS = 16, STORES = 8, APPENDS = 8, REDUCES = 8, RECURS = 4, UPDATES = 8,
+       RECORDS = 8, STEPS = 96, LOCALS = 256, LEAST = 16, FAILURES = 3 };
 
 enum { UNIFORM, AFFINE, LANES, REDUCE }; /* REDUCE: x in x = x op e (value: its reduction) */
 typedef struct {
@@ -44,6 +45,14 @@ typedef struct Mask { const uint32_t *lanes; const struct Mask *parent; struct M
 /* An item's field read at rows (known: else any row), and one set: what it sets and in which lanes (NULL: all). */
 typedef struct { uint32_t list, field; bool known; Val rows; } Read;
 typedef struct { uint32_t list, field; Val rows, value; Mask *mask; } Store;
+/* A recurrence's x = e ahead of the batch, round by round: e's instructions
+ * as steps (a number, x's value, the loop's value, or an operation on the
+ * numbers before it), the statement from to its set, the recurrence's index;
+ * and where the block reads a recurrence, its value there in each lane. */
+enum { S_NUMBER = 250, S_X, S_SLOT };
+typedef struct { uint8_t op, x; double k; } Step;
+typedef struct { uint32_t from, set; unsigned x, first, count; } Update;
+typedef struct { uint32_t pc; unsigned x; double *lanes; } Record;
 /* An item a LIST_APPEND at pc appends in the lanes of mask (NULL: all): its fields. */
 typedef struct { uint32_t pc; Mask *mask; unsigned count; Val cells[PURE_RECORD_FIELDS]; } Append;
 /* Lanes a branch sent ahead (NULL: every lane): they run again at pc. */
@@ -93,9 +102,18 @@ typedef struct {
     Store stores[STORES];
     Append appends[APPENDS];
     unsigned append_count;
+    unsigned recur_count, update_count, record_count, step_count;
+    unsigned recur_local[RECURS];
+    double recur_value[RECURS]; /* each recurrence's after the rounds so far */
+    Update updates[UPDATES];
+    Record records[RECORDS];
+    Step steps[STEPS];
 } Batch;
 
 static _Thread_local Batch batch;
+
+/* A lane's round in the batch (and a round's lane). */
+static inline unsigned round_of(const Batch *b, unsigned l) { return b->reverse ? b->n - 1 - l : l; }
 static _Thread_local double buffer[BUFFERS][BATCH + 24]; /* not 2^k apart: lanes of different buffers in different sets of the cache */
 static const uint32_t no_lanes[BATCH]; /* a mask's when there were no lanes left to make it (the batch failed) */
 
@@ -875,6 +893,124 @@ static void reduce_step(Batch *b, Reduce *r, const Val *e) {
     }
 }
 
+/* ---- Recurrences */
+
+bool pure_batch_recurs(const PureModule *m, uint32_t s, uint32_t start, const uint64_t *set, unsigned slot, uint32_t *from) {
+    unsigned x = m->code[s].arg & 0xFF;
+    uint32_t p = s;
+    while (p > start && m->height[p]) --p; /* its statement's start: nothing on the stack */
+    if (m->height[p]) return false;
+    for (uint32_t at = p; at < s; ++at) {
+        const PureOp *op = &m->code[at];
+        unsigned local = op->arg & 0xFF;
+        switch (op->op) {
+        case PURE_OP_CONST: if (op->arg == 2) return false; break; /* an i64 */
+        case PURE_OP_FIELD: case PURE_OP_LOAD: break;
+        case PURE_OP_LOCAL_LOAD:
+            if (local != x && local != slot && set[local / 64] >> (local % 64) & 1) return false;
+            break;
+        case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_MOD: case PURE_OP_MIN: case PURE_OP_MAX:
+        case PURE_OP_NEG: case PURE_OP_NOT: case PURE_OP_FLOOR: case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE:
+        case PURE_OP_EQ: case PURE_OP_NE: case PURE_OP_AND: case PURE_OP_OR: break;
+        default: return false;
+        }
+    }
+    *from = p;
+    return true;
+}
+
+/* A field the message (or the arguments) gives, as FIELD reads it. */
+static double field_value(const Batch *b, uint32_t arg) {
+    const PureField *field = &b->m->field[b->ev->shape->field_start + arg];
+    const unsigned char *given = (b->ev->arguments ? b->app->arguments.data : b->app->payload.data) + field->offset;
+    return field->type == PURE_FIELD_U32 ? read32(given) : field->type == PURE_FIELD_BOOL ? given[0] : read_double(given);
+}
+
+/* The recurrences of the batch's block (their sets planned PLAN_RECUR): each
+ * x = e as steps, and each other read of x a record. false: more than it holds. */
+static bool recurrences(Batch *b, uint32_t start, uint32_t end) {
+    const PureModule *m = b->m;
+    for (uint32_t pc = start; pc < end; ++pc) {
+        const PureOp *op = &m->code[pc];
+        if (op->op == PURE_OP_LOOP) pc += op->arg >> 16;
+        if (op->op != PURE_OP_LOCAL_STORE || !(op->plan & PLAN_RECUR)) continue;
+        unsigned local = op->arg & 0xFF, x = 0;
+        while (x < b->recur_count && b->recur_local[x] != local) ++x;
+        if (x == b->recur_count) {
+            if (x == RECURS) return false;
+            b->recur_local[x] = local, b->recur_value[x] = b->ev->locals[local].num, ++b->recur_count;
+        }
+        uint32_t from;
+        if (b->update_count == UPDATES || !pure_batch_recurs(m, pc, start, b->sets, b->slot, &from)) return false;
+        Update *u = &b->updates[b->update_count++];
+        *u = (Update){from, pc, x, b->step_count, 0};
+        for (uint32_t at = from; at < pc; ++at) {
+            const PureOp *e = &m->code[at];
+            unsigned l = e->arg & 0xFF, r = 0;
+            if (b->step_count == STEPS) return false;
+            Step *step = &b->steps[b->step_count++];
+            *step = (Step){e->op, 0, 0};
+            if (e->op == PURE_OP_CONST) step->op = S_NUMBER, step->k = e->value;
+            else if (e->op == PURE_OP_FIELD) step->op = S_NUMBER, step->k = field_value(b, e->arg);
+            else if (e->op == PURE_OP_LOAD) step->op = S_NUMBER, step->k = b->frame->values[e->arg].num;
+            else if (e->op == PURE_OP_LOCAL_LOAD && l == b->slot) step->op = S_SLOT;
+            else if (e->op == PURE_OP_LOCAL_LOAD) {
+                while (r < b->recur_count && b->recur_local[r] != l) ++r;
+                if (r < b->recur_count) step->op = S_X, step->x = (uint8_t)r;
+                else step->op = S_NUMBER, step->k = b->ev->locals[l].num; /* the block does not set it */
+            }
+        }
+        u->count = b->step_count - u->first;
+    }
+    for (uint32_t pc = start; pc < end; ++pc) { /* the block's other reads of a recurrence */
+        const PureOp *op = &m->code[pc];
+        if (op->op == PURE_OP_LOOP) pc += op->arg >> 16;
+        if (op->op != PURE_OP_LOCAL_LOAD) continue;
+        unsigned x = 0, u = 0;
+        while (x < b->recur_count && b->recur_local[x] != (op->arg & 0xFF)) ++x;
+        while (u < b->update_count && !(pc >= b->updates[u].from && pc < b->updates[u].set)) ++u;
+        if (x == b->recur_count || u < b->update_count) continue;
+        if (b->record_count == RECORDS || !(b->records[b->record_count].lanes = fresh(b))) return false;
+        b->records[b->record_count].pc = pc, b->records[b->record_count++].x = x;
+    }
+    return true;
+}
+
+/* The recurrences round by round, in the rounds' order (as the executor computes them): each record's lane. false: a round faults. */
+static bool recur(Batch *b) {
+    double stack[PURE_MODULE_STACK];
+    if (!b->update_count) return true;
+    for (unsigned r = 0; r < b->n; ++r) {
+        unsigned lane = round_of(b, r), u = 0, k = 0;
+        double slot = r ? b->first + (double)r : b->first;
+        while (u < b->update_count || k < b->record_count) { /* in the block's order */
+            if (k < b->record_count && b->records[k].pc < (u < b->update_count ? b->updates[u].from : UINT32_MAX)) {
+                b->records[k].lanes[lane] = b->recur_value[b->records[k].x];
+                ++k;
+                continue;
+            }
+            const Update *up = &b->updates[u++];
+            unsigned sp = 0;
+            for (unsigned i = up->first; i < up->first + up->count; ++i) {
+                const Step *step = &b->steps[i];
+                switch (step->op) {
+                case S_NUMBER: stack[sp++] = step->k; break;
+                case S_X: stack[sp++] = b->recur_value[step->x]; break;
+                case S_SLOT: stack[sp++] = slot; break;
+                case PURE_OP_NEG: stack[sp - 1] = -stack[sp - 1]; break;
+                case PURE_OP_NOT: stack[sp - 1] = stack[sp - 1] == 0; break;
+                case PURE_OP_FLOOR: stack[sp - 1] = floor(stack[sp - 1]); break;
+                default:
+                    --sp;
+                    if (!number_op(step->op, stack[sp - 1], stack[sp], &stack[sp - 1])) return false; /* its fault: the executor's */
+                }
+            }
+            b->recur_value[up->x] = stack[0];
+        }
+    }
+    return true;
+}
+
 /* ---- The pass */
 
 static void nested(Batch *b, const PureOp *op, uint32_t pc);
@@ -891,6 +1027,12 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             for (unsigned s = 0; s < b->split_count; ++s)
                 if (b->splits[s].pc < next) next = b->splits[s].pc;
             pc = next;
+            continue;
+        }
+        unsigned u = 0;
+        while (u < b->update_count && b->updates[u].from != pc) ++u;
+        if (u < b->update_count) { /* a recurrence's x = e: made ahead, round by round */
+            pc = b->updates[u].set + 1;
             continue;
         }
         const PureOp *op = &m->code[pc];
@@ -926,7 +1068,17 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             for (unsigned d = b->sp - 1 - arg; d + 1 < b->sp; ++d) release(b, &b->stack[d]);
             b->stack[b->sp - 1 - arg] = b->stack[b->sp - 1], b->sp -= arg;
             break;
-        case PURE_OP_LOCAL_LOAD: local_load(b, arg, pc - 1); break;
+        case PURE_OP_LOCAL_LOAD: {
+            unsigned k = 0;
+            while (k < b->record_count && b->records[k].pc != pc - 1) ++k;
+            if (k == b->record_count) local_load(b, arg, pc - 1);
+            else { /* a recurrence's value here, round by round */
+                Val v = lanes_val(b->records[k].lanes, false);
+                v.temp = false, v.owner = (uint16_t)(arg >> 16);
+                b->stack[b->sp++] = v;
+            }
+            break;
+        }
         case PURE_OP_LOCAL_STORE: local_store(b, arg); break;
         case PURE_OP_NEG: case PURE_OP_NOT: case PURE_OP_FLOOR: unary(b, op->op); break;
         case PURE_OP_CLAMP: clamp(b); break;
@@ -1015,6 +1167,7 @@ static void sweep(Batch *b) {
     for (unsigned s = 0; s < b->store_count; ++s)
         mark_val(kept, &b->stores[s].rows), mark_val(kept, &b->stores[s].value), mark_mask(b, kept, kept_mask, b->stores[s].mask);
     for (unsigned d = 0; d < b->sp; ++d) mark_val(kept, &b->stack[d]);
+    for (unsigned r = 0; r < b->record_count; ++r) mark_lanes(kept, b->records[r].lanes);
     for (unsigned a = 0; a < b->append_count; ++a) {
         mark_mask(b, kept, kept_mask, b->appends[a].mask);
         for (unsigned f = 0; f < b->appends[a].count; ++f) mark_val(kept, &b->appends[a].cells[f]);
@@ -1108,8 +1261,6 @@ static void nested(Batch *b, const PureOp *op, uint32_t pc) {
 
 /* ---- The end: the sets, if no read of the batch would have seen one */
 
-/* A lane's round in the batch. */
-static inline unsigned round_of(const Batch *b, unsigned l) { return b->reverse ? b->n - 1 - l : l; }
 
 /* Whether a store at rows (in the lanes of mask: NULL all) sets in a round the row a later round's read reads. */
 static bool reads_set(const Batch *b, const Read *r, const Store *s, const uint32_t *mask) {
@@ -1296,6 +1447,7 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     b->failed = b->none = b->items = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
     b->mask_free_count = b->reduce_count = b->append_count = 0;
+    b->recur_count = b->update_count = b->record_count = b->step_count = 0;
     memset(b->sets, 0, sizeof(b->sets));
     for (uint32_t pc = loop->start; pc < loop->end; ++pc) { /* the locals it sets (a nested loop's slot too), and whether it sets items */
         const PureOp *op = &m->code[pc];
@@ -1306,7 +1458,8 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
             b->state[at] = 0;
         }
     }
-    if (pass(b, loop->start, loop->end)) {
+    if (!recurrences(b, loop->start, loop->end) || !recur(b)) b->failed = true; /* the recurrences ahead, round by round */
+    if (!b->failed && pass(b, loop->start, loop->end)) {
         arrive(b, loop->end);
         for (unsigned w = 0; w < LOCALS / 64; ++w) /* the lanes each local was set in, made before anything changes */
             for (uint64_t bits = b->sets[w]; bits; bits &= bits - 1) {
@@ -1337,6 +1490,7 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     }
     app->work += work;
     for (unsigned r = 0; r < b->reduce_count; ++r) frame->ev->locals[b->reduce[r].local].num = b->reduce[r].result;
+    for (unsigned x = 0; x < b->recur_count; ++x) frame->ev->locals[b->recur_local[x]].num = b->recur_value[x];
     for (unsigned w = 0; w < LOCALS / 64; ++w) /* each local the block set: as the last round to set it left it */
         for (uint64_t bits = b->sets[w]; bits; bits &= bits - 1) {
             unsigned at = w * 64 + (unsigned)__builtin_ctzll(bits), last = n - 1;

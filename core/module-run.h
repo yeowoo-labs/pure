@@ -55,8 +55,8 @@ static inline bool number_op(uint8_t op, double a, double b, double *out) {
 }
 
 /* An item's or a key's op->plan: its cell a text; a FIND joined to the ITEM_GET after it; a FIND whose row an ITEM_SET
- * takes; a LOOP whose block a batch may run (module-batch.c). */
-enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_ROW = 4, PLAN_BATCH = 8 };
+ * takes; a LOOP whose block a batch may run (module-batch.c); a LOCAL_STORE ending x = e of a recurrence in such a block. */
+enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_ROW = 4, PLAN_BATCH = 8, PLAN_RECUR = 16 };
 
 /* An item instruction's argument: its list and its field. */
 static inline uint32_t list_of(uint32_t arg) { return arg & 0xFFFF; }
@@ -168,6 +168,11 @@ int pure_batch_run(Frame *, Loop *, unsigned *done);
  * (x its local, op ADD, MIN or MAX, e computed above x with no branch or
  * loop): a reduction across a batch's rounds. *at: op's pc. */
 bool pure_batch_reduces(const PureModule *, uint32_t pc, uint32_t end, uint32_t *at);
+/* Whether the LOCAL_STORE at s, in a block from start setting the locals
+ * of set (slot: its loop's), ends x = e with e made of x, numbers, fields,
+ * states, the loop's value and locals the block does not set: a recurrence
+ * run round by round ahead of a batch. *from: where its statement begins. */
+bool pure_batch_recurs(const PureModule *, uint32_t s, uint32_t start, const uint64_t *set, unsigned slot, uint32_t *from);
 
 /* Where a list keeps what compiled code reads of it (module-list.c owns the
  * layout and says where): its item count, its key set (the words, how many,
