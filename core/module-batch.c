@@ -54,7 +54,7 @@ typedef struct { uint32_t list, field; Val rows, value; Mask *mask; } Store;
 enum { V_X = STEPS, V_SLOT = V_X + RECURS, V_NUMBER, VALUES = 256 };
 typedef struct { uint8_t op, a, c; } Step;
 typedef struct { uint32_t from, set; unsigned x, first, count; uint8_t value; } Update;
-typedef struct { uint32_t pc; unsigned x; double *lanes; } Record;
+typedef struct { uint32_t pc; unsigned x; double *lanes; bool shared; } Record; /* shared: an earlier record's lanes, x not set between */
 /* A sum into a cell, L[k].f = L[k].f + e: its statement's second k from
  * again to resume (past its find and read, skipped), its ADD and its set;
  * and as the pass leaves it, its rows and e in the lanes of mask, added at
@@ -1038,48 +1038,73 @@ static bool recurrences(Batch *b, uint32_t start, uint32_t end) {
         while (x < b->recur_count && b->recur_local[x] != (op->arg & 0xFF)) ++x;
         while (u < b->update_count && !(pc >= b->updates[u].from && pc < b->updates[u].set)) ++u;
         if (x == b->recur_count || u < b->update_count) continue;
-        if (b->record_count == RECORDS || !(b->records[b->record_count].lanes = fresh(b))) return false;
-        b->records[b->record_count].pc = pc, b->records[b->record_count++].x = x;
+        if (b->record_count == RECORDS) return false;
+        Record *record = &b->records[b->record_count++];
+        *record = (Record){pc, x, NULL, false};
+        for (unsigned j = 0; j + 1 < b->record_count && !record->shared; ++j) { /* x read before where it was not set since: those lanes */
+            bool set = b->records[j].x != x;
+            for (unsigned v = 0; v < b->update_count && !set; ++v)
+                set = b->updates[v].x == x && b->updates[v].set > b->records[j].pc && b->updates[v].set < pc;
+            if (!set) record->lanes = b->records[j].lanes, record->shared = true;
+        }
+        if (!record->lanes && !(record->lanes = fresh(b))) return false;
     }
     return true;
 }
 
-/* The recurrences round by round, in the rounds' order (as the executor computes them): each record's lane. false: a round faults. */
+/* The recurrences round by round, in the rounds' order (as the executor
+ * computes them): each record's lane. Their steps, sets of x and records
+ * laid out once in the block's order, each a number from two others (an
+ * update's last step setting x itself), so a round is one loop. false: a
+ * round faults. */
+enum { A_RECORD = 254, A_SET };
+typedef struct { uint8_t op, a, c, to; } Action;
 static bool recur(Batch *b) {
     if (!b->update_count) return true;
-    double *values = b->values;
+    Action actions[STEPS + UPDATES + RECORDS];
+    double *lanes[RECORDS];
+    unsigned count = 0, u = 0, k = 0;
+    while (u < b->update_count || k < b->record_count) {
+        if (k < b->record_count && b->records[k].pc < (u < b->update_count ? b->updates[u].from : UINT32_MAX)) {
+            lanes[k] = b->records[k].lanes;
+            if (!b->records[k].shared) actions[count++] = (Action){A_RECORD, (uint8_t)(V_X + b->records[k].x), (uint8_t)k, 0};
+            ++k;
+            continue;
+        }
+        const Update *up = &b->updates[u++];
+        for (unsigned i = up->first; i < up->first + up->count; ++i)
+            actions[count++] = (Action){b->steps[i].op, b->steps[i].a, b->steps[i].c, (uint8_t)i};
+        if (up->count && up->value == up->first + up->count - 1) /* its last step's: x itself (nothing after it reads that step) */
+            actions[count - 1].to = (uint8_t)(V_X + up->x);
+        else
+            actions[count++] = (Action){A_SET, up->value, up->value, (uint8_t)(V_X + up->x)};
+    }
+    double *restrict values = b->values;
     for (unsigned x = 0; x < b->recur_count; ++x) values[V_X + x] = b->recur_value[x];
-    for (unsigned r = 0; r < b->n; ++r) {
-        unsigned lane = round_of(b, r), u = 0, k = 0;
+    for (unsigned r = 0, n = b->n; r < n; ++r) {
+        unsigned lane = round_of(b, r);
         values[V_SLOT] = r ? b->first + (double)r : b->first;
-        while (u < b->update_count || k < b->record_count) { /* in the block's order */
-            if (k < b->record_count && b->records[k].pc < (u < b->update_count ? b->updates[u].from : UINT32_MAX)) {
-                b->records[k].lanes[lane] = values[V_X + b->records[k].x];
-                ++k;
-                continue;
+        for (unsigned j = 0; j < count; ++j) {
+            const Action *t = &actions[j];
+            double a = values[t->a], c = values[t->c], v;
+            switch (t->op) { /* as the executor computes each (a fault: not finite, or 0 divided by) */
+            case A_RECORD: lanes[t->c][lane] = a; continue;
+            case A_SET: values[t->to] = a; continue;
+            case PURE_OP_NEG: v = -a; break;
+            case PURE_OP_NOT: v = a == 0; break;
+            case PURE_OP_FLOOR: v = floor(a); break;
+            case PURE_OP_ADD: v = a + c; break;
+            case PURE_OP_SUB: v = a - c; break;
+            case PURE_OP_MUL: v = a * c; break;
+            case PURE_OP_DIV:
+                if (c == 0) return false;
+                v = a / c;
+                break;
+            default:
+                if (!number_op(t->op, a, c, &v)) return false;
             }
-            const Update *up = &b->updates[u++];
-            for (unsigned i = up->first; i < up->first + up->count; ++i) {
-                const Step *step = &b->steps[i];
-                double a = values[step->a], c = values[step->c], v;
-                switch (step->op) { /* as the executor computes each (a fault: not finite, or 0 divided by) */
-                case PURE_OP_NEG: v = -a; break;
-                case PURE_OP_NOT: v = a == 0; break;
-                case PURE_OP_FLOOR: v = floor(a); break;
-                case PURE_OP_ADD: v = a + c; break;
-                case PURE_OP_SUB: v = a - c; break;
-                case PURE_OP_MUL: v = a * c; break;
-                case PURE_OP_DIV:
-                    if (c == 0) return false;
-                    v = a / c;
-                    break;
-                default:
-                    if (!number_op(step->op, a, c, &v)) return false;
-                }
-                if (not_finite(v)) return false;
-                values[i] = v;
-            }
-            values[V_X + up->x] = values[up->value];
+            if (not_finite(v)) return false;
+            values[t->to] = v;
         }
     }
     for (unsigned x = 0; x < b->recur_count; ++x) b->recur_value[x] = values[V_X + x];
