@@ -1,6 +1,6 @@
 # 024 — 묶음 실행기: 기계어 없이 루프를 C 가까이
 
-작성일: 2026-10-05. 상태: 제안과 시제품([041](../../research/experiments/041-batches/)). 1단계를 만들었다([126](../research/126-batch-executor-stage-one.md): knapsack이 실행기에서 1,041 ms → 13.6 ms, 안쪽 루프는 계층의 1.17배로 기준 미달). 2단계(중첩 루프를 함께, 모으기)를 만들었다([127](../research/127-batch-executor-stage-two.md): roots 9.13 ms로 계층 9.57보다 빠름, matmul 50 ms).
+작성일: 2026-10-05. 상태: 제안과 시제품([041](../../research/experiments/041-batches/)). 1단계를 만들었다([126](../research/126-batch-executor-stage-one.md): knapsack이 실행기에서 1,041 ms → 13.6 ms, 안쪽 루프는 계층의 1.17배로 기준 미달). 2단계(중첩 루프를 함께, 모으기)를 만들었다([127](../research/127-batch-executor-stage-two.md): roots 9.13 ms로 계층 9.57보다 빠름, matmul 50 ms). 4단계의 앞 절반(덧붙이기), 5단계(점화식), 칸에 더하기, 걷기를 만들었다([128](../research/128-batch-executor-tables-and-costs.md): join이 실행기의 423에서 161 ms, 계층 74). 남은 값은 덧붙이기 하나 약 100 ns, join의 점화식 회차당 약 60 ns, 레인이 적은 중첩 몸체의 해석이고, BFS는 아직 묶이지 않는다(바뀌는 개수, 커지기만 하는 걸러내기, 중첩 걷기가 필요하다).
 
 [023](023-optimizing-tier.md)의 계층은 루프 묶음을 SSA로 올려 AArch64 기계어를 실행 시간에 만든다. 일곱 가지 일의 기하 평균을
 C의 3–300배에서 1.92배로 줄였지만([125](../research/125-tier-first-steps.md)), 실행 가능한 메모리에 코드를 쓰고 리눅스 AArch64에서만
