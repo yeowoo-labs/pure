@@ -1360,7 +1360,7 @@ def tier_program(rng):
     whose keys came out of order read by key alone (HASHED), one of small
     keys read by key alone (full, or not where keys are left out), ifs and
     breaks, loops whose rounds are apart (a batch's, 024), some with a loop
-    run in each and reductions (ra, rb, rc), with what fails
+    run in each and reductions (ra, rb, rc), some appending (e, d), with what fails
     (a key not there, not whole, 0 divided by, a cell past its column's
     width) as likely as not."""
     names = iter('jklpqrxyz')
@@ -1458,7 +1458,12 @@ def tier_program(rng):
                 lines.append(f'{pad}for {name} in {low} .. {high} {{')
                 lines.append(f'{pad}  let w{name} = {number(1, loops + [name])}')
                 for _ in range(rng.randint(1, 3)):
-                    if rng.random() < 0.5:
+                    pick = rng.random()
+                    if pick < 0.15:  # appended round by round (a key there already: EXISTS; past the memory: MEMORY)
+                        lines.append(f'{pad}  e.append(Cell {{ at: {at()}, v: {number(1, inner)} }})')
+                    elif pick < 0.3:
+                        lines.append(f'{pad}  d.add(Cell {{ at: {rng.choice([name, f"{name} * 3", key(2, inner)])}, v: {number(1, inner)} }})')
+                    elif pick < 0.6:
                         lines.append(f'{pad}  t[{at()}].v = {number(1, inner)}')
                     else:
                         lines.append(f'{pad}  if {cond(1, inner)} {{ t[{at()}].v = {number(1, inner)} }}' +
@@ -1498,12 +1503,13 @@ def tier_program(rng):
         'record Cell {', '  at = 0', '  v = 0', '}', 'state out = 0', 'state acc = 0',
         'input go = message {', '  n: u32', '  m: u32', '  q: u32', '}',
         'on go {', '  let t: list of Cell by at', '  let f: list of Cell', '  let h: list of Cell by at', '  let g: list of Cell by at',
+        '  let e: list of Cell', '  let d: list of Cell by at',
         '  for i in 0 .. go.n {', f'    t.add(Cell {{ at: i, v: {rng.choice(["i", "0", "(i * 3)", "1"])} }})',
         '    f.append(Cell { at: i * 2, v: i })', '    h.add(Cell { at: i * 7919 - floor(i * 7919 / 1009) * 1009 + 5000000, v: i * 5 })',
         f'    g.add(Cell {{ at: {rng.choice(["i", "i", "i + floor(i / 40)"])}, v: i * 3 }})', '  }',
         '  let s = 0', '  let u = 1', '  let ra = 0', '  let rb = 0', '  let rc = 0',
         '  for i in 0 .. go.m {', *body, '  }',
-        '  out = s + ra + rb + rc', '  acc = acc + u', '}', ''])
+        '  out = s + ra + rb + rc + e.count + d.count', '  acc = acc + u', '}', ''])
 
 
 def module_tier(aup, pure, work, programs=150):
@@ -1522,7 +1528,8 @@ def module_tier(aup, pure, work, programs=150):
     rng = random.Random(23)
     runs = [(0, 0, 0), (5, 3, 1), (70, 40, 3), (130, 25, 2), (300, 7, 299), (70, 70, 64)]
     messages = ''.join(f'message go {struct.pack("<III", n, m, q).hex()}\nwork\n' for n, m, q in runs)
-    commands = messages + ''.join(f'budget {b}\n' + messages for b in (61, 389, 1201, 4099)) + 'budget 0\n' + messages
+    commands = (messages + ''.join(f'budget {b}\n' + messages for b in (61, 389, 1201, 4099)) + 'budget 0\n' + messages +
+                'memory 6000\n' + messages + 'memory 0\n')
     checked = failed = 0
     for i in range(programs):
         source, module = work / f'tier-{i}.aup', work / f'tier-{i}.pmod'

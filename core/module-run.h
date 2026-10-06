@@ -158,10 +158,12 @@ int pure_run_rest(Frame *, uint32_t pc);
 
 /* Loops a batch of rounds at a time (module-batch.c, docs/design/024): the
  * innermost loop's rounds from loop->k (set up and counted; its LOOP
- * planned PLAN_BATCH) run as one batch: how many (0: none ran, its block
- * runs round by round next, at least until round loop->resume), the frame
- * left as the last of them leaves it, their work counted. */
-unsigned pure_batch_run(Frame *, Loop *);
+ * planned PLAN_BATCH) run as one batch: *done how many (0: none ran, its
+ * block runs round by round next, at least until round loop->resume), the
+ * frame left as the last of them leaves it, their work counted. STEP_NEXT,
+ * or how an item it appends stopped at its round (as the executor's step:
+ * the event is undone, the work so far counted). */
+int pure_batch_run(Frame *, Loop *, unsigned *done);
 /* Whether the LOCAL_LOAD at pc, in a block ending at end, begins x = x op e
  * (x its local, op ADD, MIN or MAX, e computed above x with no branch or
  * loop): a reduction across a batch's rounds. *at: op's pc. */

@@ -733,6 +733,15 @@ PURE_COLD static bool batch_block(const PureModule *m, uint32_t start, uint32_t 
             *shape |= 2;
             break;
         }
+        case PURE_OP_LIST_APPEND: { /* an item of numbers and bools, its list read nowhere in the block (appended) */
+            for (uint32_t i = 0; i < m->states; ++i) /* an index into it: its moves (state_indexed is set after the plans) */
+                if (m->state_type[i] == PURE_STATE_INDEX && m->state_ref[i] == op->arg) return false;
+            if (depth) return false;
+            for (unsigned f = 0; f < m->record[m->state_ref[op->arg]].count; ++f)
+                if (field_type(m, op->arg, f) != T_NUM && field_type(m, op->arg, f) != T_BOOL) return false;
+            *shape |= 4;
+            break;
+        }
         default:
             if (!has_lanes(m, op, input)) return false;
         }
@@ -740,12 +749,22 @@ PURE_COLD static bool batch_block(const PureModule *m, uint32_t start, uint32_t 
     return true;
 }
 
+/* The list an instruction of a batch's block reads, or -1. */
+PURE_COLD static int read_list(const PureOp *op) {
+    switch (op->op) {
+    case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: return (int)list_of(op->arg);
+    case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
+    case PURE_OP_ROW: case PURE_OP_OUTER_ROW: return (int)(op->arg & 0xFFFF);
+    default: return -1;
+    }
+}
+
 /* A count's loop whose block has batch forms throughout (batch_block) runs a
  * batch of its rounds at a time (module-batch.c, docs/design/024), unless it
- * sets items and has a nested loop (not yet), or PURE_BATCH=0 in the
- * environment says none does (the executor alone, to measure it). A local is
- * a reduction when every read of it begins x = x op e and every set of it
- * ends one. */
+ * sets or appends items and has a nested loop (not yet), reads a list it
+ * appends to, or PURE_BATCH=0 in the environment says none does (the
+ * executor alone, to measure it). A local is a reduction when every read of
+ * it begins x = x op e and every set of it ends one. */
 PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input) {
     static int off = -1;
     if (off < 0) {
@@ -774,7 +793,15 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input) 
     free(ends);
     for (unsigned w = 0; w < 4; ++w) reduced[w] &= set[w] & ~plain[w];
     unsigned shape = 0;
-    return batch_block(m, start, end, input, 0, sure, set, reduced, &shape) && shape != 3;
+    if (!batch_block(m, start, end, input, 0, sure, set, reduced, &shape) || (shape & 1 && shape & 6)) return false;
+    uint32_t appended = 0; /* a list appended to is read nowhere else in the block (an earlier round's item not there yet) */
+    for (uint32_t at = start; at < end; ++at)
+        if (m->code[at].op == PURE_OP_LIST_APPEND) appended |= UINT32_C(1) << m->code[at].arg;
+    for (uint32_t at = start; at < end; ++at) {
+        int list = read_list(&m->code[at]);
+        if (list >= 0 && list < 32 && appended >> list & 1) return false;
+    }
+    return true;
 }
 
 /* A fold in a verified block whose own block has lane forms throughout runs
@@ -2646,7 +2673,9 @@ static inline __attribute__((always_inline)) int iterate(Frame *frame, uint32_t 
 static __attribute__((noinline, cold)) int batches(Frame *frame, Loop *loop, uint32_t *next) {
     unsigned depth = frame->depth;
     for (;;) {
-        unsigned done = pure_batch_run(frame, loop);
+        unsigned done;
+        int how = pure_batch_run(frame, loop, &done);
+        if (how != STEP_NEXT) return how;
         if (done) {
             if ((loop->k += done) >= loop->count) { /* it ended */
                 frame->arena->used = loop->mark;

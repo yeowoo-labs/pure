@@ -25,7 +25,7 @@
 #include "module-run.h"
 #include <stdlib.h>
 
-enum { BATCH = 1024, BUFFERS = 24, MASKS = 32, SPLITS = 8, READS = 16, STORES = 8, REDUCES = 8, LOCALS = 256, LEAST = 16, FAILURES = 3 };
+enum { BATCH = 1024, BUFFERS = 24, MASKS = 32, SPLITS = 8, READS = 16, STORES = 8, APPENDS = 8, REDUCES = 8, LOCALS = 256, LEAST = 16, FAILURES = 3 };
 
 enum { UNIFORM, AFFINE, LANES, REDUCE }; /* REDUCE: x in x = x op e (value: its reduction) */
 typedef struct {
@@ -44,6 +44,8 @@ typedef struct Mask { const uint32_t *lanes; const struct Mask *parent; struct M
 /* An item's field read at rows (known: else any row), and one set: what it sets and in which lanes (NULL: all). */
 typedef struct { uint32_t list, field; bool known; Val rows; } Read;
 typedef struct { uint32_t list, field; Val rows, value; Mask *mask; } Store;
+/* An item a LIST_APPEND at pc appends in the lanes of mask (NULL: all): its fields. */
+typedef struct { uint32_t pc; Mask *mask; unsigned count; Val cells[PURE_RECORD_FIELDS]; } Append;
 /* Lanes a branch sent ahead (NULL: every lane): they run again at pc. */
 typedef struct { uint32_t pc; Mask *mask; } Split;
 /* A reduction (x = x op e, x read no other way): each lane's op of its rounds'
@@ -89,6 +91,8 @@ typedef struct {
     void *spare[BUFFERS];       /* lanes no value holds any more */
     Read reads[READS];
     Store stores[STORES];
+    Append appends[APPENDS];
+    unsigned append_count;
 } Batch;
 
 static _Thread_local Batch batch;
@@ -929,6 +933,21 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
         case PURE_OP_INDEX_MOVE: index_move(b); break;
         case PURE_OP_ITEM_GET: item_get(b, list_of(arg), item_field(arg)); break;
         case PURE_OP_ITEM_SET: item_set(b, list_of(arg), item_field(arg)); break;
+        case PURE_OP_LIST_APPEND: { /* kept for the end, made there round by round as the executor makes it */
+            unsigned count = m->record[m->state_ref[arg]].count;
+            if (b->append_count == APPENDS) {
+                b->failed = true;
+                break;
+            }
+            Append *a = &b->appends[b->append_count++];
+            a->pc = pc - 1, a->mask = b->active, a->count = count;
+            b->sp -= count;
+            for (unsigned f = 0; f < count; ++f) {
+                a->cells[f] = b->stack[b->sp + f];
+                a->cells[f].temp = false;
+            }
+            break;
+        }
         case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS:
             if (!find(b, op, pc - 1)) b->failed = true;
             else if (op->op == PURE_OP_LIST_FIND && op->plan & PLAN_JOINED) ++pc; /* its ITEM_GET with it */
@@ -996,6 +1015,10 @@ static void sweep(Batch *b) {
     for (unsigned s = 0; s < b->store_count; ++s)
         mark_val(kept, &b->stores[s].rows), mark_val(kept, &b->stores[s].value), mark_mask(b, kept, kept_mask, b->stores[s].mask);
     for (unsigned d = 0; d < b->sp; ++d) mark_val(kept, &b->stack[d]);
+    for (unsigned a = 0; a < b->append_count; ++a) {
+        mark_mask(b, kept, kept_mask, b->appends[a].mask);
+        for (unsigned f = 0; f < b->appends[a].count; ++f) mark_val(kept, &b->appends[a].cells[f]);
+    }
     b->spare_count = b->mask_free_count = 0;
     for (unsigned i = 0; i < b->buffers; ++i)
         if (!kept[i]) b->spare[b->spare_count++] = buffer[i];
@@ -1248,21 +1271,22 @@ static bool settle(Batch *b) {
     return true;
 }
 
-unsigned pure_batch_run(Frame *frame, Loop *loop) {
+int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     PureApp *app = frame->app;
     const PureModule *m = frame->m;
     uint64_t per = (uint64_t)(loop->end - loop->start) + 1, left = loop->count - loop->k;
     uint64_t budget = app->work_budget ? app->work_budget : PURE_WORK_DEFAULT, paid = 1 + (budget - app->work) / per;
+    *done = 0;
     if (left < LEAST || loop->integer) {
         loop->resume = UINT64_MAX;
-        return 0;
+        return STEP_NEXT;
     }
     unsigned n = (unsigned)(left < BATCH ? left : BATCH);
     if (paid < n) n = (unsigned)paid;
     double first = loop->slot->num;
     if (n < 2 || (first == 0 && signbit(first))) { /* the work left pays for one round, or the loop counts from -0: one round by the executor */
         loop->resume = loop->k + 1;
-        return 0;
+        return STEP_NEXT;
     }
     Batch *b = &batch;
     b->frame = frame, b->m = m, b->app = app, b->ev = frame->ev, b->n = n, b->first = first;
@@ -1271,7 +1295,7 @@ unsigned pure_batch_run(Frame *frame, Loop *loop) {
     b->slot = (uint32_t)(loop->slot - frame->ev->locals), b->end = loop->end;
     b->failed = b->none = b->items = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
-    b->mask_free_count = b->reduce_count = 0;
+    b->mask_free_count = b->reduce_count = b->append_count = 0;
     memset(b->sets, 0, sizeof(b->sets));
     for (uint32_t pc = loop->start; pc < loop->end; ++pc) { /* the locals it sets (a nested loop's slot too), and whether it sets items */
         const PureOp *op = &m->code[pc];
@@ -1289,11 +1313,27 @@ unsigned pure_batch_run(Frame *frame, Loop *loop) {
                 unsigned at = w * 64 + (unsigned)__builtin_ctzll(bits);
                 if (b->state[at] == 2) mask_lanes(b, b->written[at]);
             }
+        for (unsigned a = 0; a < b->append_count; ++a) mask_lanes(b, b->appends[a].mask);
     }
     uint64_t work = (n - 1) * per + b->work; /* the rounds after the first, and every round of their nested loops */
     if (b->failed || work > budget - app->work || !settle(b)) {
         loop->resume = ++loop->failures >= FAILURES ? UINT64_MAX : loop->k + n; /* its rounds one by one, then batches again */
-        return 0;
+        return STEP_NEXT;
+    }
+    for (unsigned r = 0; r < n && b->append_count; ++r) { /* the appends round by round, each as the executor's step makes it */
+        unsigned l = round_of(b, r);
+        for (unsigned i = 0; i < b->append_count; ++i) {
+            const Append *a = &b->appends[i];
+            const uint32_t *mask = mask_lanes(b, a->mask);
+            if (mask && !mask[l]) continue;
+            for (unsigned f = 0; f < a->count; ++f) frame->stack[f].num = lane_of(&a->cells[f], l);
+            frame->sp = a->count;
+            int how = pure_run_step(frame, a->pc);
+            if (how != STEP_NEXT) { /* its fault at its round: the event's undone, so only how and the work so far tell */
+                app->work += (uint64_t)r * per;
+                return how;
+            }
+        }
     }
     app->work += work;
     for (unsigned r = 0; r < b->reduce_count; ++r) frame->ev->locals[b->reduce[r].local].num = b->reduce[r].result;
@@ -1307,5 +1347,6 @@ unsigned pure_batch_run(Frame *frame, Loop *loop) {
         }
     loop->slot->num = first + (double)(n - 1);
     if (b->backward > 0) loop->reverse = !loop->reverse; /* rows going down from lane to lane: the next batch's lanes the other way */
-    return n;
+    *done = n;
+    return STEP_NEXT;
 }
