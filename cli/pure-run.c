@@ -12,6 +12,7 @@
  * saved at the end of input or by save. --batch N defers saving and saves
  * every N commands (and at the end), so N events share one commit.
  *   down NAME | up NAME | frame [N] | type NAME HEX|- | message NAME HEX|- | tick NAME | time MS | replace PATH | save | show
+ *   budget N (the work an event may do) | memory N (what the states may hold) | work (the last event's work)
  * (type gives a text input its bytes, message a message input its payload, laid out as the module says.)
  * Text states and text views print as JSON strings; cursors as byte positions;
  * lists as arrays of objects; indices as positions; a table view as an array
@@ -201,6 +202,11 @@ int main(int argc, char **argv) {
             unsigned long long budget = strtoull(argument, &end, 10);
             if (!*argument || *end) failure = "budget";
             else pure_app_work(&app, budget);
+        } else if (!strcmp(command, "memory")) { /* what the states may hold (0: no budget) */
+            char *end;
+            unsigned long long bytes = strtoull(argument, &end, 10);
+            if (!*argument || *end) failure = "memory";
+            else pure_app_memory(&app, (size_t)bytes);
         } else if (!strcmp(command, "work")) printf("{\"work\":%llu}\n", (unsigned long long)app.work); /* the last event's */
         else if (strcmp(command, "show")) failure = "unknown command";
         if (batch && strcmp(command, "show") && ++unsaved == batch) {

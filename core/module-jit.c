@@ -1555,17 +1555,21 @@ static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
     load64(e, X0, X23, offsetof(PureApp, spent));
     add_imm(e, X0, X0, bytes);
     store64(e, X0, X23, offsetof(PureApp, spent));
-    int budgeted = new_label(e);
-    load64(e, X1, X23, offsetof(PureApp, memory));
-    cbz_x(e, X1, budgeted);
-    cmp_reg(e, X10, X1);
-    b_cond(e, GT, fault_at(k, PURE_FAULT_MEMORY, pc));
-    bind(e, budgeted);
-    load64(e, X1, X23, offsetof(PureApp, room));
-    cmp_reg(e, X0, X1);
-    b_cond(e, GT, fault_at(k, PURE_FAULT_MEMORY, pc));
     int head = kept_find(k, k->loop_of[pc - k->block.start], C_HEADROOM, 0, 0);
-    if (head >= 0 && k->fresh >> head & 1) sub_imm(e, k->kept[head].reg, k->kept[head].reg, bytes); /* the nest's books' */
+    if (head >= 0 && k->fresh >> head & 1) { /* the nest's books keep the headroom: the growth they hold not in the app's yet */
+        subs_imm(e, k->kept[head].reg, k->kept[head].reg, bytes);
+        b_cond(e, LT, fault_at(k, PURE_FAULT_MEMORY, pc));
+    } else {
+        int budgeted = new_label(e);
+        load64(e, X1, X23, offsetof(PureApp, memory));
+        cbz_x(e, X1, budgeted);
+        cmp_reg(e, X10, X1);
+        b_cond(e, GT, fault_at(k, PURE_FAULT_MEMORY, pc));
+        bind(e, budgeted);
+        load64(e, X1, X23, offsetof(PureApp, room));
+        cmp_reg(e, X0, X1);
+        b_cond(e, GT, fault_at(k, PURE_FAULT_MEMORY, pc));
+    }
     slow_back(k, s, V_MEM, 0);
 }
 
