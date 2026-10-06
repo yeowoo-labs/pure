@@ -4,3 +4,9 @@ b3 rounds  04:07:37 up 2 days, 29 min,  3 users,  load average: 0.87, 0.78, 0.64
 b4 jit  04:28:08 up 2 days, 49 min,  3 users,  load average: 0.48, 0.60, 0.67
 b4 batches  04:28:15 up 2 days, 49 min,  3 users,  load average: 0.52, 0.60, 0.67
 b4 rounds  04:28:25 up 2 days, 49 min,  3 users,  load average: 0.59, 0.62, 0.67
+b5 jit  10:01:13 up 2 days,  6:22,  2 users,  load average: 1.25, 0.98, 0.54
+b5 batches  10:01:20 up 2 days,  6:22,  2 users,  load average: 1.23, 0.98, 0.54
+b5 rounds  10:01:30 up 2 days,  6:22,  2 users,  load average: 1.20, 0.98, 0.55
+b6 jit  10:13:09 up 2 days,  6:34,  2 users,  load average: 0.90, 0.84, 0.68
+b6 batches  10:13:17 up 2 days,  6:34,  2 users,  load average: 0.91, 0.84, 0.68
+b6 rounds  10:13:26 up 2 days,  6:34,  2 users,  load average: 0.92, 0.85, 0.68

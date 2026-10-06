@@ -8,6 +8,8 @@
  *   nest    200 x 200 x 200, the inner loop's rounds together: 200 lanes
  *   adds    50,000 keys added in order to a DENSE list: an append's call
  *   probes  100,000 keys added to a HASHED list, 1,000,000 found
+ *   recur   1,000 x N rounds of MINSTD: a recurrence ahead of a batch
+ *   recur4  recur and four reads of x into a sum (records of x in the lanes)
  *   ops0, ops12, sum0, sum6, sum12: ops with one or twelve lets, and with
  *           total = total + 1 for the max (n 51200, batches only): what
  *           an instruction costs a batch apart from the reduction */

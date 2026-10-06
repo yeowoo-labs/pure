@@ -1,0 +1,13 @@
+state out = 0
+input go = message {
+  n: u32
+}
+on go {
+  let x = 1
+  let total = 0
+  for i in 0 .. go.n * 1000 {
+    x = x * 48271 - floor(x * 48271 / 2147483647) * 2147483647
+    total = total + ((x - floor(x / 1000) * 1000) + (x - floor(x / 7) * 7))
+  }
+  out = total + x
+}
