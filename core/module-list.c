@@ -1816,6 +1816,129 @@ bool pure_list_widen(PureList *list, unsigned field, uint8_t bytes) { return wid
 
 void pure_list_touched(PureList *list) { ++list->version; }
 
+bool pure_list_takes(const PureList *list, int key, size_t n, const double *keys, size_t *stored, size_t *extra) {
+    const Layout *l = &list->layout;
+    if (!list->arrays || list->pack || list->copy || list->journaled || l->key != key || n > PURE_LIST_ITEMS - list->count) return false;
+    for (unsigned f = 0; f < l->fields; ++f)
+        if (l->kinds[f] != PURE_CELL_NUMBER && l->kinds[f] != PURE_CELL_BOOL) return false;
+    size_t row = row_width(l), capacity = list->member_capacity;
+    if (key < 0) { /* at its end, FLAT: its arrays grown as flat_insert grows them, never past ARRAYS_LARGE (a tree then) */
+        if (list->form != FLAT) return false;
+        for (size_t c = list->count, room = list->room; c < list->count + n; ++c)
+            if (c == room) {
+                if (2 * room * row > ARRAYS_LARGE) return false;
+                room = room ? 2 * room : 16;
+            }
+    } else if (list->form == DENSE && list->bitmap) { /* every key one it holds at its count now (it holds more as it grows) */
+        size_t limit = dense_limit(list), top = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (!small_key(keys[i]) || (keys[i] == 0 && signbit(keys[i])) || (size_t)keys[i] >= limit) return false;
+            if ((size_t)keys[i] > top) top = (size_t)keys[i];
+        }
+        if (n && top / 64 >= capacity) /* its bits grown as dense_add grows them */
+            for (capacity = capacity ? capacity : 1; capacity <= top / 64;) capacity *= 2;
+    } else if (list->form == HASHED && list->text_key < 0) { /* its table doubled as hashed_add doubles it, never past ARRAYS_LARGE (made ordered then) */
+        for (size_t c = list->count; c < list->count + n; ++c)
+            if (hashed_full(c + 1, capacity)) {
+                if (2 * capacity * row > ARRAYS_LARGE) return false;
+                capacity *= 2;
+            }
+    } else
+        return false;
+    *stored = n * l->number_bytes;
+    *extra = (capacity - list->member_capacity) * sizeof(*list->members);
+    return true;
+}
+
+/* n numbers into a column of cells bytes wide from row at on. */
+static void column_out(void *column, uint8_t bytes, size_t at, const double *values, size_t n) {
+    switch (bytes) {
+    case 1: for (size_t i = 0; i < n; ++i) ((uint8_t *)column)[at + i] = (uint8_t)values[i]; break;
+    case 4: for (size_t i = 0; i < n; ++i) ((uint32_t *)column)[at + i] = (uint32_t)values[i]; break;
+    case 8: memcpy((double *)column + at, values, n * sizeof(double)); break;
+    }
+}
+
+size_t pure_list_add_many(PureList *list, size_t n, const double *const *fields) {
+    const Layout *l = &list->layout;
+    for (unsigned f = 0; f < l->fields; ++f) { /* every column wide enough for them all first: widths only grow, as arrays_fit grows them */
+        uint8_t now = list->width[f], need = now;
+        if ((now != 1 && now != 4) || !narrows(l->kinds[f])) continue;
+        for (size_t i = 0; i < n && need < 8; ++i) {
+            uint8_t w = width_of(fields[f][i]);
+            if (w > need) need = w;
+        }
+        if (need > now && !widen(list, f, need)) return SIZE_MAX;
+    }
+    size_t done = 0;
+    if (l->key < 0) { /* at its end */
+        size_t room = list->room;
+        while (room < list->count + n) room = room ? 2 * room : 16;
+        if (room != list->room && !arrays_room(list, room)) return SIZE_MAX;
+        for (unsigned f = 0; f < l->fields; ++f) column_out(list->columns[f], list->width[f], list->count, fields[f], n);
+        done = n;
+        list->count += n;
+    } else if (list->form == DENSE) { /* at their keys, each set in its bits in turn: one there already ends them */
+        const double *keys = fields[l->key];
+        size_t room = list->room, top = 0, row = row_width(l);
+        for (size_t i = 0; i < n; ++i) { /* the room dense_add would leave, key after key */
+            size_t key = (size_t)keys[i], limit = 4 * (list->count + i + 1) + DENSE_SLACK / row;
+            if (limit > ARRAYS_LARGE / row) limit = ARRAYS_LARGE / row;
+            if (key >= room) {
+                size_t grown = room + room / 2;
+                if (grown <= key) grown = key + 1 + (key + 1) / 2;
+                room = grown > limit ? limit : grown;
+            }
+            if (key > top) top = key;
+        }
+        if (room != list->room && !arrays_room(list, room)) return SIZE_MAX;
+        if (n && top / 64 >= list->member_capacity) {
+            size_t capacity = list->member_capacity ? list->member_capacity : 1;
+            while (capacity <= top / 64) capacity *= 2;
+            uint64_t *grown = realloc(list->members, capacity * sizeof(*grown));
+            if (!grown) return SIZE_MAX;
+            memset(grown + list->member_capacity, 0, (capacity - list->member_capacity) * sizeof(*grown));
+            list->members = grown, list->member_capacity = capacity;
+        }
+        for (; done < n; ++done) {
+            size_t key = (size_t)keys[done];
+            uint64_t bit = UINT64_C(1) << (key % 64);
+            if (list->members[key / 64] & bit) break;
+            list->members[key / 64] |= bit;
+        }
+        for (unsigned f = 0; f < l->fields; ++f) {
+            void *column = list->columns[f];
+            const double *values = fields[f];
+            switch (list->width[f]) {
+            case 1: for (size_t i = 0; i < done; ++i) ((uint8_t *)column)[(size_t)keys[i]] = (uint8_t)values[i]; break;
+            case 4: for (size_t i = 0; i < done; ++i) ((uint32_t *)column)[(size_t)keys[i]] = (uint32_t)values[i]; break;
+            case 8: for (size_t i = 0; i < done; ++i) ((double *)column)[(size_t)keys[i]] = values[i]; break;
+            }
+        }
+        list->member_count += done;
+        list->count += done;
+    } else { /* HASHED, at their keys' slots: one there already ends them */
+        for (; done < n; ++done) {
+            if (hashed_full(list->count + 1, list->member_capacity) && !hashed_table(list, 2 * list->member_capacity)) {
+                list->version += done;
+                list->bytes += done * l->number_bytes;
+                return SIZE_MAX;
+            }
+            uint64_t bits = key_bits(fields[l->key][done]);
+            size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+            while (list->members[at] != VACANT && list->members[at] != bits) at = (at + 1) & mask;
+            if (list->members[at] == bits) break;
+            list->members[at] = bits;
+            for (unsigned f = 0; f < l->fields; ++f) cell_out(list->columns[f], list->width[f], at, (PureCell){.num = fields[f][done]});
+            ++list->member_count;
+            ++list->count;
+        }
+    }
+    list->version += done;
+    list->bytes += done * l->number_bytes;
+    return done;
+}
+
 bool pure_list_settle(PureList *list) {
     if (list->pack || list->copy || list->arrays || list->form != TREE || list->layout.key < 0 || list->count < PACK_ITEMS ||
         list->searched_version != list->version || list->searched < list->count / PACK_SEARCHES)

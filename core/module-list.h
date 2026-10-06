@@ -186,6 +186,18 @@ bool pure_list_cells(PureList *, PureCells *);
 bool pure_list_widen(PureList *, unsigned field, uint8_t bytes);
 /* A batch set cells of it in place: it changed (its version). */
 void pure_list_touched(PureList *);
+/* Whether n items of numbers and bools go into an event's list at once
+ * (pure_list_add_many) as one after another they would go, the list
+ * staying in its form: a FLAT list not keyed (key -1), at its end; a DENSE
+ * one by keys it holds at its count now; a HASHED one by number (keys: the
+ * items' key field's cells, in order). *stored and *extra: what
+ * pure_list_size and pure_list_extra grow by once they are in. */
+bool pure_list_takes(const PureList *, int key, size_t n, const double *keys, size_t *stored, size_t *extra);
+/* The n items (fields[f][i]: item i's field f) into a list that takes
+ * them, as pure_list_insert at its end or pure_list_add puts each in turn
+ * (its columns grown and widened once): how many went in before one whose
+ * key it had already (n: all of them); SIZE_MAX when memory ran out. */
+size_t pure_list_add_many(PureList *, size_t n, const double *const *fields);
 /* What it keeps its items in now: 0 a tree, 1 FLAT arrays, 2 DENSE (for tests and counts). */
 unsigned pure_list_form(const PureList *);
 /* Field of the item whose key_field is key, in a list ordered by key_field

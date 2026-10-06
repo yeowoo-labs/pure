@@ -1536,6 +1536,159 @@ static bool settle(Batch *b) {
     return true;
 }
 
+enum { CHUNK = 128 }; /* items a call of pure_list_add_many takes */
+
+/* v in the k rounds from r on, in their order (each round's lane's). */
+static void rounds_of(const Batch *b, const Val *v, unsigned r, unsigned k, double *out) {
+    if (v->kind == UNIFORM)
+        for (unsigned i = 0; i < k; ++i) out[i] = v->value;
+    else if (!b->reverse) {
+        if (v->kind == AFFINE)
+            for (unsigned i = 0; i < k; ++i) out[i] = v->value + v->step * (r + i);
+        else if (v->u32)
+            for (unsigned i = 0; i < k; ++i) out[i] = ((const uint32_t *)v->lane)[r + i];
+        else
+            memcpy(out, (const double *)v->lane + r, k * sizeof(double));
+    } else {
+        unsigned top = b->n - 1 - r; /* round r's lane, the lanes going down */
+        if (v->kind == AFFINE)
+            for (unsigned i = 0; i < k; ++i) out[i] = v->value + v->step * (top - i);
+        else if (v->u32)
+            for (unsigned i = 0; i < k; ++i) out[i] = ((const uint32_t *)v->lane)[top - i];
+        else
+            for (unsigned i = 0; i < k; ++i) out[i] = ((const double *)v->lane)[top - i];
+    }
+}
+
+/* The rounds from *r on that mask runs (NULL: every one), at most CHUNK of
+ * them, v's in each into out (rounds: which, when mask is not NULL); *r
+ * past the last. How many. */
+static unsigned chunk_of(const Batch *b, const Val *v, const uint32_t *mask, unsigned *r, unsigned n, double *out, unsigned *rounds) {
+    if (!mask) {
+        unsigned k = n - *r < CHUNK ? n - *r : CHUNK;
+        rounds_of(b, v, *r, k, out);
+        *r += k;
+        return k;
+    }
+    unsigned k = 0;
+    for (; *r < n && k < CHUNK; ++*r) {
+        unsigned l = round_of(b, *r);
+        if (mask[l]) rounds[k] = *r, out[k++] = lane_of(v, l);
+    }
+    return k;
+}
+
+/* The batch's appends from round from on at once, each list's items by
+ * one call a chunk (pure_list_add_many), when every list takes its items
+ * so and the memory budget takes them all (each item only grows what the
+ * budget counts, so no round in between runs out): as the executor's steps
+ * make them round by round, the first key there already (an append's at
+ * its round, the earliest) its fault. false, nothing changed: make them
+ * round by round. */
+static bool at_once(Batch *b, Frame *frame, unsigned from, unsigned n, uint64_t per, int *how) {
+    PureApp *app = b->app;
+    const PureModule *m = b->m;
+    double keys[BATCH];
+    size_t stored = 0, extra = 0;
+    for (unsigned i = 0; i < b->append_count; ++i) {
+        const Append *a = &b->appends[i];
+        uint32_t arg = m->code[a->pc].arg;
+        int key = m->state_key[arg] ? (int)m->state_key[arg] - 1 : -1;
+        if (!(m->state_flags[arg] & PURE_LIST_ROWS >> 8) || m->state_indexed[arg]) return false; /* an event's list, no index into it */
+        for (unsigned j = 0; j < i; ++j)
+            if (m->code[b->appends[j].pc].arg == arg) return false; /* two appends to one list: their items in turn */
+        const uint32_t *mask = mask_lanes(b, a->mask);
+        size_t count = 0, s, e;
+        if (!mask) {
+            count = n - from;
+            if (key >= 0) rounds_of(b, &a->cells[key], from, n - from, keys);
+        } else
+            for (unsigned r = from; r < n; ++r) {
+                unsigned l = round_of(b, r);
+                if (!mask[l]) continue;
+                if (key >= 0) keys[count] = lane_of(&a->cells[key], l);
+                ++count;
+            }
+        if (!pure_list_takes(app->lists[arg], key, count, keys, &s, &e)) return false;
+        stored += s, extra += e;
+    }
+    if ((app->memory && app->grown + (int64_t)stored > (int64_t)app->memory) || app->spent + (int64_t)(stored + extra) > (int64_t)app->room)
+        return false; /* it runs out at some round: there, round by round */
+    unsigned fault = n, faulting = 0;
+    for (unsigned i = 0; i < b->append_count; ++i) {
+        const Append *a = &b->appends[i];
+        PureList *list = app->lists[m->code[a->pc].arg];
+        const uint32_t *mask = mask_lanes(b, a->mask);
+        size_t was = pure_list_size(list), had = pure_list_extra(list);
+        double cells[PURE_RECORD_FIELDS][CHUNK];
+        const double *fields[PURE_RECORD_FIELDS];
+        unsigned rounds[CHUNK];
+        for (unsigned f = 0; f < a->count; ++f) fields[f] = cells[f];
+        for (unsigned r = from; r < n && r < fault;) {
+            unsigned at = r, count = 0;
+            for (unsigned f = 0; f < a->count; ++f) {
+                at = r;
+                count = chunk_of(b, &a->cells[f], mask, &at, n, cells[f], rounds);
+            }
+            if (!mask)
+                for (unsigned k = 0; k < count; ++k) rounds[k] = r + k;
+            r = at;
+            size_t added = count ? pure_list_add_many(list, count, fields) : 0;
+            if (added == SIZE_MAX) { /* no memory: the event stops there, as the executor's step would */
+                app->work += (uint64_t)rounds[0] * per;
+                frame->status = PURE_ALLOCATION, frame->fault_pc = a->pc, frame->sp = 0;
+                *how = STEP_REFUSED;
+                return true;
+            }
+            if (added < count) { /* its key there already: the executor's fault at that round, unless one comes before it */
+                if (rounds[added] < fault) fault = rounds[added], faulting = i;
+                break;
+            }
+        }
+        app->grown += (int64_t)pure_list_size(list) - (int64_t)was; /* as grows counts them, item by item */
+        app->spent += (int64_t)(pure_list_size(list) + pure_list_extra(list)) - (int64_t)(was + had);
+    }
+    *how = STEP_NEXT;
+    if (fault < n) { /* the event's undone: only the fault and the work so far tell */
+        app->work += (uint64_t)fault * per;
+        frame->kind = PURE_FAULT_EXISTS, frame->fault_pc = b->appends[faulting].pc, frame->sp = 0;
+        *how = STEP_FAULT;
+    }
+    return true;
+}
+
+/* The batch's appends round by round, as the executor's steps make them:
+ * at once where they may (at_once), tried again after a round that changed
+ * a list's form (a keyed list's first items make it DENSE or HASHED). */
+static int append_items(Batch *b, Frame *frame, unsigned n, uint64_t per) {
+    PureApp *app = b->app;
+    unsigned forms[APPENDS];
+    bool again = true;
+    for (unsigned r = 0; r < n; ++r) {
+        if (again) {
+            int how;
+            if (at_once(b, frame, r, n, per, &how)) return how;
+            for (unsigned i = 0; i < b->append_count; ++i) forms[i] = pure_list_form(app->lists[b->m->code[b->appends[i].pc].arg]);
+            again = false;
+        }
+        unsigned l = round_of(b, r);
+        for (unsigned i = 0; i < b->append_count; ++i) {
+            const Append *a = &b->appends[i];
+            const uint32_t *mask = mask_lanes(b, a->mask);
+            if (mask && !mask[l]) continue;
+            for (unsigned f = 0; f < a->count; ++f) frame->stack[f].num = lane_of(&a->cells[f], l);
+            frame->sp = a->count;
+            int how = pure_run_step(frame, a->pc);
+            if (how != STEP_NEXT) { /* its fault at its round: the event's undone, so only how and the work so far tell */
+                app->work += (uint64_t)r * per;
+                return how;
+            }
+            again |= pure_list_form(app->lists[b->m->code[a->pc].arg]) != forms[i];
+        }
+    }
+    return STEP_NEXT;
+}
+
 int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     PureApp *app = frame->app;
     const PureModule *m = frame->m;
@@ -1643,20 +1796,9 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
         }
         for (unsigned i = 0; i < b->scatter_count; ++i) pure_list_touched(b->app->lists[b->scatters[i].list]);
     }
-    for (unsigned r = 0; r < n && b->append_count; ++r) { /* the appends round by round, each as the executor's step makes it */
-        unsigned l = round_of(b, r);
-        for (unsigned i = 0; i < b->append_count; ++i) {
-            const Append *a = &b->appends[i];
-            const uint32_t *mask = mask_lanes(b, a->mask);
-            if (mask && !mask[l]) continue;
-            for (unsigned f = 0; f < a->count; ++f) frame->stack[f].num = lane_of(&a->cells[f], l);
-            frame->sp = a->count;
-            int how = pure_run_step(frame, a->pc);
-            if (how != STEP_NEXT) { /* its fault at its round: the event's undone, so only how and the work so far tell */
-                app->work += (uint64_t)r * per;
-                return how;
-            }
-        }
+    if (b->append_count) {
+        int how = append_items(b, frame, n, per);
+        if (how != STEP_NEXT) return how;
     }
     app->work += work;
     for (unsigned r = 0; r < b->reduce_count; ++r) frame->ev->locals[b->reduce[r].local].num = b->reduce[r].result;

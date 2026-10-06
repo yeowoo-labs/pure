@@ -1338,6 +1338,53 @@ on go {
 """
 
 
+# Items a batch appends at once (APPEND_SOURCE): keys there already, met
+# at round q of a DENSE list and at round p of a HASHED one (the
+# executor's fault at that round); keys past what a DENSE list holds from
+# round p on (it changes its form there, round by round); a list appended
+# to twice a round (round by round); columns widened by the items; all
+# under memory budgets that run out in the middle of a batch.
+APPEND_SOURCE = """record Cell {
+  at = 0
+  v = 0
+}
+state items = 0
+state last = 0
+input go = message {
+  n: u32
+  q: u32
+  p: u32
+}
+on go {
+  let d: list of Cell by at
+  let e: list of Cell by at
+  let h: list of Cell by at
+  let u: list of Cell
+  let w: list of Cell
+  for i in 0 .. go.n {
+    w.append(Cell { at: i, v: i * 300 })
+    d.add(Cell { at: i - floor(i / go.q) * go.q, v: i * 0.5 })
+  }
+  for i in 0 .. go.n {
+    e.add(Cell { at: i + floor(i / go.p) * 1000000, v: i })
+    h.add(Cell { at: i * 7919 - floor(i * 7919 / go.p) * go.p + 5000000, v: 0 - i })
+  }
+  for i in 0 .. go.n {
+    u.append(Cell { at: i, v: i })
+    u.append(Cell { at: 0 - i, v: i * 70000 })
+  }
+  items = d.count + e.count * 10000 + h.count * 100000000 + u.count + w.count
+  let s = 0
+  for c in u {
+    s = s + c.v
+  }
+  for c in w {
+    s = s + c.v * 2
+  }
+  last = s
+}
+"""
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -1401,6 +1448,19 @@ def module_assumptions(aup, pure, work):
         assert outputs[name] == outputs['batches'], ('recur', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
     faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
     assert 'divide' in faults and 'none' in faults and 'non_finite' in faults and 'memory' in faults, faults
+    source, program = work / 'append.aup', work / 'append.pmod'  # items appended at once, against the rounds one by one
+    source.write_text(APPEND_SOURCE)
+    compile_module(aup, source, program)
+    given = ''.join(f'message go {struct.pack("<III", n, q, p).hex()}\nwork\n' for n, q, p in
+                    ((3000, 70000, 70000), (3000, 1500, 70000), (3000, 70000, 2000), (3000, 70000, 40), (90, 70000, 70000), (20, 3, 5)))
+    given += ''.join(f'memory {b}\n' + given for b in (30000, 90000, 200000)) + 'memory 0\nbudget 30011\n' + given + 'budget 0\n'
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=120, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('append', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
+    faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
+    assert 'exists' in faults and 'none' in faults and 'memory' in faults and 'work' in faults, faults
     source, program = work / 'nested.aup', work / 'nested.pmod'  # nested loops together and reductions, against the rounds one by one
     source.write_text(NESTED_SOURCE)
     compile_module(aup, source, program)
