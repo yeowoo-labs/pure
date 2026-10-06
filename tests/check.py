@@ -1179,7 +1179,8 @@ on go {
 # 0 divided by at round q (a fault halfway through a batch: the executor's,
 # at its round), each round reading the last one's set (not apart: run one
 # by one), keys going down with an if and an else, two sets of one field,
-# sums into three cells in turn (the column widened as they grow).
+# sums into three cells in turn (the column widened as they grow), a walk
+# of a slice setting another field at each item.
 BATCH_SOURCE = """record Cell {
   at = 0
   v = 0
@@ -1213,6 +1214,9 @@ on go {
   }
   for k in 0 .. go.n {
     t[k - floor(k / 3) * 3].v = t[k - floor(k / 3) * 3].v + k * 1000000
+  }
+  for c in t[3 .. go.n - 1] {
+    t[c.at].w = c.v + c.at
   }
   for k in 0 .. go.n {
     t[k].w = 1000 / (k - go.q)
@@ -1420,7 +1424,7 @@ def tier_program(rng):
     keys read by key alone (full, or not where keys are left out), ifs and
     breaks, loops whose rounds are apart (a batch's, 024), some with a loop
     run in each and reductions (ra, rb, rc), some appending (e, d), some
-    with a recurrence (x1) ahead, with what fails
+    with a recurrence (x1) ahead, walks of rounds apart, with what fails
     (a key not there, not whole, 0 divided by, a cell past its column's
     width) as likely as not."""
     names = iter('jklpqrxyz')
@@ -1470,7 +1474,7 @@ def tier_program(rng):
         lines = []
         for _ in range(rng.randint(1, 3)):
             kind = rng.choice(['s', 's', 'u', 'acc', 'if', 'loop', 'walk', 'set', 'set', 'break', 'sweep', 'lanes', 'lanes', 'nest', 'nest',
-                               'recur', 'recur'] if depth < 3 else ['s', 'u', 'set', 'break'])
+                               'recur', 'recur', 'walks', 'walks'] if depth < 3 else ['s', 'u', 'set', 'break'])
             pad = '  ' * indent
             if kind == 's':
                 lines.append(f'{pad}s = s + {number(1, loops)}')
@@ -1577,6 +1581,24 @@ def tier_program(rng):
                         lines.append(f'{pad}  t[w{name}].v = t[w{name}].v + x1')
                     else:
                         lines.append(f'{pad}  ra = ra + w{name}')
+                lines.append(f'{pad}}}')
+            elif kind == 'walks' and 'c' not in loops:  # a walk's rounds apart: its items read at their places (024)
+                walked = rng.choice(['f', 'g', 'h', 'f', f'g[{rng.choice(["0", "go.q", "3"])} .. {rng.choice(["go.n", "go.m", "50"])}]'])
+                inner = loops + ['c']
+                lines.append(f'{pad}for c in {walked} {{')
+                lines.append(f'{pad}  let wc = {number(1, inner)}')
+                for _ in range(rng.randint(1, 3)):
+                    pick = rng.random()
+                    if pick < 0.3:
+                        lines.append(f'{pad}  t[{rng.choice(["c.v", "c.at", "wc", key(2, inner)])}].v = {rng.choice(["wc", "c.v", number(1, inner)])}')
+                    elif pick < 0.5:
+                        lines.append(f'{pad}  ra = ra + {rng.choice(["c.v", "wc", "c.at"])}')
+                    elif pick < 0.65:
+                        lines.append(f'{pad}  e.append(Cell {{ at: c.at, v: wc }})')
+                    elif pick < 0.8:
+                        lines.append(f'{pad}  if {cond(1, inner)} {{ t[{rng.choice(["c.v", "wc"])}].v = c.at }}')
+                    else:
+                        lines.append(f'{pad}  rb = {rng.choice(["max", "min"])}(rb, {rng.choice(["c.v", "wc"])})')
                 lines.append(f'{pad}}}')
             elif kind == 'walk' and 'c' not in loops:
                 lines.append(f'{pad}for c in f {{')

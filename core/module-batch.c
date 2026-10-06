@@ -76,7 +76,8 @@ typedef struct {
     const PureModule *m;
     PureApp *app;
     Event *ev;
-    uint32_t slot, end;         /* the loop's slot, and where its block ends */
+    uint32_t slot, end;         /* the loop's slot (LOCALS: a walk's, none), and where its block ends */
+    int walk;                   /* a walk's list (-1: a count's loop) */
     unsigned n;
     double first;               /* the loop's value in the batch's first round */
     bool reverse;               /* lane l runs round n - 1 - l (else round l) */
@@ -1133,7 +1134,18 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             break;
         }
         case PURE_OP_INDEX_LOAD: b->stack[b->sp++] = uniform(b->frame->values[arg].num, m->state_ref[arg]); break;
-        case PURE_OP_ROW: b->stack[b->sp++] = uniform((double)ev->row, (uint16_t)arg); break;
+        case PURE_OP_ROW:
+            if ((int)arg == b->walk) { /* the walk's item: each lane's place */
+                Val v;
+                if (!affine_of(b, b->reverse ? b->first + (b->n - 1) : b->first, b->reverse ? -1 : 1, &v)) {
+                    b->failed = true;
+                    break;
+                }
+                v.owner = (uint16_t)arg;
+                b->stack[b->sp++] = v;
+            } else
+                b->stack[b->sp++] = uniform((double)ev->row, (uint16_t)arg);
+            break;
         case PURE_OP_OUTER_ROW: b->stack[b->sp++] = uniform((double)ev->outer, (uint16_t)arg); break;
         case PURE_OP_LIST_COUNT: b->stack[b->sp++] = uniform((double)pure_list_count(app->lists[arg]), 0); break;
         case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: {
@@ -1527,25 +1539,29 @@ static bool settle(Batch *b) {
 int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     PureApp *app = frame->app;
     const PureModule *m = frame->m;
-    uint64_t per = (uint64_t)(loop->end - loop->start) + 1, left = loop->count - loop->k;
-    uint64_t budget = app->work_budget ? app->work_budget : PURE_WORK_DEFAULT, paid = 1 + (budget - app->work) / per;
+    bool walking = loop->walking; /* a walk: its rounds its places, their work counted as it opened */
+    size_t items = walking ? pure_list_count(app->lists[loop->walk.list]) : 0, end = loop->walk.end < items ? loop->walk.end : items;
+    uint64_t round = walking ? loop->walk.at : loop->k, per = walking ? 0 : (uint64_t)(loop->end - loop->start) + 1;
+    uint64_t left = walking ? end - loop->walk.at : loop->count - loop->k;
+    uint64_t budget = app->work_budget ? app->work_budget : PURE_WORK_DEFAULT, paid = per ? 1 + (budget - app->work) / per : left;
     *done = 0;
-    if (left < LEAST || loop->integer) {
+    if (left < LEAST || (!walking && loop->integer)) {
         loop->resume = UINT64_MAX;
         return STEP_NEXT;
     }
     unsigned n = (unsigned)(left < BATCH ? left : BATCH);
     if (paid < n) n = (unsigned)paid;
-    double first = loop->slot->num;
+    double first = walking ? (double)loop->walk.at : loop->slot->num;
     if (n < 2 || (first == 0 && signbit(first))) { /* the work left pays for one round, or the loop counts from -0: one round by the executor */
-        loop->resume = loop->k + 1;
+        loop->resume = round + 1;
         return STEP_NEXT;
     }
     Batch *b = &batch;
     b->frame = frame, b->m = m, b->app = app, b->ev = frame->ev, b->n = n, b->first = first;
     b->reverse = loop->reverse, b->backward = 0;
     b->var_start = b->reverse ? first + (n - 1) : first, b->var_step = b->reverse ? -1 : 1;
-    b->slot = (uint32_t)(loop->slot - frame->ev->locals), b->end = loop->end;
+    b->slot = walking ? LOCALS : (uint32_t)(loop->slot - frame->ev->locals), b->end = loop->end;
+    b->walk = walking ? (int)loop->walk.list : -1;
     b->failed = b->none = b->items = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
     b->mask_free_count = b->reduce_count = b->append_count = 0;
@@ -1574,7 +1590,7 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     }
     uint64_t work = (n - 1) * per + b->work; /* the rounds after the first, and every round of their nested loops */
     if (b->failed || work > budget - app->work || !settle(b)) {
-        loop->resume = ++loop->failures >= FAILURES ? UINT64_MAX : loop->k + n; /* its rounds one by one, then batches again */
+        loop->resume = ++loop->failures >= FAILURES ? UINT64_MAX : round + n; /* its rounds one by one, then batches again */
         return STEP_NEXT;
     }
     if (b->scatter_count) { /* the sums into cells round by round, as the executor adds and sets (each its own cells) */
@@ -1586,7 +1602,7 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
             rows[i] = numbers(b, &sc->rows), es[i] = numbers(b, &sc->e), masks[i] = mask_lanes(b, sc->mask);
             pure_list_cells(b->app->lists[sc->list], &cells[i]);
             if (!rows[i] || !es[i]) { /* no lanes left to make them: as the executor, round by round */
-                loop->resume = ++loop->failures >= FAILURES ? UINT64_MAX : loop->k + n;
+                loop->resume = ++loop->failures >= FAILURES ? UINT64_MAX : round + n;
                 return STEP_NEXT;
             }
         }
@@ -1653,7 +1669,8 @@ int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
             while (set && last && !set[round_of(b, last)]) --last;
             if (!set || set[round_of(b, last)]) frame->ev->locals[at].num = lane_of(&b->local[at], round_of(b, last));
         }
-    loop->slot->num = first + (double)(n - 1);
+    if (!walking) loop->slot->num = first + (double)(n - 1);
+    else frame->ev->row = (size_t)first + n - 1; /* the walk's place as its last round left it */
     if (b->backward > 0) loop->reverse = !loop->reverse; /* rows going down from lane to lane: the next batch's lanes the other way */
     *done = n;
     return STEP_NEXT;

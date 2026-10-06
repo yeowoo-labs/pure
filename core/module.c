@@ -759,8 +759,9 @@ PURE_COLD static int read_list(const PureOp *op) {
     }
 }
 
-/* A count's loop whose block has batch forms throughout (batch_block) runs a
- * batch of its rounds at a time (module-batch.c, docs/design/024), unless it
+/* A count's loop or a walk whose block has batch forms throughout
+ * (batch_block) runs a batch of its rounds at a time (module-batch.c,
+ * docs/design/024), unless it
  * sets or appends items or has a recurrence and has a nested loop (not yet),
  * reads a list it appends to, or PURE_BATCH=0 in the environment says none
  * does (the executor alone, to measure it). A local is a reduction when every
@@ -774,8 +775,9 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, 
         off = batches && !strcmp(batches, "0");
     }
     const PureOp *loop = &m->code[pc];
+    bool walk = loop->op == PURE_OP_EACH; /* a walk: no slot, its list the block's to read alone */
     uint32_t start = pc + 1, end = start + (loop->arg >> 16);
-    if (off || loop->arg & PURE_LOOP_INTEGER || start >= end || m->height[start]) return false;
+    if (off || (!walk && loop->arg & PURE_LOOP_INTEGER) || start >= end || m->height[start]) return false;
     uint8_t *ends = calloc(end - start, 1); /* the sets that end x = x op e */
     if (!ends) return false;
     uint64_t set[4] = {0}, sure[4] = {0}, reduced[4] = {0}, plain[4] = {0}; /* plain: read or set otherwise */
@@ -796,7 +798,7 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, 
     for (unsigned w = 0; w < 4; ++w) reduced[w] &= set[w] & ~plain[w];
     uint64_t sure0[4] = {0}, exempt[4]; /* a local read before the round sets it, not a reduction's: a recurrence's, if all its sets are */
     uint32_t arms = start, from;
-    unsigned slot = loop->arg & 0xFF;
+    unsigned slot = walk ? 256 : loop->arg & 0xFF;
     for (uint32_t at = start; at < end; ++at) {
         const PureOp *op = &m->code[at];
         uint64_t bit = UINT64_C(1) << (op->arg & 63);
@@ -820,9 +822,10 @@ PURE_COLD static bool loop_batches(const PureModule *m, uint32_t pc, int input, 
     unsigned shape = 0;
     bool any = recurs[0] | recurs[1] | recurs[2] | recurs[3];
     if (!batch_block(m, start, end, input, 0, sure, set, exempt, &shape) || (shape & 1 && (shape & 6 || any))) return false;
-    uint32_t appended = 0; /* a list appended to is read nowhere else in the block (an earlier round's item not there yet) */
+    uint32_t appended = 0; /* a list appended to is read nowhere else in the block (an earlier round's item not there yet), nor walked */
     for (uint32_t at = start; at < end; ++at)
         if (m->code[at].op == PURE_OP_LIST_APPEND) appended |= UINT32_C(1) << m->code[at].arg;
+    if (walk && appended >> (loop->arg >> 8 & 0xFF) & 1) return false;
     for (uint32_t at = start; at < end; ++at) {
         int list = read_list(&m->code[at]);
         if (list >= 0 && list < 32 && appended >> list & 1) return false;
@@ -837,7 +840,7 @@ PURE_COLD static void plan_folds(PureModule *m, PureBlock block, int input) {
     for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
         PureOp *op = &m->code[pc];
         uint64_t recurs[4] = {0};
-        if (op->op == PURE_OP_LOOP && (op->plan = loop_batches(m, pc, input, recurs) ? PLAN_BATCH : 0)) {
+        if ((op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) && (op->plan = loop_batches(m, pc, input, recurs) ? PLAN_BATCH : 0)) {
             m->batches = true;
             for (uint32_t at = pc + 1; at < pc + 1 + (op->arg >> 16); ++at) /* a recurrence's sets, in the loop's own block */
                 if (m->code[at].op == PURE_OP_LOOP) at += m->code[at].arg >> 16;
@@ -2698,11 +2701,12 @@ static inline __attribute__((always_inline)) int iterate(Frame *frame, uint32_t 
     return STEP_NEXT;
 }
 
-/* A loop planned PLAN_BATCH from its round loop->k (set up and counted)
- * on: batches while they run (module-batch.c), the rounds of one that failed
- * one by one, then batches again, until the loop ends or batches stop
- * (then *next its block: the rest of it as any loop's). STEP_NEXT with *next
- * past its block when it ended here, or how a round stopped. */
+/* A loop planned PLAN_BATCH from its round loop->k (set up and counted; a
+ * walk's, its place) on: batches while they run (module-batch.c), the rounds
+ * of one that failed one by one, then batches again, until the loop ends or
+ * batches stop (then *next its block: the rest of it as any loop's).
+ * STEP_NEXT with *next past its block when it ended here, or how a round
+ * stopped. */
 static __attribute__((noinline, cold)) int batches(Frame *frame, Loop *loop, uint32_t *next) {
     unsigned depth = frame->depth;
     for (;;) {
@@ -2710,12 +2714,18 @@ static __attribute__((noinline, cold)) int batches(Frame *frame, Loop *loop, uin
         int how = pure_batch_run(frame, loop, &done);
         if (how != STEP_NEXT) return how;
         if (done) {
-            if ((loop->k += done) >= loop->count) { /* it ended */
-                frame->arena->used = loop->mark;
+            size_t items = loop->walking ? pure_list_count(frame->app->lists[loop->walk.list]) : 0;
+            if (loop->walking ? (loop->walk.at += done) >= loop->walk.end || loop->walk.at >= items : (loop->k += done) >= loop->count) {
+                frame->arena->used = loop->mark; /* it ended */
+                if (loop->walking) frame->ev->walk = loop->around, frame->ev->row = loop->row;
                 frame->end = loop->outer;
                 --frame->depth;
                 *next = loop->end;
                 return STEP_NEXT;
+            }
+            if (loop->walking) { /* a walk's work counted as it opened */
+                frame->ev->row = loop->walk.at;
+                continue;
             }
             if (!charge(frame->app, (uint64_t)(loop->end - loop->start) + 1)) {
                 frame->kind = PURE_FAULT_WORK;
@@ -2726,7 +2736,7 @@ static __attribute__((noinline, cold)) int batches(Frame *frame, Loop *loop, uin
             continue;
         }
         if (loop->resume == UINT64_MAX) break;
-        while (loop->k < loop->resume) { /* a failed batch's rounds */
+        while ((loop->walking ? loop->walk.at : loop->k) < loop->resume) { /* a failed batch's rounds */
             int how = pure_run_rest(frame, loop->start);
             if (how == STEP_SKIP) { /* it left the loop */
                 *next = loop->end;
@@ -2749,7 +2759,8 @@ static __attribute__((noinline, cold)) int batches(Frame *frame, Loop *loop, uin
  * caller): opened, then in batches. */
 static __attribute__((noinline, cold)) int open_batches(Frame *frame, uint32_t pc, uint32_t *next) {
     unsigned depth = frame->depth;
-    int how = enter_loop(frame, &frame->m->code[pc], pc, next);
+    const PureOp *op = &frame->m->code[pc];
+    int how = op->op == PURE_OP_EACH ? enter_each(frame, op, pc, next) : enter_loop(frame, op, pc, next);
     if (how != STEP_NEXT || frame->depth == depth) return how;
     Loop *loop = &frame->loops[depth];
     loop->resume = 0, loop->failures = 0, loop->reverse = false;
@@ -2781,7 +2792,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (top->num == 0) *next = arg;
         return STEP_NEXT;
     case PURE_OP_JMP: *next = arg; return STEP_NEXT;
-    case PURE_OP_EACH: return enter_each(frame, op, pc, next);
+    case PURE_OP_EACH: return batches && op->plan & PLAN_BATCH ? STEP_BATCH : enter_each(frame, op, pc, next);
     case PURE_OP_LOOP: return batches && op->plan & PLAN_BATCH ? STEP_BATCH : enter_loop(frame, op, pc, next);
     case PURE_OP_BREAK: *next = leave_loop(frame); return STEP_NEXT;
     case PURE_OP_CONST: stack[sp++].i64 = op->integer; NEXT; /* the bits: a number's, a bool's or an i64's */
