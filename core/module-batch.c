@@ -869,10 +869,39 @@ static Reduce *reduction(Batch *b, unsigned local, uint8_t op) {
         return NULL;
     }
     double identity = op == PURE_OP_ADD ? -0.0 : op == PURE_OP_MIN ? INFINITY : -INFINITY;
-    for (unsigned l = 0; l < b->n; ++l) partial[l] = identity, count[l] = 0;
+    for (unsigned l = 0, n = b->n; l < n; ++l) partial[l] = identity, count[l] = 0;
     Reduce *r = &b->reduce[b->reduce_count++];
     *r = (Reduce){local, op, partial, count, false, 0};
     return r;
+}
+
+/* Each lane's partial the least (most: the most) of it and its number, as
+ * minimum and maximum: each number as an integer in their order (-0 below
+ * +0), one loop of vector code. */
+static void least_most(double *restrict p, const double *restrict es, uint32_t *restrict c, unsigned n, bool most) {
+    for (unsigned l = 0; l < n; ++l) {
+        double x = p[l], v = es[l];
+        int64_t u, w;
+        memcpy(&u, &x, sizeof(u)), memcpy(&w, &v, sizeof(w));
+        u ^= (int64_t)((uint64_t)(u >> 63) >> 1), w ^= (int64_t)((uint64_t)(w >> 63) >> 1);
+        p[l] = (most ? u >= w : u <= w) ? x : v;
+        ++c[l];
+    }
+}
+
+/* The least (most: the most) of n numbers, as minimum and maximum. */
+static double least_most_of(const double *p, unsigned n, bool most) {
+    int64_t m = most ? INT64_MIN : INT64_MAX;
+    for (unsigned l = 0; l < n; ++l) {
+        int64_t u;
+        memcpy(&u, &p[l], sizeof(u));
+        u ^= (int64_t)((uint64_t)(u >> 63) >> 1);
+        m = most ? (u > m ? u : m) : (u < m ? u : m);
+    }
+    m ^= (int64_t)((uint64_t)(m >> 63) >> 1); /* back to its bits */
+    double v;
+    memcpy(&v, &m, sizeof(v));
+    return v;
 }
 
 /* x = x op e in each running lane: e into its partial. */
@@ -887,6 +916,11 @@ static void reduce_step(Batch *b, Reduce *r, const Val *e) {
         else for (unsigned l = 0; l < n; ++l) p[l] = run[l] ? p[l] + v : p[l], c[l] += run[l];
         r->loose |= v != floor(v);
         if (v == floor(v) && fabs(v) <= 0x1p20) return; /* a lane's at most 2^31 of them: below 2^53 */
+    } else if (r->op != PURE_OP_ADD && !run) { /* the least or the most: each number as an integer in their order (-0 below +0) */
+        const double *es = numbers(b, e);
+        if (!es) return;
+        least_most(p, es, c, n, r->op == PURE_OP_MAX);
+        if (es != e->lane && es != b->var) b->spare[b->spare_count++] = (void *)es;
     } else {
         const double *es = numbers(b, e);
         if (!es) return;
@@ -1463,9 +1497,27 @@ static uint8_t width_needed(double v) {
 /* Each reduction's value after the batch's rounds, as they would leave it
  * (false: they would fault, or a lane's sum may not round as theirs). */
 static bool fold(Batch *b) {
+    unsigned n = b->n;
     for (unsigned i = 0; i < b->reduce_count; ++i) {
         Reduce *r = &b->reduce[i];
+        const double *p = r->partial;
         double c = b->ev->locals[r->local].num; /* as the batch began */
+        if (r->op != PURE_OP_ADD) { /* the least or the most: the same in any order (-0 below +0), lanes that ran none at the identity */
+            double m = least_most_of(p, n, r->op == PURE_OP_MAX);
+            r->result = r->op == PURE_OP_MAX ? maximum(c, m) : minimum(c, m);
+            continue;
+        }
+        if (!r->loose && c == floor(c) && fabs(c) < 0x1p53) { /* whole numbers whose magnitudes together stay below 2^53: exact in any order */
+            double sum[4] = {-0.0, -0.0, -0.0, -0.0}, size[4] = {0, 0, 0, 0};
+            unsigned l = 0;
+            for (; l + 4 <= n; l += 4)
+                for (unsigned j = 0; j < 4; ++j) sum[j] += p[l + j], size[j] += fabs(p[l + j]);
+            for (; l < n; ++l) sum[0] += p[l], size[0] += fabs(p[l]);
+            if ((size[0] + size[1]) + (size[2] + size[3]) + fabs(c) < 0x1p53) {
+                r->result = c + ((sum[0] + sum[1]) + (sum[2] + sum[3]));
+                continue;
+            }
+        }
         bool several = false;
         for (unsigned l = 0; l < b->n; ++l) several |= r->count[l] > 1;
         if (r->op == PURE_OP_ADD && several && (r->loose || !(c == floor(c) && fabs(c) <= 0x1p53))) return false;
