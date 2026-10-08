@@ -37,6 +37,7 @@ typedef struct {
     bool u32;       /* lanes: whole numbers below 2^32 in four bytes each (else numbers) */
     bool temp;      /* lanes the stack alone holds: an instruction may leave its result in them */
     bool view;      /* lanes a list's column itself (cells_at): read only, and only while the pass runs (own) */
+    uint16_t ones;  /* lanes of 1s and 0s a comparison made: how many 1s, + 1 (0: not counted) */
     uint16_t owner; /* a position's list (a slot's bytes.owner) */
     double value, step;
     void *lane;
@@ -421,10 +422,19 @@ static bool affine_op(Batch *b, uint8_t op, Val *x, const Val *y) {
         else for (unsigned l = 0; l < n; ++l) { type a = xs[l], c = ys[l]; out[l] = (expr); }          \
     } while (0)
 
-/* x op y over whole numbers below 2^32 in four bytes (xs or the uniform xk, ys or yk): false past them (as numbers then). */
+/* A comparison's 1s and 0s, counted in the same loop (the branch after it needs not count them). */
+#define TEST(expr)                                                                                                     \
+    do {                                                                                                               \
+        if (ux) for (unsigned l = 0; l < n; ++l) { uint32_t a = xk, c = ys[l], t = (expr); out[l] = t, count += t; }    \
+        else if (uy) for (unsigned l = 0; l < n; ++l) { uint32_t a = xs[l], c = yk, t = (expr); out[l] = t, count += t; } \
+        else for (unsigned l = 0; l < n; ++l) { uint32_t a = xs[l], c = ys[l], t = (expr); out[l] = t, count += t; }    \
+    } while (0)
+
+/* x op y over whole numbers below 2^32 in four bytes (xs or the uniform xk, ys or yk): false past them (as numbers then).
+ * A comparison's 1s: *ones (else 0). */
 static bool words_op(uint8_t op, uint32_t *restrict out, const uint32_t *restrict xs, uint32_t xk, bool ux,
-                     const uint32_t *restrict ys, uint32_t yk, bool uy, unsigned n) {
-    uint32_t over = 0;
+                     const uint32_t *restrict ys, uint32_t yk, bool uy, unsigned n, unsigned *ones) {
+    uint32_t over = 0, count = 0;
     switch (op) {
     case PURE_OP_ADD: /* past 2^32: the sum below an operand */
         if (ux) for (unsigned l = 0; l < n; ++l) { uint32_t sum = xk + ys[l]; out[l] = sum, over |= sum < xk; }
@@ -444,15 +454,16 @@ static bool words_op(uint8_t op, uint32_t *restrict out, const uint32_t *restric
         break;
     case PURE_OP_MIN: EACH(uint32_t, a < c ? a : c); break;
     case PURE_OP_MAX: EACH(uint32_t, a > c ? a : c); break;
-    case PURE_OP_LT: EACH(uint32_t, a < c); break;
-    case PURE_OP_LE: EACH(uint32_t, a <= c); break;
-    case PURE_OP_GT: EACH(uint32_t, a > c); break;
-    case PURE_OP_GE: EACH(uint32_t, a >= c); break;
-    case PURE_OP_EQ: EACH(uint32_t, a == c); break;
-    case PURE_OP_NE: EACH(uint32_t, a != c); break;
-    case PURE_OP_AND: EACH(uint32_t, a != 0 && c != 0); break;
-    default: EACH(uint32_t, a != 0 || c != 0); break;
+    case PURE_OP_LT: TEST(a < c); break;
+    case PURE_OP_LE: TEST(a <= c); break;
+    case PURE_OP_GT: TEST(a > c); break;
+    case PURE_OP_GE: TEST(a >= c); break;
+    case PURE_OP_EQ: TEST(a == c); break;
+    case PURE_OP_NE: TEST(a != c); break;
+    case PURE_OP_AND: TEST(a != 0 && c != 0); break;
+    default: TEST(a != 0 || c != 0); break;
     }
+    *ones = count;
     return !over;
 }
 
@@ -535,7 +546,8 @@ static bool word_op(Batch *b, uint8_t op, Val *x, const Val *y) {
     bool ux = x->kind == UNIFORM, uy = y->kind == UNIFORM;
     const uint32_t *xs = ux ? NULL : words(b, x), *ys = uy ? NULL : words(b, y);
     uint32_t *out = (ux || xs) && (uy || ys) ? fresh(b) : NULL;
-    if (!out || !words_op(op, out, xs, ux ? (uint32_t)x->value : 0, ux, ys, uy ? (uint32_t)y->value : 0, uy, b->n)) {
+    unsigned ones;
+    if (!out || !words_op(op, out, xs, ux ? (uint32_t)x->value : 0, ux, ys, uy ? (uint32_t)y->value : 0, uy, b->n, &ones)) {
         b->spare_count = spares, b->buffers = buffers; /* lanes it took back: past 2^32 or below 0 in some lane, as numbers */
         b->failed = false;
         return false;
@@ -544,6 +556,7 @@ static bool word_op(Batch *b, uint8_t op, Val *x, const Val *y) {
     if (ys && ys != y->lane) b->spare[b->spare_count++] = (void *)ys;
     release(b, x), release(b, y);
     *x = lanes_val(out, true);
+    if (op >= PURE_OP_LT && op <= PURE_OP_OR) x->ones = (uint16_t)(ones + 1);
     return true;
 }
 
@@ -1223,7 +1236,8 @@ static void branch(Batch *b, uint32_t pc, bool invert, uint32_t jz) {
     unsigned count = 0, n = b->n;
     if (c.kind == LANES && c.u32 && !parent && !invert) { /* a comparison's 1s and 0s: the lanes going on */
         on = c.lane;
-        for (unsigned l = 0; l < n; ++l) count += on[l];
+        if (c.ones) count = c.ones - 1u; /* counted as they were made */
+        else for (unsigned l = 0; l < n; ++l) count += on[l];
     } else {
         uint32_t *out = fresh(b);
         if (!out) return;
