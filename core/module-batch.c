@@ -135,7 +135,7 @@ typedef struct {
  * instructions, lists and cells' counts). The rounds its code ran in are
  * kept (filtered: a round's number, k, each append's cells), asked again in
  * the rounds' order at the end, their appends made for those still not there. */
-enum { FILTERS = 2, FILTER_APPENDS = 4, FILTERED = 1 << 16 };
+enum { FILTERS = 2, FILTER_APPENDS = 4, FILTERED = 1 << 16, CELLS = 4 };
 enum { KNOWN = 8 };
 typedef struct { uint32_t pc; Val v; const uint32_t *sel, *parent; } Known; /* sel, parent: the space it was kept in */
 typedef struct {
@@ -224,6 +224,10 @@ typedef struct {
     unsigned filter_count;
     Known known[KNOWN]; /* values kept for later copies of their code (the module's reuse_from) */
     unsigned known_count;
+    PureCells cells[CELLS];     /* lists' cells as the pass reads them (cells_of), */
+    uint32_t cells_list[CELLS]; /* whose (UINT32_MAX: neither form) */
+    bool cells_form[CELLS];
+    unsigned cells_count;
     const uint32_t *sel;        /* a selection running (NULL: none): its lanes */
     Selection selection;
 } Batch;
@@ -742,6 +746,18 @@ static void read_of(Batch *b, uint32_t list, uint32_t field, bool known, const V
 }
 
 /* ITEM_GET: field of the items at the top's positions. */
+/* A list's cells as the pass reads them (pure_list_cells): no list changes
+ * while a batch's pass runs (its sets, appends and filters wait for its end,
+ * which reads its own), so once a batch for the first CELLS lists it reads.
+ * NULL: neither form. */
+static const PureCells *cells_of(Batch *b, uint32_t list) {
+    for (unsigned i = 0; i < b->cells_count; ++i)
+        if (b->cells_list[i] == list) return b->cells_form[i] ? &b->cells[i] : NULL;
+    unsigned i = b->cells_count < CELLS ? b->cells_count++ : CELLS - 1; /* (more: the last one again and again) */
+    b->cells_list[i] = list, b->cells_form[i] = pure_list_cells(b->app->lists[list], &b->cells[i]);
+    return b->cells_form[i] ? &b->cells[i] : NULL;
+}
+
 static void item_get(Batch *b, uint32_t list, uint32_t field) {
     Val *x = &b->stack[b->sp - 1];
     PureList *items = b->app->lists[list];
@@ -756,9 +772,9 @@ static void item_get(Batch *b, uint32_t list, uint32_t field) {
         *x = uniform(pure_list_get(items, (size_t)x->value, field).num, 0);
         return;
     }
-    PureCells cells;
-    if (pure_list_cells(items, &cells) && cells.width[field] != 255) {
-        *x = cells_at(b, &cells, field, x);
+    const PureCells *cells = cells_of(b, list);
+    if (cells && cells->width[field] != 255) {
+        *x = cells_at(b, cells, field, x);
         x->owner = 0;
         return;
     }
@@ -777,8 +793,8 @@ static bool find(Batch *b, const PureOp *op, uint32_t pc) {
     if (joined) field = item_field(m->code[pc + 1].arg);
     if (joined && stored(b, list, field)) return false;
     Val *x = &b->stack[b->sp - 1];
-    PureCells cells;
-    bool dense = pure_list_cells(keyed, &cells) && cells.width[key] == 0; /* DENSE with every key below its count: a key its row */
+    const PureCells *cells = cells_of(b, list);
+    bool dense = cells && cells->width[key] == 0; /* DENSE with every key below its count: a key its row */
     if (x->kind == UNIFORM) {
         PureCell cell = {.num = x->value};
         if (joined) {
@@ -808,7 +824,7 @@ static bool find(Batch *b, const PureOp *op, uint32_t pc) {
             if (!out) return true;
             for (unsigned l = 0; l < b->n; ++l) {
                 double k = lane_of(x, l);
-                out[l] = k >= 0 && k < (double)cells.count && k == floor(k);
+                out[l] = k >= 0 && k < (double)cells->count && k == floor(k);
             }
             *x = lanes_val(out, true);
             return true;
@@ -817,7 +833,7 @@ static bool find(Batch *b, const PureOp *op, uint32_t pc) {
             uint8_t bad[BATCH];
             for (unsigned l = 0; l < b->n; ++l) {
                 double k = lane_of(x, l);
-                bad[l] = !(k >= 0 && k < (double)cells.count && k == floor(k));
+                bad[l] = !(k >= 0 && k < (double)cells->count && k == floor(k));
             }
             if (any_running(b, bad)) return false;
             if (!x->u32) { /* the rows: -0 is the key 0's */
@@ -826,12 +842,12 @@ static bool find(Batch *b, const PureOp *op, uint32_t pc) {
                 for (unsigned l = 0; l < b->n; ++l) rows[l] = ((const double *)x->lane)[l] + 0.0;
                 *x = lanes_val(rows, false);
             }
-        } else if (!rows_in(b, x, cells.count))
+        } else if (!rows_in(b, x, cells->count))
             return false;
         x->owner = (uint16_t)list;
         if (joined) {
             read_of(b, list, field, true, x);
-            *x = cells_at(b, &cells, field, x);
+            *x = cells_at(b, cells, field, x);
             x->owner = 0;
         }
         return true;
@@ -3146,7 +3162,7 @@ static int batch_run(Frame *frame, Loop *loop, unsigned *done) {
     b->failed = b->none = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
     b->plan = plan, b->sets = plan->sets, b->items = plan->items;
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
-    b->mask_free_count = b->reduce_count = b->append_count = b->filter_count = b->known_count = 0;
+    b->mask_free_count = b->reduce_count = b->append_count = b->filter_count = b->known_count = b->cells_count = 0;
     b->sel = NULL;
     b->scatter_count = 0;
     for (unsigned w = 0; w < LOCALS / 64; ++w) /* the locals it sets: not set yet */
