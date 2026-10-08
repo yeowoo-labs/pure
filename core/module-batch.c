@@ -154,8 +154,18 @@ typedef struct {
 typedef struct { uint32_t pc; Mask *mask; } Split;
 /* A reduction (x = x op e, x read no other way): each lane's op of its rounds'
  * e (from op's identity), how many it had, whether one was not whole or a
- * lane's past 2^53 (then a lane's two may not sum as the rounds would). */
-typedef struct { unsigned local; uint8_t op; double *partial; uint32_t *count; bool loose; double result; } Reduce;
+ * lane's past 2^53 (then a lane's two may not sum as the rounds would). While
+ * every step has been the same e in every lane, no lanes: every lane's the
+ * same, uniform after uniform_count of them (docs/design/025, stage 3). */
+typedef struct {
+    unsigned local;
+    uint8_t op;
+    double *partial;
+    uint32_t *count;
+    bool loose;
+    double result, uniform;
+    uint32_t uniform_count;
+} Reduce;
 /* A loop the batch's block runs, its rounds together: the lanes that came
  * to it, how many rounds each has, from what, and those that broke out. */
 typedef struct { Mask *entry; uint32_t *count, *broken; Val low; uint32_t *rows, t; } Nest; /* rows: a walk's, each lane's first (round t: + t) */
@@ -1311,17 +1321,26 @@ static Reduce *reduction(Batch *b, unsigned local, uint8_t op) {
             b->failed = true; /* x = x + e here, x = max(x, e) there: not one reduction */
             return NULL;
         }
-    double *partial = b->reduce_count < REDUCES ? fresh(b) : NULL;
-    uint32_t *count = partial ? fresh(b) : NULL;
-    if (!count) {
+    if (b->reduce_count == REDUCES) {
         b->failed = true;
         return NULL;
     }
-    double identity = op == PURE_OP_ADD ? -0.0 : op == PURE_OP_MIN ? INFINITY : -INFINITY;
-    for (unsigned l = 0, n = b->parent ? b->outer_n : b->sel ? b->selection.n : b->n; l < n; ++l) partial[l] = identity, count[l] = 0; /* the lanes around's */
     Reduce *r = &b->reduce[b->reduce_count++];
-    *r = (Reduce){local, op, partial, count, false, 0};
+    *r = (Reduce){local, op, NULL, NULL, false, 0, op == PURE_OP_ADD ? -0.0 : op == PURE_OP_MIN ? INFINITY : -INFINITY, 0};
     return r;
+}
+
+/* The reduction's lanes (the lanes around's), each as every lane's so far. false: none left. */
+static bool reduce_lanes(Batch *b, Reduce *r) {
+    double *partial = fresh(b);
+    uint32_t *count = partial ? fresh(b) : NULL;
+    if (!count) {
+        b->failed = true;
+        return false;
+    }
+    for (unsigned l = 0, n = b->parent ? b->outer_n : b->sel ? b->selection.n : b->n; l < n; ++l) partial[l] = r->uniform, count[l] = r->uniform_count;
+    r->partial = partial, r->count = count;
+    return true;
 }
 
 /* Each lane's partial the least (most: the most) of it and its number, as
@@ -1356,6 +1375,19 @@ static double least_most_of(const double *p, unsigned n, bool most) {
 /* x = x op e in each running lane: e into its partial. */
 static void reduce_step(Batch *b, Reduce *r, const Val *e) {
     const uint32_t *run = running(b);
+    if (!r->partial) {
+        if (e->kind == UNIFORM && !run && !b->sel && !b->parent) { /* the same e in every lane: as each lane would, once for all */
+            double v = e->value;
+            if (r->op == PURE_OP_ADD) {
+                r->uniform += v, r->loose |= v != floor(v);
+                if (!(v == floor(v) && fabs(v) <= 0x1p20)) r->loose |= !(fabs(r->uniform) <= 0x1p53);
+            } else
+                r->uniform = r->op == PURE_OP_MIN ? minimum(r->uniform, v) : maximum(r->uniform, v);
+            ++r->uniform_count;
+            return;
+        }
+        if (!reduce_lanes(b, r)) return;
+    }
     double *p = r->partial;
     uint32_t *c = r->count;
     unsigned n = b->n;
@@ -2589,6 +2621,23 @@ static bool fold(Batch *b) {
         Reduce *r = &b->reduce[i];
         const double *p = r->partial;
         double c = b->ev->locals[r->local].num; /* as the batch began */
+        if (!p) { /* every lane's the same: uniform, uniform_count of them */
+            double u = r->uniform;
+            bool several = r->uniform_count > 1;
+            if (r->op != PURE_OP_ADD) r->result = r->op == PURE_OP_MAX ? maximum(c, u) : minimum(c, u);
+            else if (!r->loose && c == floor(c) && fabs(c) < 0x1p53 && n * fabs(u) + fabs(c) < 0x1p53)
+                r->result = c + n * u; /* whole numbers, exact (as the lanes' sums would be) */
+            else if (several && (r->loose || !(c == floor(c) && fabs(c) <= 0x1p53)))
+                return false;
+            else {
+                for (unsigned k = 0; k < n && r->uniform_count; ++k) { /* in the rounds' order */
+                    c = c + u;
+                    if (!isfinite(c) || (several && fabs(c) > 0x1p53)) return false;
+                }
+                r->result = c;
+            }
+            continue;
+        }
         if (r->op != PURE_OP_ADD) { /* the least or the most: the same in any order (-0 below +0), lanes that ran none at the identity */
             double m = least_most_of(p, n, r->op == PURE_OP_MAX);
             r->result = r->op == PURE_OP_MAX ? maximum(c, m) : minimum(c, m);
