@@ -1227,6 +1227,61 @@ on go {
 """
 
 
+# Reductions that start with no lanes (REDUCE_SOURCE, docs/design/025): the
+# same e in every lane (a count, a uniform max and min, a fraction, a sum
+# past 2^53 one a lane), a count in a nested loop of the same rounds in
+# every lane, and the same e first, then a masked one or a lane's own (the
+# lanes made from the one number), in both orders.
+REDUCE_SOURCE = """state count = 0
+state mixed = 0
+state other = 0
+state low = 0
+state high = 0
+state frac = 0
+state far = 0
+state inner = 0
+input go = message {
+  n: u32
+  q: u32
+}
+on go {
+  let c = 0
+  let m = 0
+  let o = 0
+  let lo = 1000000
+  let hi = 0 - 1000000
+  let f = 0
+  let x = 0
+  let t = 0
+  for i in 0 .. go.n {
+    c = c + 1
+    m = m + go.q
+    if i - floor(i / go.q) * go.q == 0 { m = m + i }
+    o = o + i
+    o = o + 3
+    lo = min(lo, go.q)
+    hi = max(hi, go.q * 2)
+    hi = max(hi, i - 5)
+    f = f + 0.5
+    x = x + 1099511627777
+  }
+  for i in 0 .. go.n {
+    for k in 0 .. go.q {
+      t = t + 2
+    }
+    t = t + i
+  }
+  count = c
+  mixed = m
+  other = o
+  low = lo
+  high = hi
+  frac = f
+  far = x
+  inner = t
+}
+"""
+
 # Nested loops a batch runs together, and reductions (NESTED_SOURCE): Newton
 # steps breaking out lane by lane, a sum of fractions one a round, a nested
 # loop of 0 to 6 rounds a lane whose division by 0 is a fault in some
@@ -1643,6 +1698,19 @@ def module_assumptions(aup, pure, work):
         assert outputs[name] == outputs['batches'], ('nested', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
     faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
     assert 'divide' in faults and 'none' in faults and 'work' in faults, faults
+    source, program = work / 'reduce.aup', work / 'reduce.pmod'  # reductions with no lanes yet, against the rounds one by one
+    source.write_text(REDUCE_SOURCE)
+    compile_module(aup, source, program)
+    given = ''.join(f'message go {struct.pack("<II", n, q).hex()}\nwork\n' for n, q in
+                    ((3000, 7), (3000, 1), (10000, 3), (40, 3), (2, 5), (1500, 2000)))
+    given += 'budget 30011\n' + given + 'budget 0\n'
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=120, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('reduce', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
+    faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
+    assert 'none' in faults and 'work' in faults, faults
     return len(runs)
 
 
