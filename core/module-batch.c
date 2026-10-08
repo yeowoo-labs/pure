@@ -295,6 +295,7 @@ static const uint32_t *words(Batch *b, const Val *v) {
 static Val lanes_val(void *lane, bool u32) { return (Val){.kind = LANES, .u32 = u32, .temp = true, .lane = lane}; }
 static Val gather(Batch *b, const Val *v);
 static Val expand(Batch *b, const Val *v);
+static Val expand_rows(Batch *b, const Val *v);
 
 /* Whether a running lane has a bad one (bad: a byte per lane). */
 static bool any_running(Batch *b, const uint8_t *bad) {
@@ -675,7 +676,7 @@ static void read_of(Batch *b, uint32_t list, uint32_t field, bool known, const V
         return;
     }
     Read *r = &b->reads[b->read_count++];
-    r->list = list, r->field = field, r->known = known, r->rows = b->sel ? expand(b, rows) : *rows;
+    r->list = list, r->field = field, r->known = known, r->rows = b->sel ? expand_rows(b, rows) : *rows;
     if (r->rows.kind == LANES) r->rows.temp = false;
 }
 
@@ -850,7 +851,7 @@ static void item_set(Batch *b, uint32_t list, uint32_t field) {
         b->failed = true;
         return;
     }
-    if (b->sel) rows = expand(b, &rows), value = expand(b, &value); /* in the lanes around: the selection's mask tells which */
+    if (b->sel) rows = expand_rows(b, &rows), value = expand(b, &value); /* in the lanes around: the selection's mask tells which */
     if (value.kind == LANES) value.temp = false;
     if (rows.kind == LANES) rows.temp = false;
     b->stores[b->store_count++] = (Store){list, field, rows, value, b->sel ? b->selection.active : b->active};
@@ -973,6 +974,23 @@ static Val gather(Batch *b, const Val *v) {
     return r;
 }
 
+/* Rows of the selection's lanes in the lanes around: affine over them when
+ * they are (a loop's value gathered: the end's checks then know them as
+ * such), else expanded. */
+static Val expand_rows(Batch *b, const Val *v) {
+    if (v->kind != LANES) return expand(b, v);
+    const uint32_t *sel = b->sel;
+    unsigned n = b->n;
+    double r0 = lane_of(v, 0);
+    if (n == 1) return uniform(r0, v->owner);
+    double step = (lane_of(v, 1) - r0) / ((double)sel[1] - sel[0]), start = r0 - step * sel[0];
+    bool affine = step == floor(step) && whole(start) && whole(start + step * (b->selection.n - 1));
+    for (unsigned j = 0; affine && j < n; ++j) affine = lane_of(v, j) == start + step * sel[j];
+    if (!affine) return expand(b, v);
+    Val a = {.kind = AFFINE, .value = start, .step = step, .owner = v->owner};
+    return a;
+}
+
 /* v (the selection's) in the lanes around it: its lanes' values, 0 elsewhere. */
 static Val expand(Batch *b, const Val *v) {
     if (v->kind == UNIFORM) return *v;
@@ -989,7 +1007,7 @@ static Val expand(Batch *b, const Val *v) {
     return r;
 }
 
-static void local_load(Batch *b, uint32_t arg, uint32_t pc) {
+static inline __attribute__((always_inline)) void local_load(Batch *b, uint32_t arg, uint32_t pc) {
     unsigned at = arg & 0xFF;
     Val v;
     uint32_t by;
@@ -1716,7 +1734,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
                 Scatter *sc = &b->scatters[b->scatter_count++];
                 sc->list = list_of(set->arg), sc->field = item_field(set->arg), sc->add = sum->add, sc->set = sum->set;
                 sc->e = b->stack[--b->sp], sc->rows = b->stack[--b->sp], sc->mask = b->sel ? b->selection.active : b->active;
-                if (b->sel) sc->e = expand(b, &sc->e), sc->rows = expand(b, &sc->rows);
+                if (b->sel) sc->e = expand(b, &sc->e), sc->rows = expand_rows(b, &sc->rows);
                 sc->e.temp = sc->rows.temp = false;
             }
             continue;
@@ -1726,7 +1744,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             pc = b->updates[u].set + 1;
             continue;
         }
-        if (m->reuse_length[pc]) { /* the same code as an earlier value's, nothing changed between: that value, the code skipped */
+        if (m->reuses && m->reuse_length[pc]) { /* the same code as an earlier value's, nothing changed between: that value, the code skipped */
             uint32_t root = m->reuse_from[pc] - 1;
             unsigned k = 0;
             while (k < b->known_count && b->known[k].pc != root) ++k;
@@ -1890,7 +1908,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
         default: b->failed = true; /* no batch form (the load plans none such) */
         }
         if (op->op == PURE_OP_LIST_FIND && op->plan & PLAN_JOINED) ++at; /* its value its ITEM_GET's */
-        if (m->reuse_from[at] == PURE_REUSE_KEPT && !b->failed && b->sp > was) keep_known(b, at);
+        if (m->reuses && m->reuse_from[at] == PURE_REUSE_KEPT && !b->failed && b->sp > was) keep_known(b, at);
     }
     if (b->sel) { /* (failed within a selection, or its end the block's) */
         if (b->failed) b->sel = NULL, b->n = b->selection.n, b->active = b->selection.active;

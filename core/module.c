@@ -1037,6 +1037,7 @@ PURE_COLD static void plan_reuse(PureModule *m, uint32_t start, uint32_t end, co
                 if (!line) break;
                 m->reuse_from[at] = root + 1, m->reuse_length[at] = length;
                 m->reuse_from[root] = PURE_REUSE_KEPT;
+                m->reuses = true;
                 from = at + length, at = at + length - 1;
             }
         }
@@ -1390,6 +1391,7 @@ void pure_module_release(PureModule *m) {
     m->height = NULL;
     free(m->reuse_from), free(m->reuse_length);
     m->reuse_from = m->reuse_length = NULL;
+    m->reuses = false;
     free(m->storage);
     m->storage = NULL;
     m->code = NULL;
