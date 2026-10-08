@@ -52,3 +52,9 @@
 {"binary":"tiles-16-O3 (computed goto, spilled)","body":"bfs","T":16,"tiles_ms":16.199,"passes_ms":11.197,"c_ms":11.365,"same":true,"reached":99998}
 {"binary":"tiles-16-O3 (computed goto, spilled)","body":"bfs","T":16,"tiles_ms":15.623,"passes_ms":11.305,"c_ms":11.387,"same":true,"reached":99998}
 {"binary":"tiles-16-O3 (computed goto, spilled)","body":"bfs","T":16,"tiles_ms":15.889,"passes_ms":11.203,"c_ms":11.597,"same":true,"reached":99998}
+{"binary":"tail-2-4 clang -O2","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":29.864,"passes_ms":2.925,"ascending_ms":1.872,"c_ms":8.114,"same":true,"answer":49720}
+{"binary":"tail-2-4 gcc -O3","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":41.785,"passes_ms":3.549,"ascending_ms":2.118,"c_ms":6.166,"same":true,"answer":49720}
+{"binary":"tail-2-4 gcc -O2","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":41.781,"passes_ms":9.803,"ascending_ms":9.024,"c_ms":6.165,"same":true,"answer":49720}
+{"binary":"tail-2-4 clang -O2","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":29.819,"passes_ms":2.944,"ascending_ms":1.873,"c_ms":8.184,"same":true,"answer":49720}
+{"binary":"tail-2-4 gcc -O3","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":41.780,"passes_ms":3.562,"ascending_ms":2.113,"c_ms":6.164,"same":true,"answer":49720}
+{"binary":"tail-2-4 gcc -O2","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":41.818,"passes_ms":9.807,"ascending_ms":9.022,"c_ms":6.166,"same":true,"answer":49720}

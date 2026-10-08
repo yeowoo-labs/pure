@@ -220,6 +220,28 @@ static double knapsack_passes(unsigned n, unsigned capacity, const uint32_t *wei
     return best[capacity];
 }
 
+/* The same two passes with the lanes numbered the other way (the batch executor's reverse): memory's order, ascending. */
+static double knapsack_ascending(unsigned n, unsigned capacity, const uint32_t *weight, const uint32_t *worth, uint32_t *best, double *ms) {
+    enum { LANES = 1024 };
+    static uint32_t with[LANES];
+    double a = now_ms();
+    for (unsigned i = 0; i < n; ++i) {
+        uint32_t w = weight[i], v = worth[i];
+        if (w > capacity) continue;
+        size_t count = capacity + 1 - w;
+        for (size_t k0 = 0; k0 < count; k0 += LANES) {
+            size_t m = count - k0 < LANES ? count - k0 : LANES;
+            size_t low = capacity - k0 - (m - 1); /* the batch's lowest c */
+            const uint32_t *restrict from = best + low - w;
+            uint32_t *restrict to = best + low;
+            for (size_t l = 0; l < m; ++l) with[l] = from[l] + v;
+            for (size_t l = 0; l < m; ++l) to[l] = with[l] > to[l] ? with[l] : to[l];
+        }
+    }
+    *ms = now_ms() - a;
+    return best[capacity];
+}
+
 static double knapsack_c(unsigned n, unsigned capacity, const uint32_t *weight, const uint32_t *worth, uint32_t *best, double *ms) {
     double a = now_ms();
     for (uint32_t i = 0; i < n; ++i)
@@ -350,12 +372,13 @@ int main(int argc, char **argv) {
         uint64_t x = 1;
         for (unsigned i = 0; i < n; ++i) x = minstd(x), weight[i] = (uint32_t)(x % 1000) + 1, x = minstd(x), worth[i] = (uint32_t)(x % 1000);
         for (int r = 0; r < rounds; ++r) {
-            double ms[3], answers[3];
+            double ms[4], answers[4];
             memset(best, 0, 4 * (capacity + 1)), answers[0] = knapsack_tiles(n, capacity, weight, worth, best, &ms[0]);
             memset(best, 0, 4 * (capacity + 1)), answers[1] = knapsack_passes(n, capacity, weight, worth, best, &ms[1]);
             memset(best, 0, 4 * (capacity + 1)), answers[2] = knapsack_c(n, capacity, weight, worth, best, &ms[2]);
-            printf("{\\"body\\":\\"knapsack\\",\\"K\\":%d,\\"S\\":%d,\\"T\\":%d,\\"tiles_ms\\":%.3f,\\"passes_ms\\":%.3f,\\"c_ms\\":%.3f,\\"same\\":%s,\\"answer\\":%.17g}\\n", K, S, T, ms[0], ms[1], ms[2],
-                   answers[0] == answers[2] && answers[1] == answers[2] ? "true" : "false", answers[0]);
+            memset(best, 0, 4 * (capacity + 1)), answers[3] = knapsack_ascending(n, capacity, weight, worth, best, &ms[3]);
+            printf("{\\"body\\":\\"knapsack\\",\\"K\\":%d,\\"S\\":%d,\\"T\\":%d,\\"tiles_ms\\":%.3f,\\"passes_ms\\":%.3f,\\"ascending_ms\\":%.3f,\\"c_ms\\":%.3f,\\"same\\":%s,\\"answer\\":%.17g}\\n", K, S, T, ms[0], ms[1], ms[3], ms[2],
+                   answers[0] == answers[2] && answers[1] == answers[2] && answers[3] == answers[2] ? "true" : "false", answers[0]);
         }
     }
     if (all || !strcmp(body, "roots")) {
