@@ -93,16 +93,23 @@ typedef struct {
  * and at a LOCAL_LOAD beginning x = x op e how far on op is (by; 0: none).
  * A nested loop's instructions have no role (sums and recurrences are the
  * loop's own block's) but may begin x = x op e. Its recurrences (NULL:
- * none). failed: more sums or recurrences than a batch holds. */
-enum { AT_PLAIN, AT_AGAIN, AT_ADD, AT_SET, AT_UPDATE, AT_RECORD };
+ * none). failed: more sums or recurrences than a batch holds. A segment
+ * (role AT_SEGMENT at its first instruction, docs/design/025's stage 2):
+ * instructions to its end (to) that make one uniform or affine value from
+ * uniform and affine values alone, then its LOCAL_STORE if store, run at
+ * once in scalars when the batch runs plainly (the pass's own way else). */
+enum { AT_PLAIN, AT_AGAIN, AT_ADD, AT_SET, AT_UPDATE, AT_RECORD, AT_SEGMENT };
 typedef struct { uint8_t role, index; uint16_t by; } PlanAt;
+typedef struct { uint32_t to; bool store; } Segment;
+enum { SEGMENTS = 255 };
 typedef struct PureBatchPlan {
     uint32_t loop, start, end;
     uint64_t sets[LOCALS / 64];
     bool items, failed;
-    unsigned sum_count;
+    unsigned sum_count, segment_count;
     Sum sums[SUMS];
     Recurring *recur;
+    Segment *segments;
     PlanAt at[];
 } PureBatchPlan;
 /* An item a LIST_APPEND at pc appends in the lanes of mask (NULL: all): its fields. */
@@ -1669,6 +1676,115 @@ static bool plan_sums(const PureModule *m, PureBatchPlan *p) {
     return true;
 }
 
+/* What the load can tell of a value a segment makes: uniform, affine (or
+ * uniform, as its parts come out), or neither (no segment holds it). */
+enum { K_NONE, K_UNIFORM, K_AFFINE };
+
+/* The plan's segments (docs/design/025, stage 2): each run of instructions
+ * with no other part in the plan (no role, no x = x op e, no value the same
+ * code makes again or keeps), no jump landing inside, two or more, that
+ * makes one value from values it makes itself, each uniform or affine as
+ * far as the load can tell: a constant, LOAD, field, INDEX_LOAD, a walk's
+ * item (not the loop's own walk's, nor one walked in the block), a local
+ * the block does not set, the loop's value, a nested count loop's value in
+ * its block, a local set once in the block by a segment before here; an
+ * item's field at a uniform row (not a FIND's joined read); NEG, NOT (not
+ * before a JZ), FLOOR, arithmetic and comparisons by the pass's rules. Its
+ * LOCAL_STORE too when the statement ends there. Each is checked again as
+ * it runs (segment). slot: the loop's local (LOCALS: a walk's); walk: the
+ * list a walk walks (-1: a count's loop). */
+static void plan_segments(const PureModule *m, PureBatchPlan *p, unsigned slot, int walk) {
+    uint32_t start = p->start, end = p->end;
+    uint8_t *landed = calloc(end - start + 1, 1), stores[LOCALS] = {0}, local[LOCALS] = {0}, kinds[PURE_MODULE_STACK + 1];
+    Segment found[SEGMENTS];
+    unsigned count = 0;
+    if (!landed) return;
+    for (uint32_t pc = start; pc < end; ++pc) { /* where jumps land, where nested blocks begin and end; how often each local is set */
+        const PureOp *op = &m->code[pc];
+        if ((op->op == PURE_OP_JZ || op->op == PURE_OP_JMP) && op->arg >= start && op->arg <= end) landed[op->arg - start] = 1;
+        if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) landed[pc + 1 - start] = landed[pc + 1 + (op->arg >> 16) - start] = 1;
+        if ((op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP) && stores[op->arg & 0xFF] < 2) ++stores[op->arg & 0xFF];
+    }
+    typedef struct { uint32_t end; unsigned slot; bool each; } Around;
+    Around nest[8];
+    unsigned depth = 0, walks = 0; /* walks: the nested walks around pc */
+    for (uint32_t pc = start; pc < end;) {
+        while (depth && pc >= nest[depth - 1].end) {
+            --depth;
+            if (nest[depth].each) --walks;
+            else local[nest[depth].slot] = K_NONE; /* its last value, whatever it was */
+        }
+        const PureOp *op = &m->code[pc];
+        if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) {
+            bool each = op->op == PURE_OP_EACH;
+            if (depth == 8) break; /* (deeper: no more segments) */
+            nest[depth++] = (Around){pc + 1 + (op->arg >> 16), op->arg & 0xFF, each};
+            if (each) ++walks;
+            else local[op->arg & 0xFF] = K_UNIFORM; /* the same round in every lane, as a rule */
+            ++pc;
+            continue;
+        }
+        uint32_t to = 0;
+        unsigned h0 = m->height[pc];
+        for (uint32_t q = pc; q < end && (q == pc || !landed[q - start]); ++q) {
+            const PureOp *o = &m->code[q];
+            const PlanAt *at = &p->at[q - start];
+            if (at->role || at->by || m->reuse_from[q] || m->reuse_length[q]) break;
+            unsigned h = m->height[q], pops = 0, k = K_NONE, l = o->arg & 0xFF;
+            switch (o->op) {
+            case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_FIELD: case PURE_OP_INDEX_LOAD: k = K_UNIFORM; break;
+            case PURE_OP_ROW: k = walks || (int)o->arg == walk ? K_NONE : K_UNIFORM; break;
+            case PURE_OP_LOCAL_LOAD: k = l == slot ? K_AFFINE : !(p->sets[l / 64] >> (l % 64) & 1) ? K_UNIFORM : local[l]; break;
+            case PURE_OP_ITEM_GET:
+                pops = 1;
+                if (!(q > start && m->code[q - 1].op == PURE_OP_LIST_FIND && m->code[q - 1].plan & PLAN_JOINED) && h >= h0 + 1 &&
+                    kinds[h - 1] == K_UNIFORM)
+                    k = K_UNIFORM;
+                break;
+            case PURE_OP_NOT:
+                if (q + 1 < end && m->code[q + 1].op == PURE_OP_JZ) break; /* a branch */
+                /* fall through */
+            case PURE_OP_NEG: case PURE_OP_FLOOR:
+                pops = 1;
+                if (h >= h0 + 1) k = kinds[h - 1] == K_UNIFORM ? K_UNIFORM : o->op == PURE_OP_FLOOR ? kinds[h - 1] : K_NONE;
+                break;
+            case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_MOD: case PURE_OP_MIN: case PURE_OP_MAX:
+            case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE: case PURE_OP_AND: case PURE_OP_OR:
+                pops = 2;
+                if (h >= h0 + 2 && kinds[h - 2] && kinds[h - 1]) {
+                    unsigned x = kinds[h - 2], y = kinds[h - 1];
+                    if (x == K_UNIFORM && y == K_UNIFORM) k = K_UNIFORM;
+                    else if (o->op == PURE_OP_ADD || o->op == PURE_OP_SUB) k = K_AFFINE;
+                    else if (o->op == PURE_OP_MUL && (x == K_UNIFORM || y == K_UNIFORM)) k = K_AFFINE;
+                }
+                break;
+            default: break;
+            }
+            if (k == K_NONE || h < h0 + pops) break; /* not one, or its operands made before the run */
+            kinds[h - pops] = (uint8_t)k;
+            if (m->height[q + 1] == h0 + 1) to = q + 1; /* one value made so far */
+        }
+        if (to && to - pc >= 2 && count < SEGMENTS) {
+            const PureOp *set = &m->code[to];
+            bool store = to < end && !landed[to - start] && set->op == PURE_OP_LOCAL_STORE && m->height[to + 1] == h0 && !p->at[to - start].role &&
+                         !m->reuse_from[to] && !m->reuse_length[to];
+            if (store && stores[set->arg & 0xFF] == 1) local[set->arg & 0xFF] = kinds[h0];
+            else if (store) local[set->arg & 0xFF] = K_NONE;
+            p->at[pc - start].role = AT_SEGMENT, p->at[pc - start].index = (uint8_t)count;
+            found[count++] = (Segment){to, store};
+            pc = store ? to + 1 : to;
+            continue;
+        }
+        if (op->op == PURE_OP_LOCAL_STORE) local[op->arg & 0xFF] = K_NONE; /* set otherwise: not known here on */
+        ++pc;
+    }
+    free(landed);
+    if (count && (p->segments = malloc(count * sizeof(*p->segments)))) memcpy(p->segments, found, count * sizeof(*p->segments)), p->segment_count = count;
+    else /* (no memory: the pass's way throughout) */
+        for (uint32_t pc = start; pc < end; ++pc)
+            if (p->at[pc - start].role == AT_SEGMENT) p->at[pc - start].role = AT_PLAIN;
+}
+
 /* The plan of the batch loop at pc, or NULL (no memory). */
 static PureBatchPlan *plan_loop(const PureModule *m, uint32_t pc) {
     uint32_t start = pc + 1, end = start + (m->code[pc].arg >> 16);
@@ -1692,6 +1808,8 @@ static PureBatchPlan *plan_loop(const PureModule *m, uint32_t pc) {
         p->at[sum->again - start].role = AT_AGAIN, p->at[sum->add - start].role = AT_ADD, p->at[sum->set - start].role = AT_SET;
         p->at[sum->again - start].index = p->at[sum->add - start].index = p->at[sum->set - start].index = (uint8_t)k;
     }
+    if (!p->failed) plan_segments(m, p, m->code[pc].op == PURE_OP_EACH ? LOCALS : m->code[pc].arg & 0xFF,
+                                  m->code[pc].op == PURE_OP_EACH ? (int)(m->code[pc].arg >> 8 & 0xFF) : -1);
     return p;
 }
 
@@ -1711,7 +1829,7 @@ bool pure_batch_plans(PureModule *m) {
 }
 
 void pure_batch_plans_free(PureModule *m) {
-    for (uint32_t i = 0; i < m->batch_plan_count; ++i) free(m->batch_plans[i]->recur), free(m->batch_plans[i]);
+    for (uint32_t i = 0; i < m->batch_plan_count; ++i) free(m->batch_plans[i]->recur), free(m->batch_plans[i]->segments), free(m->batch_plans[i]);
     free(m->batch_plans);
     m->batch_plans = NULL, m->batch_plan_count = 0;
 }
@@ -1725,6 +1843,79 @@ static const PureBatchPlan *plan_of(const PureModule *m, uint32_t pc) {
         else high = mid;
     }
     return low < m->batch_plan_count && m->batch_plans[low]->loop == pc ? m->batch_plans[low] : NULL;
+}
+
+/* The segment at from (docs/design/025, stage 2) as the pass would run
+ * it, each value a scalar (uniform, or affine: its first lane's and its
+ * step) by the pass's own rules: its value pushed (and its LOCAL_STORE run)
+ * unless dry (then only *out). false: a value is not as the load planned
+ * (lanes, not whole, a fault, past a list's end ...): nothing done, the
+ * pass's way then. */
+static bool segment(Batch *b, uint32_t from, const Segment *sg, bool dry, Val *out) {
+    const PureModule *m = b->m;
+    Val r[PURE_MODULE_STACK], reads[4];
+    uint32_t read_list[4], read_field[4];
+    unsigned sp = 0, read_count = 0;
+    for (uint32_t pc = from; pc < sg->to; ++pc) {
+        const PureOp *op = &m->code[pc];
+        uint32_t arg = op->arg;
+        switch (op->op) {
+        case PURE_OP_CONST: r[sp++] = uniform(op->value, 0); break;
+        case PURE_OP_LOAD: r[sp++] = uniform(b->frame->values[arg].num, 0); break;
+        case PURE_OP_FIELD: r[sp++] = uniform(field_value(b, arg), 0); break;
+        case PURE_OP_INDEX_LOAD: r[sp++] = uniform(b->frame->values[arg].num, m->state_ref[arg]); break;
+        case PURE_OP_ROW:
+            if (b->nest.rows || (int)arg == b->walk) return false;
+            r[sp++] = uniform((double)b->ev->row, (uint16_t)arg);
+            break;
+        case PURE_OP_LOCAL_LOAD: { /* as local_load, in plain lanes */
+            unsigned at = arg & 0xFF;
+            Val *v = &r[sp++];
+            if (at == b->slot) {
+                if (!affine_of(b, b->reverse ? b->first + (b->n - 1) : b->first, b->reverse ? -1 : 1, v)) return false;
+            } else if (!(b->sets[at / 64] >> (at % 64) & 1)) *v = uniform(b->ev->locals[at].num, 0);
+            else if (b->state[at] == 1 && (b->local[at].kind == UNIFORM || b->local[at].kind == AFFINE)) *v = b->local[at];
+            else return false;
+            v->owner = (uint16_t)(arg >> 16);
+            break;
+        }
+        case PURE_OP_ITEM_GET: { /* as item_get, at a uniform row */
+            Val *x = &r[sp - 1];
+            uint32_t list = list_of(arg), field = item_field(arg);
+            PureList *items = b->app->lists[list];
+            if (x->kind != UNIFORM || stored(b, list, field) || !(x->value >= 0 && x->value < (double)pure_list_count(items)) ||
+                (b->items && read_count == 4))
+                return false;
+            if (b->items) reads[read_count] = *x, read_list[read_count] = list, read_field[read_count++] = field;
+            *x = uniform(pure_list_get(items, (size_t)x->value, field).num, 0);
+            break;
+        }
+        case PURE_OP_NEG: case PURE_OP_NOT: case PURE_OP_FLOOR: { /* as unary */
+            Val *x = &r[sp - 1];
+            if (x->kind == UNIFORM) *x = uniform(op->op == PURE_OP_NEG ? -x->value : op->op == PURE_OP_NOT ? x->value == 0 : floor(x->value), 0);
+            else if (op->op == PURE_OP_FLOOR && x->kind == AFFINE) x->owner = 0;
+            else return false;
+            break;
+        }
+        default: { /* an operation of two, as binary: uniform, or affine (affine_op) */
+            Val y = r[--sp], *x = &r[sp - 1];
+            if (x->kind == UNIFORM && y.kind == UNIFORM) {
+                double value;
+                if (!number_op(op->op, x->value, y.value, &value)) return false;
+                *x = uniform(value, 0);
+            } else if (!affine_op(b, op->op, x, &y))
+                return false;
+        }
+        }
+    }
+    if (dry) {
+        *out = r[0];
+        return true;
+    }
+    for (unsigned i = 0; i < read_count; ++i) read_of(b, read_list[i], read_field[i], true, &reads[i]);
+    b->stack[b->sp++] = r[0];
+    if (sg->store) local_store(b, m->code[sg->to].arg);
+    return true;
 }
 
 /* ---- The pass */
@@ -1828,11 +2019,33 @@ static bool keep_filtered(Batch *b) {
 }
 
 /* The block from start to end once for the batch's lanes: false where it failed. */
+#ifdef PURE_BATCH_CHECK
+#include <stdio.h>
+/* A segment's value (made dry) against the pass's own at its end (while docs/design/025's stage 2 is made). */
+static void check_segment(const Batch *b, uint32_t from, uint32_t to, const Val *dry) {
+    const Val *v = b->failed ? NULL : &b->stack[b->sp - 1];
+    if (v && v->kind == dry->kind && !memcmp(&v->value, &dry->value, sizeof(v->value)) && v->owner == dry->owner && v->u32 == dry->u32 &&
+        (v->kind != AFFINE || !memcmp(&v->step, &dry->step, sizeof(v->step))))
+        return;
+    fprintf(stderr, "batch segment %u..%u of the loop at %u differs: %s (kind %u value %.17g step %.17g owner %u) against (kind %u value %.17g step %.17g owner %u)\n",
+            from, to, b->plan->loop, b->failed ? "the pass failed" : "values", v ? v->kind : 0, v ? v->value : 0, v ? v->step : 0,
+            v ? v->owner : 0, dry->kind, dry->value, dry->step, dry->owner);
+    abort();
+}
+#endif
+
 static bool pass(Batch *b, uint32_t start, uint32_t end) {
     const PureModule *m = b->m;
     Event *ev = b->ev;
     PureApp *app = b->app;
+#ifdef PURE_BATCH_CHECK
+    uint32_t check_from = 0, check_to = UINT32_MAX;
+    Val check_v;
+#endif
     for (uint32_t pc = start; pc < end && !b->failed;) {
+#ifdef PURE_BATCH_CHECK
+        if (pc == check_to) check_segment(b, check_from, check_to, &check_v), check_to = UINT32_MAX;
+#endif
         if (b->sel && pc == b->selection.end) deselect(b);
         arrive(b, pc);
         if (b->none) { /* no lane here: on to where one goes */
@@ -1843,11 +2056,22 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             continue;
         }
         const PlanAt *at_pc = &b->plan->at[pc - b->plan->start];
+        if (at_pc->role == AT_SEGMENT && !b->sel && !b->parent) { /* uniform and affine values at once, in scalars */
+            const Segment *sg = &b->plan->segments[at_pc->index];
+#ifdef PURE_BATCH_CHECK
+            if (segment(b, pc, sg, true, &check_v)) check_from = pc, check_to = sg->to; /* and on the pass's own way, to compare */
+#else
+            if (segment(b, pc, sg, false, NULL)) {
+                pc = sg->store ? sg->to + 1 : sg->to;
+                continue;
+            }
+#endif
+        }
         if (at_pc->role == AT_UPDATE) { /* a recurrence's x = e: made ahead, round by round */
             pc = b->plan->recur->updates[at_pc->index].set + 1;
             continue;
         }
-        if (at_pc->role && at_pc->role != AT_RECORD) { /* a sum into a cell: its row and e, kept for the end */
+        if (at_pc->role >= AT_AGAIN && at_pc->role <= AT_SET) { /* a sum into a cell: its row and e, kept for the end */
             const Sum *sum = &b->plan->sums[at_pc->index];
             if (at_pc->role == AT_AGAIN) pc = sum->resume; /* the key again, its find and the cell's read: not needed */
             else if (at_pc->role == AT_ADD) pc = sum->set;
@@ -2029,6 +2253,9 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
         if (op->op == PURE_OP_LIST_FIND && op->plan & PLAN_JOINED) ++at; /* its value its ITEM_GET's */
         if (m->reuses && m->reuse_from[at] == PURE_REUSE_KEPT && !b->failed && b->sp > was) keep_known(b, at);
     }
+#ifdef PURE_BATCH_CHECK
+    if (check_to != UINT32_MAX) check_segment(b, check_from, check_to, &check_v);
+#endif
     if (b->sel) { /* (failed within a selection, or its end the block's) */
         if (b->failed) b->sel = NULL, b->n = b->selection.n, b->active = b->selection.active;
         else deselect(b);
