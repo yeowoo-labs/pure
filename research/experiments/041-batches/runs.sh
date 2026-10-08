@@ -44,3 +44,7 @@ counts)
 *) echo "runs.sh suite NAME ROUNDS [WORK ...] | counts NAME [WORK ...]" >&2
     exit 2 ;;
 esac
+# 2026-10-08-lanes.jsonl (research 132): b9's code with BATCH 1024, 512 and
+# 256 (core/module-batch.c's enum), suite-run 5 rounds twice (ms: the two
+# medians) and costs/time.c's sum0, ops0 and nest under icount 3 rounds:
+# a batch's fixed cost is (the instructions' difference) / (the batches').

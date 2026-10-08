@@ -1,0 +1,24 @@
+{"version": "b9", "lanes": 1024, "work": "knapsack", "ms": [11.43, 11.49]}
+{"version": "b9", "lanes": 512, "work": "knapsack", "ms": [15.685, 15.761]}
+{"version": "b9", "lanes": 256, "work": "knapsack", "ms": [24.516, 24.585]}
+{"version": "b9", "lanes": 1024, "work": "roots", "ms": [8.972, 8.972]}
+{"version": "b9", "lanes": 512, "work": "roots", "ms": [9.505, 9.513]}
+{"version": "b9", "lanes": 256, "work": "roots", "ms": [10.789, 13.614]}
+{"version": "b9", "lanes": 1024, "work": "join", "ms": [117.102, 117.147]}
+{"version": "b9", "lanes": 512, "work": "join", "ms": [120.545, 126.901]}
+{"version": "b9", "lanes": 256, "work": "join", "ms": [125.65, 126.873]}
+{"version": "b9", "lanes": 1024, "work": "matmul", "ms": [40.042, 40.163]}
+{"version": "b9", "lanes": 512, "work": "matmul", "ms": [40.025, 40.476]}
+{"version": "b9", "lanes": 256, "work": "matmul", "ms": [39.941, 40.077]}
+{"version": "b9", "lanes": 1024, "work": "bfs", "ms": [24.265, 31.357]}
+{"version": "b9", "lanes": 512, "work": "bfs", "ms": [24.66, 24.775]}
+{"version": "b9", "lanes": 256, "work": "bfs", "ms": [25.974, 26.22]}
+{"version": "b9", "lanes": 1024, "work": "sort", "ms": [57.433, 59.233]}
+{"version": "b9", "lanes": 512, "work": "sort", "ms": [56.898, 57.247]}
+{"version": "b9", "lanes": 256, "work": "sort", "ms": [57.248, 57.819]}
+{"version": "b9", "lanes": 1024, "module": "sum0", "n": 51200, "instructions": 47885499, "cycles": 16209194}
+{"version": "b9", "lanes": 256, "module": "sum0", "n": 51200, "instructions": 68855384, "cycles": 23451153}
+{"version": "b9", "lanes": 1024, "module": "ops0", "n": 51200, "instructions": 66412063, "cycles": 30359218}
+{"version": "b9", "lanes": 256, "module": "ops0", "n": 51200, "instructions": 85341947, "cycles": 36828120}
+{"version": "b9", "lanes": 1024, "module": "nest", "n": 200, "instructions": 240741778, "cycles": 99699878}
+{"version": "b9", "lanes": 256, "module": "nest", "n": 200, "instructions": 240612644, "cycles": 102318427}
