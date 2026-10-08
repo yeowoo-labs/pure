@@ -1166,7 +1166,7 @@ static void arrive(Batch *b, uint32_t pc) {
 /* JZ to pc: the lanes whose top is 0 go there. */
 /* JZ to pc on the top (invert: on its NOT, as if !c { ... }): the lanes it holds go on, the others to pc. */
 static bool selects(Batch *b, unsigned count, uint32_t jz);
-static void select(Batch *b, const uint32_t *on, unsigned count, uint32_t jz);
+static void select_arm(Batch *b, const uint32_t *on, unsigned count, uint32_t jz);
 
 static void branch(Batch *b, uint32_t pc, bool invert, uint32_t jz) {
     Val c = b->stack[--b->sp];
@@ -1198,7 +1198,7 @@ static void branch(Batch *b, uint32_t pc, bool invert, uint32_t jz) {
     if (no->count) send(b, pc, no);
     if (count) b->active = yes;
     else b->none = true;
-    if (count && selects(b, count, jz)) select(b, on, count, jz);
+    if (count && selects(b, count, jz)) select_arm(b, on, count, jz);
 }
 
 /* Whether the arm of the JZ at jz (its block to its target, or to a JMP
@@ -1227,7 +1227,7 @@ static bool selects(Batch *b, unsigned count, uint32_t jz) {
 
 /* The arm of the JZ at jz run in the count lanes on alone (its lanes
  * j: their lanes around sel[j]), every lane running, until it ends. */
-static void select(Batch *b, const uint32_t *on, unsigned count, uint32_t jz) {
+static void select_arm(Batch *b, const uint32_t *on, unsigned count, uint32_t jz) {
     uint32_t *sel = fresh(b);
     if (!sel) return;
     for (unsigned l = 0, j = 0; l < b->n; ++l)
@@ -1242,7 +1242,7 @@ static void select(Batch *b, const uint32_t *on, unsigned count, uint32_t jz) {
 
 /* The selection running ends: its lanes the lanes around again, each local
  * it set as the arm's lanes left it (the others' as they were). */
-static void deselect(Batch *b) {
+static void deselect_arm(Batch *b) {
     Selection *se = &b->selection;
     unsigned count = b->n, outer = se->n;
     const uint32_t *sel = b->sel;
@@ -2025,7 +2025,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
     Event *ev = b->ev;
     PureApp *app = b->app;
     for (uint32_t pc = start; pc < end && !b->failed;) {
-        if (b->sel && pc == b->selection.end) deselect(b);
+        if (b->sel && pc == b->selection.end) deselect_arm(b);
         arrive(b, pc);
         if (b->none) { /* no lane here: on to where one goes */
             uint32_t next = end;
@@ -2230,7 +2230,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
     }
     if (b->sel) { /* (failed within a selection, or its end the block's) */
         if (b->failed) b->sel = NULL, b->n = b->selection.n, b->active = b->selection.active;
-        else deselect(b);
+        else deselect_arm(b);
     }
     return !b->failed;
 }
