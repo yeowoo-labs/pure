@@ -1,0 +1,12 @@
+1 s9  16:22:57 up 4 days, 12:44,  2 users,  load average: 1.32, 1.34, 1.11
+1 s14  16:24:25 up 4 days, 12:45,  2 users,  load average: 1.47, 1.44, 1.17
+2 s14  16:26:01 up 4 days, 12:47,  2 users,  load average: 1.35, 1.49, 1.22
+2 s9  16:27:49 up 4 days, 12:49,  2 users,  load average: 1.46, 1.55, 1.27
+3 s9  16:29:16 up 4 days, 12:50,  2 users,  load average: 1.48, 1.60, 1.32
+3 s14  16:30:53 up 4 days, 12:52,  2 users,  load average: 1.37, 1.63, 1.36
+4 s14  16:32:30 up 4 days, 12:53,  2 users,  load average: 1.31, 1.60, 1.38
+4 s9  16:34:07 up 4 days, 12:55,  2 users,  load average: 1.32, 1.60, 1.41
+5 s9  16:35:34 up 4 days, 12:56,  2 users,  load average: 1.34, 1.58, 1.42
+5 s14  16:37:01 up 4 days, 12:58,  2 users,  load average: 1.46, 1.64, 1.46
+6 s14  16:38:48 up 4 days, 13:00,  2 users,  load average: 1.33, 1.67, 1.50
+6 s9  16:40:15 up 4 days, 13:01,  2 users,  load average: 1.37, 1.65, 1.51
