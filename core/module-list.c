@@ -2873,6 +2873,31 @@ size_t pure_list_bound(const PureList *list, unsigned field, PureCell key) {
     return pure_list_seek(list, field, key, &found);
 }
 
+void pure_list_slice(const PureList *list, unsigned field, double low, double high, size_t *from, size_t *to) {
+    if (list->pack && (int)field == list->layout.key && list->count && list->pack->buckets && list->pack->whole &&
+        fabs(low) < 0x1p53 && low == floor(low) && fabs(high) < 0x1p53 && high == floor(high)) { /* in integers: buckets by a shift */
+        const Pack *pack = list->pack;
+        const double *keys = list->columns[list->layout.key];
+        int64_t lo = (int64_t)low, hi = (int64_t)high;
+        size_t bounds[2], count = list->count;
+        for (unsigned side = 0; side < 2; ++side) {
+            int64_t whole = side ? hi : lo;
+            if (whole <= pack->low_whole) { bounds[side] = 0; continue; }
+            if (whole > pack->high_whole) { bounds[side] = count; continue; }
+            uint64_t at_whole = (uint64_t)(whole - pack->origin_whole), b = at_whole >> pack->shift;
+            size_t at = pack->first[b];
+            if (b << pack->shift != at_whole)
+                for (size_t end = pack->first[b + 1]; at < end && keys[at] < (double)whole;) ++at;
+            bounds[side] = at;
+        }
+        *from = bounds[0], *to = bounds[1] < bounds[0] ? bounds[0] : bounds[1];
+        return;
+    }
+    *from = pure_list_bound(list, field, (PureCell){.num = low});
+    *to = pure_list_bound(list, field, (PureCell){.num = high});
+    if (*to < *from) *to = *from;
+}
+
 /* An item where it is: its leaf and its place there. */
 typedef struct { const Node *leaf; unsigned index; } Ref;
 

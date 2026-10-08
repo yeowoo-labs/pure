@@ -256,6 +256,10 @@ typedef struct {
     uint8_t state_key[PURE_MODULE_STATES];
     bool state_indexed[PURE_MODULE_STATES]; /* list: an index state refers to it (set at load) */
     uint8_t *height;    /* the operand stack's height at each instruction, from its block's start (the verifier's) */
+    /* In a batch's block (module-batch.c), a value computed again by the same code as an earlier one whose operands
+     * nothing changed between: at its code's first instruction, the earlier root + 1 and its code's length (reuse_from,
+     * reuse_length; 0: none); at such an earlier root, reuse_from PURE_REUSE_KEPT (its value kept for them). */
+    uint32_t *reuse_from, *reuse_length;
     struct PureJit *jit; /* its blocks compiled (module-jit.c, docs/design/021), or NULL */
     bool batches;        /* a loop of it is planned to run in batches (module-batch.c, docs/design/024) */
     PureInputShape input[PURE_MODULE_INPUTS];

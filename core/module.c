@@ -781,6 +781,15 @@ PURE_COLD static bool batch_block(const PureModule *m, uint32_t start, uint32_t 
     return true;
 }
 
+/* Whether instructions [a, a + n) and [b, b + n) are the same code. */
+PURE_COLD static bool same_code_of(const PureModule *m, uint32_t a, uint32_t b, uint32_t n) {
+    for (uint32_t i = 0; i < n; ++i)
+        if (m->code[a + i].op != m->code[b + i].op || m->code[a + i].arg != m->code[b + i].arg ||
+            m->code[a + i].integer != m->code[b + i].integer)
+            return false;
+    return true;
+}
+
 /* The list an instruction of a batch's block reads, or -1. */
 PURE_COLD static int read_list(const PureOp *op) {
     switch (op->op) {
@@ -944,6 +953,97 @@ PURE_COLD static bool walk_spreads(const PureModule *m, uint32_t start, uint32_t
     return true;
 }
 
+/* Whether the instruction at pc computes a value a batch may keep for a
+ * later copy of its code (plan_reuse): no branch, loop, set, append, find
+ * by position, has (a filter's), text, PICK or SLIDE, nor a reduction's x. */
+PURE_COLD static bool reusable(const PureModule *m, uint32_t pc, const uint64_t *reduced) {
+    const PureOp *op = &m->code[pc];
+    switch (op->op) {
+    case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_FIELD: case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_INDEX_LOAD:
+    case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_INDEX_NUM: case PURE_OP_INDEX_MOVE: case PURE_OP_LIST_COUNT:
+    case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_MOD: case PURE_OP_MIN: case PURE_OP_MAX:
+    case PURE_OP_NEG: case PURE_OP_NOT: case PURE_OP_FLOOR: case PURE_OP_CLAMP: case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT:
+    case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE: case PURE_OP_AND: case PURE_OP_OR:
+        return true;
+    case PURE_OP_LOCAL_LOAD: return !(reduced[(op->arg & 0xFF) / 64] >> (op->arg & 63) & 1);
+    case PURE_OP_ITEM_GET: return !(op->plan & PLAN_TEXT);
+    case PURE_OP_LIST_FIND: return op->plan & PLAN_JOINED && !(op->plan & PLAN_TEXT);
+    default: return false;
+    }
+}
+
+/* What the instructions [s, e) read: the locals (a bit each) and the lists (a bit each, lists past 32 as one bit). */
+PURE_COLD static void reads_of(const PureModule *m, uint32_t s, uint32_t e, uint64_t *locals, uint64_t *lists) {
+    for (uint32_t at = s; at < e; ++at) {
+        const PureOp *op = &m->code[at];
+        if (op->op == PURE_OP_LOCAL_LOAD) locals[(op->arg & 0xFF) / 64] |= UINT64_C(1) << (op->arg & 63);
+        int list = read_list(op);
+        if (list >= 0) *lists |= UINT64_C(1) << (list < 63 ? list : 63);
+    }
+}
+
+/* In the block [start, end) of a loop a batch runs: each value computed by
+ * the same code as an earlier value's (same_code's: a subtree of value
+ * instructions, reusable throughout), the two in one line of the same
+ * innermost block (no JMP, loop, break or jump landing between; a JZ
+ * between only narrows the lanes) with nothing between setting a local or
+ * changing a list the code reads, is planned to take the earlier value
+ * (module-batch.c): reuse_from and reuse_length at its code's start, the
+ * earlier root kept (PURE_REUSE_KEPT). */
+PURE_COLD static void plan_reuse(PureModule *m, uint32_t start, uint32_t end, const uint64_t *reduced) {
+    bool *landed = calloc(end - start + 1, 1);
+    uint32_t *block = calloc(end - start, sizeof(uint32_t)); /* each instruction's innermost block's start */
+    if (!landed || !block) {
+        free(landed), free(block);
+        return;
+    }
+    for (uint32_t at = start; at < end; ++at) {
+        const PureOp *op = &m->code[at];
+        if ((op->op == PURE_OP_JZ || op->op == PURE_OP_JMP) && op->arg >= start && op->arg <= end) landed[op->arg - start] = true;
+    }
+    for (uint32_t at = start, inner = start, stop = end; at < end; ++at) {
+        if (at >= stop) inner = start, stop = end; /* (one deep) */
+        block[at - start] = inner;
+        const PureOp *op = &m->code[at];
+        if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) inner = at + 1, stop = at + 1 + (op->arg >> 16);
+    }
+    for (uint32_t root = start; root < end; ++root) {
+        if (!reusable(m, root, reduced) || m->reuse_from[root]) continue;
+        uint32_t s = root; /* its code: back to where the stack was one below its result */
+        while (s > block[root - start] && m->height[s] != m->height[root + 1] - 1) --s;
+        if (m->height[s] != m->height[root + 1] - 1 || root == s) continue; /* (a leaf alone: nothing computed) */
+        bool pure = true;
+        for (uint32_t at = s; at <= root && pure; ++at) {
+            pure = reusable(m, at, reduced) && block[at - start] == block[root - start] && !landed[at - start];
+            if (m->code[at].op == PURE_OP_LIST_FIND) ++at; /* its ITEM_GET with it */
+        }
+        if (!pure) continue;
+        uint32_t length = root + 1 - s;
+        uint64_t locals[4] = {0}, lists = 0;
+        reads_of(m, s, root + 1, locals, &lists);
+        for (uint32_t at = root + 1, from = root; at + length <= end; ++at) { /* a later copy, in one line */
+            const PureOp *op = &m->code[at];
+            if (op->op == PURE_OP_JMP || op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH || op->op == PURE_OP_BREAK ||
+                block[at - start] != block[root - start] || (landed[at - start] && at > root + 1))
+                break;
+            if ((op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP) && locals[(op->arg & 0xFF) / 64] >> (op->arg & 63) & 1) break;
+            if ((op->op == PURE_OP_ITEM_SET && lists >> (list_of(op->arg) < 63 ? list_of(op->arg) : 63) & 1) ||
+                ((op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT || op->op == PURE_OP_LIST_REMOVE) &&
+                 lists >> (op->arg < 63 ? op->arg : 63) & 1))
+                break;
+            if (at >= from && !m->reuse_length[at] && same_code_of(m, s, at, length)) {
+                bool line = true; /* the copy itself in the line (no landing in it but at its start, no loop) */
+                for (uint32_t i = at + 1; i < at + length; ++i) line &= !landed[i - start] && block[i - start] == block[root - start];
+                if (!line) break;
+                m->reuse_from[at] = root + 1, m->reuse_length[at] = length;
+                m->reuse_from[root] = PURE_REUSE_KEPT;
+                from = at + length, at = at + length - 1;
+            }
+        }
+    }
+    free(landed), free(block);
+}
+
 /* A fold in a verified block whose own block has lane forms throughout runs
  * a leaf of its list at a time; a count's loop so planned, a batch of its
  * rounds. */
@@ -961,6 +1061,7 @@ PURE_COLD static void plan_folds(PureModule *m, PureBlock block, int input) {
                     m->code[at].plan |= PLAN_SPREAD;
                 if (filter_body(m, at, pc + 1 + (op->arg >> 16))) m->code[at].plan |= PLAN_FILTER;
             }
+            plan_reuse(m, pc + 1, pc + 1 + (op->arg >> 16), reduced);
             for (uint32_t at = pc + 1; at < pc + 1 + (op->arg >> 16); ++at) /* a recurrence's sets, in the loop's own block */
                 if (m->code[at].op == PURE_OP_LOOP || m->code[at].op == PURE_OP_EACH) at += m->code[at].arg >> 16;
                 else if (m->code[at].op == PURE_OP_LOCAL_STORE && recurs[(m->code[at].arg & 0xFF) / 64] >> (m->code[at].arg & 63) & 1)
@@ -1287,6 +1388,8 @@ void pure_module_release(PureModule *m) {
     m->batches = false;
     free(m->height);
     m->height = NULL;
+    free(m->reuse_from), free(m->reuse_length);
+    m->reuse_from = m->reuse_length = NULL;
     free(m->storage);
     m->storage = NULL;
     m->code = NULL;
@@ -1342,7 +1445,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         REFUSE("out of memory", 0);
     }
     out->code = out->storage;
-    if (!(out->height = calloc(out->code_count + 1, 1))) {
+    if (!(out->height = calloc(out->code_count + 1, 1)) || !(out->reuse_from = calloc(out->code_count + 1, sizeof(uint32_t))) ||
+        !(out->reuse_length = calloc(out->code_count + 1, sizeof(uint32_t)))) {
         result = PURE_ALLOCATION;
         REFUSE("out of memory", 0);
     }

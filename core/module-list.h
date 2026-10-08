@@ -128,6 +128,10 @@ size_t pure_list_seek(const PureList *, unsigned field, PureCell key, bool *foun
  * pure_list_seek's but without whether it is key (a slice's bound: a packed
  * list then reads its index alone). */
 size_t pure_list_bound(const PureList *, unsigned field, PureCell key);
+/* A slice's positions, from the first whose field does not order below low
+ * up to the first not below high (never before from): pure_list_bound's
+ * both, as one (a packed list's whole keys: by its buckets). */
+void pure_list_slice(const PureList *, unsigned field, double low, double high, size_t *from, size_t *to);
 /* A stored list keyed by a number and searched by key at least an eighth of
  * its items' times since it last changed (4,096 items or more) is packed
  * (docs/design/022): its items in arrays, each field's in order, with an
