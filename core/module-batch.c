@@ -57,21 +57,44 @@ typedef struct { uint32_t list, field; Val rows, value; Mask *mask; } Store;
 enum { V_X = STEPS, V_SLOT = V_X + RECURS, V_NUMBER, VALUES = 256 };
 typedef struct { uint8_t op, a, c; } Step;
 typedef struct { uint32_t from, set; unsigned x, first, count; uint8_t value; } Update;
-typedef struct { uint32_t pc; unsigned x; double *lanes; bool shared; } Record; /* shared: an earlier record's lanes, x not set between */
+typedef struct { uint32_t pc; unsigned x, of; bool shared; } Record; /* shared: record of's lanes, x not set between */
 /* A sum into a cell, L[k].f = L[k].f + e: its statement's second k from
  * again to resume (past its find and read, skipped), its ADD and its set;
  * and as the pass leaves it, its rows and e in the lanes of mask, added at
  * the end round by round. */
 typedef struct { uint32_t again, resume, add, set; } Sum;
 typedef struct { uint32_t list, field, add, set; Val rows, e; Mask *mask; } Scatter;
+/* A round of the recurrences, in the block's order: a step (op, its two
+ * numbers, where its result goes), a record of x (a: x, c: the record) or x
+ * set (a: its value, to: x). */
+enum { A_RECORD = 254, A_SET };
+typedef struct { uint8_t op, a, c, to; } Action;
+/* A batch loop's recurrences as the load reads them (docs/design/025): the
+ * locals, the updates and their steps, the records, the numbers that stay
+ * (each from where a batch reads it: a constant, a field, a LOAD, a local
+ * the block does not set; the same source one number) and a round's
+ * actions. A batch fills the numbers and the recurrences' values in. */
+enum { S_CONST, S_FIELD, S_LOAD, S_LOCAL };
+typedef struct { uint8_t kind; uint32_t arg; double value; } Source;
+typedef struct {
+    unsigned recur_count, update_count, record_count, step_count, source_count, action_count;
+    unsigned recur_local[RECURS];
+    Update updates[UPDATES];
+    Record records[RECORDS];
+    Step steps[STEPS];
+    Source sources[VALUES - V_NUMBER];
+    Action actions[STEPS + UPDATES + RECORDS];
+} Recurring;
 /* A batch loop's block as the load reads it, once (docs/design/025): the
  * locals it sets (a nested loop's slot too), whether it sets items, its sums
  * into cells, and at each of its instructions what a pass does there besides
- * the instruction: at a sum's again, add or set, that (role, the sum's
- * index), and at a LOCAL_LOAD beginning x = x op e how far on op is (by; 0:
- * none). A nested loop's instructions have no role (a sum is the loop's own
- * block's) but may begin x = x op e. failed: more sums than a batch holds. */
-enum { AT_PLAIN, AT_AGAIN, AT_ADD, AT_SET };
+ * the instruction: at a sum's again, add or set, at a recurrence's update
+ * (its from) or record, that (role, the sum's, update's or record's index),
+ * and at a LOCAL_LOAD beginning x = x op e how far on op is (by; 0: none).
+ * A nested loop's instructions have no role (sums and recurrences are the
+ * loop's own block's) but may begin x = x op e. Its recurrences (NULL:
+ * none). failed: more sums or recurrences than a batch holds. */
+enum { AT_PLAIN, AT_AGAIN, AT_ADD, AT_SET, AT_UPDATE, AT_RECORD };
 typedef struct { uint8_t role, index; uint16_t by; } PlanAt;
 typedef struct PureBatchPlan {
     uint32_t loop, start, end;
@@ -79,6 +102,7 @@ typedef struct PureBatchPlan {
     bool items, failed;
     unsigned sum_count;
     Sum sums[SUMS];
+    Recurring *recur;
     PlanAt at[];
 } PureBatchPlan;
 /* An item a LIST_APPEND at pc appends in the lanes of mask (NULL: all): its fields. */
@@ -174,14 +198,9 @@ typedef struct {
     Store stores[STORES];
     Append appends[APPENDS];
     unsigned append_count;
-    unsigned recur_count, update_count, record_count, step_count;
-    unsigned recur_local[RECURS];
     double recur_value[RECURS]; /* each recurrence's after the rounds so far */
     double values[VALUES];      /* what a round of the recurrences keeps (V_): numbers from V_NUMBER on */
-    unsigned number_count;
-    Update updates[UPDATES];
-    Record records[RECORDS];
-    Step steps[STEPS];
+    double *record_lanes[RECORDS]; /* each record's value in each lane */
     unsigned scatter_count;
     Scatter scatters[SUMS];
     Filter filters[FILTERS];
@@ -1035,10 +1054,12 @@ static void check_failed(const Batch *b, const char *what, uint32_t pc) {
     abort();
 }
 static bool plan_sums(const PureModule *m, PureBatchPlan *p);
+static double field_value(const Batch *b, uint32_t arg);
 static void check_plan(Batch *b, const Loop *loop) {
     const PureBatchPlan *p = b->plan;
     const PureModule *m = b->m;
     if (p->start != loop->start || p->end != loop->end || b->end != p->end) check_failed(b, "range", loop->start);
+    if ((m->code[p->loop].op == PURE_OP_EACH ? LOCALS : (m->code[p->loop].arg & 0xFF)) != b->slot) check_failed(b, "slot", loop->start);
     uint64_t sets[LOCALS / 64] = {0};
     bool items = false;
     for (uint32_t pc = loop->start; pc < loop->end; ++pc) {
@@ -1049,8 +1070,95 @@ static void check_plan(Batch *b, const Loop *loop) {
     if (memcmp(sets, p->sets, sizeof(sets)) || items != p->items) check_failed(b, "sets", loop->start);
     PureBatchPlan again = {.start = p->start, .end = p->end};
     bool fits = !items || plan_sums(m, &again);
-    if (!fits != p->failed || again.sum_count != p->sum_count || memcmp(again.sums, p->sums, sizeof(again.sums)))
-        check_failed(b, "sums", loop->start);
+    if (again.sum_count != p->sum_count || memcmp(again.sums, p->sums, sizeof(again.sums))) check_failed(b, "sums", loop->start);
+    /* the recurrences as each batch found them (numbers by their values) */
+    static struct { unsigned recur_count, update_count, record_count, step_count, number_count; unsigned recur_local[RECURS];
+                    Update updates[UPDATES]; Record records[RECORDS]; Step steps[STEPS]; double values[VALUES]; } o;
+    memset(&o, 0, sizeof(o));
+    bool recurs = true;
+    for (uint32_t pc = loop->start; pc < loop->end && recurs; ++pc) {
+        const PureOp *op = &m->code[pc];
+        if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) pc += op->arg >> 16;
+        if (op->op != PURE_OP_LOCAL_STORE || !(op->plan & PLAN_RECUR)) continue;
+        unsigned local = op->arg & 0xFF, x = 0;
+        while (x < o.recur_count && o.recur_local[x] != local) ++x;
+        if (x == o.recur_count) {
+            if (x == RECURS) { recurs = false; break; }
+            o.recur_local[o.recur_count++] = local;
+        }
+        uint32_t from;
+        if (o.update_count == UPDATES || !pure_batch_recurs(m, pc, loop->start, b->sets, b->slot, &from)) { recurs = false; break; }
+        Update *u = &o.updates[o.update_count++];
+        *u = (Update){from, pc, x, o.step_count, 0, 0};
+        uint8_t operands[PURE_MODULE_STACK];
+        unsigned depth = 0;
+        for (uint32_t at = from; at < pc && recurs; ++at) {
+            const PureOp *e = &m->code[at];
+            unsigned l = e->arg & 0xFF, r = 0;
+            int v = -1;
+            double k = 0;
+            bool numbered = false;
+            switch (e->op) {
+            case PURE_OP_CONST: k = e->value, numbered = true; break;
+            case PURE_OP_FIELD: k = field_value(b, e->arg), numbered = true; break;
+            case PURE_OP_LOAD: k = b->frame->values[e->arg].num, numbered = true; break;
+            case PURE_OP_LOCAL_LOAD:
+                while (r < o.recur_count && o.recur_local[r] != l) ++r;
+                if (l == b->slot) v = V_SLOT;
+                else if (r < o.recur_count) v = (int)(V_X + r);
+                else k = b->ev->locals[l].num, numbered = true;
+                break;
+            default: {
+                bool one = e->op == PURE_OP_NEG || e->op == PURE_OP_NOT || e->op == PURE_OP_FLOOR;
+                uint8_t c = operands[--depth], a = one ? c : operands[--depth];
+                for (unsigned i = u->first; i < o.step_count && v < 0; ++i)
+                    if (o.steps[i].op == e->op && o.steps[i].a == a && o.steps[i].c == c) v = (int)i;
+                if (v < 0 && o.step_count < STEPS) o.steps[o.step_count] = (Step){e->op, a, c}, v = (int)o.step_count++;
+            }
+            }
+            if (numbered) {
+                for (unsigned i = V_NUMBER; i < V_NUMBER + o.number_count && v < 0; ++i)
+                    if (!memcmp(&o.values[i], &k, sizeof(k))) v = (int)i;
+                if (v < 0 && V_NUMBER + o.number_count < VALUES) o.values[V_NUMBER + o.number_count] = k, v = (int)(V_NUMBER + o.number_count++);
+            }
+            if (v < 0) recurs = false;
+            else operands[depth++] = (uint8_t)v;
+        }
+        if (recurs) u->count = o.step_count - u->first;
+    }
+    for (uint32_t pc = loop->start; pc < loop->end && recurs && o.recur_count; ++pc) {
+        const PureOp *op = &m->code[pc];
+        if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) pc += op->arg >> 16;
+        if (op->op != PURE_OP_LOCAL_LOAD) continue;
+        unsigned x = 0, u = 0;
+        while (x < o.recur_count && o.recur_local[x] != (op->arg & 0xFF)) ++x;
+        while (u < o.update_count && !(pc >= o.updates[u].from && pc < o.updates[u].set)) ++u;
+        if (x == o.recur_count || u < o.update_count) continue;
+        if (o.record_count == RECORDS) { recurs = false; break; }
+        Record *record = &o.records[o.record_count++];
+        *record = (Record){pc, x, 0, false};
+        for (unsigned j = 0; j + 1 < o.record_count && !record->shared; ++j) {
+            bool set = o.records[j].x != x;
+            for (unsigned v = 0; v < o.update_count && !set; ++v)
+                set = o.updates[v].x == x && o.updates[v].set > o.records[j].pc && o.updates[v].set < pc;
+            if (!set) record->shared = true;
+        }
+    }
+    if (!(recurs && fits) != p->failed) check_failed(b, "failed", loop->start);
+    if (p->failed) return;
+    const Recurring *rc = p->recur;
+    unsigned recur_count = rc ? rc->recur_count : 0, update_count = rc ? rc->update_count : 0, record_count = rc ? rc->record_count : 0;
+    if (recur_count != o.recur_count || update_count != o.update_count || record_count != o.record_count)
+        check_failed(b, "recurrences' counts", loop->start);
+    for (unsigned x = 0; x < recur_count; ++x)
+        if (rc->recur_local[x] != o.recur_local[x]) check_failed(b, "recurrence", loop->start);
+    for (unsigned u = 0; u < update_count; ++u)
+        if (rc->updates[u].from != o.updates[u].from || rc->updates[u].set != o.updates[u].set || rc->updates[u].x != o.updates[u].x ||
+            rc->updates[u].count != o.updates[u].count)
+            check_failed(b, "update", rc->updates[u].from);
+    for (unsigned k = 0; k < record_count; ++k)
+        if (rc->records[k].pc != o.records[k].pc || rc->records[k].x != o.records[k].x || rc->records[k].shared != o.records[k].shared)
+            check_failed(b, "record", rc->records[k].pc);
 }
 #endif
 
@@ -1470,35 +1578,40 @@ static double field_value(const Batch *b, uint32_t arg) {
     return field->type == PURE_FIELD_U32 ? read32(given) : field->type == PURE_FIELD_BOOL ? given[0] : read_double(given);
 }
 
-/* Where the recurrences' rounds keep a number that stays (the one there
- * already when it has its bits), or -1 when they hold no more. */
-static int number(Batch *b, double k) {
-    for (unsigned i = V_NUMBER; i < V_NUMBER + b->number_count; ++i)
-        if (!memcmp(&b->values[i], &k, sizeof(k))) return (int)i;
-    if (V_NUMBER + b->number_count == VALUES) return -1;
-    b->values[V_NUMBER + b->number_count] = k;
-    return (int)(V_NUMBER + b->number_count++);
+/* Where the recurrences' rounds keep a number that stays (one source's
+ * there already, the same constant's or the same field's, LOAD's or local's),
+ * or -1 when they hold no more. */
+static int number(Recurring *rc, uint8_t kind, uint32_t arg, double value) {
+    for (unsigned i = 0; i < rc->source_count; ++i)
+        if (rc->sources[i].kind == kind && (kind == S_CONST ? !memcmp(&rc->sources[i].value, &value, sizeof(value)) : rc->sources[i].arg == arg))
+            return (int)(V_NUMBER + i);
+    if (V_NUMBER + rc->source_count == VALUES) return -1;
+    rc->sources[rc->source_count] = (Source){kind, arg, value};
+    return (int)(V_NUMBER + rc->source_count++);
 }
 
-/* The recurrences of the batch's block (their sets planned PLAN_RECUR): each
- * x = e as steps, and each other read of x a record. false: more than it holds. */
-static bool recurrences(Batch *b, uint32_t start, uint32_t end) {
-    const PureModule *m = b->m;
-    b->number_count = 0;
+/* The recurrences of the plan's block (their sets planned PLAN_RECUR): each
+ * x = e as steps, each other read of x a record, and a round's actions (a
+ * slot: the loop's local, LOCALS a walk's). false: more than a batch holds
+ * (counted by the numbers' sources: two of the same value are two). */
+static bool plan_recurrences(const PureModule *m, PureBatchPlan *p, unsigned slot) {
+    uint32_t start = p->start, end = p->end;
+    Recurring *rc = NULL;
     for (uint32_t pc = start; pc < end; ++pc) {
         const PureOp *op = &m->code[pc];
         if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) pc += op->arg >> 16;
         if (op->op != PURE_OP_LOCAL_STORE || !(op->plan & PLAN_RECUR)) continue;
+        if (!rc && !(rc = p->recur = calloc(1, sizeof(*rc)))) return false;
         unsigned local = op->arg & 0xFF, x = 0;
-        while (x < b->recur_count && b->recur_local[x] != local) ++x;
-        if (x == b->recur_count) {
+        while (x < rc->recur_count && rc->recur_local[x] != local) ++x;
+        if (x == rc->recur_count) {
             if (x == RECURS) return false;
-            b->recur_local[x] = local, b->recur_value[x] = b->ev->locals[local].num, ++b->recur_count;
+            rc->recur_local[rc->recur_count++] = local;
         }
         uint32_t from;
-        if (b->update_count == UPDATES || !pure_batch_recurs(m, pc, start, b->sets, b->slot, &from)) return false;
-        Update *u = &b->updates[b->update_count++];
-        *u = (Update){from, pc, x, b->step_count, 0, 0};
+        if (rc->update_count == UPDATES || !pure_batch_recurs(m, pc, start, p->sets, slot, &from)) return false;
+        Update *u = &rc->updates[rc->update_count++];
+        *u = (Update){from, pc, x, rc->step_count, 0, 0};
         uint8_t operands[PURE_MODULE_STACK];
         unsigned depth = 0;
         for (uint32_t at = from; at < pc; ++at) {
@@ -1506,77 +1619,96 @@ static bool recurrences(Batch *b, uint32_t start, uint32_t end) {
             unsigned l = e->arg & 0xFF, r = 0;
             int v = -1;
             switch (e->op) {
-            case PURE_OP_CONST: v = number(b, e->value); break;
-            case PURE_OP_FIELD: v = number(b, field_value(b, e->arg)); break;
-            case PURE_OP_LOAD: v = number(b, b->frame->values[e->arg].num); break;
+            case PURE_OP_CONST: v = number(rc, S_CONST, 0, e->value); break;
+            case PURE_OP_FIELD: v = number(rc, S_FIELD, e->arg, 0); break;
+            case PURE_OP_LOAD: v = number(rc, S_LOAD, e->arg, 0); break;
             case PURE_OP_LOCAL_LOAD:
-                while (r < b->recur_count && b->recur_local[r] != l) ++r;
-                v = l == b->slot ? V_SLOT : r < b->recur_count ? (int)(V_X + r) : number(b, b->ev->locals[l].num); /* the block does not set it */
+                while (r < rc->recur_count && rc->recur_local[r] != l) ++r;
+                v = l == slot ? V_SLOT : r < rc->recur_count ? (int)(V_X + r) : number(rc, S_LOCAL, l, 0); /* the block does not set it */
                 break;
             default: { /* an operation of one number (NEG, NOT, FLOOR) or two */
                 bool one = e->op == PURE_OP_NEG || e->op == PURE_OP_NOT || e->op == PURE_OP_FLOOR;
                 uint8_t c = operands[--depth], a = one ? c : operands[--depth];
-                for (unsigned i = u->first; i < b->step_count && v < 0; ++i) /* computed before in e (x the same until e is done) */
-                    if (b->steps[i].op == e->op && b->steps[i].a == a && b->steps[i].c == c) v = (int)i;
-                if (v < 0 && b->step_count < STEPS) b->steps[b->step_count] = (Step){e->op, a, c}, v = (int)b->step_count++;
+                for (unsigned i = u->first; i < rc->step_count && v < 0; ++i) /* computed before in e (x the same until e is done) */
+                    if (rc->steps[i].op == e->op && rc->steps[i].a == a && rc->steps[i].c == c) v = (int)i;
+                if (v < 0 && rc->step_count < STEPS) rc->steps[rc->step_count] = (Step){e->op, a, c}, v = (int)rc->step_count++;
             }
             }
             if (v < 0) return false; /* more steps or numbers than it holds */
             operands[depth++] = (uint8_t)v;
         }
-        u->count = b->step_count - u->first, u->value = operands[0];
+        u->count = rc->step_count - u->first, u->value = operands[0];
+        p->at[from - start].role = AT_UPDATE, p->at[from - start].index = (uint8_t)(rc->update_count - 1);
     }
+    if (!rc) return true;
     for (uint32_t pc = start; pc < end; ++pc) { /* the block's other reads of a recurrence */
         const PureOp *op = &m->code[pc];
         if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) pc += op->arg >> 16;
         if (op->op != PURE_OP_LOCAL_LOAD) continue;
         unsigned x = 0, u = 0;
-        while (x < b->recur_count && b->recur_local[x] != (op->arg & 0xFF)) ++x;
-        while (u < b->update_count && !(pc >= b->updates[u].from && pc < b->updates[u].set)) ++u;
-        if (x == b->recur_count || u < b->update_count) continue;
-        if (b->record_count == RECORDS) return false;
-        Record *record = &b->records[b->record_count++];
-        *record = (Record){pc, x, NULL, false};
-        for (unsigned j = 0; j + 1 < b->record_count && !record->shared; ++j) { /* x read before where it was not set since: those lanes */
-            bool set = b->records[j].x != x;
-            for (unsigned v = 0; v < b->update_count && !set; ++v)
-                set = b->updates[v].x == x && b->updates[v].set > b->records[j].pc && b->updates[v].set < pc;
-            if (!set) record->lanes = b->records[j].lanes, record->shared = true;
+        while (x < rc->recur_count && rc->recur_local[x] != (op->arg & 0xFF)) ++x;
+        while (u < rc->update_count && !(pc >= rc->updates[u].from && pc < rc->updates[u].set)) ++u;
+        if (x == rc->recur_count || u < rc->update_count) continue;
+        if (rc->record_count == RECORDS) return false;
+        Record *record = &rc->records[rc->record_count++];
+        *record = (Record){pc, x, 0, false};
+        for (unsigned j = 0; j + 1 < rc->record_count && !record->shared; ++j) { /* x read before where it was not set since: those lanes */
+            bool set = rc->records[j].x != x;
+            for (unsigned v = 0; v < rc->update_count && !set; ++v)
+                set = rc->updates[v].x == x && rc->updates[v].set > rc->records[j].pc && rc->updates[v].set < pc;
+            if (!set) record->of = rc->records[j].shared ? rc->records[j].of : j, record->shared = true;
         }
-        if (!record->lanes && !(record->lanes = fresh(b))) return false;
+        p->at[pc - start].role = AT_RECORD, p->at[pc - start].index = (uint8_t)(rc->record_count - 1);
     }
+    unsigned u = 0, k = 0; /* a round's actions, in the block's order */
+    while (u < rc->update_count || k < rc->record_count) {
+        if (k < rc->record_count && rc->records[k].pc < (u < rc->update_count ? rc->updates[u].from : UINT32_MAX)) {
+            if (!rc->records[k].shared) rc->actions[rc->action_count++] = (Action){A_RECORD, (uint8_t)(V_X + rc->records[k].x), (uint8_t)k, 0};
+            ++k;
+            continue;
+        }
+        const Update *up = &rc->updates[u++];
+        for (unsigned i = up->first; i < up->first + up->count; ++i)
+            rc->actions[rc->action_count++] = (Action){rc->steps[i].op, rc->steps[i].a, rc->steps[i].c, (uint8_t)i};
+        if (up->count && up->value == up->first + up->count - 1) /* its last step's: x itself (nothing after it reads that step) */
+            rc->actions[rc->action_count - 1].to = (uint8_t)(V_X + up->x);
+        else
+            rc->actions[rc->action_count++] = (Action){A_SET, up->value, up->value, (uint8_t)(V_X + up->x)};
+    }
+    return true;
+}
+
+/* The batch's recurrences: their values as the rounds before left them, the
+ * numbers that stay, and lanes for the records. false: no lanes left. */
+static bool recurrences(Batch *b) {
+    const Recurring *rc = b->plan->recur;
+    if (!rc) return true;
+    for (unsigned x = 0; x < rc->recur_count; ++x) b->recur_value[x] = b->ev->locals[rc->recur_local[x]].num;
+    for (unsigned i = 0; i < rc->source_count; ++i) {
+        const Source *source = &rc->sources[i];
+        b->values[V_NUMBER + i] = source->kind == S_CONST ? source->value
+                                  : source->kind == S_FIELD ? field_value(b, source->arg)
+                                  : source->kind == S_LOAD  ? b->frame->values[source->arg].num
+                                                            : b->ev->locals[source->arg].num;
+    }
+    for (unsigned k = 0; k < rc->record_count; ++k)
+        if (!(b->record_lanes[k] = rc->records[k].shared ? b->record_lanes[rc->records[k].of] : fresh(b))) return false;
     return true;
 }
 
 /* The recurrences round by round, in the rounds' order (as the executor
  * computes them): each record's lane. Their steps, sets of x and records
- * laid out once in the block's order, each a number from two others (an
- * update's last step setting x itself), so a round is one loop. false: a
- * round faults. */
-enum { A_RECORD = 254, A_SET };
-typedef struct { uint8_t op, a, c, to; } Action;
+ * laid out once in the block's order (the plan's actions), each a number
+ * from two others (an update's last step setting x itself), so a round is
+ * one loop. false: a round faults. */
 static bool recur(Batch *b) {
-    if (!b->update_count) return true;
-    Action actions[STEPS + UPDATES + RECORDS];
-    double *lanes[RECORDS];
-    unsigned count = 0, u = 0, k = 0;
-    while (u < b->update_count || k < b->record_count) {
-        if (k < b->record_count && b->records[k].pc < (u < b->update_count ? b->updates[u].from : UINT32_MAX)) {
-            lanes[k] = b->records[k].lanes;
-            if (!b->records[k].shared) actions[count++] = (Action){A_RECORD, (uint8_t)(V_X + b->records[k].x), (uint8_t)k, 0};
-            ++k;
-            continue;
-        }
-        const Update *up = &b->updates[u++];
-        for (unsigned i = up->first; i < up->first + up->count; ++i)
-            actions[count++] = (Action){b->steps[i].op, b->steps[i].a, b->steps[i].c, (uint8_t)i};
-        if (up->count && up->value == up->first + up->count - 1) /* its last step's: x itself (nothing after it reads that step) */
-            actions[count - 1].to = (uint8_t)(V_X + up->x);
-        else
-            actions[count++] = (Action){A_SET, up->value, up->value, (uint8_t)(V_X + up->x)};
-    }
+    const Recurring *rc = b->plan->recur;
+    if (!rc || !rc->update_count) return true;
+    const Action *actions = rc->actions;
+    double *const *lanes = b->record_lanes;
+    unsigned count = rc->action_count;
     double *restrict values = b->values;
-    for (unsigned x = 0; x < b->recur_count; ++x) values[V_X + x] = b->recur_value[x];
+    for (unsigned x = 0; x < rc->recur_count; ++x) values[V_X + x] = b->recur_value[x];
     for (unsigned r = 0, n = b->n; r < n; ++r) {
         unsigned lane = round_of(b, r);
         values[V_SLOT] = r ? b->first + (double)r : b->first;
@@ -1603,7 +1735,7 @@ static bool recur(Batch *b) {
             values[t->to] = v;
         }
     }
-    for (unsigned x = 0; x < b->recur_count; ++x) b->recur_value[x] = values[V_X + x];
+    for (unsigned x = 0; x < rc->recur_count; ++x) b->recur_value[x] = values[V_X + x];
     return true;
 }
 
@@ -1672,8 +1804,9 @@ static PureBatchPlan *plan_loop(const PureModule *m, uint32_t pc) {
             else p->at[at - start].by = (uint16_t)(by - at);
         }
     }
+    if (!plan_recurrences(m, p, m->code[pc].op == PURE_OP_EACH ? LOCALS : m->code[pc].arg & 0xFF)) p->failed = true;
     if (p->items && !plan_sums(m, p)) p->failed = true;
-    for (unsigned k = 0; k < p->sum_count; ++k) {
+    for (unsigned k = 0; k < p->sum_count; ++k) { /* (over a record's: the pass skips the sum's key again) */
         const Sum *sum = &p->sums[k];
         p->at[sum->again - start].role = AT_AGAIN, p->at[sum->add - start].role = AT_ADD, p->at[sum->set - start].role = AT_SET;
         p->at[sum->again - start].index = p->at[sum->add - start].index = p->at[sum->set - start].index = (uint8_t)k;
@@ -1697,7 +1830,7 @@ bool pure_batch_plans(PureModule *m) {
 }
 
 void pure_batch_plans_free(PureModule *m) {
-    for (uint32_t i = 0; i < m->batch_plan_count; ++i) free(m->batch_plans[i]);
+    for (uint32_t i = 0; i < m->batch_plan_count; ++i) free(m->batch_plans[i]->recur), free(m->batch_plans[i]);
     free(m->batch_plans);
     m->batch_plans = NULL, m->batch_plan_count = 0;
 }
@@ -1828,9 +1961,12 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             pc = next;
             continue;
         }
-        unsigned u = 0;
         const PlanAt *at_pc = &b->plan->at[pc - b->plan->start];
-        if (at_pc->role) { /* a sum into a cell: its row and e, kept for the end */
+        if (at_pc->role == AT_UPDATE) { /* a recurrence's x = e: made ahead, round by round */
+            pc = b->plan->recur->updates[at_pc->index].set + 1;
+            continue;
+        }
+        if (at_pc->role && at_pc->role != AT_RECORD) { /* a sum into a cell: its row and e, kept for the end */
             const Sum *sum = &b->plan->sums[at_pc->index];
             if (at_pc->role == AT_AGAIN) pc = sum->resume; /* the key again, its find and the cell's read: not needed */
             else if (at_pc->role == AT_ADD) pc = sum->set;
@@ -1846,11 +1982,6 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
                 if (b->sel) sc->e = expand(b, &sc->e), sc->rows = expand_rows(b, &sc->rows);
                 sc->e.temp = sc->rows.temp = false;
             }
-            continue;
-        }
-        while (u < b->update_count && b->updates[u].from != pc) ++u;
-        if (u < b->update_count) { /* a recurrence's x = e: made ahead, round by round */
-            pc = b->updates[u].set + 1;
             continue;
         }
         if (m->reuses && m->reuse_length[pc]) { /* the same code as an earlier value's, nothing changed between: that value, the code skipped */
@@ -1939,11 +2070,9 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             b->stack[b->sp - 1 - arg] = b->stack[b->sp - 1], b->sp -= arg;
             break;
         case PURE_OP_LOCAL_LOAD: {
-            unsigned k = 0;
-            while (k < b->record_count && b->records[k].pc != pc - 1) ++k;
-            if (k == b->record_count) local_load(b, arg, pc - 1);
+            if (at_pc->role != AT_RECORD) local_load(b, arg, pc - 1);
             else { /* a recurrence's value here, round by round */
-                Val v = lanes_val(b->records[k].lanes, false);
+                Val v = lanes_val(b->record_lanes[at_pc->index], false);
                 v.temp = false;
                 if (b->sel) v = gather(b, &v);
                 v.owner = (uint16_t)(arg >> 16);
@@ -2070,7 +2199,7 @@ static void sweep(Batch *b) {
     for (unsigned s = 0; s < b->store_count; ++s)
         mark_val(kept, &b->stores[s].rows), mark_val(kept, &b->stores[s].value), mark_mask(b, kept, kept_mask, b->stores[s].mask);
     for (unsigned d = 0; d < b->sp; ++d) mark_val(kept, &b->stack[d]);
-    for (unsigned r = 0; r < b->record_count; ++r) mark_lanes(kept, b->records[r].lanes);
+    for (unsigned r = 0; b->plan->recur && r < b->plan->recur->record_count; ++r) mark_lanes(kept, b->record_lanes[r]);
     for (unsigned i = 0; i < b->scatter_count; ++i)
         mark_val(kept, &b->scatters[i].rows), mark_val(kept, &b->scatters[i].e), mark_mask(b, kept, kept_mask, b->scatters[i].mask);
     for (unsigned a = 0; a < b->append_count; ++a) {
@@ -2890,13 +3019,13 @@ static int batch_run(Frame *frame, Loop *loop, unsigned *done) {
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
     b->mask_free_count = b->reduce_count = b->append_count = b->filter_count = b->known_count = 0;
     b->sel = NULL;
-    b->recur_count = b->update_count = b->record_count = b->step_count = b->scatter_count = 0;
+    b->scatter_count = 0;
     for (unsigned w = 0; w < LOCALS / 64; ++w) /* the locals it sets: not set yet */
         for (uint64_t bits = plan->sets[w]; bits; bits &= bits - 1) b->state[w * 64 + (unsigned)__builtin_ctzll(bits)] = 0;
 #ifdef PURE_BATCH_CHECK
     check_plan(b, loop);
 #endif
-    if (plan->failed || !recurrences(b, loop->start, loop->end) || !recur(b))
+    if (plan->failed || !recurrences(b) || !recur(b))
         b->failed = true; /* more sums than a batch holds; the recurrences ahead, round by round */
     if (!b->failed && pass(b, guard ? loop->start + 5 : loop->start, loop->end)) {
         arrive(b, loop->end);
@@ -2974,7 +3103,7 @@ static int batch_run(Frame *frame, Loop *loop, unsigned *done) {
     }
     app->work += work;
     for (unsigned r = 0; r < b->reduce_count; ++r) frame->ev->locals[b->reduce[r].local].num = b->reduce[r].result;
-    for (unsigned x = 0; x < b->recur_count; ++x) frame->ev->locals[b->recur_local[x]].num = b->recur_value[x];
+    for (unsigned x = 0; plan->recur && x < plan->recur->recur_count; ++x) frame->ev->locals[plan->recur->recur_local[x]].num = b->recur_value[x];
     for (unsigned w = 0; w < LOCALS / 64; ++w) /* each local the block set: as the last round to set it left it */
         for (uint64_t bits = b->sets[w]; bits; bits &= bits - 1) {
             unsigned at = w * 64 + (unsigned)__builtin_ctzll(bits), last = n - 1;
