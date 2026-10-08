@@ -169,6 +169,9 @@ int pure_run_rest(Frame *, uint32_t pc);
  * or how an item it appends stopped at its round (as the executor's step:
  * the event is undone, the work so far counted). */
 int pure_batch_run(Frame *, Loop *, unsigned *done);
+/* Each batch loop's plan (docs/design/025), made once the plans of the module's instructions are final. false: no memory. */
+bool pure_batch_plans(PureModule *);
+void pure_batch_plans_free(PureModule *);
 /* Whether the LOCAL_LOAD at pc, in a block ending at end, begins x = x op e
  * (x its local, op ADD, MIN or MAX, e computed above x with no branch or
  * loop): a reduction across a batch's rounds. *at: op's pc. */

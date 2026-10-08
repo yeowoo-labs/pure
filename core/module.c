@@ -1392,6 +1392,7 @@ void pure_module_release(PureModule *m) {
     free(m->reuse_from), free(m->reuse_length);
     m->reuse_from = m->reuse_length = NULL;
     m->reuses = false;
+    pure_batch_plans_free(m);
     free(m->storage);
     m->storage = NULL;
     m->code = NULL;
@@ -1790,6 +1791,10 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     /* The lists an index state refers to: their inserts tell where (move_indices). */
     for (uint32_t i = 0; i < out->states; ++i)
         if (out->state_type[i] == PURE_STATE_INDEX) out->state_indexed[out->state_ref[i]] = true;
+    if (out->batches && !pure_batch_plans(out)) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
     out->jit = pure_jit_make(out); /* none: the executor runs it all */
     return PURE_OK;
 refused:

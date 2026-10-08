@@ -25,7 +25,10 @@
 #include "module-run.h"
 #include <stdlib.h>
 
-enum { BATCH = 1024, BUFFERS = 24, MASKS = 32, SPLITS = 8, READS = 16, STORES = 8, APPENDS = 8, REDUCES = 8, RECURS = 4, UPDATES = 8,
+#ifndef PURE_BATCH_LANES
+#define PURE_BATCH_LANES 1024 /* (another to measure a batch's fixed cost: its time against 1024's, docs/design/025) */
+#endif
+enum { BATCH = PURE_BATCH_LANES, BUFFERS = 24, MASKS = 32, SPLITS = 8, READS = 16, STORES = 8, APPENDS = 8, REDUCES = 8, RECURS = 4, UPDATES = 8,
        RECORDS = 8, STEPS = 96, SUMS = 4, LOCALS = 256, LEAST = 16, FAILURES = 3 };
 
 enum { UNIFORM, AFFINE, LANES, REDUCE }; /* REDUCE: x in x = x op e (value: its reduction) */
@@ -61,6 +64,23 @@ typedef struct { uint32_t pc; unsigned x; double *lanes; bool shared; } Record; 
  * the end round by round. */
 typedef struct { uint32_t again, resume, add, set; } Sum;
 typedef struct { uint32_t list, field, add, set; Val rows, e; Mask *mask; } Scatter;
+/* A batch loop's block as the load reads it, once (docs/design/025): the
+ * locals it sets (a nested loop's slot too), whether it sets items, its sums
+ * into cells, and at each of its instructions what a pass does there besides
+ * the instruction: at a sum's again, add or set, that (role, the sum's
+ * index), and at a LOCAL_LOAD beginning x = x op e how far on op is (by; 0:
+ * none). A nested loop's instructions have no role (a sum is the loop's own
+ * block's) but may begin x = x op e. failed: more sums than a batch holds. */
+enum { AT_PLAIN, AT_AGAIN, AT_ADD, AT_SET };
+typedef struct { uint8_t role, index; uint16_t by; } PlanAt;
+typedef struct PureBatchPlan {
+    uint32_t loop, start, end;
+    uint64_t sets[LOCALS / 64];
+    bool items, failed;
+    unsigned sum_count;
+    Sum sums[SUMS];
+    PlanAt at[];
+} PureBatchPlan;
 /* An item a LIST_APPEND at pc appends in the lanes of mask (NULL: all): its fields. */
 typedef struct { uint32_t pc; Mask *mask; unsigned count; Val cells[PURE_RECORD_FIELDS]; const uint32_t *sel; unsigned sel_count; } Append;
 /* A branch's arm run in its lanes alone when they are few (a selection,
@@ -123,7 +143,8 @@ typedef struct {
     bool failed;
     Val stack[PURE_MODULE_STACK];
     unsigned sp;
-    uint64_t sets[LOCALS / 64]; /* the locals the block sets */
+    const struct PureBatchPlan *plan; /* the loop's, made at load */
+    const uint64_t *sets;       /* the locals the block sets (the plan's) */
     uint8_t state[LOCALS];      /* each this pass: 0 not set yet, 1 set in every lane, 2 in those of written */
     Mask *written[LOCALS];
     Val local[LOCALS];
@@ -161,8 +182,7 @@ typedef struct {
     Update updates[UPDATES];
     Record records[RECORDS];
     Step steps[STEPS];
-    unsigned sum_count, scatter_count;
-    Sum sums[SUMS];
+    unsigned scatter_count;
     Scatter scatters[SUMS];
     Filter filters[FILTERS];
     unsigned filter_count;
@@ -1007,11 +1027,42 @@ static Val expand(Batch *b, const Val *v) {
     return r;
 }
 
+#ifdef PURE_BATCH_CHECK
+#include <stdio.h>
+/* The plan against the block read again as each batch read it before (while docs/design/025's stages are made). */
+static void check_failed(const Batch *b, const char *what, uint32_t pc) {
+    fprintf(stderr, "batch plan of the loop at %u: %s differs at %u\n", b->plan->loop, what, pc);
+    abort();
+}
+static bool plan_sums(const PureModule *m, PureBatchPlan *p);
+static void check_plan(Batch *b, const Loop *loop) {
+    const PureBatchPlan *p = b->plan;
+    const PureModule *m = b->m;
+    if (p->start != loop->start || p->end != loop->end || b->end != p->end) check_failed(b, "range", loop->start);
+    uint64_t sets[LOCALS / 64] = {0};
+    bool items = false;
+    for (uint32_t pc = loop->start; pc < loop->end; ++pc) {
+        const PureOp *op = &m->code[pc];
+        items |= op->op == PURE_OP_ITEM_SET;
+        if (op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP) sets[(op->arg & 0xFF) / 64] |= UINT64_C(1) << (op->arg & 63);
+    }
+    if (memcmp(sets, p->sets, sizeof(sets)) || items != p->items) check_failed(b, "sets", loop->start);
+    PureBatchPlan again = {.start = p->start, .end = p->end};
+    bool fits = !items || plan_sums(m, &again);
+    if (!fits != p->failed || again.sum_count != p->sum_count || memcmp(again.sums, p->sums, sizeof(again.sums)))
+        check_failed(b, "sums", loop->start);
+}
+#endif
+
 static inline __attribute__((always_inline)) void local_load(Batch *b, uint32_t arg, uint32_t pc) {
     unsigned at = arg & 0xFF;
     Val v;
     uint32_t by;
-    if (b->sets[at / 64] >> (at % 64) & 1 && !b->state[at] && at != b->slot && pure_batch_reduces(b->m, pc, b->end, &by)) {
+#ifdef PURE_BATCH_CHECK
+    if ((pure_batch_reduces(b->m, pc, b->end, &by) ? by - pc : 0) != b->plan->at[pc - b->plan->start].by) check_failed(b, "reduces", pc);
+#endif
+    if (b->sets[at / 64] >> (at % 64) & 1 && !b->state[at] && at != b->slot && b->plan->at[pc - b->plan->start].by) {
+        by = pc + b->plan->at[pc - b->plan->start].by; /* x = x op e's op */
         Reduce *r = reduction(b, at, b->m->code[by].op); /* not set yet: an earlier round's, as x = x op e reads it */
         if (r) b->stack[b->sp++] = (Val){.kind = REDUCE, .value = (double)(r - b->reduce)};
         return;
@@ -1581,9 +1632,10 @@ static bool touches(const PureModule *m, uint32_t a, uint32_t b, uint32_t list) 
 }
 
 /* The block's statements L[k].f = L[k].f + e (k computed twice the same,
- * reading no L; e reading no L; the set at k's row as its find found it). */
-static bool sums(Batch *b, uint32_t start, uint32_t end) {
-    const PureModule *m = b->m;
+ * reading no L; e reading no L; the set at k's row as its find found it),
+ * into the plan. false: more than a batch holds. */
+static bool plan_sums(const PureModule *m, PureBatchPlan *p) {
+    uint32_t start = p->start, end = p->end;
     for (uint32_t set = start; set < end; ++set) {
         const PureOp *op = &m->code[set];
         if (op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) set += op->arg >> 16;
@@ -1598,10 +1650,67 @@ static bool sums(Batch *b, uint32_t start, uint32_t end) {
             m->code[read + 1].op != PURE_OP_ITEM_GET || m->code[read + 1].arg != op->arg || touches(m, from, find, list) ||
             touches(m, read + 2, set - 1, list) || m->height[read + 2] != 2 || m->height[set - 1] != 3)
             continue;
-        if (b->sum_count == SUMS) return false;
-        b->sums[b->sum_count++] = (Sum){again, read + 2, set - 1, set};
+        if (p->sum_count == SUMS) return false;
+        p->sums[p->sum_count++] = (Sum){again, read + 2, set - 1, set};
     }
     return true;
+}
+
+/* The plan of the batch loop at pc, or NULL (no memory). */
+static PureBatchPlan *plan_loop(const PureModule *m, uint32_t pc) {
+    uint32_t start = pc + 1, end = start + (m->code[pc].arg >> 16);
+    PureBatchPlan *p = calloc(1, sizeof(*p) + (size_t)(end - start) * sizeof(PlanAt));
+    if (!p) return NULL;
+    p->loop = pc, p->start = start, p->end = end;
+    for (uint32_t at = start; at < end; ++at) {
+        const PureOp *op = &m->code[at];
+        uint32_t by;
+        p->items |= op->op == PURE_OP_ITEM_SET;
+        if (op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP) p->sets[(op->arg & 0xFF) / 64] |= UINT64_C(1) << (op->arg & 63);
+        if (op->op == PURE_OP_LOCAL_LOAD && pure_batch_reduces(m, at, end, &by)) {
+            if (by - at > UINT16_MAX) p->failed = true;
+            else p->at[at - start].by = (uint16_t)(by - at);
+        }
+    }
+    if (p->items && !plan_sums(m, p)) p->failed = true;
+    for (unsigned k = 0; k < p->sum_count; ++k) {
+        const Sum *sum = &p->sums[k];
+        p->at[sum->again - start].role = AT_AGAIN, p->at[sum->add - start].role = AT_ADD, p->at[sum->set - start].role = AT_SET;
+        p->at[sum->again - start].index = p->at[sum->add - start].index = p->at[sum->set - start].index = (uint8_t)k;
+    }
+    return p;
+}
+
+bool pure_batch_plans(PureModule *m) {
+    for (uint32_t pc = 0; pc < m->code_count; ++pc) {
+        const PureOp *op = &m->code[pc];
+        if ((op->op != PURE_OP_LOOP && op->op != PURE_OP_EACH) || !(op->plan & PLAN_BATCH)) continue;
+        if (!(m->batch_plan_count & (m->batch_plan_count - 1))) { /* room doubled at each power of two */
+            PureBatchPlan **more = realloc(m->batch_plans, (m->batch_plan_count ? 2 * m->batch_plan_count : 1) * sizeof(*more));
+            if (!more) return false;
+            m->batch_plans = more;
+        }
+        if (!(m->batch_plans[m->batch_plan_count] = plan_loop(m, pc))) return false;
+        ++m->batch_plan_count;
+    }
+    return true;
+}
+
+void pure_batch_plans_free(PureModule *m) {
+    for (uint32_t i = 0; i < m->batch_plan_count; ++i) free(m->batch_plans[i]);
+    free(m->batch_plans);
+    m->batch_plans = NULL, m->batch_plan_count = 0;
+}
+
+/* The plan of the loop whose LOOP (or EACH) is at pc (the plans in their loops' order), or NULL. */
+static const PureBatchPlan *plan_of(const PureModule *m, uint32_t pc) {
+    uint32_t low = 0, high = m->batch_plan_count;
+    while (low < high) {
+        uint32_t mid = low + (high - low) / 2;
+        if (m->batch_plans[mid]->loop < pc) low = mid + 1;
+        else high = mid;
+    }
+    return low < m->batch_plan_count && m->batch_plans[low]->loop == pc ? m->batch_plans[low] : NULL;
 }
 
 /* ---- The pass */
@@ -1719,12 +1828,12 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             pc = next;
             continue;
         }
-        unsigned u = 0, k = 0;
-        while (k < b->sum_count && b->sums[k].again != pc && b->sums[k].add != pc && b->sums[k].set != pc) ++k;
-        if (k < b->sum_count) { /* a sum into a cell: its row and e, kept for the end */
-            const Sum *sum = &b->sums[k];
-            if (pc == sum->again) pc = sum->resume; /* the key again, its find and the cell's read: not needed */
-            else if (pc == sum->add) pc = sum->set;
+        unsigned u = 0;
+        const PlanAt *at_pc = &b->plan->at[pc - b->plan->start];
+        if (at_pc->role) { /* a sum into a cell: its row and e, kept for the end */
+            const Sum *sum = &b->plan->sums[at_pc->index];
+            if (at_pc->role == AT_AGAIN) pc = sum->resume; /* the key again, its find and the cell's read: not needed */
+            else if (at_pc->role == AT_ADD) pc = sum->set;
             else {
                 const PureOp *set = &m->code[pc++];
                 if (b->scatter_count == SUMS) {
@@ -2765,29 +2874,30 @@ static int batch_run(Frame *frame, Loop *loop, unsigned *done) {
         loop->resume = round + 1;
         return STEP_NEXT;
     }
+    const PureBatchPlan *plan = plan_of(m, loop->start - 1);
+    if (!plan) { /* none made: its rounds the executor's */
+        loop->resume = UINT64_MAX;
+        return STEP_NEXT;
+    }
     Batch *b = &batch;
     b->frame = frame, b->m = m, b->app = app, b->ev = frame->ev, b->n = n, b->first = first;
     b->reverse = loop->reverse, b->backward = 0;
     b->var_start = b->reverse ? first + (n - 1) : first, b->var_step = b->reverse ? -1 : 1;
     b->slot = walking ? LOCALS : (uint32_t)(loop->slot - frame->ev->locals), b->end = loop->end;
     b->walk = walking ? (int)loop->walk.list : -1;
-    b->failed = b->none = b->items = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
+    b->failed = b->none = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
+    b->plan = plan, b->sets = plan->sets, b->items = plan->items;
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
     b->mask_free_count = b->reduce_count = b->append_count = b->filter_count = b->known_count = 0;
     b->sel = NULL;
-    b->recur_count = b->update_count = b->record_count = b->step_count = b->sum_count = b->scatter_count = 0;
-    memset(b->sets, 0, sizeof(b->sets));
-    for (uint32_t pc = loop->start; pc < loop->end; ++pc) { /* the locals it sets (a nested loop's slot too), and whether it sets items */
-        const PureOp *op = &m->code[pc];
-        b->items |= op->op == PURE_OP_ITEM_SET;
-        if (op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP) {
-            unsigned at = op->arg & 0xFF;
-            b->sets[at / 64] |= UINT64_C(1) << (at % 64);
-            b->state[at] = 0;
-        }
-    }
-    if (!recurrences(b, loop->start, loop->end) || !recur(b) || (b->items && !sums(b, loop->start, loop->end)))
-        b->failed = true; /* the recurrences ahead, round by round; the sums into cells */
+    b->recur_count = b->update_count = b->record_count = b->step_count = b->scatter_count = 0;
+    for (unsigned w = 0; w < LOCALS / 64; ++w) /* the locals it sets: not set yet */
+        for (uint64_t bits = plan->sets[w]; bits; bits &= bits - 1) b->state[w * 64 + (unsigned)__builtin_ctzll(bits)] = 0;
+#ifdef PURE_BATCH_CHECK
+    check_plan(b, loop);
+#endif
+    if (plan->failed || !recurrences(b, loop->start, loop->end) || !recur(b))
+        b->failed = true; /* more sums than a batch holds; the recurrences ahead, round by round */
     if (!b->failed && pass(b, guard ? loop->start + 5 : loop->start, loop->end)) {
         arrive(b, loop->end);
         if (b->filter_count && !keep_filtered(b)) b->failed = true; /* the filters' rounds in the batch's own lanes */

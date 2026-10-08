@@ -261,6 +261,8 @@ typedef struct {
      * reuse_length; 0: none); at such an earlier root, reuse_from PURE_REUSE_KEPT (its value kept for them). */
     uint32_t *reuse_from, *reuse_length;
     bool reuses;         /* some value of it is planned so (else a batch need not look) */
+    struct PureBatchPlan **batch_plans; /* each batch loop's block as the load reads it (module-batch.c, docs/design/025), */
+    uint32_t batch_plan_count;          /* in their loops' order */
     struct PureJit *jit; /* its blocks compiled (module-jit.c, docs/design/021), or NULL */
     bool batches;        /* a loop of it is planned to run in batches (module-batch.c, docs/design/024) */
     PureInputShape input[PURE_MODULE_INPUTS];
