@@ -1847,11 +1847,10 @@ static const PureBatchPlan *plan_of(const PureModule *m, uint32_t pc) {
 
 /* The segment at from (docs/design/025, stage 2) as the pass would run
  * it, each value a scalar (uniform, or affine: its first lane's and its
- * step) by the pass's own rules: its value pushed (and its LOCAL_STORE run)
- * unless dry (then only *out). false: a value is not as the load planned
- * (lanes, not whole, a fault, past a list's end ...): nothing done, the
- * pass's way then. */
-static bool segment(Batch *b, uint32_t from, const Segment *sg, bool dry, Val *out) {
+ * step) by the pass's own rules: its value pushed (and its LOCAL_STORE
+ * run). false: a value is not as the load planned (lanes, not whole, a
+ * fault, past a list's end ...): nothing done, the pass's way then. */
+static bool segment(Batch *b, uint32_t from, const Segment *sg) {
     const PureModule *m = b->m;
     Val r[PURE_MODULE_STACK], reads[4];
     uint32_t read_list[4], read_field[4];
@@ -1907,10 +1906,6 @@ static bool segment(Batch *b, uint32_t from, const Segment *sg, bool dry, Val *o
                 return false;
         }
         }
-    }
-    if (dry) {
-        *out = r[0];
-        return true;
     }
     for (unsigned i = 0; i < read_count; ++i) read_of(b, read_list[i], read_field[i], true, &reads[i]);
     b->stack[b->sp++] = r[0];
@@ -2019,33 +2014,12 @@ static bool keep_filtered(Batch *b) {
 }
 
 /* The block from start to end once for the batch's lanes: false where it failed. */
-#ifdef PURE_BATCH_CHECK
-#include <stdio.h>
-/* A segment's value (made dry) against the pass's own at its end (while docs/design/025's stage 2 is made). */
-static void check_segment(const Batch *b, uint32_t from, uint32_t to, const Val *dry) {
-    const Val *v = b->failed ? NULL : &b->stack[b->sp - 1];
-    if (v && v->kind == dry->kind && !memcmp(&v->value, &dry->value, sizeof(v->value)) && v->owner == dry->owner && v->u32 == dry->u32 &&
-        (v->kind != AFFINE || !memcmp(&v->step, &dry->step, sizeof(v->step))))
-        return;
-    fprintf(stderr, "batch segment %u..%u of the loop at %u differs: %s (kind %u value %.17g step %.17g owner %u) against (kind %u value %.17g step %.17g owner %u)\n",
-            from, to, b->plan->loop, b->failed ? "the pass failed" : "values", v ? v->kind : 0, v ? v->value : 0, v ? v->step : 0,
-            v ? v->owner : 0, dry->kind, dry->value, dry->step, dry->owner);
-    abort();
-}
-#endif
 
 static bool pass(Batch *b, uint32_t start, uint32_t end) {
     const PureModule *m = b->m;
     Event *ev = b->ev;
     PureApp *app = b->app;
-#ifdef PURE_BATCH_CHECK
-    uint32_t check_from = 0, check_to = UINT32_MAX;
-    Val check_v;
-#endif
     for (uint32_t pc = start; pc < end && !b->failed;) {
-#ifdef PURE_BATCH_CHECK
-        if (pc == check_to) check_segment(b, check_from, check_to, &check_v), check_to = UINT32_MAX;
-#endif
         if (b->sel && pc == b->selection.end) deselect(b);
         arrive(b, pc);
         if (b->none) { /* no lane here: on to where one goes */
@@ -2058,14 +2032,10 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
         const PlanAt *at_pc = &b->plan->at[pc - b->plan->start];
         if (at_pc->role == AT_SEGMENT && !b->sel && !b->parent) { /* uniform and affine values at once, in scalars */
             const Segment *sg = &b->plan->segments[at_pc->index];
-#ifdef PURE_BATCH_CHECK
-            if (segment(b, pc, sg, true, &check_v)) check_from = pc, check_to = sg->to; /* and on the pass's own way, to compare */
-#else
-            if (segment(b, pc, sg, false, NULL)) {
+            if (segment(b, pc, sg)) {
                 pc = sg->store ? sg->to + 1 : sg->to;
                 continue;
             }
-#endif
         }
         if (at_pc->role == AT_UPDATE) { /* a recurrence's x = e: made ahead, round by round */
             pc = b->plan->recur->updates[at_pc->index].set + 1;
@@ -2253,9 +2223,6 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
         if (op->op == PURE_OP_LIST_FIND && op->plan & PLAN_JOINED) ++at; /* its value its ITEM_GET's */
         if (m->reuses && m->reuse_from[at] == PURE_REUSE_KEPT && !b->failed && b->sp > was) keep_known(b, at);
     }
-#ifdef PURE_BATCH_CHECK
-    if (check_to != UINT32_MAX) check_segment(b, check_from, check_to, &check_v);
-#endif
     if (b->sel) { /* (failed within a selection, or its end the block's) */
         if (b->failed) b->sel = NULL, b->n = b->selection.n, b->active = b->selection.active;
         else deselect(b);
