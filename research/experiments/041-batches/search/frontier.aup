@@ -1,0 +1,77 @@
+# The graph of research 118 (docs/design/018 stage 2): edges keyed by
+# from * 1048576 + to, loaded in bulk as rows; a breadth first search in
+# one event, its queue and what it has seen the event's own lists.
+record Edge {
+  link = 0
+  to = 0
+}
+record Seen {
+  node = 0
+  depth = 0
+}
+record Step {
+  node = 0
+}
+state edges: list of Edge by link
+state nodes = 0
+state hops = -1
+state reached = 0
+state sum = 0
+input size = message {
+  nodes: u32
+}
+input load = message {
+  rows: list of Edge
+}
+input frontier = message {
+  from: u32
+  to: u32
+}
+input route = message {
+  from: u32
+  to: u32
+}
+on size {
+  nodes = size.nodes
+}
+on load {
+  for r in load.rows {
+    edges.add(Edge { ..r })
+  }
+}
+on route {
+  let seen: list of Seen by node
+  let queue: list of Step
+  queue.append(Step { node: route.from })
+  seen.add(Seen { node: route.from })
+  for i in 0 .. nodes {
+    if i >= queue.count { break }
+    let q = queue.first + i
+    for e in edges[q.node * 1048576 .. q.node * 1048576 + 1048576] {
+      if !seen.has(e.to) {
+        seen.add(Seen { node: e.to, depth: seen[q.node].depth + 1 })
+        queue.append(Step { node: e.to })
+      }
+    }
+  }
+  hops = if seen.has(route.to) { seen[route.to].depth } else { -1 }
+  reached = seen.count
+}
+view far = hops
+view found = reached
+
+on frontier {
+  let queue: list of Step
+  for v in 0 .. nodes {
+    queue.append(Step { node: v })
+  }
+  let total = 0
+  for i in 0 .. nodes {
+    if i >= queue.count { break }
+    let q = queue.first + i
+    for e in edges[q.node * 1048576 .. q.node * 1048576 + 1048576] {
+      total = total + e.to
+    }
+  }
+  sum = total
+}
