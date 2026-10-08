@@ -1,0 +1,54 @@
+{"binary":"tail-2-4-clang","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":29.523,"passes_ms":2.931,"c_ms":8.262,"same":true,"answer":49720}
+{"binary":"tail-2-4-clang","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":29.431,"passes_ms":2.923,"c_ms":8.252,"same":true,"answer":49720}
+{"binary":"tail-2-4-clang","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":29.435,"passes_ms":2.920,"c_ms":8.255,"same":true,"answer":49720}
+{"binary":"tail-2-4-clang","body":"roots","K":2,"S":4,"T":4,"tiles_ms":5.782,"c_ms":7.750,"same":true,"sum":21082008.97391776,"steps":1238280}
+{"binary":"tail-2-4-clang","body":"roots","K":2,"S":4,"T":4,"tiles_ms":5.780,"c_ms":7.779,"same":true,"sum":21082008.97391776,"steps":1238280}
+{"binary":"tail-2-4-clang","body":"roots","K":2,"S":4,"T":4,"tiles_ms":5.778,"c_ms":7.804,"same":true,"sum":21082008.97391776,"steps":1238280}
+{"binary":"tail-2-4-clang","body":"bfs","K":2,"S":4,"T":4,"tiles_ms":18.683,"passes_ms":9.881,"c_ms":8.618,"same":true,"reached":99998}
+{"binary":"tail-2-4-clang","body":"bfs","K":2,"S":4,"T":4,"tiles_ms":18.693,"passes_ms":9.842,"c_ms":8.650,"same":true,"reached":99998}
+{"binary":"tail-2-4-clang","body":"bfs","K":2,"S":4,"T":4,"tiles_ms":18.068,"passes_ms":9.951,"c_ms":8.874,"same":true,"reached":99998}
+{"binary":"tail-2-4-gcc","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":41.693,"passes_ms":9.591,"c_ms":6.169,"same":true,"answer":49720}
+{"binary":"tail-2-4-gcc","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":41.597,"passes_ms":9.587,"c_ms":6.167,"same":true,"answer":49720}
+{"binary":"tail-2-4-gcc","body":"knapsack","K":2,"S":4,"T":4,"tiles_ms":41.594,"passes_ms":9.590,"c_ms":6.166,"same":true,"answer":49720}
+{"binary":"tail-2-4-gcc","body":"roots","K":2,"S":4,"T":4,"tiles_ms":6.879,"c_ms":6.877,"same":true,"sum":21082008.97391776,"steps":1238280}
+{"binary":"tail-2-4-gcc","body":"roots","K":2,"S":4,"T":4,"tiles_ms":6.804,"c_ms":6.881,"same":true,"sum":21082008.97391776,"steps":1238280}
+{"binary":"tail-2-4-gcc","body":"roots","K":2,"S":4,"T":4,"tiles_ms":6.670,"c_ms":6.878,"same":true,"sum":21082008.97391776,"steps":1238280}
+{"binary":"tail-2-4-gcc","body":"bfs","K":2,"S":4,"T":4,"tiles_ms":24.460,"passes_ms":11.581,"c_ms":11.448,"same":true,"reached":99998}
+{"binary":"tail-2-4-gcc","body":"bfs","K":2,"S":4,"T":4,"tiles_ms":23.762,"passes_ms":12.632,"c_ms":11.434,"same":true,"reached":99998}
+{"binary":"tail-2-4-gcc","body":"bfs","K":2,"S":4,"T":4,"tiles_ms":23.743,"passes_ms":11.977,"c_ms":11.477,"same":true,"reached":99998}
+{"binary":"tail-1-8-clang","body":"knapsack","K":1,"S":8,"T":2,"tiles_ms":35.823,"c_ms":8.266,"same":true,"answer":49720}
+{"binary":"tail-1-8-clang","body":"knapsack","K":1,"S":8,"T":2,"tiles_ms":35.750,"c_ms":8.272,"same":true,"answer":49720}
+{"binary":"tail-1-8-clang","body":"knapsack","K":1,"S":8,"T":2,"tiles_ms":35.748,"c_ms":8.265,"same":true,"answer":49720}
+{"binary":"tail-1-8-clang","body":"roots","K":1,"S":8,"T":2,"tiles_ms":9.746,"c_ms":7.801,"same":true,"sum":21082008.973917805,"steps":1238280}
+{"binary":"tail-1-8-clang","body":"roots","K":1,"S":8,"T":2,"tiles_ms":9.735,"c_ms":7.811,"same":true,"sum":21082008.973917805,"steps":1238280}
+{"binary":"tail-1-8-clang","body":"roots","K":1,"S":8,"T":2,"tiles_ms":9.745,"c_ms":7.775,"same":true,"sum":21082008.973917805,"steps":1238280}
+{"binary":"tail-1-8-clang","body":"bfs","K":1,"S":8,"T":2,"tiles_ms":19.944,"passes_ms":10.015,"c_ms":9.460,"same":true,"reached":99998}
+{"binary":"tail-1-8-clang","body":"bfs","K":1,"S":8,"T":2,"tiles_ms":20.277,"passes_ms":9.950,"c_ms":9.441,"same":true,"reached":99998}
+{"binary":"tail-1-8-clang","body":"bfs","K":1,"S":8,"T":2,"tiles_ms":19.555,"passes_ms":9.825,"c_ms":9.677,"same":true,"reached":99998}
+{"binary":"tail-1-8-gcc","body":"knapsack","K":1,"S":8,"T":2,"tiles_ms":40.733,"c_ms":6.166,"same":true,"answer":49720}
+{"binary":"tail-1-8-gcc","body":"knapsack","K":1,"S":8,"T":2,"tiles_ms":40.717,"c_ms":6.168,"same":true,"answer":49720}
+{"binary":"tail-1-8-gcc","body":"knapsack","K":1,"S":8,"T":2,"tiles_ms":40.692,"c_ms":6.171,"same":true,"answer":49720}
+{"binary":"tail-1-8-gcc","body":"roots","K":1,"S":8,"T":2,"tiles_ms":9.942,"c_ms":6.889,"same":true,"sum":21082008.973917805,"steps":1238280}
+{"binary":"tail-1-8-gcc","body":"roots","K":1,"S":8,"T":2,"tiles_ms":9.946,"c_ms":6.875,"same":true,"sum":21082008.973917805,"steps":1238280}
+{"binary":"tail-1-8-gcc","body":"roots","K":1,"S":8,"T":2,"tiles_ms":9.944,"c_ms":6.872,"same":true,"sum":21082008.973917805,"steps":1238280}
+{"binary":"tail-1-8-gcc","body":"bfs","K":1,"S":8,"T":2,"tiles_ms":23.364,"passes_ms":11.229,"c_ms":11.616,"same":true,"reached":99998}
+{"binary":"tail-1-8-gcc","body":"bfs","K":1,"S":8,"T":2,"tiles_ms":20.582,"passes_ms":11.138,"c_ms":11.718,"same":true,"reached":99998}
+{"binary":"tail-1-8-gcc","body":"bfs","K":1,"S":8,"T":2,"tiles_ms":21.081,"passes_ms":11.145,"c_ms":11.474,"same":true,"reached":99998}
+{"binary":"tiles-8-O3 (computed goto, spilled)","body":"knapsack","T":8,"tiles_ms":46.762,"passes_ms":27.043,"c_ms":6.170,"same":true,"answer":49720}
+{"binary":"tiles-8-O3 (computed goto, spilled)","body":"knapsack","T":8,"tiles_ms":46.750,"passes_ms":27.014,"c_ms":6.168,"same":true,"answer":49720}
+{"binary":"tiles-8-O3 (computed goto, spilled)","body":"knapsack","T":8,"tiles_ms":46.650,"passes_ms":27.008,"c_ms":6.171,"same":true,"answer":49720}
+{"binary":"tiles-8-O3 (computed goto, spilled)","body":"roots","T":8,"tiles_ms":12.846,"c_ms":6.882,"same":false,"sum":21082008.973917745,"steps":1238280}
+{"binary":"tiles-8-O3 (computed goto, spilled)","body":"roots","T":8,"tiles_ms":12.900,"c_ms":6.877,"same":false,"sum":21082008.973917745,"steps":1238280}
+{"binary":"tiles-8-O3 (computed goto, spilled)","body":"roots","T":8,"tiles_ms":12.817,"c_ms":6.876,"same":false,"sum":21082008.973917745,"steps":1238280}
+{"binary":"tiles-8-O3 (computed goto, spilled)","body":"bfs","T":8,"tiles_ms":18.845,"passes_ms":11.196,"c_ms":11.413,"same":true,"reached":99998}
+{"binary":"tiles-8-O3 (computed goto, spilled)","body":"bfs","T":8,"tiles_ms":18.868,"passes_ms":11.011,"c_ms":11.387,"same":true,"reached":99998}
+{"binary":"tiles-8-O3 (computed goto, spilled)","body":"bfs","T":8,"tiles_ms":19.576,"passes_ms":11.237,"c_ms":11.400,"same":true,"reached":99998}
+{"binary":"tiles-16-O3 (computed goto, spilled)","body":"knapsack","T":16,"tiles_ms":43.138,"passes_ms":27.044,"c_ms":6.315,"same":true,"answer":49720}
+{"binary":"tiles-16-O3 (computed goto, spilled)","body":"knapsack","T":16,"tiles_ms":43.138,"passes_ms":27.025,"c_ms":6.313,"same":true,"answer":49720}
+{"binary":"tiles-16-O3 (computed goto, spilled)","body":"knapsack","T":16,"tiles_ms":43.179,"passes_ms":27.040,"c_ms":6.316,"same":true,"answer":49720}
+{"binary":"tiles-16-O3 (computed goto, spilled)","body":"roots","T":16,"tiles_ms":11.597,"c_ms":6.887,"same":false,"sum":21082008.973917749,"steps":1238280}
+{"binary":"tiles-16-O3 (computed goto, spilled)","body":"roots","T":16,"tiles_ms":11.565,"c_ms":6.877,"same":false,"sum":21082008.973917749,"steps":1238280}
+{"binary":"tiles-16-O3 (computed goto, spilled)","body":"roots","T":16,"tiles_ms":11.645,"c_ms":6.882,"same":false,"sum":21082008.973917749,"steps":1238280}
+{"binary":"tiles-16-O3 (computed goto, spilled)","body":"bfs","T":16,"tiles_ms":16.199,"passes_ms":11.197,"c_ms":11.365,"same":true,"reached":99998}
+{"binary":"tiles-16-O3 (computed goto, spilled)","body":"bfs","T":16,"tiles_ms":15.623,"passes_ms":11.305,"c_ms":11.387,"same":true,"reached":99998}
+{"binary":"tiles-16-O3 (computed goto, spilled)","body":"bfs","T":16,"tiles_ms":15.889,"passes_ms":11.203,"c_ms":11.597,"same":true,"reached":99998}
