@@ -410,6 +410,11 @@ static bool words_op(uint8_t op, uint32_t *restrict out, const uint32_t *restric
         else if (uy) for (unsigned l = 0; l < n; ++l) over |= xs[l] < yk;
         else for (unsigned l = 0; l < n; ++l) over |= xs[l] < ys[l];
         break;
+    case PURE_OP_MUL: /* past 2^32: the product's high half */
+        if (ux) for (unsigned l = 0; l < n; ++l) { uint64_t p = (uint64_t)xk * ys[l]; out[l] = (uint32_t)p, over |= (uint32_t)(p >> 32); }
+        else if (uy) for (unsigned l = 0; l < n; ++l) { uint64_t p = (uint64_t)xs[l] * yk; out[l] = (uint32_t)p, over |= (uint32_t)(p >> 32); }
+        else for (unsigned l = 0; l < n; ++l) { uint64_t p = (uint64_t)xs[l] * ys[l]; out[l] = (uint32_t)p, over |= (uint32_t)(p >> 32); }
+        break;
     case PURE_OP_MIN: EACH(uint32_t, a < c ? a : c); break;
     case PURE_OP_MAX: EACH(uint32_t, a > c ? a : c); break;
     case PURE_OP_LT: EACH(uint32_t, a < c); break;
@@ -488,7 +493,7 @@ static void numbers_test(uint8_t op, uint32_t *restrict out, const double *restr
 
 static bool word_form(uint8_t op) {
     switch (op) {
-    case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_LT: case PURE_OP_LE:
+    case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_LT: case PURE_OP_LE:
     case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE: case PURE_OP_AND: case PURE_OP_OR: return true;
     default: return false;
     }
