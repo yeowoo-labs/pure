@@ -10,6 +10,11 @@
 #   runs.sh counts NAME [WORK ...]         user-mode instructions and cycles
 #                                          of suite-run's 3 rounds, each of
 #                                          the two executor ways (icount.c)
+#   runs.sh pairs A B ROUNDS TIMES [WORK ...]  the batches way of A then B,
+#                                          TIMES turns (interleaved: the
+#                                          medians of A's and B's turns)
+# (A build of another lane count: CPPFLAGS=-DPURE_BATCH_LANES=256 with
+# 040's runs.sh build.)
 set -e
 here=research/experiments/041-batches
 builds=$HOME/.cache/pure-040
@@ -41,7 +46,17 @@ counts)
                 | sed "s/^{/{\"version\":\"$name\",\"way\":\"$way\",\"work\":\"$work\",/" >> "$here/$day-counts.jsonl"
         done
     done ;;
-*) echo "runs.sh suite NAME ROUNDS [WORK ...] | counts NAME [WORK ...]" >&2
+pairs)
+    other=$1 rounds=$2 times=$3
+    shift 3
+    for turn in $(seq "$times"); do
+        for version in "$name" "$other"; do
+            quiet
+            PURE_JIT=0 python3 research/guard.py --most 3072 -- "$builds/$version/suite-run" "$builds/$version" "$rounds" "$@" \
+                | grep median | sed "s/^{/{\"version\":\"$version\",\"way\":\"batches\",\"turn\":$turn,/" >> "$here/$day-pairs.jsonl"
+        done
+    done ;;
+*) echo "runs.sh suite NAME ROUNDS [WORK ...] | counts NAME [WORK ...] | pairs A B ROUNDS TIMES [WORK ...]" >&2
     exit 2 ;;
 esac
 # 2026-10-08-lanes.jsonl (research 132): b9's code with BATCH 1024, 512 and

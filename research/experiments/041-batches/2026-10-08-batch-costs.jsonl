@@ -83,3 +83,9 @@
 {"work": "knapsack", "line": "module-batch.c:1715", "ms_1024": 0.042, "ms_256": 0.103}
 {"note":"time.c sum0 n=200000 (4M rounds), 21 rounds median, b9 BATCH 1024 then 256","module":"sum0.pmod","n":200000,"ms":8.633,"work":44000019,"out":4000000}
 {"note":"time.c sum0 n=200000 (4M rounds), 21 rounds median, b9 BATCH 1024 then 256","module":"sum0.pmod","n":200000,"ms":12.544,"work":44000019,"out":4000000}
+{"note":"icount over time.c's 3 rounds (n 51200: 3,000 and 12,000 batches), b9 = 735ba81 and b10 = 140cc46 (design 025 stage 1), BATCH 1024 and 256","version":"b9","module":"sum0","instructions":[47885467,68855349],"cycles":[16221217,23496974]}
+{"version":"b9","module":"ops0","instructions":[66412005,85341885],"cycles":[30351488,36805399]}
+{"version":"b10","module":"sum0","instructions":[34047758,50448573],"cycles":[11650551,17023859]}
+{"version":"b10","module":"ops0","instructions":[52772240,67691004],"cycles":[25970653,30661478]}
+{"note":"time.c sum0 n=200000, 21 rounds median, twice each","version":"b9","ms":[8.690,8.689],"ms_256":[12.545,12.552]}
+{"version":"b10","ms":[6.133,6.136],"ms_256":[9.069,9.070]}
