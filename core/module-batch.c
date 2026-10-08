@@ -36,6 +36,7 @@ typedef struct {
     uint8_t kind;
     bool u32;       /* lanes: whole numbers below 2^32 in four bytes each (else numbers) */
     bool temp;      /* lanes the stack alone holds: an instruction may leave its result in them */
+    bool view;      /* lanes a list's column itself (cells_at): read only, and only while the pass runs (own) */
     uint16_t owner; /* a position's list (a slot's bytes.owner) */
     double value, step;
     void *lane;
@@ -353,6 +354,18 @@ static const uint32_t *words(Batch *b, const Val *v) {
 }
 
 static Val lanes_val(void *lane, bool u32) { return (Val){.kind = LANES, .u32 = u32, .temp = true, .lane = lane}; }
+
+/* A view's lanes (a column read in place) as lanes of its own: what outlives
+ * the pass (a local, a set, an append, a sum into a cell, a filter's key, a
+ * read's rows) must not see its column set or widened at the batch's end. */
+static void own(Batch *b, Val *v) {
+    if (v->kind != LANES || !v->view) return;
+    void *out = fresh(b);
+    if (!out) return;
+    memcpy(out, v->lane, b->n * (v->u32 ? sizeof(uint32_t) : sizeof(double)));
+    uint16_t owner = v->owner;
+    *v = lanes_val(out, v->u32), v->owner = owner;
+}
 static Val gather(Batch *b, const Val *v);
 static Val expand(Batch *b, const Val *v);
 static Val expand_rows(Batch *b, const Val *v);
@@ -683,20 +696,23 @@ static Val cells_at(Batch *b, const PureCells *cells, unsigned field, const Val 
         /* in range in every lane */
         ptrdiff_t first = (ptrdiff_t)rows->value, step = (ptrdiff_t)rows->step;
         b->backward += step < 0 ? 1 : -1;
+        if (step == 1 && (width == 8 || width == 4)) { /* the column itself, in memory's order: a view, no copy */
+            Val v = lanes_val((char *)column + first * width, width == 4);
+            v.temp = false, v.view = true;
+            return v;
+        }
         if (width == 8) {
             double *out = fresh(b);
             if (!out) return *rows;
             const double *from = (const double *)column + first;
-            if (step == 1) memcpy(out, from, n * sizeof(*out));
-            else for (unsigned l = 0; l < n; ++l) out[l] = from[(ptrdiff_t)l * step];
+            for (unsigned l = 0; l < n; ++l) out[l] = from[(ptrdiff_t)l * step];
             return lanes_val(out, false);
         }
         uint32_t *out = fresh(b);
         if (!out) return *rows;
         if (width == 4) {
             const uint32_t *from = (const uint32_t *)column + first;
-            if (step == 1) memcpy(out, from, n * sizeof(*out));
-            else if (step == -1) for (unsigned l = 0; l < n; ++l) out[l] = from[-(ptrdiff_t)l];
+            if (step == -1) for (unsigned l = 0; l < n; ++l) out[l] = from[-(ptrdiff_t)l];
             else for (unsigned l = 0; l < n; ++l) out[l] = from[(ptrdiff_t)l * step];
         } else {
             const uint8_t *from = (const uint8_t *)column + first;
@@ -742,6 +758,7 @@ static void read_of(Batch *b, uint32_t list, uint32_t field, bool known, const V
     }
     Read *r = &b->reads[b->read_count++];
     r->list = list, r->field = field, r->known = known, r->rows = b->sel ? expand_rows(b, rows) : *rows;
+    own(b, &r->rows);
     if (r->rows.kind == LANES) r->rows.temp = false;
 }
 
@@ -929,6 +946,7 @@ static void item_set(Batch *b, uint32_t list, uint32_t field) {
         return;
     }
     if (b->sel) rows = expand_rows(b, &rows), value = expand(b, &value); /* in the lanes around: the selection's mask tells which */
+    own(b, &rows), own(b, &value);
     if (value.kind == LANES) value.temp = false;
     if (rows.kind == LANES) rows.temp = false;
     b->stores[b->store_count++] = (Store){list, field, rows, value, b->sel ? b->selection.active : b->active};
@@ -952,6 +970,7 @@ static void local_store(Batch *b, uint32_t arg) {
         se->old[at] = b->local[at], se->old_state[at] = b->state[at], se->old_written[at] = b->written[at];
         b->state[at] = 0;
     }
+    own(b, &v);
     if (v.kind == LANES) v.temp = false;
     if (!b->active) {
         b->local[at] = v, b->state[at] = 1;
@@ -2005,6 +2024,7 @@ static bool open_filter(Batch *b, const PureOp *op, uint32_t pc) {
     }
     Filter *fl = &b->filters[f];
     Val *k = &b->stack[b->sp - 1];
+    own(b, k);
     k->temp = false; /* the filter keeps it (HAS gives a new value) */
     fl->key = *k, fl->mask = NULL, fl->sel = NULL, fl->none = false, fl->spread = b->parent != NULL, fl->first = b->append_count, fl->appends = 0;
     return true;
@@ -2108,6 +2128,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
                 sc->list = list_of(set->arg), sc->field = item_field(set->arg), sc->add = sum->add, sc->set = sum->set;
                 sc->e = b->stack[--b->sp], sc->rows = b->stack[--b->sp], sc->mask = b->sel ? b->selection.active : b->active;
                 if (b->sel) sc->e = expand(b, &sc->e), sc->rows = expand_rows(b, &sc->rows);
+                own(b, &sc->e), own(b, &sc->rows);
                 sc->e.temp = sc->rows.temp = false;
             }
             continue;
@@ -2240,6 +2261,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             b->sp -= count;
             for (unsigned f = 0; f < count; ++f) {
                 a->cells[f] = b->stack[b->sp + f];
+                own(b, &a->cells[f]);
                 a->cells[f].temp = false;
             }
             break;

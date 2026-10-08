@@ -1227,6 +1227,53 @@ on go {
 """
 
 
+# Columns read in place (VIEW_SOURCE, docs/design/025's stage 4): a local
+# holding a row's field while the batch sets that field (its last value
+# written back after the sets), a set whose value is the same column three
+# rows over in the order that overwrites what it reads, and a set that widens
+# the column to eight bytes while a local holds a view of it.
+VIEW_SOURCE = """record Cell {
+  at = 0
+  v = 0
+}
+state last = 0
+state back = 0
+state wide = 0
+state sum = 0
+input go = message {
+  n: u32
+  q: u32
+}
+on go {
+  let t: list of Cell by at
+  for i in 0 .. go.n {
+    t.add(Cell { at: i, v: i * 3 })
+  }
+  let a = 0
+  for i in 0 .. go.n - 3 {
+    a = t[i].v
+    t[i].v = t[i + 3].v + 1
+  }
+  last = a
+  for k in 0 .. go.n - 3 {
+    let i = go.n - 1 - k
+    t[i].v = t[i - 3].v
+  }
+  back = t[go.n - 1].v + t[go.n - 2].v * 1000
+  let w = 0
+  for i in 0 .. go.n - 3 {
+    w = t[i].v
+    t[i].v = t[i + 3].v + go.q + 0.5
+  }
+  wide = w
+  let s = 0
+  for c in t {
+    s = s + c.v
+  }
+  sum = s
+}
+"""
+
 # Reductions that start with no lanes (REDUCE_SOURCE, docs/design/025): the
 # same e in every lane (a count, a uniform max and min, a fraction, a sum
 # past 2^53 one a lane), a count in a nested loop of the same rounds in
@@ -1709,6 +1756,19 @@ def module_assumptions(aup, pure, work):
                for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
     for name in ('rounds', 'all'):
         assert outputs[name] == outputs['batches'], ('reduce', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
+    faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
+    assert 'none' in faults and 'work' in faults, faults
+    source, program = work / 'view.aup', work / 'view.pmod'  # columns read in place, against the rounds one by one
+    source.write_text(VIEW_SOURCE)
+    compile_module(aup, source, program)
+    given = ''.join(f'message go {struct.pack("<II", n, q).hex()}\nwork\n' for n, q in
+                    ((3000, 7), (3000, 70000), (2049, 1), (40, 3), (5, 2), (1500, 100000)))
+    given += 'budget 30011\n' + given + 'budget 0\n'
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=120, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('view', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
     faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
     assert 'none' in faults and 'work' in faults, faults
     return len(runs)
