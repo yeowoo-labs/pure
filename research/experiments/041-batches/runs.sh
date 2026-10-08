@@ -47,4 +47,8 @@ esac
 # 2026-10-08-lanes.jsonl (research 132): b9's code with BATCH 1024, 512 and
 # 256 (core/module-batch.c's enum), suite-run 5 rounds twice (ms: the two
 # medians) and costs/time.c's sum0, ops0 and nest under icount 3 rounds:
-# a batch's fixed cost is (the instructions' difference) / (the batches').
+# a batch's fixed cost is (the instructions' difference) / (the batches'),
+# icount's 3 rounds counted: 3,000 and 12,000 batches for sum0 and ops0.
+# 2026-10-08-batch-costs.jsonl (design 025): knapsack's time a round by
+# function and line, b9's code at BATCH 1024 and 256 under a 2 kHz sampled
+# profile (ms by the in-process C's samples); sum0's times at both.
