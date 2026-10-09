@@ -67,3 +67,5 @@ esac
 # 2026-10-08-batch-costs.jsonl (design 025): knapsack's time a round by
 # function and line, b9's code at BATCH 1024 and 256 under a 2 kHz sampled
 # profile (ms by the in-process C's samples); sum0's times at both.
+# A series run over midnight writes two days' files (2026-10-08 and
+# 2026-10-09 for design 025's stage 5): read both.
