@@ -1227,6 +1227,63 @@ on go {
 """
 
 
+# Sums into cells in whole numbers (SUMS_SOURCE, docs/design/025's stage 5):
+# sixteen rows met again and again, a one-byte column widened to four in the
+# middle of a batch, a four-byte one past 2^32 (to eight), and a masked
+# fraction where the whole numbers stop.
+SUMS_SOURCE = """record Total {
+  region = 0
+  amount = 0
+}
+state totals = 0
+state tinies = 0
+state bigs = 0
+state mixed = 0
+input go = message {
+  n: u32
+  q: u32
+}
+on go {
+  let t: list of Total by region
+  let u: list of Total by region
+  let w: list of Total by region
+  let m: list of Total by region
+  for r in 0 .. 16 {
+    t.add(Total { region: r })
+    u.add(Total { region: r })
+    w.add(Total { region: r })
+    m.add(Total { region: r })
+  }
+  for o in 0 .. go.n {
+    let region = o - floor(o / 16) * 16
+    t[region].amount = t[region].amount + (o - floor(o / 1000) * 1000)
+    u[region].amount = u[region].amount + 1
+    w[region].amount = w[region].amount + 1500000000
+    if o - floor(o / go.q) * go.q == 0 { m[region].amount = m[region].amount + 0.5 }
+  }
+  let a = 0
+  let b = 0
+  let c = 0
+  let d = 0
+  for x in t {
+    a = a + x.amount * (x.region + 1)
+  }
+  for x in u {
+    b = b + x.amount * (x.region + 1)
+  }
+  for x in w {
+    c = c + x.amount
+  }
+  for x in m {
+    d = d + x.amount * (x.region + 1)
+  }
+  totals = a
+  tinies = b
+  bigs = c
+  mixed = d
+}
+"""
+
 # Columns read in place (VIEW_SOURCE, docs/design/025's stage 4): a local
 # holding a row's field while the batch sets that field (its last value
 # written back after the sets), a set whose value is the same column three
@@ -1756,6 +1813,19 @@ def module_assumptions(aup, pure, work):
                for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
     for name in ('rounds', 'all'):
         assert outputs[name] == outputs['batches'], ('reduce', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
+    faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
+    assert 'none' in faults and 'work' in faults, faults
+    source, program = work / 'sums.aup', work / 'sums.pmod'  # sums into cells in whole numbers, against the rounds one by one
+    source.write_text(SUMS_SOURCE)
+    compile_module(aup, source, program)
+    given = ''.join(f'message go {struct.pack("<II", n, q).hex()}\nwork\n' for n, q in
+                    ((3000, 7), (3000, 1), (5000, 70000), (100, 3), (40, 2), (2, 3)))
+    given += 'budget 30011\n' + given + 'budget 0\n'
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=120, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('sums', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
     faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
     assert 'none' in faults and 'work' in faults, faults
     source, program = work / 'view.aup', work / 'view.pmod'  # columns read in place, against the rounds one by one

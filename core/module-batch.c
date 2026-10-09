@@ -3143,6 +3143,77 @@ static int append_items(Batch *b, Frame *frame, unsigned n, uint64_t per) {
 
 static int batch_run(Frame *frame, Loop *loop, unsigned *done);
 
+/* The sums into cells from round 0 at once (docs/design/025, stage 5): the
+ * round's sums in turn, a one- or four-byte cell's in integers while its e
+ * is a whole number below 2^32 and its sum stays in its bytes, an
+ * eight-byte cell's as a number while it is finite (the numbers the
+ * executor's adds would make, with no fault and no widening). The rows and
+ * the e's in four bytes first (vector code), up to the first round whose e
+ * is not one. Where one is not so, *round and *sum: the executor's way goes
+ * on from there. */
+static void sums_in_words(Batch *b, const double *const *rows, const double *const *es, const uint32_t *const *masks,
+                          const PureCells *cells, unsigned *round, unsigned *sum) {
+    unsigned n = b->n, count = b->scatter_count, stop = n, spares = b->spare_count, buffers = b->buffers;
+    bool reverse = b->reverse, failed = b->failed;
+    uint32_t *row32[SUMS], *e32[SUMS];
+    *round = 0, *sum = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        uint8_t width = cells[i].width[b->scatters[i].field];
+        if ((width != 8 && width != 4 && width != 1) || !(row32[i] = fresh(b)) || (width != 8 && !(e32[i] = fresh(b)))) {
+            b->spare_count = spares, b->buffers = buffers, b->failed = failed; /* (the rounds one by one) */
+            return;
+        }
+        const double *at = rows[i], *e = es[i];
+        for (unsigned l = 0; l < n; ++l) row32[i][l] = at[l] >= 0 && at[l] < 4294967296.0 ? (uint32_t)at[l] : 0;
+        if (width == 8) continue;
+        uint32_t bad = 0, *out = e32[i];
+        for (unsigned l = 0; l < n; ++l) {
+            uint32_t u = e[l] >= 0 && e[l] < 4294967296.0 ? (uint32_t)e[l] : 0;
+            out[l] = u, bad |= (double)u != e[l];
+        }
+        for (unsigned l = 0; bad && l < n; ++l) /* the first round (of those it runs in) whose e is not a whole number below 2^32 */
+            if ((!masks[i] || masks[i][l]) && (double)out[l] != e[l]) {
+                unsigned r = reverse ? n - 1 - l : l;
+                stop = r < stop ? r : stop;
+            }
+    }
+    for (unsigned r = 0; r < stop; ++r) {
+        unsigned l = reverse ? n - 1 - r : r;
+        for (unsigned i = 0; i < count; ++i) {
+            if (masks[i] && !masks[i][l]) continue;
+            uint8_t width = cells[i].width[b->scatters[i].field];
+            void *column = cells[i].columns[b->scatters[i].field];
+            uint32_t row = row32[i][l];
+            if (width == 8) {
+                double v;
+                memcpy(&v, (const double *)column + row, sizeof(v));
+                v += es[i][l];
+                if (!isfinite(v)) {
+                    stop = r, *sum = i;
+                    break;
+                }
+                memcpy((double *)column + row, &v, sizeof(v));
+            } else if (width == 4) {
+                uint64_t v = (uint64_t)((uint32_t *)column)[row] + e32[i][l];
+                if (v >> 32) {
+                    stop = r, *sum = i;
+                    break;
+                }
+                ((uint32_t *)column)[row] = (uint32_t)v;
+            } else {
+                uint32_t v = ((uint8_t *)column)[row] + e32[i][l];
+                if (v > 255) {
+                    stop = r, *sum = i;
+                    break;
+                }
+                ((uint8_t *)column)[row] = (uint8_t)v;
+            }
+        }
+    }
+    *round = stop;
+    b->spare_count = spares, b->buffers = buffers; /* its four bytes let go */
+}
+
 /* A batch (batch_run), the filters' rounds and keys let go after it (held only while one runs: a thread keeps none). */
 int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     int how = batch_run(frame, loop, done);
@@ -3234,9 +3305,11 @@ static int batch_run(Frame *frame, Loop *loop, unsigned *done) {
                 return STEP_NEXT;
             }
         }
-        for (unsigned r = 0; r < n; ++r) {
+        unsigned from_round, from_sum;
+        sums_in_words(b, rows, es, masks, cells, &from_round, &from_sum);
+        for (unsigned r = from_round; r < n; ++r) { /* the rest round by round, as the executor adds and sets */
             unsigned l = round_of(b, r);
-            for (unsigned i = 0; i < b->scatter_count; ++i) {
+            for (unsigned i = r == from_round ? from_sum : 0; i < b->scatter_count; ++i) {
                 const Scatter *sc = &b->scatters[i];
                 if (masks[i] && !masks[i][l]) continue;
                 size_t row = (size_t)rows[i][l];
