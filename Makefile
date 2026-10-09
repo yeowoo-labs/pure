@@ -41,7 +41,10 @@ $(BUILD)/obj/%.o: %.c $(HEADERS)
 # The lists' searches count a node's keys and positions whole, and move
 # items in a leaf column by column: -O3 makes vector instructions of them
 # (docs/design/020: 8% of a breadth first search).
-LIST_OPTIMIZE ?= -O3
+# Their loops start each at a 64-byte line: else a change anywhere in the
+# file moves them, and the batch executor's hot loops ran 6% apart with the
+# same instructions (knapsack 8.26, 8.74, 8.20 ms; docs/research/138).
+LIST_OPTIMIZE ?= -O3 -falign-loops=64
 $(BUILD)/obj/core/module-list.o: CFLAGS += $(LIST_OPTIMIZE)
 # A batch's instructions are loops over its lanes: vector instructions too (docs/design/024).
 $(BUILD)/obj/core/module-batch.o: CFLAGS += $(LIST_OPTIMIZE)
