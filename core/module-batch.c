@@ -2802,7 +2802,8 @@ enum { CHUNK = 128 }; /* items a call of pure_list_add_many takes */
 static _Thread_local uint64_t *added_keys;  /* decide's keys added to a filter's list by its kept rounds (a hash set) */
 static _Thread_local uint64_t *added_bits;  /* or, for a list whose keys are bits, a bit each (cleared after) */
 static _Thread_local double *scratch;       /* and the keys its rounds add, for pure_list_takes */
-static _Thread_local size_t added_room, added_bits_room, scratch_room;
+static _Thread_local uint32_t *marked;      /* the bits of our own set (their places), to clear them after */
+static _Thread_local size_t added_room, added_bits_room, scratch_room, marked_room;
 static const uint64_t NO_KEY = UINT64_C(0x7FF8000000000001); /* a NaN: never a key */
 
 static uint64_t key_of(double k) {
@@ -2865,7 +2866,12 @@ static bool decide(Batch *b) {
                 memset(grown + added_bits_room, 0, (words - added_bits_room) * sizeof(*grown));
                 added_bits = grown, added_bits_room = words;
             }
-            size_t top = words * 64;
+            if (fl->kept * fl->made > marked_room) {
+                uint32_t *grown = realloc(marked, fl->kept * fl->made * sizeof(*grown));
+                if (!grown) return false;
+                marked = grown, marked_room = fl->kept * fl->made;
+            }
+            size_t top = words * 64, count = 0;
             bool twice = false; /* a key marked already: the batch gives its rounds back (EXISTS at that round) */
             for (size_t i = 0; i < fl->kept && !twice; ++i) {
                 double *r = filtered[f] + i * fl->stride, k = r[1];
@@ -2876,23 +2882,14 @@ static bool decide(Batch *b) {
                 }
                 for (unsigned a = 0, c = 2; a < fl->made; c += fl->cells[a++]) /* its adds to the list: keys not there yet */
                     if (fl->to[a] == fl->list) {
-                        double k2 = r[c + key];
-                        size_t at2 = k2 >= 0 && k2 < (double)top && (double)(uint32_t)k2 == k2 ? (size_t)k2 : top;
+                        double k2 = r[c + key]; /* (the key it asked, as a rule: its place found already) */
+                        size_t at2 = k2 == k ? at : k2 >= 0 && k2 < (double)top && (double)(uint32_t)k2 == k2 ? (size_t)k2 : top;
                         if (at2 == top || bits[at2 >> 6] >> (at2 & 63) & 1 || added_bits[at2 >> 6] >> (at2 & 63) & 1)
                             twice = true; /* (no bit for it: the list would not take it so either) */
-                        else added_bits[at2 >> 6] |= UINT64_C(1) << (at2 & 63);
+                        else added_bits[at2 >> 6] |= UINT64_C(1) << (at2 & 63), marked[count++] = (uint32_t)(at2 >> 6);
                     }
             }
-            for (size_t i = 0; i < fl->kept; ++i) { /* the bits of our own clear again */
-                const double *r = filtered[f] + i * fl->stride;
-                if (r[0] < 0) continue;
-                for (unsigned a = 0, c = 2; a < fl->made; c += fl->cells[a++])
-                    if (fl->to[a] == fl->list) {
-                        double k2 = r[c + key];
-                        size_t at2 = k2 >= 0 && k2 < (double)top && (double)(uint32_t)k2 == k2 ? (size_t)k2 : top;
-                        if (at2 < top) added_bits[at2 >> 6] &= ~(UINT64_C(1) << (at2 & 63));
-                    }
-            }
+            for (size_t i = 0; i < count; ++i) added_bits[marked[i]] = 0; /* the bits of our own clear again (their words) */
             if (twice) return false;
         } else {
             while (slots < 2 * fl->kept * (fl->made + 1)) slots *= 2;
@@ -3217,9 +3214,9 @@ static void sums_in_words(Batch *b, const double *const *rows, const double *con
 /* A batch (batch_run), the filters' rounds and keys let go after it (held only while one runs: a thread keeps none). */
 int pure_batch_run(Frame *frame, Loop *loop, unsigned *done) {
     int how = batch_run(frame, loop, done);
-    if (added_room || scratch_room || added_bits_room) {
-        free(added_keys), free(scratch), free(added_bits);
-        added_keys = NULL, scratch = NULL, added_bits = NULL, added_room = scratch_room = added_bits_room = 0;
+    if (added_room || scratch_room || added_bits_room || marked_room) {
+        free(added_keys), free(scratch), free(added_bits), free(marked);
+        added_keys = NULL, scratch = NULL, added_bits = NULL, marked = NULL, added_room = scratch_room = added_bits_room = marked_room = 0;
     }
     for (unsigned f = 0; f < FILTERS; ++f)
         if (filtered_room[f]) free(filtered[f]), filtered[f] = NULL, filtered_room[f] = 0;
