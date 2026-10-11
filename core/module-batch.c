@@ -212,7 +212,6 @@ typedef struct {
     bool none;                  /* no lane runs here */
     Split splits[SPLITS];
     unsigned split_count, buffers, masks, read_count, store_count, spare_count;
-    unsigned low_buffers, low_masks; /* the fewest left since a round began (tide) */
     void *spare[BUFFERS];       /* lanes no value holds any more */
     Read reads[READS];
     Store stores[STORES];
@@ -233,6 +232,7 @@ typedef struct {
     unsigned cells_count;
     const uint32_t *sel;        /* a selection running (NULL: none): its lanes */
     Selection selection;
+    unsigned low_buffers, low_masks; /* the fewest left since a round began (tide) */
 } Batch;
 
 static _Thread_local Batch batch;
