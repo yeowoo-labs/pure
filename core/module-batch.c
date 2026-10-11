@@ -212,6 +212,7 @@ typedef struct {
     bool none;                  /* no lane runs here */
     Split splits[SPLITS];
     unsigned split_count, buffers, masks, read_count, store_count, spare_count;
+    unsigned low_buffers, low_masks; /* the fewest left since a round began (tide) */
     void *spare[BUFFERS];       /* lanes no value holds any more */
     Read reads[READS];
     Store stores[STORES];
@@ -258,12 +259,15 @@ static bool affine_of(Batch *b, double value, double step, Val *out) {
 }
 
 static void *fresh(Batch *b) {
-    if (b->spare_count) return b->spare[--b->spare_count];
-    if (b->buffers == BUFFERS) {
+    void *out;
+    if (b->spare_count) out = b->spare[--b->spare_count];
+    else if (b->buffers == BUFFERS) {
         b->failed = true;
         return NULL;
-    }
-    return buffer[b->buffers++];
+    } else out = buffer[b->buffers++];
+    unsigned left = b->spare_count + BUFFERS - b->buffers;
+    if (left < b->low_buffers) b->low_buffers = left;
+    return out;
 }
 
 /* A value the stack held alone, gone: its lanes for others. */
@@ -278,6 +282,8 @@ static Mask *new_mask(Batch *b, const uint32_t *lanes, const Mask *parent, unsig
     }
     Mask *m = b->mask_free_count ? b->mask_free[--b->mask_free_count] : &b->mask[b->masks++];
     *m = (Mask){lanes, parent, NULL, count};
+    unsigned left = b->mask_free_count + MASKS - b->masks;
+    if (left < b->low_masks) b->low_masks = left;
     return m;
 }
 
@@ -2377,6 +2383,33 @@ static void sweep(Batch *b) {
         if (!kept_mask[i]) b->mask_free[b->mask_free_count++] = &b->mask[i];
 }
 
+/* A nested count loop's rounds in turn (a walk's rounds and a spread walk's
+ * chunks sweep each: their filters, selections and masks take more than a
+ * round's fewest left tells, and BFS's batches ran out held longer): the
+ * lanes and masks their values no longer hold back as spares at a round's
+ * end only when fewer are left than the most a round has taken and one (a
+ * sweep costs about as much as a short round's work; held a while longer,
+ * they are still the batch's). */
+typedef struct { unsigned buffers, masks, most_buffers, most_masks, outer_buffers, outer_masks; bool held; } Tide; /* held: the last round's end swept none */
+static void tide_start(Batch *b, Tide *t) { /* (the fewest left of rounds around these kept, given back at the end) */
+    t->outer_buffers = b->low_buffers, t->outer_masks = b->low_masks;
+    t->buffers = b->low_buffers = b->spare_count + BUFFERS - b->buffers;
+    t->masks = b->low_masks = b->mask_free_count + MASKS - b->masks;
+}
+static void tide_end(Batch *b, Tide *t) {
+    unsigned took = t->buffers - b->low_buffers, took_masks = t->masks - b->low_masks;
+    if (t->outer_buffers < b->low_buffers) b->low_buffers = t->outer_buffers;
+    if (t->outer_masks < b->low_masks) b->low_masks = t->outer_masks;
+    if (took > t->most_buffers) t->most_buffers = took;
+    if (took_masks > t->most_masks) t->most_masks = took_masks;
+    t->held = !(b->spare_count + BUFFERS - b->buffers <= t->most_buffers + 1 || b->mask_free_count + MASKS - b->masks <= t->most_masks + 1);
+    if (!t->held) sweep(b);
+}
+static void tide_leave(Batch *b, const Tide *t) { /* the rounds done (or broken off): the rounds around see what these took */
+    if (t->outer_buffers < b->low_buffers) b->low_buffers = t->outer_buffers;
+    if (t->outer_masks < b->low_masks) b->low_masks = t->outer_masks;
+}
+
 /* A nested loop's slot in round t: low + t in the lanes running it (low
  * itself in round 0, as the LOOP sets it), the others' as it was. */
 static void set_slot(Batch *b, unsigned slot, const Val *low, uint32_t t, const uint32_t *live, unsigned alive) {
@@ -2435,7 +2468,9 @@ static void nested(Batch *b, const PureOp *op, uint32_t pc) {
     for (unsigned l = 0; l < n; ++l)
         if (!entry || entry[l]) least = count[l] < least ? count[l] : least, ++came;
     b->breaks = false;
+    Tide tide = {0};
     for (uint32_t t = 0; !b->failed; ++t) {
+        tide_start(b, &tide);
         uint32_t *live;
         unsigned alive = 0;
         if (t < least && !b->breaks) /* every lane that came: no mask to make */
@@ -2451,10 +2486,12 @@ static void nested(Batch *b, const PureOp *op, uint32_t pc) {
         b->none = false;
         if (!pass(b, start, end)) break;
         arrive(b, end);
-        sweep(b);
+        tide_end(b, &tide);
     }
+    tide_leave(b, &tide);
     b->nest = saved;
     b->active = outer, b->none = false;
+    if (!b->failed && tide.held) sweep(b); /* (the lanes left to what follows, as the last round's sweep left them) */
 }
 
 /* A walk planned PLAN_SPREAD in the batch's block (its block from start to
