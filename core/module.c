@@ -1821,6 +1821,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         }
     }
     free(landed);
+    for (uint32_t pc = 0; pc < out->code_count; ++pc) out->held = out->held || out->code[pc].op == PURE_OP_BYTES_STORE;
     /* The lists an index state refers to: their inserts tell where (move_indices). */
     for (uint32_t i = 0; i < out->states; ++i)
         if (out->state_type[i] == PURE_STATE_INDEX) out->state_indexed[out->state_ref[i]] = true;
@@ -4184,7 +4185,7 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
      * holds for it the default room, or the budget when that is larger. */
     app->grown = app->spent = 0;
     app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
-    for (unsigned i = 0; i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
+    for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
     Mark mark;
     mark_event(app, &mark);
     memcpy(pending, app->values, sizeof(app->values));
@@ -4532,7 +4533,7 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
         if (!own_lists(app, m->view_lists[view])) return PURE_ALLOCATION;
         app->grown = app->spent = 0;
         app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
-        for (unsigned i = 0; i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
+        for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
     }
     PureFault fault = app->fault;
     uint32_t fault_pc = app->fault_pc;

@@ -298,6 +298,7 @@ typedef struct {
     uint32_t batch_plan_count;          /* in their loops' order */
     struct PureJit *jit; /* its blocks compiled (module-jit.c, docs/design/021), or NULL */
     bool batches;        /* a loop of it is planned to run in batches (module-batch.c, docs/design/024) */
+    bool held;           /* it holds bytes or texts by name (BYTES_STORE): events and views empty them as they begin */
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
     PureValue initial[PURE_MODULE_STATES];
