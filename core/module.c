@@ -18,7 +18,7 @@ enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 
  * state named. */
 enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8, T_LOCAL = 9,
        T_BOOL = 10, T_STATE = 11, T_I64 = 12 };
-enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUMENTS };
+enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUMENTS, FROM_HELD };
 /* Where an opcode may appear. */
 /* IN_ARGUMENTS: fields read where nothing is done with them (a view's arguments, a message's fields in a fold). */
 /* IN_LOCALS: a handler's locals, read in its walks and the folds in them. */
@@ -31,11 +31,13 @@ enum { READ = IN_VIEW | IN_HANDLER };
  * collection, a constant, a unit, the column's row, a branch target, a stack
  * depth, a fold, a relation, a keyed list, an output, the row of the column
  * a fold runs in, a number, bool or i64 state (A_VALUE), or the value's type
- * (A_TYPE: 0 a number, 1 a bool, 2 an i64), how I64_BITS computes (A_BITS) or
- * what a position is (A_POSITION: 0 a number, 1 an i64). */
+ * (A_TYPE: 0 a number, 1 a bool, 2 an i64), how I64_BITS computes (A_BITS),
+ * what a position is (A_POSITION: 0 a number, 1 an i64), what CONCAT joins
+ * (A_JOINED: 0 texts, 1 bytes), how NUM_TEXT writes (A_FORMAT) or the value
+ * held by name (A_HELD). */
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
        A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL, A_VALUE, A_TYPE,
-       A_LOOP, A_BITS, A_POSITION };
+       A_LOOP, A_BITS, A_POSITION, A_JOINED, A_FORMAT, A_HELD };
 /* A fold's block is verified as a column that leaves one bool (count, first)
  * or a value and whether to include it (a bool): a number (FOLD_TWO) or an
  * i64 (FOLD_I64). A table's filter is verified as a column that leaves a
@@ -73,15 +75,15 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_FIELD] = {0, {0}, T_FIELD, IN_MESSAGE | IN_ARGUMENTS, A_FIELD, O_ANY},
     [PURE_OP_DOC] = {0, {0}, T_BYTES, IN_KEYED, A_COLLECTION, O_ANY},
     [PURE_OP_DOC_SIZE] = {0, {0}, T_NUM, IN_KEYED, A_COLLECTION, O_ANY},
-    [PURE_OP_LEN] = {1, {T_BYTES}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
+    [PURE_OP_LEN] = {1, {T_BYTES}, T_NUM, READ, A_NONE, O_ANY},
     [PURE_OP_REPLACE] = {3, {T_NUM, T_NUM, T_BYTES}, 0, IN_KEYED, A_COLLECTION, O_ANY},
     [PURE_OP_REPLY] = {1, {T_BYTES}, 0, IN_MESSAGE, A_NONE, O_ANY},
     [PURE_OP_REQUIRE] = {1, {T_BOOL}, 0, IN_HANDLER, A_NONE, O_ANY},
     [PURE_OP_TEXT_CONST] = {0, {0}, T_TEXT, READ, A_CONSTANT, O_ANY},
     [PURE_OP_TEXT_LOAD] = {0, {0}, T_TEXT, READ, STATE(TEXT), O_ANY},
     [PURE_OP_TEXT_INPUT] = {0, {0}, T_TEXT, IN_TEXT, A_NONE, O_ANY},
-    [PURE_OP_NUM_TEXT] = {1, {T_NUM}, T_TEXT, READ, A_TYPE, O_ANY},
-    [PURE_OP_CONCAT] = {2, {T_TEXT, T_TEXT}, T_TEXT, READ, A_NONE, O_ANY},
+    [PURE_OP_NUM_TEXT] = {1, {T_NUM}, T_TEXT, READ, A_FORMAT, O_ANY},
+    [PURE_OP_CONCAT] = {2, {T_TEXT, T_TEXT}, T_TEXT, READ, A_JOINED, O_ANY},
     [PURE_OP_CHARS] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
     [PURE_OP_LINES] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
     [PURE_OP_TEXT_BYTES] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
@@ -138,6 +140,10 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_BYTE_AT] = {2, {T_BYTES, T_NUM}, T_I64, READ, A_POSITION, O_ANY},
     [PURE_OP_BYTES_OF] = {0, {0}, T_BYTES, READ, STATE(LIST), O_ANY},
     [PURE_OP_INDEX_AT] = {1, {T_NUM}, T_INDEX, READ, STATE(LIST), O_ARG},
+    [PURE_OP_BYTES_SLICE] = {3, {T_BYTES, T_NUM, T_NUM}, T_BYTES, READ, A_POSITION, O_ANY},
+    [PURE_OP_BYTE] = {1, {T_I64}, T_BYTES, READ, A_NONE, O_ANY},
+    [PURE_OP_BYTES_LOAD] = {0, {0}, T_BYTES, IN_LOCALS, A_HELD, O_ANY},
+    [PURE_OP_BYTES_STORE] = {1, {T_BYTES}, 0, IN_HANDLER | IN_COMPUTE, A_HELD, O_ANY},
 };
 #undef NUMS
 #undef COMPARE
@@ -388,7 +394,13 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_LOOP: return (arg & 0xFF) < PURE_MODULE_LOCALS && !(arg & 0xFE00); /* a slot, and whether i64s */
     case A_TYPE: return arg <= 2;
     case A_BITS: return arg <= PURE_BITS_RIGHT;
-    case A_POSITION: return arg <= 1;
+    case A_POSITION: case A_JOINED: return arg <= 1;
+    case A_HELD: return (arg & ~(uint32_t)PURE_HELD_APPEND) < PURE_MODULE_HELD;
+    case A_FORMAT: { /* a type; a width, zeros, a form fitting it and digits for FIXED alone */
+        uint32_t type = arg & 3, form = arg >> PURE_FORMAT_FORM & 7, digits = arg >> PURE_FORMAT_DIGITS & 31;
+        return type <= 2 && !(arg & 0xFC) && !(arg >> 25) && form <= PURE_FORMAT_FIXED && (type != 1 || !form) &&
+               (form != PURE_FORMAT_FIXED || type == 0) && (form == PURE_FORMAT_FIXED || !digits);
+    }
     case A_RELATION: return arg <= PURE_NOT_EQUAL;
     case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
     case A_OUTPUT: return arg < m->inputs && m->input[arg].kind == PURE_KIND_OUTPUT;
@@ -569,8 +581,14 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             need[0] = local_type(arg);
         } else if (need[0] == T_STATE) {
             need[0] = state_type(m, arg);
-        } else if (op->op == PURE_OP_NUM_TEXT && arg) {
-            need[0] = arg == 1 ? T_BOOL : T_I64;
+        } else if (op->op == PURE_OP_NUM_TEXT && arg & 3) {
+            need[0] = (arg & 3) == 1 ? T_BOOL : T_I64;
+        } else if (op->op == PURE_OP_CONCAT && arg) {
+            need[0] = need[1] = T_BYTES;
+        } else if (op->op == PURE_OP_BYTES_SLICE && arg) {
+            need[1] = need[2] = T_I64; /* the positions i64s */
+        } else if (op->op == PURE_OP_BYTES_STORE && (arg & 0xFF) >= PURE_HELD_TEXT) {
+            need[0] = T_TEXT;
         } else if (op->op == PURE_OP_BYTE_AT && arg) {
             need[1] = T_I64; /* the position an i64 */
         } else if ((op->op == PURE_OP_EQ || op->op == PURE_OP_NE) && height >= 2 && types[height - 1] == T_BOOL &&
@@ -611,6 +629,8 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (out == T_STATE) out = state_type(m, arg);
         if (truth) out = T_BOOL;
         if (integer) out = T_I64;
+        if ((op->op == PURE_OP_CONCAT && arg) || (op->op == PURE_OP_BYTES_LOAD && (arg & 0xFF) < PURE_HELD_TEXT)) out = T_BYTES;
+        else if (op->op == PURE_OP_BYTES_LOAD) out = T_TEXT;
         if (out) {
             if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
             owners[height] = (unsigned char)(out != T_CURSOR && out != T_INDEX ? 0 : of == O_OPERAND ? owners[height] : owner);
@@ -1096,13 +1116,13 @@ PURE_COLD static unsigned arity(uint8_t op) {
     switch (op) {
     case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_INDEX_LOAD: case PURE_OP_ROW: case PURE_OP_OUTER_ROW:
     case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_FIELD: case PURE_OP_LOCAL_LOAD:
-    case PURE_OP_BYTES_OF:
+    case PURE_OP_BYTES_OF: case PURE_OP_BYTES_LOAD:
         return 0;
     case PURE_OP_ITEM_GET: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: case PURE_OP_NEG: case PURE_OP_NOT:
     case PURE_OP_FLOOR: case PURE_OP_INDEX_NUM: case PURE_OP_I64_NEG: case PURE_OP_I64_FROM: case PURE_OP_NUM_FROM:
-    case PURE_OP_INDEX_AT:
+    case PURE_OP_INDEX_AT: case PURE_OP_BYTE:
         return 1;
-    case PURE_OP_CLAMP: return 3;
+    case PURE_OP_CLAMP: case PURE_OP_BYTES_SLICE: return 3;
     default: return 2;
     }
 }
@@ -2007,6 +2027,7 @@ static PureResult visit_value(const PureApp *app, const PureArena *arena, PureBy
     case FROM_COPY: direct = app->copied + v.offset; break;
     case FROM_CONSTANT: direct = app->module->constant_data + v.offset; break;
     case FROM_ARENA: direct = arena->bytes + v.offset; break;
+    case FROM_HELD: direct = app->held[v.owner].data + v.offset; break;
     case FROM_TEXT:
         return pure_draft_read_version(app->texts[v.owner], v.version, (size_t)v.offset, (size_t)v.length,
                                        visit, context);
@@ -2040,8 +2061,8 @@ static PureResult contiguous(const PureApp *app, PureArena *arena, PureBytes v, 
         *out = (PureSpan){v.length ? base + v.offset : NULL, (size_t)v.length};
         return PURE_OK;
     }
-    if (v.source == FROM_ARENA) {
-        *out = (PureSpan){arena->bytes + v.offset, (size_t)v.length};
+    if (v.source == FROM_ARENA || v.source == FROM_HELD) {
+        *out = (PureSpan){(v.source == FROM_ARENA ? arena->bytes : app->held[v.owner].data) + v.offset, (size_t)v.length};
         return PURE_OK;
     }
     size_t start = arena->used;
@@ -2122,6 +2143,71 @@ static bool copy_out(void *context, PureSpan span) {
     Copy *copy = context;
     if (span.size) memcpy(copy->at, span.data, span.size);
     copy->at += span.size;
+    return true;
+}
+
+/* BYTES_STORE: the value held by name slot becomes v, or v after it (append); what it holds counts in the room.
+ * 1 where that passes the room (MEMORY), 2 out of memory, else 0. */
+static int hold(PureApp *app, PureArena *arena, unsigned slot, PureBytes v, bool append) {
+    __typeof__(app->held[0]) *h = &app->held[slot];
+    size_t mark = arena->used, before = h->size, at = append ? h->size : 0, size = at + (size_t)v.length;
+    if (v.source == FROM_HELD && v.owner == slot && v.length) { /* a part of itself: by way of the arena */
+        if (append_value(app, arena, v) != PURE_OK) return 2;
+        v = (PureBytes){FROM_ARENA, 0, {0, 0}, mark, v.length};
+    }
+    if (!grows(app, (Held){0, before}, (Held){0, size})) return 1;
+    if (size > h->capacity) {
+        size_t capacity = h->capacity ? h->capacity : 64;
+        while (capacity < size) capacity *= 2;
+        unsigned char *data = realloc(h->data, capacity);
+        if (!data) return 2;
+        h->data = data, h->capacity = capacity;
+    }
+    Copy copy = {h->data + at};
+    if (visit_value(app, arena, v, copy_out, &copy) != PURE_OK) return 2;
+    h->size = size;
+    arena->used = mark;
+    return 0;
+}
+
+/* NUM_TEXT's text of v in a format (the argument past its type, PureFormat): false where an integer's form meets a
+ * number that is not a whole one within 2^53. */
+static bool formatted(Slot v, uint32_t arg, char *out, size_t *length) {
+    unsigned type = arg & 3, width = arg >> PURE_FORMAT_WIDTH & 0xFF, form = arg >> PURE_FORMAT_FORM & 7,
+             digits = arg >> PURE_FORMAT_DIGITS & 31;
+    char body[400];
+    size_t n = 0;
+    if (form == PURE_FORMAT_FIXED) {
+        n = (size_t)snprintf(body, sizeof(body), "%.*f", digits ? (int)digits - 1 : 6, v.num == 0 ? 0.0 : v.num);
+    } else if (form) {
+        int64_t i = v.i64;
+        if (type != 2) {
+            if (!(fabs(v.num) <= 0x1p53 && v.num == floor(v.num))) return false;
+            i = (int64_t)v.num;
+        }
+        uint64_t magnitude = i < 0 ? 0 - (uint64_t)i : (uint64_t)i;
+        unsigned base = form == PURE_FORMAT_DECIMAL ? 10 : form <= PURE_FORMAT_HEX_UPPER ? 16 : form == PURE_FORMAT_BINARY ? 2 : 8;
+        const char *set = form == PURE_FORMAT_HEX_UPPER ? "0123456789ABCDEF" : "0123456789abcdef";
+        char reversed[64];
+        unsigned count = 0;
+        do reversed[count++] = set[magnitude % base], magnitude /= base; while (magnitude);
+        if (i < 0) body[n++] = '-';
+        while (count) body[n++] = reversed[--count];
+    } else
+        n = type == 2 ? (size_t)snprintf(body, sizeof(body), "%" PRId64, v.i64)
+          : type ? (size_t)snprintf(body, sizeof(body), "%s", v.num ? "true" : "false") : pure_format_number(v.num, body);
+    size_t sign = body[0] == '-', pad = width > n ? width - n : 0, k = 0;
+    if (arg & PURE_FORMAT_ZEROS) {
+        if (sign) out[k++] = '-';
+        while (pad--) out[k++] = '0';
+        memcpy(out + k, body + sign, n - sign);
+        k += n - sign;
+    } else {
+        while (pad--) out[k++] = ' ';
+        memcpy(out + k, body, n);
+        k += n;
+    }
+    *length = k;
     return true;
 }
 
@@ -3097,7 +3183,17 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         NEXT;
     }
     /* A reply outlives the arena mark of later statements: keep it by value. */
-    case PURE_OP_REPLY: app->reply = stack[--sp].bytes; app->has_reply = true; NEXT;
+    case PURE_OP_REPLY: { /* by value; a value held by name may change after it, so its bytes go to the arena */
+        PureBytes reply = stack[--sp].bytes;
+        if (reply.source == FROM_HELD) {
+            size_t start = arena->used;
+            if ((status = append_value(app, arena, reply)) != PURE_OK) STOPPED(status);
+            reply = (PureBytes){FROM_ARENA, 0, {0, 0}, start, reply.length};
+        }
+        app->reply = reply;
+        app->has_reply = true;
+        NEXT;
+    }
     case PURE_OP_REQUIRE: if (stack[--sp].num == 0) { kind = PURE_FAULT_LIMIT; FAILED; } NEXT;
     case PURE_OP_TEXT_CONST:
         stack[sp++].bytes = (PureBytes){FROM_CONSTANT, 0, {0, 0}, m->constant_offset[arg], m->constant_length[arg]};
@@ -3106,6 +3202,13 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
     case PURE_OP_TEXT_INPUT: stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, 0, app->payload.size}; NEXT;
     case PURE_OP_NUM_TEXT: {
         char digits[32];
+        if (arg > 2) { /* in a format */
+            char text[700];
+            size_t length;
+            if (!formatted(*top, arg, text, &length)) { kind = PURE_FAULT_LIMIT; FAILED; }
+            if ((status = keep_bytes(arena, text, length, &top->bytes)) != PURE_OK) STOPPED(status);
+            NEXT;
+        }
         size_t length = arg == 2 ? (size_t)snprintf(digits, sizeof(digits), "%" PRId64, top->i64)
                       : arg ? (size_t)snprintf(digits, sizeof(digits), "%s", top->num ? "true" : "false")
                             : pure_format_number(top->num, digits);
@@ -3495,6 +3598,35 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (top->num < 0 || top->num >= (double)pure_list_count(app->lists[arg])) { kind = PURE_FAULT_NOT_FOUND; FAILED; }
         top->bytes.owner = (uint16_t)arg;
         NEXT;
+    case PURE_OP_BYTES_SLICE: { /* from a up to before c, both whole and within */
+        Slot high = stack[--sp], low = stack[--sp];
+        PureBytes *v = &stack[sp - 1].bytes;
+        if (arg ? low.i64 < 0 || high.i64 < low.i64 || (uint64_t)high.i64 > v->length
+                : !(low.num >= 0 && high.num >= low.num && high.num <= (double)v->length) || low.num != floor(low.num) ||
+                      high.num != floor(high.num)) {
+            kind = PURE_FAULT_LIMIT;
+            FAILED;
+        }
+        uint64_t from = arg ? (uint64_t)low.i64 : (uint64_t)low.num, to = arg ? (uint64_t)high.i64 : (uint64_t)high.num;
+        v->offset += from;
+        v->length = to - from;
+        NEXT;
+    }
+    case PURE_OP_BYTE: {
+        if (top->i64 < 0 || top->i64 > 255) { kind = PURE_FAULT_LIMIT; FAILED; }
+        unsigned char byte = (unsigned char)top->i64;
+        if ((status = keep_bytes(arena, &byte, 1, &top->bytes)) != PURE_OK) STOPPED(status);
+        NEXT;
+    }
+    case PURE_OP_BYTES_LOAD:
+        stack[sp++].bytes = (PureBytes){FROM_HELD, (uint16_t)(arg & 0xFF), {0, 0}, 0, app->held[arg & 0xFF].size};
+        NEXT;
+    case PURE_OP_BYTES_STORE: {
+        int held = hold(app, arena, arg & 0xFF, stack[--sp].bytes, arg & PURE_HELD_APPEND);
+        if (held == 1) { kind = PURE_FAULT_MEMORY; FAILED; }
+        if (held) STOPPED(PURE_ALLOCATION);
+        NEXT;
+    }
     default: break;
     }
     double b = stack[--sp].num, a = stack[sp - 1].num, value;
@@ -3916,6 +4048,7 @@ void pure_app_stop(PureApp *app) {
         pure_snapshot_release(app->snapshot);
     }
     pure_retired_free(&app->retired);
+    for (unsigned i = 0; i < PURE_MODULE_HELD; ++i) free(app->held[i].data);
     pure_draft_close(app->stored_values);
     free(app->carried);
     pure_draft_close(app->stored_links);
@@ -4051,6 +4184,7 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
      * holds for it the default room, or the budget when that is larger. */
     app->grown = app->spent = 0;
     app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
+    for (unsigned i = 0; i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
     Mark mark;
     mark_event(app, &mark);
     memcpy(pending, app->values, sizeof(app->values));
@@ -4398,6 +4532,7 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
         if (!own_lists(app, m->view_lists[view])) return PURE_ALLOCATION;
         app->grown = app->spent = 0;
         app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
+        for (unsigned i = 0; i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
     }
     PureFault fault = app->fault;
     uint32_t fault_pc = app->fault_pc;

@@ -13,7 +13,8 @@
  * every N commands (and at the end), so N events share one commit.
  *   down NAME | up NAME | frame [N] | type NAME HEX|- | message NAME HEX|- | tick NAME | time MS | replace PATH | save | show
  *   budget N (the work an event may do) | memory N (what the states may hold) | work (the last event's work)
- * (type gives a text input its bytes, message a message input its payload, laid out as the module says.)
+ * (type gives a text input its bytes, message a message input its payload, laid out as the module says;
+ * message NAME @PATH gives it the bytes of the file at PATH, of any size.)
  * Text states and text views print as JSON strings; cursors as byte positions;
  * lists as arrays of objects; indices as positions; a table view as an array
  * with an object of its columns per row. A failed view or cell is null. */
@@ -173,10 +174,22 @@ int main(int argc, char **argv) {
             for (size_t i = 0; i < length && length * 2 == strlen(data); ++i)
                 text[i] = (unsigned char)(hex(data[2 * i]) << 4 | hex(data[2 * i + 1]));
             PureSpan given = {text, length};
-            if (input < 0) failure = "unknown input";
+            unsigned char *read = NULL; /* message NAME @PATH: the file's bytes */
+            if (data[0] == '@') {
+                FILE *file = fopen(data + 1, "rb");
+                long size = file && !fseek(file, 0, SEEK_END) ? ftell(file) : -1;
+                if (size >= 0 && !fseek(file, 0, SEEK_SET) && (read = malloc(size ? (size_t)size : 1)) &&
+                    fread(read, 1, (size_t)size, file) == (size_t)size)
+                    given = (PureSpan){read, (size_t)size};
+                else failure = "cannot read the file";
+                if (file) fclose(file);
+            }
+            if (failure) {
+            } else if (input < 0) failure = "unknown input";
             else if ((command[0] == 't' ? pure_app_text(&app, (uint32_t)input, given)
                                         : pure_app_message(&app, (uint32_t)input, NULL, -1, given)) != PURE_OK)
                 failure = "event failed";
+            free(read);
         } else if (!strcmp(command, "tick")) {
             int input = pure_module_input(app.module, argument);
             if (input < 0) failure = "unknown input";

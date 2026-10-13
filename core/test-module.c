@@ -6131,6 +6131,122 @@ static void bits_and_bytes(void) {
     printf("{\"bits_and_bytes\":{\"bits\":%zu,\"reads\":%zu,\"refused\":%zu}}\n", LEN(cases), LEN(reads), LEN(refused));
 }
 
+/* ---- Formats, slices and values held by name (docs/design/027, stage 2a) --
+ * NUM_TEXT writes a number, a bool or an i64 in a width, with zeros or
+ * spaces, in a base or with fixed digits; an integer's form fails as limit
+ * on a number that is not whole. BYTES_SLICE takes whole positions inside
+ * the value; BYTE makes one byte. BYTES_LOAD and BYTES_STORE keep bytes
+ * and texts by name for the event (a text's slots hold text alone): set,
+ * appended, set to a part of itself, counted in the room, empty at the next
+ * event; a reply of one is kept as it was. */
+enum { NTX = PURE_OP_NUM_TEXT, SLC = PURE_OP_BYTES_SLICE, BYT = PURE_OP_BYTE, HLD = PURE_OP_BYTES_LOAD, HST = PURE_OP_BYTES_STORE };
+#define FMT(type, width, zeros, form, digits) ((uint32_t)(type) | (uint32_t)(width) << PURE_FORMAT_WIDTH | \
+    ((zeros) ? (uint32_t)PURE_FORMAT_ZEROS : 0) | (uint32_t)(form) << PURE_FORMAT_FORM | (uint32_t)(digits) << PURE_FORMAT_DIGITS)
+
+static void formats_and_held(void) {
+    static const struct { int i64; double value; uint32_t format; PureFault fault; const char *text; } shown[] = {
+        {1, 255, FMT(2, 0, 0, PURE_FORMAT_HEX, 0), PURE_FAULT_NONE, "ff"},
+        {1, 255, FMT(2, 8, 1, PURE_FORMAT_HEX, 0), PURE_FAULT_NONE, "000000ff"},
+        {1, -255, FMT(2, 6, 1, PURE_FORMAT_HEX_UPPER, 0), PURE_FAULT_NONE, "-000FF"},
+        {1, -5, FMT(2, 4, 0, PURE_FORMAT_DECIMAL, 0), PURE_FAULT_NONE, "  -5"},
+        {1, 5, FMT(2, 0, 0, PURE_FORMAT_BINARY, 0), PURE_FAULT_NONE, "101"},
+        {1, 8, FMT(2, 0, 0, PURE_FORMAT_OCTAL, 0), PURE_FAULT_NONE, "10"},
+        {1, 0, FMT(2, 3, 1, PURE_FORMAT_PLAIN, 0), PURE_FAULT_NONE, "000"},
+        {0, 2.5, FMT(0, 0, 0, PURE_FORMAT_FIXED, 3), PURE_FAULT_NONE, "2.50"},
+        {0, 1.005, FMT(0, 0, 0, PURE_FORMAT_FIXED, 3), PURE_FAULT_NONE, "1.00"}, /* the binary value is below 1.005 */
+        {0, -0.0, FMT(0, 0, 0, PURE_FORMAT_FIXED, 2), PURE_FAULT_NONE, "0.0"},
+        {0, -1.25, FMT(0, 7, 1, PURE_FORMAT_FIXED, 2), PURE_FAULT_NONE, "-0001.2"},
+        {0, 3, FMT(0, 0, 0, PURE_FORMAT_FIXED, 0), PURE_FAULT_NONE, "3.000000"},
+        {0, 0.1, FMT(0, 6, 0, PURE_FORMAT_PLAIN, 0), PURE_FAULT_NONE, "   0.1"},
+        {0, 42, FMT(0, 0, 0, PURE_FORMAT_HEX, 0), PURE_FAULT_NONE, "2a"},
+        {0, 2.5, FMT(0, 0, 0, PURE_FORMAT_HEX, 0), PURE_FAULT_LIMIT, ""},
+        {0, 1, FMT(1, 6, 0, PURE_FORMAT_PLAIN, 0), PURE_FAULT_NONE, "  true"},
+    };
+    for (size_t k = 0; k < LEN(shown); ++k) {
+        O value = shown[k].i64 ? IC((int64_t)shown[k].value) : (O){C, shown[k].format & 3, shown[k].value};
+        O code[] = {value, {NTX, shown[k].format, 0}, {PURE_OP_TEXT_SET, 4, 0}};
+        Byted ran = run_bytes(code, LEN(code));
+        if (ran.fault != shown[k].fault || strcmp(ran.said, shown[k].text)) {
+            fprintf(stderr, "format %zu: fault %d, '%s'\n", k, (int)ran.fault, ran.said);
+            abort();
+        }
+    }
+    /* Slices of a constant's bytes ("Az\xc3\xa9") and of a text state's, by numbers or i64s; one byte. */
+    static const struct { uint32_t text_state, as_i64; double from, to; PureFault fault; const char *text; } slices[] = {
+        {0, 0, 0, 2, PURE_FAULT_NONE, "Az"}, {0, 1, 2, 4, PURE_FAULT_NONE, "\xc3\xa9"}, {1, 0, 1, 1, PURE_FAULT_NONE, ""},
+        {1, 1, 0, 4, PURE_FAULT_NONE, "Az\xc3\xa9"}, {0, 0, 2, 1, PURE_FAULT_LIMIT, ""}, {0, 0, 0, 5, PURE_FAULT_LIMIT, ""},
+        {0, 0, 0.5, 2, PURE_FAULT_LIMIT, ""}, {0, 1, -1, 2, PURE_FAULT_LIMIT, ""}, {0, 0, 2, 3, PURE_FAULT_ENCODING, ""},
+    };
+    for (size_t k = 0; k < LEN(slices); ++k) {
+        O from = slices[k].as_i64 ? IC((int64_t)slices[k].from) : (O){C, 0, slices[k].from};
+        O to = slices[k].as_i64 ? IC((int64_t)slices[k].to) : (O){C, 0, slices[k].to};
+        O code[] = {slices[k].text_state ? (O){TL, 1, 0} : (O){TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, from, to,
+                    {SLC, slices[k].as_i64, 0}, {PURE_OP_TEXT_FROM, 0, 0}, {PURE_OP_TEXT_SET, 4, 0}};
+        Byted ran = run_bytes(code, LEN(code));
+        CHECK(ran.fault == slices[k].fault && !strcmp(ran.said, slices[k].text));
+    }
+    O bytes_joined[] = {IC('O'), {BYT, 0, 0}, IC('k'), {BYT, 0, 0}, {CAT, 1, 0}, {PURE_OP_TEXT_FROM, 0, 0}, {PURE_OP_TEXT_SET, 4, 0}};
+    CHECK(!strcmp(run_bytes(bytes_joined, LEN(bytes_joined)).said, "Ok"));
+    O past[] = {IC(256), {BYT, 0, 0}, {PURE_OP_TEXT_FROM, 0, 0}, {PURE_OP_TEXT_SET, 4, 0}};
+    CHECK(run_bytes(past, LEN(past)).fault == PURE_FAULT_LIMIT);
+    /* Held: bytes slot 3 set to "Az", appended "Az\xc3\xa9", set to a part of itself, then shown; a text slot. */
+    O held[] = {{TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {C, 0, 0}, {C, 0, 2}, {SLC, 0, 0}, {HST, 3, 0},
+                {TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {HST, 3 | PURE_HELD_APPEND, 0},
+                {HLD, 3, 0}, {HLD, 3, 0}, {CAT, 1, 0}, {HST, 3, 0},                              /* "AzAz\xc3\xa9" twice */
+                {HLD, 3, 0}, {C, 0, 1}, {C, 0, 6}, {SLC, 0, 0}, {HST, 3 | PURE_HELD_APPEND, 0},   /* itself, appended */
+                {HLD, 3, 0}, {C, 0, 2}, {C, 0, 8}, {SLC, 0, 0}, {HST, 3, 0},                      /* a part of itself */
+                {HLD, 3, 0}, {PURE_OP_TEXT_FROM, 0, 0}, {HST, 20, 0}, {HLD, 20, 0}, {PURE_OP_TEXT_SET, 4, 0}};
+    Byted ran = run_bytes(held, LEN(held));
+    CHECK(ran.fault == PURE_FAULT_NONE && !strcmp(ran.said, "Az\xc3\xa9" "Az"));
+    /* Held values start empty each event; doubling past the room fails as memory and leaves nothing. */
+    static const S nums[] = {{"n", 0}};
+    static const T others[] = {{"note", 1, 0}, {"bytes", 3, 0}, {"i", PURE_STATE_I64, 0}, {"said", 1, 1}};
+    static const RF byte_fields[] = {{"v", 3, 0}};
+    static const R records[] = {{"Byte", byte_fields, 1}};
+    static const char *const constants[] = {"Az\xc3\xa9", ""};
+    static const I inputs[] = {KEY("go", "KeyG"), KEY("grow", "KeyH"), {"ask", NULL, PURE_KIND_MESSAGE, false, NULL, 0}};
+    static const O code[] = {
+        /* 0 go: held5 = held5 + bytes(note); said = text(held5) */
+        {HLD, 5, 0}, {TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {CAT, 1, 0}, {HST, 5, 0}, {HLD, 5, 0}, {PURE_OP_TEXT_FROM, 0, 0},
+        {PURE_OP_TEXT_SET, 4, 0},
+        /* 8 grow: held6 = bytes(note); for 40 rounds held6 = held6 + held6; said = "x" */
+        {TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {HST, 6, 0}, {C, 0, 0}, {C, 0, 40}, {PURE_OP_LOOP, 0 | 2u << 16, 0},
+        {HLD, 6, 0}, {HST, 6 | PURE_HELD_APPEND, 0}, {TK, 0, 0}, {PURE_OP_TEXT_SET, 4, 0},
+        /* 18 ask: held7 = bytes(note); reply held7; held7 = "" */
+        {TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {HST, 7, 0}, {HLD, 7, 0}, {PURE_OP_REPLY, 0, 0}, {TK, 1, 0},
+        {PURE_OP_BYTES_FROM, 0, 0}, {HST, 7, 0},
+    };
+    static const H handlers[] = {{1, 0, 8}, {3, 8, 10}, {5, 18, 8}};
+    Spec spec = {nums, 1, inputs, LEN(inputs), NULL, 0, handlers, LEN(handlers), code, LEN(code), NULL, 0, others, LEN(others),
+                 constants, LEN(constants), NULL, 0, records, 1, NULL, 0};
+    if (load(spec, &module_b) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(!strcmp(state_text(&app, 4), "Az\xc3\xa9")); /* held5 began empty again */
+    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY);
+    CHECK(!strcmp(state_text(&app, 4), "Az\xc3\xa9")); /* nothing changed */
+    CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){NULL, 0}) == PURE_OK);
+    Text replied = {{0}, 0};
+    CHECK(pure_app_reply(&app, text_span, &replied) == PURE_OK && !strcmp(replied.text, "Az\xc3\xa9"));
+    pure_app_stop(&app);
+    /* Refused: bytes into a text's slot, a slot past the last, a format that does not fit its type. */
+    const O refused[][3] = {
+        {{TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {HST, PURE_HELD_TEXT, 0}}, {{TK, 0, 0}, {HST, 3, 0}, {C, 0, 0}},
+        {{TK, 0, 0}, {HST, PURE_MODULE_HELD, 0}, {C, 0, 0}}, {{C, 1, 1}, {NTX, FMT(1, 0, 0, PURE_FORMAT_HEX, 0), 0}, {PURE_OP_TEXT_SET, 4, 0}},
+        {IC(1), {NTX, FMT(2, 0, 0, PURE_FORMAT_FIXED, 2), 0}, {PURE_OP_TEXT_SET, 4, 0}},
+        {IC(1), {NTX, FMT(2, 0, 0, PURE_FORMAT_HEX, 2), 0}, {PURE_OP_TEXT_SET, 4, 0}},
+        {{TK, 0, 0}, {TK, 0, 0}, {CAT, 1, 0}},
+    };
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        H one = {1, 0, 3};
+        Spec bad = {nums, 1, inputs, 1, NULL, 0, &one, 1, refused[k], 3, NULL, 0, others, LEN(others), constants,
+                    LEN(constants), NULL, 0, records, 1, NULL, 0};
+        if (load(bad, &module_b) == PURE_OK) { fprintf(stderr, "formats and held: refused %zu loaded\n", k); abort(); }
+    }
+    printf("{\"formats_and_held\":{\"formats\":%zu,\"slices\":%zu,\"refused\":%zu}}\n", LEN(shown), LEN(slices), LEN(refused));
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -6505,6 +6621,7 @@ int main(void) {
     bools();
     integers();
     bits_and_bytes();
+    formats_and_held();
     memory_budget();
     work_budget();
     fold_mutations();

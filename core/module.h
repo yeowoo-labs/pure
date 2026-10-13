@@ -44,6 +44,7 @@ typedef enum {
     PURE_OP_I64_COMPARE, PURE_OP_I64_MIN, PURE_OP_I64_MAX, PURE_OP_I64_FROM, PURE_OP_NUM_FROM,
     PURE_OP_LOOP, PURE_OP_BREAK,
     PURE_OP_I64_BITS, PURE_OP_BYTE_AT, PURE_OP_BYTES_OF, PURE_OP_INDEX_AT,
+    PURE_OP_BYTES_SLICE, PURE_OP_BYTE, PURE_OP_BYTES_LOAD, PURE_OP_BYTES_STORE,
     PURE_OP_COUNT
 } PureOpcode;
 /* A bool is its own type (docs/design/016-bool-and-i64.md), held as a
@@ -73,6 +74,25 @@ typedef enum {
  * a position (a number), failing as LIMIT if it is not a whole number and
  * as NOT_FOUND where there is no item. */
 typedef enum { PURE_BITS_AND, PURE_BITS_OR, PURE_BITS_XOR, PURE_BITS_LEFT, PURE_BITS_RIGHT } PureBits;
+/* 027's stage 2a. CONCAT with argument 1 joins two bytes values (0: two
+ * texts). BYTES_SLICE takes a bytes value and two positions a <= c (numbers,
+ * or i64s with argument 1) and gives its bytes from a up to before c, failing
+ * as LIMIT unless both are whole and within it. BYTE makes one byte of an
+ * i64 0-255 (else LIMIT). BYTES_LOAD and BYTES_STORE read and set one of an
+ * event's PURE_MODULE_HELD values held by name (a let), empty when the event
+ * or a view's body begins: the argument's bits 0-4 name it, a text below 16
+ * bytes and from 16 on a text (so a text one holds UTF-8 alone); STORE with
+ * bit 8 appends the value to what it holds. What they hold counts in the
+ * event's room (MEMORY past it).
+ * NUM_TEXT's argument: bits 0-1 the value's type (as CONST's), 8-15 a width
+ * the text is padded to on the left, bit 16 padding with zeros after a sign
+ * (else spaces), 17-19 the form (PureFormat), 20-24 one more than the digits
+ * after the point of FIXED. A form of an integer takes an i64 or a whole
+ * number (else LIMIT), in its base with a sign; FIXED takes a number. */
+enum { PURE_MODULE_HELD = 32, PURE_HELD_TEXT = 16, PURE_HELD_APPEND = 1 << 8 };
+typedef enum { PURE_FORMAT_PLAIN, PURE_FORMAT_DECIMAL, PURE_FORMAT_HEX, PURE_FORMAT_HEX_UPPER, PURE_FORMAT_BINARY,
+               PURE_FORMAT_OCTAL, PURE_FORMAT_FIXED } PureFormat;
+enum { PURE_FORMAT_WIDTH = 8, PURE_FORMAT_ZEROS = 1 << 16, PURE_FORMAT_FORM = 17, PURE_FORMAT_DIGITS = 20 };
 /* A local: one of an event's PURE_MODULE_LOCALS slots, 0 when the event
  * begins and never saved. LOCAL_LOAD and LOCAL_STORE name the slot (bits
  * 0-7), what it holds (bits 8-15: 0 a number, 1 an index, 2 a bool) and an index's
@@ -499,6 +519,8 @@ typedef struct {
     struct PureSnapshot *snapshot; /* the newest snapshot made, or NULL */
     PureRetired retired;           /* list items let go since it was made */
     bool reading;                  /* a reader: its states are a snapshot's */
+    /* The values an event or a view's body holds by name (BYTES_STORE): emptied as it begins. */
+    struct { unsigned char *data; size_t size, capacity; } held[PURE_MODULE_HELD];
 } PureApp;
 
 PureResult pure_app_start(PureApp *, const PureModule *, PureData data);
