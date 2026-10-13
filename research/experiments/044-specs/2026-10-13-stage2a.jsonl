@@ -1,0 +1,8 @@
+{"size":103781,"jit":"0","batch":"0","c_ns_per_byte":2.567,"pure_ns_per_byte":298.133,"ratio":116.1,"instructions":35226511,"instructions_per_byte":339.4}
+{"size":103781,"jit":"0","batch":"","c_ns_per_byte":2.567,"pure_ns_per_byte":298.362,"ratio":116.2,"instructions":35226511,"instructions_per_byte":339.4}
+{"size":103781,"jit":"all","batch":"","c_ns_per_byte":2.569,"pure_ns_per_byte":298.453,"ratio":116.2,"instructions":35226511,"instructions_per_byte":339.4}
+{"size":103781,"jit":"","batch":"","c_ns_per_byte":2.571,"pure_ns_per_byte":299.164,"ratio":116.4,"instructions":35226511,"instructions_per_byte":339.4}
+{"size":103781,"python_ns_per_byte":247.0}
+{"size":65536,"jit":"0","batch":"0","c_ns_per_byte":9.025,"pure_ns_per_byte":1437.304,"ratio":159.3,"instructions":16887501,"instructions_per_block":16476}
+{"size":65536,"jit":"","batch":"","c_ns_per_byte":9.051,"pure_ns_per_byte":1439.504,"ratio":159.0,"instructions":16887501,"instructions_per_block":16476}
+{"messages": 142, "right": {"batches": 142, "rounds": 142, "all": 142, "default": 142}, "aup_lines": 42, "aup_brace_lines": 5, "python_lines": 28}

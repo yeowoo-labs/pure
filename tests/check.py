@@ -1686,6 +1686,61 @@ on go {
 }
 """
 
+def module_specs(aup, pure, work):
+    """Specs written in aup (docs/research/140), checked by their own cases
+    on Pure's three paths, each path's output the same byte for byte: SHA-256
+    (aup's examples/sha256.aup) against hashlib on FIPS 180-2's examples and
+    messages of every length up to two blocks; whether bytes are JSON (its
+    examples/json.aup) on JSONTestSuite's parsing cases (tests/specs/json):
+    every y_ case taken, every n_ case refused (a refusal: valid false, or
+    the event failing as encoding on bytes that are not UTF-8)."""
+    import hashlib
+    import os
+    import random
+    import struct
+    runs = {}
+    program = work / 'sha256.pmod'
+    compile_module(aup, EDITOR.parent / 'sha256.aup', program)
+    chooser = random.Random(140)
+    messages = [b'abc', b'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq',
+                b'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu']
+    messages += [bytes(chooser.randrange(256) for _ in range(n)) for n in list(range(130)) + [1000, 4096]]
+    given = ''.join(f"message hash {m.hex() or '-'}\n" for m in messages)
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=120, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('sha256', name)
+    digests = [json.loads(line)['states']['digest'] for line in outputs['batches'].splitlines()]
+    assert digests == [hashlib.sha256(m).hexdigest() for m in messages], 'sha256'
+    runs['sha256'] = len(messages)
+    program = work / 'json.pmod'
+    compile_module(aup, EDITOR.parent / 'json.aup', program)
+    suite = pure / 'tests/specs/json'
+    cases = {name: (suite / name).read_bytes() for name in sorted(os.listdir(suite)) if name.endswith('.json')}
+    cases['n_structure_100000_opening_arrays.json'] = b'[' * 100000
+    cases['n_structure_open_array_object.json'] = b'[{"":' * 50000 + b'\n'
+    assert hashlib.sha256(cases['n_structure_100000_opening_arrays.json']).hexdigest().startswith('13f86ea1e7edd116')
+    assert hashlib.sha256(cases['n_structure_open_array_object.json']).hexdigest().startswith('48b232fcd18ce2f7')
+    for name, data in cases.items():
+        (work / name).write_bytes(data)
+    given = ''.join(f'message check @{work / name}\n' for name in cases)
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=300, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('json', name)
+    taken = {'y': 0, 'n': 0, 'i': 0}
+    for name, line in zip(cases, outputs['batches'].splitlines()):
+        state = json.loads(line)
+        accepted = state['fault'] == 'none' and state['states']['valid'] is True
+        assert accepted or state['fault'] in ('none', 'encoding'), (name, state['fault'])
+        assert accepted == (name[0] == 'y') or name[0] == 'i', (name, accepted)
+        taken[name[0]] += accepted
+    runs['json'] = {'cases': len(cases), 'taken': taken}
+    return runs
+
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -1841,24 +1896,6 @@ def module_assumptions(aup, pure, work):
         assert outputs[name] == outputs['batches'], ('view', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
     faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
     assert 'none' in faults and 'work' in faults, faults
-    # SHA-256 written in aup (its examples/sha256.aup, docs/design/027's stage 1: bytes by position, bit operations, lists
-    # of i64): FIPS 180-2's examples and messages of every length up to two blocks, against hashlib, on every path.
-    import hashlib
-    import random
-    program = work / 'sha256.pmod'
-    compile_module(aup, EDITOR.parent / 'sha256.aup', program)
-    chooser = random.Random(140)
-    messages = [b'abc', b'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq',
-                b'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu']
-    messages += [bytes(chooser.randrange(256) for _ in range(n)) for n in list(range(130)) + [1000, 4096]]
-    given = ''.join(f"message hash {m.hex() or '-'}\n" for m in messages)
-    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
-                                    timeout=120, env=dict(os.environ, **env)).stdout
-               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
-    for name in ('rounds', 'all'):
-        assert outputs[name] == outputs['batches'], ('sha256', name)
-    digests = [json.loads(line)['states']['digest'] for line in outputs['batches'].splitlines()]
-    assert digests == [hashlib.sha256(m).hexdigest() for m in messages], 'sha256'
     return len(runs)
 
 
@@ -6207,6 +6244,7 @@ def main():
         work = Path(directory)
         report['module_ranges'] = module_ranges(aup, pure, work)
         report['module_assumptions'] = module_assumptions(aup, pure, work)
+        report['module_specs'] = module_specs(aup, pure, work)
         report['module_tier'] = module_tier(aup, pure, work)
         report['server_parity_requests'] = sum(server_parity(aup, pure, work, range(args.seeds), threads=threads)
                                                for threads in (1, 3))
