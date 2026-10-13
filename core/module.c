@@ -31,10 +31,11 @@ enum { READ = IN_VIEW | IN_HANDLER };
  * collection, a constant, a unit, the column's row, a branch target, a stack
  * depth, a fold, a relation, a keyed list, an output, the row of the column
  * a fold runs in, a number, bool or i64 state (A_VALUE), or the value's type
- * (A_TYPE: 0 a number, 1 a bool, 2 an i64). */
+ * (A_TYPE: 0 a number, 1 a bool, 2 an i64), how I64_BITS computes (A_BITS) or
+ * what a position is (A_POSITION: 0 a number, 1 an i64). */
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
        A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL, A_VALUE, A_TYPE,
-       A_LOOP };
+       A_LOOP, A_BITS, A_POSITION };
 /* A fold's block is verified as a column that leaves one bool (count, first)
  * or a value and whether to include it (a bool): a number (FOLD_TWO) or an
  * i64 (FOLD_I64). A table's filter is verified as a column that leaves a
@@ -133,6 +134,10 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_I64_COMPARE] = {2, {T_I64, T_I64}, T_BOOL, READ, A_RELATION, O_ANY},
     [PURE_OP_I64_FROM] = {1, {T_NUM}, T_I64, READ, A_NONE, O_ANY},
     [PURE_OP_NUM_FROM] = {1, {T_I64}, T_NUM, READ, A_NONE, O_ANY},
+    [PURE_OP_I64_BITS] = {2, {T_I64, T_I64}, T_I64, READ, A_BITS, O_ANY},
+    [PURE_OP_BYTE_AT] = {2, {T_BYTES, T_NUM}, T_I64, READ, A_POSITION, O_ANY},
+    [PURE_OP_BYTES_OF] = {0, {0}, T_BYTES, READ, STATE(LIST), O_ANY},
+    [PURE_OP_INDEX_AT] = {1, {T_NUM}, T_INDEX, READ, STATE(LIST), O_ARG},
 };
 #undef NUMS
 #undef COMPARE
@@ -382,6 +387,8 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_VALUE: return state_of(m, arg, PURE_STATE_NUM) || state_of(m, arg, PURE_STATE_BOOL) || state_of(m, arg, PURE_STATE_I64);
     case A_LOOP: return (arg & 0xFF) < PURE_MODULE_LOCALS && !(arg & 0xFE00); /* a slot, and whether i64s */
     case A_TYPE: return arg <= 2;
+    case A_BITS: return arg <= PURE_BITS_RIGHT;
+    case A_POSITION: return arg <= 1;
     case A_RELATION: return arg <= PURE_NOT_EQUAL;
     case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
     case A_OUTPUT: return arg < m->inputs && m->input[arg].kind == PURE_KIND_OUTPUT;
@@ -496,6 +503,8 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (op->op == PURE_OP_BREAK && height) REFUSE("break with values on the stack");
         if (op->op == PURE_OP_ITEM_SET && m->state_key[list_of(arg)] == item_field(arg) + 1)
             REFUSE("change of a keyed list's key");
+        if (op->op == PURE_OP_BYTES_OF && (m->record[m->state_ref[arg]].count != 1 || field_type(m, arg, 0) != T_I64))
+            REFUSE("bytes of a list not of one i64");
         /* A view's body changes an event's lists alone: its states are a snapshot's. */
         if (body && (op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT || op->op == PURE_OP_LIST_REMOVE ||
                      op->op == PURE_OP_ITEM_SET) &&
@@ -562,6 +571,8 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             need[0] = state_type(m, arg);
         } else if (op->op == PURE_OP_NUM_TEXT && arg) {
             need[0] = arg == 1 ? T_BOOL : T_I64;
+        } else if (op->op == PURE_OP_BYTE_AT && arg) {
+            need[1] = T_I64; /* the position an i64 */
         } else if ((op->op == PURE_OP_EQ || op->op == PURE_OP_NE) && height >= 2 && types[height - 1] == T_BOOL &&
                    types[height - 2] == T_BOOL) {
             need[0] = need[1] = T_BOOL; /* two bools compare as two numbers do */
@@ -795,7 +806,7 @@ PURE_COLD static int read_list(const PureOp *op) {
     switch (op->op) {
     case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: return (int)list_of(op->arg);
     case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
-    case PURE_OP_ROW: case PURE_OP_OUTER_ROW: return (int)(op->arg & 0xFFFF);
+    case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_BYTES_OF: case PURE_OP_INDEX_AT: return (int)(op->arg & 0xFFFF);
     default: return -1;
     }
 }
@@ -1085,9 +1096,11 @@ PURE_COLD static unsigned arity(uint8_t op) {
     switch (op) {
     case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_INDEX_LOAD: case PURE_OP_ROW: case PURE_OP_OUTER_ROW:
     case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_FIELD: case PURE_OP_LOCAL_LOAD:
+    case PURE_OP_BYTES_OF:
         return 0;
     case PURE_OP_ITEM_GET: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: case PURE_OP_NEG: case PURE_OP_NOT:
     case PURE_OP_FLOOR: case PURE_OP_INDEX_NUM: case PURE_OP_I64_NEG: case PURE_OP_I64_FROM: case PURE_OP_NUM_FROM:
+    case PURE_OP_INDEX_AT:
         return 1;
     case PURE_OP_CLAMP: return 3;
     default: return 2;
@@ -1099,7 +1112,7 @@ PURE_COLD static int list_read(const PureOp *op) {
     switch (op->op) {
     case PURE_OP_ITEM_GET: return (int)list_of(op->arg);
     case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_LIST_FIND:
-    case PURE_OP_LIST_HAS: case PURE_OP_ROW:
+    case PURE_OP_LIST_HAS: case PURE_OP_ROW: case PURE_OP_BYTES_OF: case PURE_OP_INDEX_AT:
         return (int)op->arg;
     default: return -1;
     }
@@ -2082,6 +2095,14 @@ static void move_indices(const PureModule *m, PureValue *values, uint32_t list, 
 }
 
 
+
+/* x / 2^n rounded down, whatever the sign (027's RIGHT). */
+static inline int64_t floor_shift(int64_t x, unsigned n) { return x >= 0 ? x >> n : ~(~x >> n); }
+
+static bool take_byte(void *context, PureSpan span) {
+    if (span.size) *(unsigned char *)context = span.data[0];
+    return true;
+}
 
 /* Append bytes to the arena as a value of it. */
 static PureResult keep_bytes(PureArena *arena, const void *bytes, size_t length, PureBytes *out) {
@@ -3428,6 +3449,52 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         top->i64 = cell.i64;
         NEXT;
     }
+    case PURE_OP_I64_BITS: { /* on integers in two's complement without end (027) */
+        int64_t b = stack[--sp].i64, a = stack[sp - 1].i64, r;
+        if (arg == PURE_BITS_AND) r = a & b;
+        else if (arg == PURE_BITS_OR) r = a | b;
+        else if (arg == PURE_BITS_XOR) r = a ^ b;
+        else {
+            if (b < 0 || b > 63) { kind = PURE_FAULT_LIMIT; FAILED; }
+            if (arg == PURE_BITS_RIGHT) r = floor_shift(a, (unsigned)b);
+            else if (floor_shift(r = (int64_t)((uint64_t)a << b), (unsigned)b) != a) { kind = PURE_FAULT_OVERFLOW; FAILED; }
+        }
+        stack[sp - 1].i64 = r;
+        NEXT;
+    }
+    case PURE_OP_BYTE_AT: { /* the byte at a whole position inside the value */
+        Slot at = stack[--sp];
+        PureBytes v = stack[sp - 1].bytes;
+        if (arg ? at.i64 < 0 || (uint64_t)at.i64 >= v.length
+                : !(at.num >= 0 && at.num < (double)v.length) || at.num != floor(at.num)) {
+            kind = PURE_FAULT_LIMIT;
+            FAILED;
+        }
+        unsigned char byte = 0;
+        v.offset += arg ? (uint64_t)at.i64 : (uint64_t)at.num;
+        v.length = 1;
+        if ((status = visit_value(app, arena, v, take_byte, &byte)) != PURE_OK) STOPPED(status);
+        stack[sp - 1].i64 = byte;
+        NEXT;
+    }
+    case PURE_OP_BYTES_OF: { /* a list of one i64, an item a byte */
+        const PureList *list = app->lists[arg];
+        size_t count = pure_list_count(list);
+        if (!reserve(arena, count)) STOPPED(PURE_ALLOCATION);
+        for (size_t i = 0; i < count; ++i) {
+            int64_t byte = pure_list_get(list, i, 0).i64;
+            if (byte < 0 || byte > 255) { kind = PURE_FAULT_LIMIT; FAILED; }
+            arena->bytes[arena->used + i] = (unsigned char)byte;
+        }
+        stack[sp++].bytes = (PureBytes){FROM_ARENA, 0, {0, 0}, arena->used, count};
+        arena->used += count;
+        NEXT;
+    }
+    case PURE_OP_INDEX_AT: /* the item at a whole position */
+        if (top->num != floor(top->num)) { kind = PURE_FAULT_LIMIT; FAILED; }
+        if (top->num < 0 || top->num >= (double)pure_list_count(app->lists[arg])) { kind = PURE_FAULT_NOT_FOUND; FAILED; }
+        top->bytes.owner = (uint16_t)arg;
+        NEXT;
     default: break;
     }
     double b = stack[--sp].num, a = stack[sp - 1].num, value;

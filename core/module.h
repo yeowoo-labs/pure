@@ -43,6 +43,7 @@ typedef enum {
     PURE_OP_I64_ADD, PURE_OP_I64_SUB, PURE_OP_I64_MUL, PURE_OP_I64_DIV, PURE_OP_I64_MOD, PURE_OP_I64_NEG,
     PURE_OP_I64_COMPARE, PURE_OP_I64_MIN, PURE_OP_I64_MAX, PURE_OP_I64_FROM, PURE_OP_NUM_FROM,
     PURE_OP_LOOP, PURE_OP_BREAK,
+    PURE_OP_I64_BITS, PURE_OP_BYTE_AT, PURE_OP_BYTES_OF, PURE_OP_INDEX_AT,
     PURE_OP_COUNT
 } PureOpcode;
 /* A bool is its own type (docs/design/016-bool-and-i64.md), held as a
@@ -59,7 +60,19 @@ typedef enum {
  * DIVIDE by zero; COMPARE takes a relation as TEXT_COMPARE does and gives a
  * bool), I64_FROM makes one of a whole number in range and NUM_FROM a
  * number of one within 2^53 (else LIMIT). LOAD, STORE, the item and local
- * opcodes, FIELD and SEND move them as they move numbers. */
+ * opcodes, FIELD and SEND move them as they move numbers.
+ * I64_BITS computes on two i64s as on integers in two's complement without
+ * end (docs/design/027): its argument says how (PureBits). AND, OR and XOR
+ * work bit by bit; LEFT is a * 2^b, failing as OVERFLOW past the range;
+ * RIGHT is floor(a / 2^b); a shift by b outside 0-63 fails as LIMIT.
+ * BYTE_AT gives the byte of a bytes value at a position (argument 0: a
+ * number, 1: an i64) as an i64 0-255, failing as LIMIT where there is none
+ * (not a whole number, or outside the value). BYTES_OF makes the bytes of a
+ * list state whose record is one i64 field, an item a byte (a value outside
+ * 0-255 fails as LIMIT). INDEX_AT makes the index of a list state's item at
+ * a position (a number), failing as LIMIT if it is not a whole number and
+ * as NOT_FOUND where there is no item. */
+typedef enum { PURE_BITS_AND, PURE_BITS_OR, PURE_BITS_XOR, PURE_BITS_LEFT, PURE_BITS_RIGHT } PureBits;
 /* A local: one of an event's PURE_MODULE_LOCALS slots, 0 when the event
  * begins and never saved. LOCAL_LOAD and LOCAL_STORE name the slot (bits
  * 0-7), what it holds (bits 8-15: 0 a number, 1 an index, 2 a bool) and an index's

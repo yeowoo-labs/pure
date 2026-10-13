@@ -6013,6 +6013,124 @@ static void integers(void) {
            pure_save_test_checkpoints - checkpoints);
 }
 
+/* ---- Bits and bytes (docs/design/027, stage 1) ---------------------------
+ * I64_BITS works on integers in two's complement without end: a left shift
+ * past the range fails as overflow, a right shift rounds down, a shift
+ * outside 0-63 fails as limit. BYTE_AT reads the byte at a whole position
+ * of any bytes value (here a constant's and a text state's), BYTES_OF makes
+ * the bytes of a list of one i64, INDEX_AT finds a list's item by position,
+ * failing where there is none. */
+enum { BITS = PURE_OP_I64_BITS, BAT = PURE_OP_BYTE_AT, BOF = PURE_OP_BYTES_OF, XAT = PURE_OP_INDEX_AT };
+
+/* Code run as a key's handler over n (a number), note (text "Az\xc3\xa9"),
+ * bytes (a list of Byte { v: i64 }), i (an i64) and said (text): the fault,
+ * and n, i, said and the list's count after it. */
+typedef struct { PureFault fault; double n; int64_t i; char said[64]; size_t count; } Byted;
+static Byted run_bytes(const O *code, uint32_t count) {
+    static const S nums[] = {{"n", 0}};
+    static const T others[] = {{"note", 1, 0}, {"bytes", 3, 0}, {"i", PURE_STATE_I64, 0}, {"said", 1, 1}};
+    static const RF byte_fields[] = {{"v", 3, 0}};
+    static const R records[] = {{"Byte", byte_fields, 1}};
+    static const char *const constants[] = {"Az\xc3\xa9", ""};
+    static const I inputs[] = {KEY("go", "KeyG")};
+    H handler = {1, 0, count};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, code, count, NULL, 0, others, LEN(others), constants,
+                 LEN(constants), NULL, 0, records, 1, NULL, 0};
+    if (load(spec, &module_b) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
+    Byted ran = {pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK ? PURE_FAULT_NONE : app.fault, app.values[0].num,
+                 app.values[3].i64, {0}, pure_list_count(app.lists[2])};
+    snprintf(ran.said, sizeof(ran.said), "%s", state_text(&app, 4));
+    pure_app_stop(&app);
+    return ran;
+}
+
+static void bits_and_bytes(void) {
+    enum { AND = PURE_BITS_AND, OR = PURE_BITS_OR, XOR = PURE_BITS_XOR, LEFT = PURE_BITS_LEFT, RIGHT = PURE_BITS_RIGHT };
+    static const struct { uint32_t how; int64_t a, b; PureFault fault; int64_t result; } cases[] = {
+        {AND, 0xF0F0, 0x0FF0, PURE_FAULT_NONE, 0x00F0}, {AND, -1, 5, PURE_FAULT_NONE, 5},
+        {AND, INT64_MIN, -1, PURE_FAULT_NONE, INT64_MIN}, {AND, -8, 0xFF, PURE_FAULT_NONE, 0xF8},
+        {OR, 0xF000, 0x000F, PURE_FAULT_NONE, 0xF00F}, {OR, -8, 3, PURE_FAULT_NONE, -5},
+        {XOR, 5, -1, PURE_FAULT_NONE, -6}, {XOR, 0x55, 0xFF, PURE_FAULT_NONE, 0xAA}, {XOR, INT64_MAX, -1, PURE_FAULT_NONE, INT64_MIN},
+        {LEFT, 1, 62, PURE_FAULT_NONE, INT64_C(1) << 62}, {LEFT, 1, 63, PURE_FAULT_OVERFLOW, 0},
+        {LEFT, -1, 63, PURE_FAULT_NONE, INT64_MIN}, {LEFT, 3, 62, PURE_FAULT_OVERFLOW, 0}, {LEFT, 0, 63, PURE_FAULT_NONE, 0},
+        {LEFT, 0x80000000, 32, PURE_FAULT_OVERFLOW, 0}, {LEFT, 0xFFFFFFFF, 7, PURE_FAULT_NONE, INT64_C(0x7FFFFFFF80)},
+        {LEFT, -3, 2, PURE_FAULT_NONE, -12}, {LEFT, 5, -1, PURE_FAULT_LIMIT, 0}, {LEFT, 5, 64, PURE_FAULT_LIMIT, 0},
+        {RIGHT, 7, 1, PURE_FAULT_NONE, 3}, {RIGHT, -7, 1, PURE_FAULT_NONE, -4}, {RIGHT, INT64_MIN, 63, PURE_FAULT_NONE, -1},
+        {RIGHT, -1, 63, PURE_FAULT_NONE, -1}, {RIGHT, 1, 63, PURE_FAULT_NONE, 0}, {RIGHT, INT64_MAX, 0, PURE_FAULT_NONE, INT64_MAX},
+        {RIGHT, 5, 64, PURE_FAULT_LIMIT, 0}, {RIGHT, 5, -64, PURE_FAULT_LIMIT, 0},
+    };
+    for (size_t k = 0; k < LEN(cases); ++k) {
+        O code[] = {IC(cases[k].a), IC(cases[k].b), {BITS, cases[k].how, 0}, {ST, 1, 0}};
+        Ran ran = run_code(code, LEN(code));
+        if (ran.fault != cases[k].fault || ran.values[1].i64 != (cases[k].fault ? 0 : cases[k].result)) {
+            fprintf(stderr, "bits case %zu: fault %d, %" PRId64 "\n", k, (int)ran.fault, ran.values[1].i64);
+            abort();
+        }
+    }
+    /* A byte at a position: of a constant's bytes, of a text state's, by a number or an i64. */
+    static const struct { uint32_t text_state; uint32_t as_i64; double at; PureFault fault; int64_t byte; } reads[] = {
+        {0, 0, 0, PURE_FAULT_NONE, 'A'}, {0, 0, 3, PURE_FAULT_NONE, 0xA9}, {0, 1, 2, PURE_FAULT_NONE, 0xC3},
+        {0, 0, 4, PURE_FAULT_LIMIT, 0}, {0, 0, -1, PURE_FAULT_LIMIT, 0}, {0, 0, 1.5, PURE_FAULT_LIMIT, 0},
+        {0, 1, 4, PURE_FAULT_LIMIT, 0}, {0, 1, -1, PURE_FAULT_LIMIT, 0}, {1, 0, 1, PURE_FAULT_NONE, 'z'},
+        {1, 1, 3, PURE_FAULT_NONE, 0xA9}, {1, 0, 4, PURE_FAULT_LIMIT, 0},
+    };
+    for (size_t k = 0; k < LEN(reads); ++k) {
+        O position = reads[k].as_i64 ? IC((int64_t)reads[k].at) : (O){C, 0, reads[k].at};
+        O code[] = {reads[k].text_state ? (O){TL, 1, 0} : (O){TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, position,
+                    {BAT, reads[k].as_i64, 0}, {ST, 3, 0}};
+        Byted ran = run_bytes(code, LEN(code));
+        if (ran.fault != reads[k].fault || ran.i != reads[k].byte) {
+            fprintf(stderr, "byte read %zu: fault %d, %" PRId64 "\n", k, (int)ran.fault, ran.i);
+            abort();
+        }
+    }
+    /* Bytes of a list of one i64: said = text(bytes(list)); a value past a byte fails and leaves nothing. */
+    O made[] = {IC('H'), {LA, 2, 0}, IC('i'), {LA, 2, 0}, {BOF, 2, 0}, {PURE_OP_TEXT_FROM, 0, 0}, {PURE_OP_TEXT_SET, 4, 0}};
+    Byted ran = run_bytes(made, LEN(made));
+    CHECK(ran.fault == PURE_FAULT_NONE && !strcmp(ran.said, "Hi") && ran.count == 2);
+    O none[] = {{BOF, 2, 0}, {PURE_OP_TEXT_FROM, 0, 0}, {PURE_OP_TEXT_SET, 4, 0}};
+    ran = run_bytes(none, LEN(none));
+    CHECK(ran.fault == PURE_FAULT_NONE && !strcmp(ran.said, "") && ran.count == 0);
+    O past[] = {IC('H'), {LA, 2, 0}, IC(256), {LA, 2, 0}, {BOF, 2, 0}, {PURE_OP_TEXT_FROM, 0, 0}, {PURE_OP_TEXT_SET, 4, 0}};
+    ran = run_bytes(past, LEN(past));
+    CHECK(ran.fault == PURE_FAULT_LIMIT && !strcmp(ran.said, "") && ran.count == 0);
+    O negative[] = {IC(-1), {LA, 2, 0}, {BOF, 2, 0}, {PURE_OP_TEXT_FROM, 0, 0}, {PURE_OP_TEXT_SET, 4, 0}};
+    CHECK(run_bytes(negative, LEN(negative)).fault == PURE_FAULT_LIMIT);
+    /* An item by position: i = bytes[at].v, where there is one. */
+    static const struct { double at; PureFault fault; int64_t v; } items[] = {
+        {0, PURE_FAULT_NONE, 7}, {1, PURE_FAULT_NONE, 9}, {2, PURE_FAULT_NOT_FOUND, 0}, {-1, PURE_FAULT_NOT_FOUND, 0},
+        {0.5, PURE_FAULT_LIMIT, 0}};
+    for (size_t k = 0; k < LEN(items); ++k) {
+        O code[] = {IC(7), {LA, 2, 0}, IC(9), {LA, 2, 0}, {C, 0, items[k].at}, {XAT, 2, 0}, {IG, ITEM(2, 0), 0}, {ST, 3, 0}};
+        Byted at = run_bytes(code, LEN(code));
+        CHECK(at.fault == items[k].fault && at.i == items[k].v && at.count == (items[k].fault ? 0 : 2));
+    }
+    /* Refused: bits of numbers or of no such kind, a byte of a text, by a position of the other type or of no such kind,
+     * bytes of a number state, an item by an i64's position. */
+    const O refused[][4] = {
+        {{C, 0, 1}, {C, 0, 2}, {BITS, AND, 0}, {ST, 0, 0}}, {IC(1), IC(2), {BITS, RIGHT + 1, 0}, {ST, 3, 0}},
+        {{TK, 0, 0}, {C, 0, 0}, {BAT, 0, 0}, {ST, 3, 0}}, {{TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, IC(0), {BAT, 0, 0}},
+        {{TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {C, 0, 0}, {BAT, 2, 0}}, {{BOF, 0, 0}, {PURE_OP_TEXT_FROM, 0, 0}, {PURE_OP_TEXT_SET, 4, 0}},
+        {IC(0), {XAT, 2, 0}, {IG, ITEM(2, 0), 0}, {ST, 3, 0}},
+    };
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        static const S nums[] = {{"n", 0}};
+        static const T others[] = {{"note", 1, 0}, {"bytes", 3, 0}, {"i", PURE_STATE_I64, 0}, {"said", 1, 1}};
+        static const RF byte_fields[] = {{"v", 3, 0}};
+        static const R records[] = {{"Byte", byte_fields, 1}};
+        static const char *const constants[] = {"Az\xc3\xa9", ""};
+        static const I inputs[] = {KEY("go", "KeyG")};
+        uint32_t length = k == 5 ? 3 : 4;
+        H handler = {1, 0, length};
+        Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, refused[k], length, NULL, 0, others, LEN(others), constants,
+                     LEN(constants), NULL, 0, records, 1, NULL, 0};
+        if (load(spec, &module_b) == PURE_OK) { fprintf(stderr, "bits and bytes: refused %zu loaded\n", k); abort(); }
+    }
+    printf("{\"bits_and_bytes\":{\"bits\":%zu,\"reads\":%zu,\"refused\":%zu}}\n", LEN(cases), LEN(reads), LEN(refused));
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -6386,6 +6504,7 @@ int main(void) {
     output_meaning();
     bools();
     integers();
+    bits_and_bytes();
     memory_budget();
     work_budget();
     fold_mutations();
