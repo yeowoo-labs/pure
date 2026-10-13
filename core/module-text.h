@@ -24,6 +24,10 @@ size_t pure_utf8_newlines(PureSpan span);
  * exponent. -0 prints as 0. Returns the length written (at most 32). */
 size_t pure_format_number(double value, char out[32]);
 
+/* A number written as JSON writes one, -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?, as the nearest double (ties to
+ * even): false where the text is not one or its value is not finite (027's NUM_PARSE). */
+bool pure_parse_number(const unsigned char *text, size_t size, double *value);
+
 /* Positions in one version of a text draft (size is version.bytes). */
 size_t pure_text_step(const PureDraft *, PureVersion, size_t position, double count);
 size_t pure_text_line_step(const PureDraft *, PureVersion, size_t position, double count);

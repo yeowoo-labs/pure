@@ -180,7 +180,7 @@ static size_t build(unsigned char *out, Spec spec) {
             p = put32(p, offset[++n]);
             p = put32(p, field->text);
             if (field->text == 1) { p = put32(p, (uint32_t)field->initial); p = put32(p, 0); }
-            else if (field->text == 3) {
+            else if (field->text == 3 || field->text == 4) { /* an i64's default, a list's record */
                 int64_t initial = (int64_t)field->initial;
                 p = put32(p, (uint32_t)(uint64_t)initial);
                 p = put32(p, (uint32_t)((uint64_t)initial >> 32));
@@ -345,7 +345,7 @@ static void rejections(void) {
     static const O nan_const[] = {{C, 0, NAN}, {ST, 0, 0}};
     static const O noncanon[] = {{C, 0, 1}, {NEG, 1, 0}, {ST, 0, 0}};
     static const O unreachable[] = {{JMP, 2, 0}, {C, 0, 1}, {C, 0, 1}, {ST, 0, 0}};
-    static const O bad_op[] = {{99, 0, 0}, {ST, 0, 0}};
+    static const O bad_op[] = {{PURE_OP_COUNT, 0, 0}, {ST, 0, 0}}; /* past the last opcode */
     static const H h_all[] = {{0, 0, 1}};
     static const H h_two[] = {{0, 0, 2}};
     static const H h_five[] = {{0, 0, 5}};
@@ -6247,6 +6247,77 @@ static void formats_and_held(void) {
     printf("{\"formats_and_held\":{\"formats\":%zu,\"slices\":%zu,\"refused\":%zu}}\n", LEN(shown), LEN(slices), LEN(refused));
 }
 
+/* ---- Lists in records (docs/design/027, stage 2b) ------------------------
+ * A Node's kids are a list of Leaf. A list made a value (LIST_VALUE) is a
+ * copy; a value stored in a second cell shares the list, and an append into
+ * either (APPEND_IN) makes that cell's own first; a register (LIST_BIND)
+ * reads the list as it was bound, appends after it go to a copy. */
+enum { LV = PURE_OP_LIST_VALUE, BIND = PURE_OP_LIST_BIND, AIN = PURE_OP_APPEND_IN };
+#define NEXT_DIGIT(list) {L, 0, 0}, {C, 0, 10}, {MUL, 0, 0}, {LC, list, 0}, {ADD, 0, 0}, {ST, 0, 0}
+
+static void lists_in_records(void) {
+    static const S nums[] = {{"n", 0}};
+    static const RF leaf_fields[] = {{"v", 3, 0}};
+    static const RF node_fields[] = {{"name", 3, 0}, {"kids", 4, 0}}; /* kids: a list of record 0, Leaf */
+    static const R records[] = {{"Leaf", leaf_fields, 1}, {"Node", node_fields, 2}};
+    static const T others[] = {{"let.nodes", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}, {"let.leaves", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0},
+                               {"let.view", 3 | (uint32_t)(PURE_LIST_ROWS | PURE_LIST_BOUND) << 8, 0}, {"i", PURE_STATE_I64, 0}};
+    static const I inputs[] = {KEY("go", "KeyG")};
+    const O code[] = {
+        {C, 0, 0}, {ST, 0, 0},                                                  /* 0 n = 0 */
+        IC(7), {LA, 2, 0}, IC(9), {LA, 2, 0},                                   /* 2 leaves = [7, 9] */
+        IC(1), {LV, 2, 0}, {LA, 1, 0},                                          /* 6 nodes.append(Node { 1, leaves }) */
+        IC(11), {LA, 2, 0},                                                     /* 9 leaves.append(11): kids keep 2 */
+        {XF, 1, 0}, IC(5), {AIN, ITEM(1, 1), 0},                                /* 11 nodes[0].kids += 5 */
+        IC(2), {XF, 1, 0}, {IG, ITEM(1, 1), 0}, {LA, 1, 0},                     /* 14 nodes.append(Node { 2, nodes[0].kids }) */
+        {C, 0, 1}, {XAT, 1, 0}, IC(6), {AIN, ITEM(1, 1), 0},                    /* 18 nodes[1].kids += 6: its own first */
+        {XF, 1, 0}, {IG, ITEM(1, 1), 0}, {BIND, 3, 0},                          /* 22 view = nodes[0].kids (3) */
+        NEXT_DIGIT(3),                                                          /* 25 */
+        {XF, 1, 0}, IC(8), {AIN, ITEM(1, 1), 0},                                /* 31 nodes[0].kids += 8: bound, so a copy */
+        NEXT_DIGIT(3),                                                          /* 34 the view still 3 */
+        {XF, 1, 0}, {IG, ITEM(1, 1), 0}, {BIND, 3, 0}, NEXT_DIGIT(3),           /* 40 nodes[0].kids now 4 */
+        {C, 0, 1}, {XAT, 1, 0}, {IG, ITEM(1, 1), 0}, {BIND, 3, 0}, NEXT_DIGIT(3), /* 49 nodes[1].kids: 7 9 5 6 */
+        {FOLD, FOLDING(PURE_FOLD_SUM | PURE_FOLD_INTEGER, 3, 3), 0}, {ROW, 3, 0}, {IG, ITEM(3, 0), 0}, {C, 1, 1}, {ST, 4, 0},
+        NEXT_DIGIT(2),                                                          /* 64 leaves: 3 */
+    };
+    H handler = {1, 0, LEN(code)};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, code, LEN(code), NULL, 0, others, LEN(others), NULL, 0, NULL, 0,
+                 records, 2, NULL, 0};
+    if (load(spec, &module_b) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
+    for (int round = 0; round < 3; ++round) { /* each event begins with its lists and theirs empty */
+        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+        if (app.values[0].num != 33443 || app.values[4].i64 != 27) {
+            fprintf(stderr, "lists in records: n %g, i %" PRId64 "\n", app.values[0].num, app.values[4].i64);
+            abort();
+        }
+        CHECK(pure_list_count(app.lists[1]) == 0 && app.lists[3] && pure_list_count(app.lists[3]) == 0);
+    }
+    pure_app_stop(&app);
+    /* Refused: a change of a register, a bind to a list not bound, an append into a field not a list, a list of another
+     * record; a stored list of records holding lists. */
+    const O refused[][4] = {
+        {IC(1), {LA, 3, 0}, {C, 0, 0}, {ST, 0, 0}},
+        {{XF, 1, 0}, {IG, ITEM(1, 1), 0}, {BIND, 2, 0}, {C, 0, 0}},
+        {{XF, 1, 0}, IC(1), {AIN, ITEM(1, 0), 0}, {C, 0, 0}},
+        {IC(1), {LV, 1, 0}, {LA, 1, 0}, {C, 0, 0}},
+        {{LV, 4, 0}, {C, 0, 0}, {C, 0, 0}, {C, 0, 0}},
+    };
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        H one = {1, 0, 3};
+        Spec bad = {nums, 1, inputs, 1, NULL, 0, &one, 1, refused[k], 3, NULL, 0, others, LEN(others), NULL, 0, NULL, 0,
+                    records, 2, NULL, 0};
+        if (load(bad, &module_b) == PURE_OK) { fprintf(stderr, "lists in records: refused %zu loaded\n", k); abort(); }
+    }
+    static const T stored[] = {{"nodes", 3, 1}};
+    static const O nothing[] = {{C, 0, 0}, {ST, 0, 0}};
+    H two = {1, 0, 2};
+    Spec kept = {nums, 1, inputs, 1, NULL, 0, &two, 1, nothing, 2, NULL, 0, stored, 1, NULL, 0, NULL, 0, records, 2, NULL, 0};
+    CHECK(load(kept, &module_b) != PURE_OK);
+    printf("{\"lists_in_records\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(refused) + 1);
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -6622,6 +6693,7 @@ int main(void) {
     integers();
     bits_and_bytes();
     formats_and_held();
+    lists_in_records();
     memory_budget();
     work_budget();
     fold_mutations();

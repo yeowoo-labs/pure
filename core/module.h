@@ -45,6 +45,7 @@ typedef enum {
     PURE_OP_LOOP, PURE_OP_BREAK,
     PURE_OP_I64_BITS, PURE_OP_BYTE_AT, PURE_OP_BYTES_OF, PURE_OP_INDEX_AT,
     PURE_OP_BYTES_SLICE, PURE_OP_BYTE, PURE_OP_BYTES_LOAD, PURE_OP_BYTES_STORE,
+    PURE_OP_LIST_VALUE, PURE_OP_LIST_BIND, PURE_OP_APPEND_IN, PURE_OP_NUM_PARSE,
     PURE_OP_COUNT
 } PureOpcode;
 /* A bool is its own type (docs/design/016-bool-and-i64.md), held as a
@@ -90,6 +91,22 @@ typedef enum { PURE_BITS_AND, PURE_BITS_OR, PURE_BITS_XOR, PURE_BITS_LEFT, PURE_
  * after the point of FIXED. A form of an integer takes an i64 or a whole
  * number (else LIMIT), in its base with a sign; FIXED takes a number. */
 enum { PURE_MODULE_HELD = 32, PURE_HELD_TEXT = 16, PURE_HELD_APPEND = 1 << 8 };
+/* 027's stage 2b: lists in records. A record field of type LIST holds a list
+ * of the record its default names (an event's alone: an event's lists, and
+ * the lists in their items, are the only ones that may hold one). The value
+ * is the list's number among the event's lists made so (0: an empty one),
+ * an i64 in its cell, so moves and reads (ITEM_GET) are an integer's; such
+ * lists go as the event or a view's body ends. A list is a value: storing
+ * one in a second cell shares it, and a list shared or bound is copied
+ * before it changes (so no other value sees the change).
+ * LIST_VALUE pushes the value of an event's list state (the argument): a
+ * copy of its items. LIST_BIND gives the bound list state (a register: an
+ * event's list flagged PURE_LIST_BOUND, read and walked, never changed by
+ * code) the list on the stack. APPEND_IN appends an item (its fields on the
+ * stack after an index) to the list in field (bits 16-31) of the item the
+ * index names in list (bits 0-15), an event's list. NUM_PARSE reads a text
+ * written as a JSON number as the nearest number (failing as LIMIT on any
+ * other text, or a value past the finite ones). */
 typedef enum { PURE_FORMAT_PLAIN, PURE_FORMAT_DECIMAL, PURE_FORMAT_HEX, PURE_FORMAT_HEX_UPPER, PURE_FORMAT_BINARY,
                PURE_FORMAT_OCTAL, PURE_FORMAT_FIXED } PureFormat;
 enum { PURE_FORMAT_WIDTH = 8, PURE_FORMAT_ZEROS = 1 << 16, PURE_FORMAT_FORM = 17, PURE_FORMAT_DIGITS = 20 };
@@ -187,7 +204,7 @@ static inline uint8_t pure_value_kind(uint8_t state_type) {
            state_type == PURE_STATE_I64 ? PURE_CELL_INTEGER : 0xFF;
 }
 /* A record field: a number, a text (its default a constant), a bool or an i64. */
-typedef enum { PURE_RECORD_NUMBER = 0, PURE_RECORD_TEXT = 1, PURE_RECORD_BOOL = 2, PURE_RECORD_I64 = 3 } PureRecordType;
+typedef enum { PURE_RECORD_NUMBER = 0, PURE_RECORD_TEXT = 1, PURE_RECORD_BOOL = 2, PURE_RECORD_I64 = 3, PURE_RECORD_LIST = 4 } PureRecordType;
 /* A value's 8 bytes: a number (a bool's 0 or 1, a cursor's or an index's
  * position too), or an integer. What a value is its state's or field's type
  * says, and the verifier keeps to it: moves copy the bytes, and only what
@@ -199,7 +216,7 @@ typedef union { double num; int64_t i64; } PureValue;
  * let.name): it is emptied when every event ends, and it is never saved
  * nor logged for undoing. A message's rows field fills the one its path
  * names (unkeyed) as the message arrives; code fills a let's (docs/design/018). */
-enum { PURE_CURSOR_STAYS = 1, PURE_LIST_ROWS = 256 };
+enum { PURE_CURSOR_STAYS = 1, PURE_LIST_ROWS = 256, PURE_LIST_BOUND = 512 };
 /* A transient state (bit 8 of its type word in a module, a bit of
  * PureModule.transient): the app holds it while it runs, and undoes it with
  * a failed event, but never saves it: each start begins it at its initial
@@ -327,7 +344,9 @@ typedef struct {
     PureRecord record[PURE_MODULE_RECORDS];
     char record_field_names[PURE_MODULE_RECORD_FIELDS][PURE_MODULE_NAME];
     uint8_t record_field_type[PURE_MODULE_RECORD_FIELDS]; /* PureRecordType */
-    PureValue record_field_default[PURE_MODULE_RECORD_FIELDS]; /* a number (a bool's 0 or 1), an i64, or a text constant's index */
+    PureValue record_field_default[PURE_MODULE_RECORD_FIELDS]; /* a number (a bool's 0 or 1), an i64, a text constant's index
+                                                                  * or a list's record (LIST, its i64) */
+    bool record_nested[PURE_MODULE_RECORDS]; /* a record with a LIST field (set at load) */
 } PureModule;
 
 /* Whether a state of m is transient (PURE_STATE_TRANSIENT). */
@@ -522,6 +541,10 @@ typedef struct {
     bool reading;                  /* a reader: its states are a snapshot's */
     /* The values an event or a view's body holds by name (BYTES_STORE): emptied as it begins. */
     struct { unsigned char *data; size_t size, capacity; } held[PURE_MODULE_HELD];
+    /* The lists in records an event or a view's body made (LIST fields: a value is a number here, 1 on), how many
+     * values share each, and the bound lists' own (a register's list while another is bound to it). */
+    struct { PureList **list; uint32_t *shared; size_t count, capacity; } nested;
+    PureList *unbound[PURE_MODULE_STATES];
 } PureApp;
 
 PureResult pure_app_start(PureApp *, const PureModule *, PureData data);

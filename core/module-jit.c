@@ -1245,7 +1245,8 @@ static bool event_list(const PureModule *m, uint32_t list) {
 static bool numbers_only(const PureModule *m, uint32_t list) {
     const PureRecord *record = &m->record[m->state_ref[list]];
     for (unsigned f = 0; f < record->count; ++f)
-        if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT) return false;
+        if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT || m->record_field_type[record->first + f] == PURE_RECORD_LIST)
+            return false; /* a list in a record is shared by count (module.c's APPEND_IN) */
     return true;
 }
 

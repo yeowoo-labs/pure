@@ -17,7 +17,7 @@ enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 
  * the named local holds, T_STATE for the type of the number, bool or i64
  * state named. */
 enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8, T_LOCAL = 9,
-       T_BOOL = 10, T_STATE = 11, T_I64 = 12 };
+       T_BOOL = 10, T_STATE = 11, T_I64 = 12, T_LIST = 13 }; /* T_LIST: a list value, its owner the record of its items */
 enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUMENTS, FROM_HELD };
 /* Where an opcode may appear. */
 /* IN_ARGUMENTS: fields read where nothing is done with them (a view's arguments, a message's fields in a fold). */
@@ -144,6 +144,11 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_BYTE] = {1, {T_I64}, T_BYTES, READ, A_NONE, O_ANY},
     [PURE_OP_BYTES_LOAD] = {0, {0}, T_BYTES, IN_LOCALS, A_HELD, O_ANY},
     [PURE_OP_BYTES_STORE] = {1, {T_BYTES}, 0, IN_HANDLER | IN_COMPUTE, A_HELD, O_ANY},
+    [PURE_OP_LIST_VALUE] = {0, {0}, T_LIST, IN_HANDLER | IN_COMPUTE, STATE(LIST), O_ANY},
+    [PURE_OP_LIST_BIND] = {1, {T_LIST}, 0, IN_HANDLER | IN_COMPUTE, STATE(LIST), O_ANY},
+    /* APPEND_IN also takes as many values as the record of the list in the field has fields. */
+    [PURE_OP_APPEND_IN] = {1, {T_INDEX}, 0, IN_HANDLER | IN_COMPUTE, A_ITEM, O_LIST},
+    [PURE_OP_NUM_PARSE] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
 };
 #undef NUMS
 #undef COMPARE
@@ -340,8 +345,42 @@ static bool state_of(const PureModule *m, uint32_t state, uint8_t type) {
 
 static unsigned char field_type(const PureModule *m, uint32_t list, uint32_t field) {
     static const unsigned char types[] = {[PURE_RECORD_NUMBER] = T_NUM, [PURE_RECORD_TEXT] = T_TEXT,
-                                          [PURE_RECORD_BOOL] = T_BOOL, [PURE_RECORD_I64] = T_I64};
+                                          [PURE_RECORD_BOOL] = T_BOOL, [PURE_RECORD_I64] = T_I64, [PURE_RECORD_LIST] = T_LIST};
     return types[m->record_field_type[m->record[m->state_ref[list]].first + field]];
+}
+
+/* The record of the lists a LIST field of a record holds (field: the module's numbering), or UINT32_MAX. */
+static uint32_t nested_record(const PureModule *m, uint32_t field) {
+    return m->record_field_type[field] == PURE_RECORD_LIST ? (uint32_t)m->record_field_default[field].i64 : UINT32_MAX;
+}
+
+/* An event's list, and one bound by LIST_BIND (a register: never changed by code). */
+static bool event_list_state(const PureModule *m, uint32_t list) {
+    return list < m->states && m->state_type[list] == PURE_STATE_LIST && m->state_flags[list] & PURE_LIST_ROWS >> 8;
+}
+static bool bound_list(const PureModule *m, uint32_t list) {
+    return event_list_state(m, list) && m->state_flags[list] & PURE_LIST_BOUND >> 8;
+}
+
+/* The stack type of a record field (the module's numbering). */
+static unsigned char record_type(const PureModule *m, uint32_t field) {
+    static const unsigned char types[] = {[PURE_RECORD_NUMBER] = T_NUM, [PURE_RECORD_TEXT] = T_TEXT,
+                                          [PURE_RECORD_BOOL] = T_BOOL, [PURE_RECORD_I64] = T_I64, [PURE_RECORD_LIST] = T_LIST};
+    return types[m->record_field_type[field]];
+}
+
+/* The record of the list value an instruction takes as its operand k (bottom 0). */
+static unsigned list_wanted(const PureModule *m, const PureOp *op, unsigned k) {
+    uint32_t arg = op->arg;
+    switch (op->op) {
+    case PURE_OP_LIST_BIND: return m->state_ref[arg];
+    case PURE_OP_LIST_APPEND: return nested_record(m, m->record[m->state_ref[arg]].first + k);
+    case PURE_OP_LIST_INSERT: return nested_record(m, m->record[m->state_ref[arg]].first + k - 1); /* the index first */
+    case PURE_OP_ITEM_SET: return nested_record(m, m->record[m->state_ref[list_of(arg)]].first + item_field(arg));
+    case PURE_OP_APPEND_IN:
+        return nested_record(m, m->record[nested_record(m, m->record[m->state_ref[list_of(arg)]].first + item_field(arg))].first + k - 1);
+    default: return UINT32_MAX;
+    }
 }
 
 /* The stack type of a message field's value (a u32 is a number). */
@@ -517,6 +556,16 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             REFUSE("change of a keyed list's key");
         if (op->op == PURE_OP_BYTES_OF && (m->record[m->state_ref[arg]].count != 1 || field_type(m, arg, 0) != T_I64))
             REFUSE("bytes of a list not of one i64");
+        /* Lists in records (027's 2b): a register is read alone; values are of an event's lists; APPEND_IN appends to a
+         * list in a field of an event's list. */
+        if (((op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT || op->op == PURE_OP_LIST_REMOVE) && bound_list(m, arg)) ||
+            ((op->op == PURE_OP_ITEM_SET || op->op == PURE_OP_APPEND_IN) && bound_list(m, list_of(arg))))
+            REFUSE("change of a bound list");
+        if (op->op == PURE_OP_LIST_VALUE && !event_list_state(m, arg)) REFUSE("value of a list not an event's");
+        if (op->op == PURE_OP_LIST_BIND && !bound_list(m, arg)) REFUSE("list bound to a list not bound");
+        if (op->op == PURE_OP_APPEND_IN &&
+            (!event_list_state(m, list_of(arg)) || field_type(m, list_of(arg), item_field(arg)) != T_LIST))
+            REFUSE("append into a field not an event's list's list");
         /* A view's body changes an event's lists alone: its states are a snapshot's. */
         if (body && (op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT || op->op == PURE_OP_LIST_REMOVE ||
                      op->op == PURE_OP_ITEM_SET) &&
@@ -575,6 +624,10 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             pops += record->count;
         } else if (op->op == PURE_OP_ITEM_SET) {
             need[pops++] = field_type(m, list_of(arg), item_field(arg));
+        } else if (op->op == PURE_OP_APPEND_IN) { /* an item of the list in the field */
+            const PureRecord *record = &m->record[nested_record(m, m->record[m->state_ref[list_of(arg)]].first + item_field(arg))];
+            for (unsigned f = 0; f < record->count; ++f) need[pops + f] = record_type(m, record->first + f);
+            pops += record->count;
         } else if (need[0] == T_KEY) {
             need[0] = field_type(m, arg, m->state_key[arg] - 1u);
         } else if (need[0] == T_LOCAL) {
@@ -606,6 +659,8 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         height -= (int)pops;
         for (unsigned k = 0; k < pops; ++k)
             if (types[height + (int)k] != need[k]) REFUSE("operand type");
+        for (unsigned k = 0; k < pops; ++k) /* a list value goes where a list of its record goes */
+            if (need[k] == T_LIST && owners[height + (int)k] != list_wanted(m, op, k)) REFUSE("list of another record");
         unsigned owner = of == O_ARG ? arg : of == O_REF ? m->state_ref[arg] : of == O_LIST ? list_of(arg) : 0;
         if (kind == A_LOCAL && arg >> 8 & 0xFF) { /* an index local belongs to its list */
             owner = arg >> 16;
@@ -634,6 +689,9 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (out) {
             if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
             owners[height] = (unsigned char)(out != T_CURSOR && out != T_INDEX ? 0 : of == O_OPERAND ? owners[height] : owner);
+            if (out == T_LIST) /* the record of its items */
+                owners[height] = (unsigned char)(op->op == PURE_OP_LIST_VALUE ? m->state_ref[arg] :
+                                                 nested_record(m, m->record[m->state_ref[list_of(arg)]].first + item_field(arg)));
             types[height++] = out;
         }
         if (kind == A_TARGET) {
@@ -1116,11 +1174,11 @@ PURE_COLD static unsigned arity(uint8_t op) {
     switch (op) {
     case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_INDEX_LOAD: case PURE_OP_ROW: case PURE_OP_OUTER_ROW:
     case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_FIELD: case PURE_OP_LOCAL_LOAD:
-    case PURE_OP_BYTES_OF: case PURE_OP_BYTES_LOAD:
+    case PURE_OP_BYTES_OF: case PURE_OP_BYTES_LOAD: case PURE_OP_LIST_VALUE:
         return 0;
     case PURE_OP_ITEM_GET: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: case PURE_OP_NEG: case PURE_OP_NOT:
     case PURE_OP_FLOOR: case PURE_OP_INDEX_NUM: case PURE_OP_I64_NEG: case PURE_OP_I64_FROM: case PURE_OP_NUM_FROM:
-    case PURE_OP_INDEX_AT: case PURE_OP_BYTE:
+    case PURE_OP_INDEX_AT: case PURE_OP_BYTE: case PURE_OP_NUM_PARSE:
         return 1;
     case PURE_OP_CLAMP: case PURE_OP_BYTES_SLICE: return 3;
     default: return 2;
@@ -1132,7 +1190,7 @@ PURE_COLD static int list_read(const PureOp *op) {
     switch (op->op) {
     case PURE_OP_ITEM_GET: return (int)list_of(op->arg);
     case PURE_OP_LIST_COUNT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_LIST_FIND:
-    case PURE_OP_LIST_HAS: case PURE_OP_ROW: case PURE_OP_BYTES_OF: case PURE_OP_INDEX_AT:
+    case PURE_OP_LIST_HAS: case PURE_OP_ROW: case PURE_OP_BYTES_OF: case PURE_OP_INDEX_AT: case PURE_OP_LIST_VALUE:
         return (int)op->arg;
     default: return -1;
     }
@@ -1331,8 +1389,10 @@ PURE_COLD static bool bounds_fixed(const PureModule *m, const PureRange *range, 
             states |= (uint64_t)1 << (op->arg & 63);
             break;
         case PURE_OP_LOCAL_STORE: case PURE_OP_LOOP: locals |= (uint64_t)1 << (op->arg & 63); break;
-        case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: lists |= (uint64_t)1 << (op->arg & 63); break;
-        case PURE_OP_ITEM_SET: lists |= (uint64_t)1 << (list_of(op->arg) & 63); break;
+        case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: case PURE_OP_LIST_BIND:
+            lists |= (uint64_t)1 << (op->arg & 63);
+            break;
+        case PURE_OP_ITEM_SET: case PURE_OP_APPEND_IN: lists |= (uint64_t)1 << (list_of(op->arg) & 63); break;
         default: break;
         }
     }
@@ -1504,7 +1564,9 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         uint32_t flags = value ? 0 : read32(at + 12);
         bool cursor = out->state_type[i] == PURE_STATE_CURSOR, list = out->state_type[i] == PURE_STATE_LIST;
         bool rows = list && flags & PURE_LIST_ROWS; /* an event's list, keyed or not */
-        uint32_t key = list ? flags & ~(uint32_t)PURE_LIST_ROWS : 0;
+        bool bound = list && flags & PURE_LIST_BOUND; /* a register: an event's list, not keyed */
+        uint32_t key = list ? flags & ~(uint32_t)(PURE_LIST_ROWS | PURE_LIST_BOUND) : 0;
+        if (bound && (!rows || key)) REFUSE("state type", i);
         if (rows && type & PURE_STATE_TRANSIENT) REFUSE("state type", i); /* an event's own, saved or not */
         /* A list of a message's rows is named by the field's path (input.field), no other state. */
         if (!name_at(text, strings, read32(at), rows ? NAME_PATH : NAME_IDENTIFIER, out->state_names[i]) ||
@@ -1520,7 +1582,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             if ((flags && !(cursor && flags == PURE_CURSOR_STAYS) && !(list && key <= PURE_RECORD_FIELDS)) ||
                 read32(at + 8) > UINT16_MAX) REFUSE("state reference", i);
             out->state_ref[i] = (uint16_t)read32(at + 8);
-            out->state_flags[i] = cursor ? (uint8_t)flags : rows ? PURE_LIST_ROWS >> 8 : 0;
+            out->state_flags[i] = cursor ? (uint8_t)flags : (uint8_t)((rows ? PURE_LIST_ROWS >> 8 : 0) | (bound ? PURE_LIST_BOUND >> 8 : 0));
             out->state_key[i] = (uint8_t)key;
         }
     }
@@ -1618,18 +1680,21 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             const unsigned char *entry = fields_at + (size_t)f * RECORD_FIELD_BYTES;
             uint32_t type = read32(entry + 4); /* PureRecordType */
             out->record_field_type[f] = (uint8_t)type;
-            if (!name_at(text, strings, read32(entry), NAME_IDENTIFIER, out->record_field_names[f]) || type > PURE_RECORD_I64)
+            if (!name_at(text, strings, read32(entry), NAME_PATH, out->record_field_names[f]) || type > PURE_RECORD_LIST)
                 REFUSE("record field", f);
             for (uint32_t k = record->first; k < f; ++k)
                 if (!strcmp(out->record_field_names[k], out->record_field_names[f])) REFUSE("duplicate record field", f);
             /* A default: a text's constant, an i64's 8 bytes, a number (a bool's +0 or 1). */
             if (type == PURE_RECORD_TEXT) out->record_field_default[f].num = read32(entry + 8);
-            else if (type == PURE_RECORD_I64) out->record_field_default[f].i64 = (int64_t)(read32(entry + 8) | (uint64_t)read32(entry + 12) << 32);
+            else if (type == PURE_RECORD_I64 || type == PURE_RECORD_LIST) /* a LIST's: the record of its items */
+                out->record_field_default[f].i64 = (int64_t)(read32(entry + 8) | (uint64_t)read32(entry + 12) << 32);
             else out->record_field_default[f].num = read_double(entry + 8);
             double given = out->record_field_default[f].num;
             if (type == PURE_RECORD_TEXT ? read32(entry + 12) || read32(entry + 8) >= out->constants
+                : type == PURE_RECORD_LIST ? (uint64_t)out->record_field_default[f].i64 >= out->records
                 : type != PURE_RECORD_I64 && (!isfinite(given) || (type == PURE_RECORD_BOOL && !canonical_bool(given))))
                 REFUSE("record field default", f);
+            if (type == PURE_RECORD_LIST) out->record_nested[i] = true;
         }
         next_record_field += record->count;
     }
@@ -1644,6 +1709,19 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_BOOL))) ||
             (out->state_type[i] == PURE_STATE_INDEX && !state_of(out, out->state_ref[i], PURE_STATE_LIST)))
             REFUSE("state reference", i);
+    /* A list in a record is an event's alone (027's stage 2b): no stored, transient or message's list holds one, and no
+     * list is keyed by one; a register is no message's rows. */
+    for (uint32_t i = 0; i < out->states; ++i) {
+        if (out->state_type[i] != PURE_STATE_LIST) continue;
+        bool nested = out->record_nested[out->state_ref[i]];
+        if ((nested && !(out->state_flags[i] & PURE_LIST_ROWS >> 8)) ||
+            (out->state_key[i] && out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_LIST))
+            REFUSE("list in a record outside an event's list", i);
+    }
+    for (uint32_t f = 0; f < out->fields; ++f)
+        if (out->field[f].type == PURE_FIELD_ROWS &&
+            (out->record_nested[out->state_ref[out->field[f].rows]] || out->state_flags[out->field[f].rows] & PURE_LIST_BOUND >> 8))
+            REFUSE("rows field", f);
     /* A stored position into what is not stored would come back meaning nothing. */
     for (uint32_t i = 0; i < out->states; ++i)
         if ((out->state_type[i] == PURE_STATE_CURSOR || out->state_type[i] == PURE_STATE_INDEX) &&
@@ -2169,6 +2247,53 @@ static int hold(PureApp *app, PureArena *arena, unsigned slot, PureBytes v, bool
     h->size = size;
     arena->used = mark;
     return 0;
+}
+
+/* ---- Lists in records (027's 2b): the event's lists made for LIST fields, numbered from 1 */
+
+PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record);
+
+/* The values that share each list in the LIST fields of cells (an item's, just stored). */
+static void share_cells(PureApp *app, const PureModule *m, uint32_t record, const PureCell *cells) {
+    const PureRecord *r = &m->record[record];
+    for (unsigned f = 0; f < r->count; ++f)
+        if (m->record_field_type[r->first + f] == PURE_RECORD_LIST && cells[f].i64) ++app->nested.shared[cells[f].i64 - 1];
+}
+
+/* A new list of record's items among the event's (empty, or a copy of from's items): its number, or 0 out of memory. */
+static uint64_t nest(PureApp *app, uint32_t record, const PureList *from) {
+    const PureModule *m = app->module;
+    if (app->nested.count == app->nested.capacity) {
+        size_t capacity = app->nested.capacity ? app->nested.capacity * 2 : 16;
+        PureList **lists = realloc(app->nested.list, capacity * sizeof(*lists));
+        if (lists) app->nested.list = lists;
+        uint32_t *shared = lists ? realloc(app->nested.shared, capacity * sizeof(*shared)) : NULL;
+        if (!shared) return 0;
+        app->nested.shared = shared;
+        app->nested.capacity = capacity;
+    }
+    PureList *list = new_list(m, record);
+    if (!list) return 0;
+    const PureRecord *r = &m->record[record];
+    for (size_t at = 0, count = from ? pure_list_count(from) : 0; at < count; ++at) {
+        PureCell cells[PURE_RECORD_FIELDS];
+        for (unsigned f = 0; f < r->count; ++f) cells[f] = pure_list_get(from, at, f);
+        if (pure_list_insert(list, at, cells, NULL) != PURE_OK) { pure_list_free(list); return 0; }
+        if (m->record_nested[record]) share_cells(app, m, record, cells);
+    }
+    app->nested.list[app->nested.count] = list;
+    app->nested.shared[app->nested.count] = 0;
+    return ++app->nested.count;
+}
+
+/* The bound lists given back their own, and the event's lists in records let go (an event or a view begins). */
+static void unbind(PureApp *app) {
+    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i)
+        if (app->unbound[i]) app->lists[i] = app->unbound[i], app->unbound[i] = NULL;
+}
+static void drop_nested(PureApp *app) {
+    for (size_t i = 0; i < app->nested.count; ++i) pure_list_free(app->nested.list[i]);
+    app->nested.count = 0;
 }
 
 /* NUM_TEXT's text of v in a format (the argument past its type, PureFormat): false where an integer's form meets a
@@ -3365,6 +3490,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (status == PURE_INVALID) status = pure_list_insert(list, at, cells, undo_for(app, arg));
         arena->used = mark;
         if (status != PURE_OK) REFUSED;
+        if (m->record_nested[m->state_ref[arg]]) share_cells(app, m, m->state_ref[arg], cells);
         if (m->state_indexed[arg]) move_indices(m, values, arg, pure_list_count(list), at, true);
         if (!grows(app, before, list_held(app, list))) { kind = PURE_FAULT_MEMORY; FAILED; }
         NEXT;
@@ -3401,11 +3527,18 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         PureSpan span = {0};
         status = op->plan & PLAN_TEXT ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
         PureCell cell = {.i64 = value.i64, .text = (unsigned char *)span.data, .size = span.size};
+        bool nested = m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_LIST;
+        uint64_t was = nested && status == PURE_OK && at < pure_list_count(app->lists[list]) ?
+                       (uint64_t)pure_list_get(app->lists[list], at, field).i64 : 0;
         if (status == PURE_OK) /* where its FIND found it (PLAN_ROW: a HASHED list's slot), else its position */
             status = op->plan & PLAN_ROW ? pure_list_set_row(app->lists[list], at, field, cell, undo_for(app, list))
                                          : pure_list_set(app->lists[list], at, field, cell, undo_for(app, list));
         arena->used = mark;
         if (status != PURE_OK) REFUSED;
+        if (nested) { /* the list it holds now is shared once more, the one it held once less */
+            if (cell.i64) ++app->nested.shared[cell.i64 - 1];
+            if (was) --app->nested.shared[was - 1];
+        }
         if (!grows(app, before, list_held(app, app->lists[list]))) { kind = PURE_FAULT_MEMORY; FAILED; }
         NEXT;
     }
@@ -3626,6 +3759,68 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         int held = hold(app, arena, arg & 0xFF, stack[--sp].bytes, arg & PURE_HELD_APPEND);
         if (held == 1) { kind = PURE_FAULT_MEMORY; FAILED; }
         if (held) STOPPED(PURE_ALLOCATION);
+        NEXT;
+    }
+    case PURE_OP_NUM_PARSE: { /* a text written as a JSON number, its nearest number */
+        PureSpan span;
+        size_t mark = arena->used;
+        if ((status = contiguous(app, arena, top->bytes, &span)) != PURE_OK) STOPPED(status);
+        double number;
+        bool read = pure_parse_number(span.data, span.size, &number);
+        arena->used = mark;
+        if (!read) { kind = PURE_FAULT_LIMIT; FAILED; }
+        top->num = number;
+        NEXT;
+    }
+    case PURE_OP_LIST_VALUE: { /* a copy of an event's list's items (an empty one is 0, made of nothing) */
+        if (!pure_list_count(app->lists[arg])) { stack[sp++].i64 = 0; NEXT; }
+        uint64_t made = nest(app, m->state_ref[arg], app->lists[arg]);
+        if (!made) STOPPED(PURE_ALLOCATION);
+        if (!grows(app, (Held){0, 0}, (Held){0, pure_list_size(app->nested.list[made - 1])})) { kind = PURE_FAULT_MEMORY; FAILED; }
+        stack[sp++].i64 = (int64_t)made;
+        NEXT;
+    }
+    case PURE_OP_LIST_BIND: { /* the register reads the list (shared: no one changes it in place from now) */
+        uint64_t list = (uint64_t)stack[--sp].i64;
+        if (!app->unbound[arg]) app->unbound[arg] = app->lists[arg];
+        app->lists[arg] = list ? app->nested.list[list - 1] : app->unbound[arg];
+        if (list) ++app->nested.shared[list - 1];
+        NEXT;
+    }
+    case PURE_OP_APPEND_IN: { /* an item into the list in a field, made the field's own first when another shares it */
+        uint32_t list = list_of(arg), field = item_field(arg), inner = nested_record(m, m->record[m->state_ref[list]].first + field);
+        const PureRecord *record = &m->record[inner];
+        size_t base = sp - record->count, at = (size_t)stack[base - 1].num;
+        sp = base - 1;
+        if (at >= pure_list_count(app->lists[list])) { kind = PURE_FAULT_NOT_FOUND; FAILED; }
+        uint64_t into = (uint64_t)pure_list_get(app->lists[list], at, field).i64;
+        if (!into || app->nested.shared[into - 1] > 1) {
+            uint64_t own = nest(app, inner, into ? app->nested.list[into - 1] : NULL);
+            if (!own) STOPPED(PURE_ALLOCATION);
+            if (into) --app->nested.shared[into - 1];
+            app->nested.shared[own - 1] = 1;
+            if ((status = pure_list_set(app->lists[list], at, field, (PureCell){.i64 = (int64_t)own}, NULL)) != PURE_OK) REFUSED;
+            into = own;
+        }
+        PureList *in = app->nested.list[into - 1];
+        size_t mark = arena->used, total = 0;
+        for (unsigned f = 0; f < record->count; ++f)
+            if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT) total += (size_t)stack[base + f].bytes.length;
+        if (!reserve(arena, total)) STOPPED(PURE_ALLOCATION);
+        PureCell cells[PURE_RECORD_FIELDS];
+        for (unsigned f = 0; f < record->count; ++f) {
+            PureSpan span = {0};
+            if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT &&
+                (status = contiguous(app, arena, stack[base + f].bytes, &span)) != PURE_OK)
+                STOPPED(status);
+            cells[f] = (PureCell){.i64 = stack[base + f].i64, .text = (unsigned char *)span.data, .size = span.size};
+        }
+        Held before = {0, pure_list_size(in)};
+        status = pure_list_insert(in, pure_list_count(in), cells, NULL);
+        arena->used = mark;
+        if (status != PURE_OK) REFUSED;
+        if (m->record_nested[inner]) share_cells(app, m, inner, cells);
+        if (!grows(app, before, (Held){0, pure_list_size(in)})) { kind = PURE_FAULT_MEMORY; FAILED; }
         NEXT;
     }
     default: break;
@@ -4031,6 +4226,7 @@ void pure_snapshot_release(PureSnapshot *snapshot) {
 static void let_own_go(PureApp *app);
 
 void pure_app_stop(PureApp *app) {
+    unbind(app); /* a register's own list goes with the lists, the bound one with the event's */
     pure_app_finish(app);
     close_burst(app, true); /* unsaved changes are dropped with the app */
     let_own_go(app);
@@ -4050,6 +4246,9 @@ void pure_app_stop(PureApp *app) {
     }
     pure_retired_free(&app->retired);
     for (unsigned i = 0; i < PURE_MODULE_HELD; ++i) free(app->held[i].data);
+    drop_nested(app);
+    free(app->nested.list);
+    free(app->nested.shared);
     pure_draft_close(app->stored_values);
     free(app->carried);
     pure_draft_close(app->stored_links);
@@ -4147,6 +4346,7 @@ static PureResult keep_reply(PureApp *app);
 /* Every list of a message's rows emptied: an event's rows are its own. */
 static void clear_rows(PureApp *app) {
     const PureModule *m = app->module;
+    unbind(app);
     for (uint32_t i = 0; i < m->states; ++i)
         if (m->state_type[i] == PURE_STATE_LIST && m->state_flags[i] & PURE_LIST_ROWS >> 8) pure_list_clear(app->lists[i]);
 }
@@ -4186,6 +4386,7 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     app->grown = app->spent = 0;
     app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
     for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
+    if (app->nested.count) unbind(app), drop_nested(app); /* a view's body bound some on the app itself */
     Mark mark;
     mark_event(app, &mark);
     memcpy(pending, app->values, sizeof(app->values));
@@ -4534,6 +4735,8 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
         app->grown = app->spent = 0;
         app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
         for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
+        unbind(app);
+        if (app->nested.count) drop_nested(app);
     }
     PureFault fault = app->fault;
     uint32_t fault_pc = app->fault_pc;
@@ -4810,7 +5013,7 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
 static void let_own_go(PureApp *app) {
     for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
         pure_list_free(app->own[i]);
-        app->own[i] = NULL;
+        app->own[i] = app->unbound[i] = NULL;
     }
 }
 
@@ -4826,7 +5029,8 @@ void pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
 
 uint8_t pure_record_kind(const PureModule *m, uint32_t field) {
     static const uint8_t kinds[] = {[PURE_RECORD_NUMBER] = PURE_CELL_NUMBER, [PURE_RECORD_TEXT] = PURE_CELL_TEXT,
-                                    [PURE_RECORD_BOOL] = PURE_CELL_BOOL, [PURE_RECORD_I64] = PURE_CELL_INTEGER};
+                                    [PURE_RECORD_BOOL] = PURE_CELL_BOOL, [PURE_RECORD_I64] = PURE_CELL_INTEGER,
+                                    [PURE_RECORD_LIST] = PURE_CELL_INTEGER}; /* a list in a record: its number */
     return kinds[m->record_field_type[field]];
 }
 
@@ -5223,6 +5427,8 @@ PURE_COLD PureResult pure_app_start(PureApp *app, const PureModule *module, Pure
 }
 
 PURE_COLD PureResult pure_app_replace(PureApp *app, const PureModule *module) {
+    unbind(app); /* lists are laid out again: none bound, the event's in records let go */
+    drop_nested(app);
     pure_app_finish(app);
     if (app->open || app->pending_count) {
         PureResult saved = pure_app_save(app); /* the burst belongs to the module that made it */

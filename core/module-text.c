@@ -59,6 +59,30 @@ size_t pure_utf8_newlines(PureSpan span) {
     return count;
 }
 
+bool pure_parse_number(const unsigned char *text, size_t size, double *value) {
+    size_t i = 0;
+    if (i < size && text[i] == '-') ++i;
+    if (i == size || text[i] < '0' || text[i] > '9') return false;
+    if (text[i++] != '0') while (i < size && text[i] >= '0' && text[i] <= '9') ++i;
+    if (i < size && text[i] == '.') {
+        if (++i == size || text[i] < '0' || text[i] > '9') return false;
+        while (i < size && text[i] >= '0' && text[i] <= '9') ++i;
+    }
+    if (i < size && (text[i] == 'e' || text[i] == 'E')) {
+        if (++i < size && (text[i] == '+' || text[i] == '-')) ++i;
+        if (i == size || text[i] < '0' || text[i] > '9') return false;
+        while (i < size && text[i] >= '0' && text[i] <= '9') ++i;
+    }
+    if (i != size) return false;
+    char small[64], *digits = size < sizeof(small) ? small : malloc(size + 1); /* strtod rounds to nearest, ties to even */
+    if (!digits) return false;
+    memcpy(digits, text, size);
+    digits[size] = 0;
+    *value = strtod(digits, NULL);
+    if (digits != small) free(digits);
+    return isfinite(*value);
+}
+
 size_t pure_format_number(double value, char out[32]) {
     if (value == 0) { memcpy(out, "0", 2); return 1; }
     if (value == floor(value) && fabs(value) < 1e15) {
