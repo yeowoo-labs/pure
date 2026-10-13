@@ -1738,6 +1738,59 @@ def module_specs(aup, pure, work):
         assert accepted == (name[0] == 'y') or name[0] == 'i', (name, accepted)
         taken[name[0]] += accepted
     runs['json'] = {'cases': len(cases), 'taken': taken}
+    # A JSON text read into a tree of values (its examples/json_tree.aup, 027's 2b: a variant, lists in records, match),
+    # walked breadth first for a digest, against Python's reading walked so: JSONTestSuite's cases and random documents.
+    class Pairs(list):
+        pass
+
+    def digest(data):
+        doc = json.loads(data.decode('utf-8'), object_pairs_hook=Pairs)
+        d = dict(nulls=0, trues=0, falses=0, numbers=0, strings=0, arrays=0, objects=0, sum=0.0, text_bytes=0, key_bytes=0)
+        q, at = [doc], 0
+        while at < len(q):
+            x = q[at]
+            if x is None: d['nulls'] += 1
+            elif x is True: d['trues'] += 1
+            elif x is False: d['falses'] += 1
+            elif isinstance(x, (int, float)): d['numbers'] += 1; d['sum'] += float(x)
+            elif isinstance(x, str): d['strings'] += 1; d['text_bytes'] += len(x.encode('utf-8'))
+            elif isinstance(x, Pairs):
+                d['objects'] += 1
+                for k, v in x: d['key_bytes'] += len(k.encode('utf-8')); q.append(v)
+            else: d['arrays'] += 1; q.extend(x)
+            at += 1
+        return d
+
+    def value(depth):
+        pick = chooser.random()
+        if depth > 4 or pick < 0.35:
+            return chooser.choice([None, True, False, chooser.randrange(-10 ** 6, 10 ** 6), chooser.uniform(-1e3, 1e3),
+                                   chooser.choice(['', 'a', 'é ü', 'line\nbreak', 'quote"back\\', '\U0001f600', '\u0001'])])
+        if pick < 0.7:
+            return [value(depth + 1) for _ in range(chooser.randrange(0, 6))]
+        return {f'k{chooser.randrange(50)}' if chooser.random() < 0.8 else '': value(depth + 1) for _ in range(chooser.randrange(0, 6))}
+
+    for k in range(100):
+        cases[f'r_{k}.json'] = json.dumps(value(0), ensure_ascii=chooser.random() < 0.5, indent=chooser.choice([None, 1, 2])).encode()
+        (work / f'r_{k}.json').write_bytes(cases[f'r_{k}.json'])
+    program = work / 'json_tree.pmod'
+    compile_module(aup, EDITOR.parent / 'json_tree.aup', program)
+    given = ''.join(f'message check @{work / name}\n' for name in cases)
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=600, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('json_tree', name)
+    keys = ('nulls', 'trues', 'falses', 'numbers', 'strings', 'arrays', 'objects', 'sum', 'text_bytes', 'key_bytes')
+    trees = {'y': 0, 'n': 0, 'i': 0, 'r': 0}
+    for name, line in zip(cases, outputs['batches'].splitlines()):
+        state = json.loads(line)
+        accepted = state['fault'] == 'none' and state['states']['valid'] is True
+        assert accepted == (name[0] in 'yr') or name[0] == 'i', (name, state['fault'])
+        if accepted:
+            assert {k: state['states'][k] for k in keys} == digest(cases[name]), name
+        trees[name[0]] += accepted
+    runs['json_tree'] = {'cases': len(cases), 'taken': trees}
     return runs
 
 

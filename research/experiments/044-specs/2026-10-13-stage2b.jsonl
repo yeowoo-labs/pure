@@ -1,0 +1,6 @@
+{"size":103781,"jit":"0","batch":"0","c_ns_per_byte":14.717,"pure_ns_per_byte":554.145,"ratio":37.7,"instructions":54505171,"instructions_per_byte":525.2}
+{"size":103781,"jit":"0","batch":"","c_ns_per_byte":13.756,"pure_ns_per_byte":555.296,"ratio":40.4,"instructions":54505171,"instructions_per_byte":525.2}
+{"size":103781,"jit":"all","batch":"","c_ns_per_byte":14.223,"pure_ns_per_byte":555.444,"ratio":39.1,"instructions":54505171,"instructions_per_byte":525.2}
+{"size":103781,"jit":"","batch":"","c_ns_per_byte":13.899,"pure_ns_per_byte":555.628,"ratio":40.0,"instructions":54505171,"instructions_per_byte":525.2}
+{"size":103781,"python_ns_per_byte":426.5,"python_json_module_ns_per_byte":62.3}
+{"json_tree_aup_lines": 167, "aup_brace_lines": 20, "python_lines": 133, "jsontestsuite": {"y_taken": 95, "n_taken": 0, "i_taken": 6}, "random_documents": 300, "wrong": 0}
