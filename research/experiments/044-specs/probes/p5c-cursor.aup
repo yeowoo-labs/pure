@@ -1,0 +1,7 @@
+state note: text
+state at: cursor in note
+state c: text
+input next = key ArrowRight
+on next.down {
+  c = note.char(at)
+}

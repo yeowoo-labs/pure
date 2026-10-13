@@ -1,0 +1,5 @@
+state h = 0
+input word = message { w: u32 }
+on word {
+  h = (h ^ word.w) << 3
+}

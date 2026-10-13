@@ -1,0 +1,5 @@
+state first = 0
+input packet = message { data: bytes }
+on packet {
+  first = packet.data[0]
+}

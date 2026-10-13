@@ -1,0 +1,2 @@
+record Leaf { v = 0 }
+state x: Leaf | text = ""

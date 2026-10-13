@@ -1,0 +1,8 @@
+record Point {
+  x = 0
+  y = 0
+}
+record Box {
+  at: Point
+}
+state boxes: list of Box

@@ -1,0 +1,7 @@
+state count = 0
+input line = message { t: text }
+on line {
+  for c in line.t {
+    count = count + 1
+  }
+}

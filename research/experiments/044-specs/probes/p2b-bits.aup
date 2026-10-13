@@ -1,0 +1,5 @@
+state h: i64 = 0
+input word = message { w: i64 }
+on word {
+  h = h & word.w
+}

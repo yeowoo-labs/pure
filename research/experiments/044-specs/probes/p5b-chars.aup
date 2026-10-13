@@ -1,0 +1,5 @@
+state first: text
+input line = message { t: text }
+on line {
+  first = line.t[0]
+}

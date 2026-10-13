@@ -1,0 +1,10 @@
+p1-byte.aup	p1-byte.aup:4:22: expected newline or semicolon
+p2-bits.aup	p2-bits.aup:4:10: unexpected character '^'
+p2b-bits.aup	p2b-bits.aup:4:9: unexpected character '&'
+p3-nested.aup	p3-nested.aup:2:10: expected a numeric field default
+p3b-nested.aup	p3b-nested.aup:6:7: a field is a number (field = 0), a bool (field = false), text (field: text) or an i64 (field: i64)
+p4-rec.aup	p4-rec.aup:1:42: fn 'depth' calls itself (in fn 'depth' called at 2:10)
+p5-chars.aup	p5-chars.aup:4:12: unknown list 'line.t'
+p5b-chars.aup	p5b-chars.aup:4:17: expected newline or semicolon
+p5c-cursor.aup	p5c-cursor.aup:6:12: unknown library 'note'; write use note first
+p6-variant.aup	p6-variant.aup:2:15: unexpected character '|'
