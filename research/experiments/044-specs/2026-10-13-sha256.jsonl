@@ -1,0 +1,6 @@
+{"size":65536,"jit":"0","batch":"0","c_ns_per_byte":9.035,"pure_ns_per_byte":1592.087,"ratio":176.2,"instructions":19606989,"instructions_per_block":19129}
+{"size":65536,"jit":"0","batch":"","c_ns_per_byte":9.049,"pure_ns_per_byte":1589.872,"ratio":175.7,"instructions":19606989,"instructions_per_block":19129}
+{"size":65536,"jit":"all","batch":"","c_ns_per_byte":9.031,"pure_ns_per_byte":1592.166,"ratio":176.3,"instructions":19606989,"instructions_per_block":19129}
+{"size":65536,"jit":"","batch":"","c_ns_per_byte":9.051,"pure_ns_per_byte":1591.118,"ratio":175.8,"instructions":19606989,"instructions_per_block":19129}
+{"size":65536,"python_ns_per_byte":3708.3}
+{"messages":142,"right":{"batches":142,"rounds":142,"all":142,"default":142},"aup_lines":52,"aup_brace_lines":7,"python_lines":28}

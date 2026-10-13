@@ -1841,6 +1841,24 @@ def module_assumptions(aup, pure, work):
         assert outputs[name] == outputs['batches'], ('view', name, next((a, b) for a, b in zip(outputs[name].splitlines(), outputs['batches'].splitlines()) if a != b))
     faults = [json.loads(line)['fault'] for line in outputs['batches'].splitlines() if line.startswith('{"states"')]
     assert 'none' in faults and 'work' in faults, faults
+    # SHA-256 written in aup (its examples/sha256.aup, docs/design/027's stage 1: bytes by position, bit operations, lists
+    # of i64): FIPS 180-2's examples and messages of every length up to two blocks, against hashlib, on every path.
+    import hashlib
+    import random
+    program = work / 'sha256.pmod'
+    compile_module(aup, EDITOR.parent / 'sha256.aup', program)
+    chooser = random.Random(140)
+    messages = [b'abc', b'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq',
+                b'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu']
+    messages += [bytes(chooser.randrange(256) for _ in range(n)) for n in list(range(130)) + [1000, 4096]]
+    given = ''.join(f"message hash {m.hex() or '-'}\n" for m in messages)
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=120, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('sha256', name)
+    digests = [json.loads(line)['states']['digest'] for line in outputs['batches'].splitlines()]
+    assert digests == [hashlib.sha256(m).hexdigest() for m in messages], 'sha256'
     return len(runs)
 
 
