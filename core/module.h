@@ -98,9 +98,11 @@ enum { PURE_MODULE_HELD = 32, PURE_HELD_TEXT = 16, PURE_HELD_APPEND = 1 << 8 };
  * an empty one), an i64 in its cell, so moves and reads (ITEM_GET) are an
  * integer's; such lists go as the event or a view's body ends. A list is a
  * value: storing one in a second cell shares it, and a list shared or bound
- * is copied before it changes (so no other value sees the change). Since
- * stage 3 a stored or a transient list's records may hold lists too (a
- * message's rows not, nor as a key): there the cell holds the value in its
+ * is copied before it changes (so no other value sees the change). A
+ * message's rows may hold lists (027's 4a): each comes in as one of the
+ * event's lists, read from its stored form (below) before the handler runs.
+ * Since stage 3 a stored or a transient list's records may hold lists too
+ * (never as a key): there the cell holds the value in its
  * items' stored form (PURE_CELL_LIST), read into one of the event's lists
  * as ITEM_GET reads it and written from one as it is set (LIST_APPEND,
  * LIST_INSERT, ITEM_SET; APPEND_IN reads, appends and writes back), so

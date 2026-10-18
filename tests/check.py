@@ -3637,6 +3637,133 @@ def server_rows(aup, pure, work):
             'orders_applied': applied, 'orders_refused': refused, 'logged': len(log)}
 
 
+TREES = '''
+record Node {
+  name: text
+  n = 0
+  kids: list of Node
+}
+state nodes = 0
+state total = 0
+state deepest = 0
+state name_bytes = 0
+input tree = message {
+  label: text
+  roots: list of Node
+}
+
+fn walk(x, depth) {
+  nodes = nodes + 1
+  total = total + x.n
+  name_bytes = name_bytes + x.name.bytes
+  if depth > deepest { deepest = depth }
+  for k in x.kids { walk(k, depth + 1) }
+}
+
+on tree {
+  require tree.label != "refuse"
+  for r in tree.roots { walk(r, 1) }
+}
+
+view count = nodes
+view sum = total
+view depth = deepest
+view named = name_bytes
+'''
+
+
+def server_trees(aup, pure, work):
+    """A message's rows whose records hold lists (027's 4a): a JSON forest
+    read straight into the event's lists, nested to any depth up to 64, and
+    walked by a function that calls itself. Random forests (names with
+    escapes and characters past ASCII, fields left out taking their
+    defaults) against a model walking them in the same order; a require
+    refusing one leaves everything as it was; malformed trees (a list field
+    not an array, a field the record lacks, past 64 deep) are refused before
+    the app sees them; a restart keeps the states and no rows."""
+    import http.client
+    import random
+    source, module = work / 'trees.aup', work / 'trees.pmod'
+    source.write_text(TREES)
+    compile_module(aup, source, module)
+    store = work / 'trees-store'
+
+    def call(port, method, path, body=None):
+        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=60)
+        try:
+            connection.request(method, path, body, {'Content-Type': 'application/json'} if body is not None else {})
+            answer = connection.getresponse()
+            return answer.status, answer.getheader('X-Pure-Error'), answer.read()
+        finally:
+            connection.close()
+
+    def views(port):
+        return tuple(float(call(port, 'GET', f'/views/{v}')[2]) for v in ('count', 'sum', 'depth', 'named'))
+
+    rng = random.Random(44)
+    names = ['', 'a', 'node', '빨리', 'a "quoted" \\ name', 'tab\there', '😀', 'line\nbreak', 'é']
+
+    def forest(depth):
+        roots = []
+        for _ in range(rng.randrange(4 if depth < 6 else 1)):
+            node = {'name': rng.choice(names)}
+            if rng.random() < 0.8:
+                node['n'] = rng.randrange(-1000, 1000) / 8
+            kids = forest(depth + 1)
+            if kids or rng.random() < 0.5:
+                node['kids'] = kids
+            roots.append(node)
+        return roots
+
+    model = [0, 0.0, 0, 0]
+
+    def walk(node, depth, into):
+        into[0] += 1
+        into[1] += node.get('n', 0)
+        into[2] = max(into[2], depth)
+        into[3] += len(node['name'].encode())
+        for k in node.get('kids', []):
+            walk(k, depth + 1, into)
+
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store])
+    sent = refused = 0
+    try:
+        for i in range(300):
+            roots = forest(1)
+            label = 'refuse' if rng.random() < 0.1 else 'tree'
+            after = list(model)
+            for r in roots:
+                walk(r, 1, after)
+            status, error, _ = call(host.port, 'POST', '/inputs/tree', json.dumps({'label': label, 'roots': roots}).encode())
+            if label == 'refuse':
+                assert (status, error) == (422, 'limit'), (status, error)  # require fails as limit
+                refused += 1
+            else:
+                assert (status, error) == (200, 'none'), (status, error)
+                model = after
+                sent += 1
+            if i % 25 == 0:
+                assert views(host.port) == tuple(model), (views(host.port), model)
+        deep = {'name': 'z'}
+        for _ in range(63):
+            deep = {'name': 'z', 'kids': [deep]}
+        for body, want in [({'label': 'x', 'roots': [{'name': 'a', 'kids': 3}]}, (400, 'json_type')),
+                           ({'label': 'x', 'roots': [{'name': 'a', 'kid': []}]}, (400, 'json_field')),
+                           ({'label': 'x', 'roots': [{'name': 'a', 'kids': [deep]}]}, (400, 'limit'))]:
+            assert call(host.port, 'POST', '/inputs/tree', json.dumps(body).encode())[:2] == want, body
+        assert call(host.port, 'POST', '/inputs/tree', json.dumps({'label': 'x', 'roots': [deep]}).encode())[:2] == (200, 'none')
+        walk(deep, 1, model)
+        assert views(host.port) == tuple(model) and model[2] == 64
+    finally:
+        host.stop()
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store])
+    try:
+        assert views(host.port) == tuple(model)
+    finally:
+        host.stop()
+    assert sent > 200 and refused > 10
+    return {'forests': sent, 'refused': refused, 'nodes': model[0], 'deepest': model[2]}
+
 ARGUED = '''
 record Account {
   aid = 0
@@ -6332,6 +6459,7 @@ def main():
         report['server_surface'] = server_surface(aup, pure, work)
         report['server_queries'] = server_queries(aup, pure, work)
         report['server_rows'] = server_rows(aup, pure, work)
+        report['server_trees'] = server_trees(aup, pure, work)
         report['server_arguments'] = server_arguments(aup, pure, work)
         report['server_answers'] = server_answers(aup, pure, work)
         report['server_answers_memory'] = server_answers_memory(aup, pure, work)

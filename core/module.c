@@ -1822,16 +1822,14 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_BOOL))) ||
             (out->state_type[i] == PURE_STATE_INDEX && !state_of(out, out->state_ref[i], PURE_STATE_LIST)))
             REFUSE("state reference", i);
-    /* A list in a record is an event's alone (027's stage 2b): no stored, transient or message's list holds one, and no
-     * list is keyed by one; a register is no message's rows. */
+    /* No list is keyed by a list in its records; a register is no message's rows. */
     for (uint32_t i = 0; i < out->states; ++i) {
         if (out->state_type[i] != PURE_STATE_LIST) continue;
         if (out->state_key[i] && out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_LIST)
             REFUSE("list in a record as a key", i);
     }
     for (uint32_t f = 0; f < out->fields; ++f)
-        if (out->field[f].type == PURE_FIELD_ROWS &&
-            (out->record_nested[out->state_ref[out->field[f].rows]] || out->state_flags[out->field[f].rows] & PURE_LIST_BOUND >> 8))
+        if (out->field[f].type == PURE_FIELD_ROWS && out->state_flags[out->field[f].rows] & PURE_LIST_BOUND >> 8)
             REFUSE("rows field", f);
     /* A stored position into what is not stored would come back meaning nothing. */
     for (uint32_t i = 0; i < out->states; ++i)
@@ -2518,28 +2516,31 @@ static unsigned char *value_put(const PureApp *app, uint32_t record, uint64_t li
     return out;
 }
 
-/* A list value's stored form (bytes) read into a new one of the event's lists of record's items, its lists in fields
- * too: its number (0: none), or 0 with *made false where the bytes are not that form or memory ran out (*bad: they are
- * not). */
-static uint64_t value_take(PureApp *app, uint32_t record, const unsigned char *bytes, size_t size, bool *made, bool *bad) {
+/* A list value's stored form (bytes) read into a new one of the event's lists of record's items (or appended to into, a
+ * message's rows), its lists in fields too: its number (0: none, or into), or 0 with *made false where the bytes are not
+ * that form or memory ran out (*bad: they are not). */
+static uint64_t value_take(PureApp *app, uint32_t record, const unsigned char *bytes, size_t size, PureList *into, bool *made,
+                           bool *bad) {
     const PureModule *m = app->module;
     const PureRecord *r = &m->record[record];
     *made = true;
     if (!size) return 0;
-    uint64_t list = nest(app, record, NULL);
-    if (!list) return *made = false, 0;
+    uint64_t list = into ? 0 : nest(app, record, NULL);
+    if (!into && !list) return *made = false, 0;
     for (size_t at = 0; at < size;) {
         PureCell cells[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < r->count; ++f) {
             uint32_t field = r->first + f;
             uint8_t type = m->record_field_type[field];
             if (type == PURE_RECORD_TEXT || type == PURE_RECORD_LIST) {
-                uint32_t length = size - at >= 4 ? read32(bytes + at) : UINT32_MAX;
+                if (size - at < 4) return *bad = true, *made = false, 0;
+                uint32_t length = read32(bytes + at);
                 if (length > size - at - 4 || (type == PURE_RECORD_TEXT && !pure_utf8_valid((PureSpan){bytes + at + 4, length})))
                     return *bad = true, *made = false, 0;
                 cells[f] = (PureCell){.text = (unsigned char *)bytes + at + 4, .size = length};
                 if (type == PURE_RECORD_LIST) {
-                    cells[f] = (PureCell){.i64 = (int64_t)value_take(app, nested_record(m, field), bytes + at + 4, length, made, bad)};
+                    cells[f] = (PureCell){.i64 = (int64_t)value_take(app, nested_record(m, field), bytes + at + 4, length, NULL, made,
+                                                                     bad)};
                     if (!*made) return 0;
                 }
                 at += 4 + length;
@@ -2550,7 +2551,7 @@ static uint64_t value_take(PureApp *app, uint32_t record, const unsigned char *b
                 if (!pure_cell_fits(pure_record_kind(m, field), cells[f])) return *bad = true, *made = false, 0;
             }
         }
-        PureList *items = app->nested.list[list - 1]; /* (the lists in its fields may have moved the table) */
+        PureList *items = into ? into : app->nested.list[list - 1]; /* (the lists in its fields may have moved the table) */
         if (pure_list_insert(items, pure_list_count(items), cells, NULL) != PURE_OK) return *made = false, 0;
         if (m->record_nested[record]) share_cells(app, m, record, cells);
     }
@@ -2604,7 +2605,8 @@ static __attribute__((cold, noinline)) PureResult kept_value(PureApp *app, uint3
                                                              int64_t *out) {
     const PureModule *m = app->module;
     bool made, bad = false;
-    uint64_t value = value_take(app, nested_record(m, m->record[m->state_ref[list]].first + field), cell.text, cell.size, &made, &bad);
+    uint32_t record = nested_record(m, m->record[m->state_ref[list]].first + field);
+    uint64_t value = value_take(app, record, cell.text, cell.size, NULL, &made, &bad);
     if (!made) return bad ? PURE_STORE_ERROR : PURE_ALLOCATION;
     if (!grows(app, (Held){0, 0}, (Held){0, cell.size})) return PURE_BUDGET;
     *out = (int64_t)value;
@@ -5118,7 +5120,7 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     app->grown = app->spent = 0;
     app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
     for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0, app->held[i].by_ref = false;
-    if (app->nested.count) unbind(app), drop_nested(app); /* a view's body bound some on the app itself */
+    if (app->nested.count && !ev->nested) unbind(app), drop_nested(app); /* a view's body bound some on the app itself */
     Mark mark;
     mark_event(app, &mark);
     memcpy(pending, app->values, sizeof(app->values));
@@ -5310,19 +5312,32 @@ static PureResult message(PureApp *app, uint32_t input, const char *key, int64_t
         if (opened != PURE_OK) { app->document = NULL; return opened; }
         if (base >= 0 && base != app->revision) { pure_app_finish(app); return PURE_CONFLICT; }
     }
-    /* Its rows fill their lists (emptied when the event ends); rows that are not whole fail it. */
+    /* Its rows fill their lists (emptied when the event ends); rows that are not whole fail it. Rows whose records hold
+     * lists (027's 4a) read those into the event's lists as a kept list's cell is read, in the event's lists begun anew. */
+    bool nested = false;
     for (uint32_t f = 0; f < shape->field_count; ++f) {
         const PureField *field = &m->field[shape->field_start + f];
         if (field->type != PURE_FIELD_ROWS) continue;
-        PureResult filled = pure_list_read(app->lists[field->rows], payload.data + spans[f][0], spans[f][1]);
+        uint32_t record = m->state_ref[field->rows];
+        const unsigned char *rows = payload.data + spans[f][0];
+        PureResult filled;
+        if (m->record_nested[record]) {
+            if (!nested && app->nested.count) unbind(app), drop_nested(app);
+            nested = true;
+            bool made, bad = false;
+            value_take(app, record, rows, spans[f][1], app->lists[field->rows], &made, &bad);
+            filled = made ? PURE_OK : bad ? PURE_STORE_ERROR : PURE_ALLOCATION;
+        } else
+            filled = pure_list_read(app->lists[field->rows], rows, spans[f][1]);
         if (filled == PURE_OK) continue;
         clear_rows(app);
+        if (nested) drop_nested(app);
         pure_app_finish(app);
         return filled == PURE_ALLOCATION ? filled : fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
     }
     app->payload = payload;
     Event ev = {.app = app, .shape = shape, .key = key, .base = base, .arena = &app->arena, .exists = app->revision > 0,
-                .spans = spans};
+                .nested = nested, .spans = spans};
     PureResult result = dispatch(app, 1 + 2 * input, &ev);
     if (result != PURE_OK) pure_app_finish(app);
     return result;

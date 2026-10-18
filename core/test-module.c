@@ -6628,6 +6628,64 @@ static void nested_replace(void) {
     printf("{\"nested_replace\":{\"lists\":2,\"items\":3}}\n");
 }
 
+/* 027's 4a: a message's rows whose records hold lists. Each node's kids come in as one of the event's lists, read
+ * through a register; the rows and their lists go as the event ends, and rows that are not whole fail it with nothing
+ * changed. */
+static size_t put_node(unsigned char *out, int64_t name, const int64_t *kids, uint32_t count) {
+    memcpy(out, &name, 8);
+    put32(out + 8, 8 * count);
+    for (uint32_t k = 0; k < count; ++k) memcpy(out + 12 + 8 * k, &kids[k], 8);
+    return 12 + 8 * (size_t)count;
+}
+
+static void nested_rows(void) {
+    enum { LC_ = PURE_OP_LIST_COUNT, BIND_ = PURE_OP_LIST_BIND, NODES = 1, KIDS = 2, TOTAL = 3 };
+    static const S nums[] = {{"n", 0}};
+    static const RF leaf_fields[] = {{"v", 3, 0}};
+    static const RF node_fields[] = {{"name", 3, 0}, {"kids", 4, 0}};
+    static const R records[] = {{"Leaf", leaf_fields, 1}, {"Node", node_fields, 2}};
+    static const T others[] = {{"order.nodes", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1},
+                               {"let.kids", 3 | (uint32_t)(PURE_LIST_ROWS | PURE_LIST_BOUND) << 8, 0}, {"total", PURE_STATE_I64, 0}};
+    static const F fields[] = {{"nodes", PURE_FIELD_ROWS | NODES << 8}};
+    static const I inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, fields, 1}};
+    static const O code[] = {
+        /* 0: for x in order.nodes { total += sum(k.v for k in x.kids) } */
+        {EACH, WALKING(NODES, 10), 0}, {ROW, NODES, 0}, {IG, ITEM(NODES, 1), 0}, {BIND_, KIDS, 0},
+        {L, TOTAL, 0}, {FOLD, FOLDING(PURE_FOLD_SUM | PURE_FOLD_INTEGER, KIDS, 3), 0}, {ROW, KIDS, 0}, {IG, ITEM(KIDS, 0), 0},
+        {C, 1, 1}, {IADD, 0, 0}, {ST, TOTAL, 0},
+        /* 11: n = n * 10 + order.nodes.count */
+        {L, 0, 0}, {C, 0, 10}, {MUL, 0, 0}, {LC_, NODES, 0}, {ADD, 0, 0}, {ST, 0, 0},
+    };
+    H handler = {1, 0, LEN(code)};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, code, LEN(code), NULL, 0, others, LEN(others), NULL, 0, NULL, 0,
+                 records, 2, NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "nested rows: %s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    static const int64_t first[] = {7, 9}, second[] = {5};
+    unsigned char payload[64];
+    size_t size = put_node(payload, 1, first, 2);
+    size += put_node(payload + size, 2, second, 1);
+    size += put_node(payload + size, 3, NULL, 0);
+    for (int round = 1; round <= 3; ++round) { /* each event begins with its lists and theirs empty */
+        CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, size}) == PURE_OK);
+        CHECK(app.values[TOTAL].i64 == 21 * round && app.values[0].num == (round == 1 ? 3 : round == 2 ? 33 : 333));
+        CHECK(pure_list_count(app.lists[NODES]) == 0 && app.nested.count == 2); /* the third node's kids are none */
+    }
+    /* Not whole: a node's kids past the end, a kid cut short, a node cut short. */
+    const size_t cuts[] = {size - 1, size - 12 - 4, 4};
+    unsigned char broken[64];
+    memcpy(broken, payload, size);
+    put32(broken + 8, 1000);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){broken, size}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
+    for (size_t k = 0; k < LEN(cuts); ++k)
+        CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, cuts[k]}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
+    CHECK(app.values[TOTAL].i64 == 63 && app.values[0].num == 333 && pure_list_count(app.lists[NODES]) == 0 && !app.nested.count);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, size}) == PURE_OK && app.values[TOTAL].i64 == 84);
+    pure_app_stop(&app);
+    printf("{\"nested_rows\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(cuts) + 1);
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -7007,6 +7065,7 @@ int main(void) {
     functions_and_characters();
     nested_crashes();
     nested_replace();
+    nested_rows();
     memory_budget();
     work_budget();
     fold_mutations();

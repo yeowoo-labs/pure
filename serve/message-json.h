@@ -16,14 +16,16 @@ typedef struct {
     bool seen[PURE_MODULE_FIELDS];
     /* A rows field's array of objects is encoded in the stored form of its
      * list into rows (grown with malloc: the caller frees it), which the
-     * caller places from rows_base on in the payload, as the table says. */
+     * caller places from rows_base on in the payload, as the table says. A
+     * list field of an object is an array of its record's objects so, 64
+     * lists deep at most. */
     unsigned char *rows;
     size_t rows_size, rows_capacity, rows_base;
 } PureJsonMessage;
 
 /* The object at json[*at] (its opening brace), *at moved past it: NULL, or
  * what is wrong ("json", "json_field": unknown or given twice, "json_type",
- * "limit": rows past what a payload holds, "memory"). */
+ * "limit": rows past what a payload holds or 64 lists deep, "memory"). */
 const char *pure_json_message(PureJsonMessage *, unsigned char *json, size_t size, size_t *at);
 size_t pure_json_space(const unsigned char *json, size_t at, size_t size);
 /* A fixed field's value from its text (a query value or a JSON value) into

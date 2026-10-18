@@ -293,15 +293,15 @@ static bool rows_room(PureJsonMessage *b, size_t more) {
     return true;
 }
 
-/* A rows field's array (at its opening bracket): each an object of its
- * record's fields by name, a number or a string, a field left out taking its
- * default; encoded one after another as the list's stored form (a number's
- * binary64 bits, a text's u32le length and bytes). */
-static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size, size_t *at, uint32_t f, unsigned depth) {
+/* An array (at its opening bracket) of objects of a record's fields by name: a number, a string, or an array of the
+ * record a list field holds (027's 4a), a field left out taking its default; encoded one after another into rows as
+ * the list's stored form (a number's binary64 bits, a text's u32le length and bytes, a list's u32le length and its
+ * items so). An item's lists are encoded first and the item after them, moved down over them at its end. */
+static const char *items_of(PureJsonMessage *b, unsigned char *json, size_t size, size_t *at, uint32_t record_index,
+                            unsigned depth) {
     const PureModule *m = b->module;
-    const PureField *field = &m->field[b->shape->field_start + f];
-    const PureRecord *record = &m->record[m->state_ref[field->rows]];
-    size_t start = b->rows_size;
+    const PureRecord *record = &m->record[record_index];
+    if (depth >= 64) return "limit"; /* 64 lists deep at most */
     if (*at == size || json[(*at)++] != '[') return "json_type";
     *at = pure_json_space(json, *at, size);
     for (bool first = true; *at < size && json[*at] != ']'; first = false) {
@@ -312,7 +312,9 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
         if (*at == size || json[(*at)++] != '{') return "json_type";
         PureValue numbers[PURE_RECORD_FIELDS]; /* a number's, a bool's or an i64's */
         PureSpan texts[PURE_RECORD_FIELDS];
+        size_t lists[PURE_RECORD_FIELDS][2]; /* a list's stored form: where in rows, and its bytes */
         bool given[PURE_RECORD_FIELDS] = {false};
+        size_t item = b->rows_size;
         *at = pure_json_space(json, *at, size);
         for (bool member = true; *at < size && json[*at] != '}'; member = false) {
             if (!member) {
@@ -340,6 +342,16 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
             given[k] = true;
             uint8_t type = m->record_field_type[record->first + k];
             bool text = type == PURE_RECORD_TEXT, truth;
+            if (type == PURE_RECORD_LIST) {
+                size_t from = b->rows_size;
+                const char *why = items_of(b, json, size, at, (uint32_t)m->record_field_default[record->first + k].i64,
+                                           depth + 1);
+                if (why) return why;
+                lists[k][0] = from;
+                lists[k][1] = b->rows_size - from;
+                *at = pure_json_space(json, *at, size);
+                continue;
+            }
             if (type == PURE_RECORD_BOOL) { /* true or false, nothing else */
                 size_t word = json_bool(json + *at, size - *at, &truth);
                 if (!word) return "json_type";
@@ -370,16 +382,24 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
         }
         if (*at == size) return "json";
         ++*at;
+        size_t lists_end = b->rows_size;
         for (unsigned k = 0; k < record->count; ++k) {
             uint32_t at_field = record->first + k;
-            if (m->record_field_type[at_field] == PURE_RECORD_TEXT) {
-                uint32_t constant = (uint32_t)m->record_field_default[at_field].num;
-                PureSpan text = given[k] ? texts[k]
-                                         : (PureSpan){m->constant_data + m->constant_offset[constant], m->constant_length[constant]};
-                if (!rows_room(b, 4 + text.size)) return "memory";
-                write_u32(b->rows + b->rows_size, (uint32_t)text.size);
-                if (text.size) memcpy(b->rows + b->rows_size + 4, text.data, text.size);
-                b->rows_size += 4 + text.size;
+            uint8_t type = m->record_field_type[at_field];
+            if (type == PURE_RECORD_TEXT || type == PURE_RECORD_LIST) {
+                PureSpan text = {0};
+                size_t length = type == PURE_RECORD_LIST ? (given[k] ? lists[k][1] : 0) : 0;
+                if (type == PURE_RECORD_TEXT) {
+                    uint32_t constant = (uint32_t)m->record_field_default[at_field].num;
+                    text = given[k] ? texts[k]
+                                    : (PureSpan){m->constant_data + m->constant_offset[constant], m->constant_length[constant]};
+                    length = text.size;
+                }
+                if (length > UINT32_MAX || !rows_room(b, 4 + length)) return "memory";
+                write_u32(b->rows + b->rows_size, (uint32_t)length);
+                if (type == PURE_RECORD_LIST && length) memcpy(b->rows + b->rows_size + 4, b->rows + lists[k][0], length);
+                else if (length) memcpy(b->rows + b->rows_size + 4, text.data, length);
+                b->rows_size += 4 + length;
             } else {
                 uint64_t bits = (uint64_t)(given[k] ? numbers[k] : m->record_field_default[at_field]).i64; /* its bits */
                 if (!rows_room(b, 8)) return "memory";
@@ -387,9 +407,23 @@ static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size,
                 b->rows_size += 8;
             }
         }
+        if (lists_end > item) { /* the item over its lists' forms */
+            memmove(b->rows + item, b->rows + lists_end, b->rows_size - lists_end);
+            b->rows_size -= lists_end - item;
+        }
     }
     if (*at == size) return "json";
     ++*at;
+    return NULL;
+}
+
+/* A rows field's array, encoded so (items_of) and placed as the table says. */
+static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size, size_t *at, uint32_t f, unsigned depth) {
+    const PureModule *m = b->module;
+    const PureField *field = &m->field[b->shape->field_start + f];
+    size_t start = b->rows_size;
+    const char *why = items_of(b, json, size, at, m->state_ref[field->rows], depth);
+    if (why) return why;
     if (b->rows_base + b->rows_size > UINT32_MAX >> 2) return "limit";
     write_u32(b->table + 8 * f, (uint32_t)(b->rows_base + start));
     write_u32(b->table + 8 * f + 4, (uint32_t)(b->rows_size - start));

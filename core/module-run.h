@@ -102,6 +102,7 @@ typedef struct {
     PureValue *locals; /* the event's locals (a handler's, and what runs in it), or NULL */
     bool arguments; /* FIELD reads the arguments given for a view, not the message */
     bool modified, exists;
+    bool nested; /* its rows made some of the event's lists in records (027's 4a): the event begins with them */
     uint32_t (*spans)[2]; /* a message's variable fields: start and size in the payload */
 } Event;
 
