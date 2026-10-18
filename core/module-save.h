@@ -79,15 +79,25 @@ uint8_t pure_record_kind(const PureModule *, uint32_t field);
  * order its list fields first meet them, each its fields' kinds (PURE_CELL_...) and names, and a list field's items'
  * record by its number here. A module's graph knows each record's number in the module too. */
 typedef struct {
-    unsigned records;
-    struct {
-        unsigned count;
-        uint8_t kinds[PURE_RECORD_FIELDS], items[PURE_RECORD_FIELDS];
-        char names[PURE_RECORD_FIELDS][PURE_MODULE_NAME];
-    } record[PURE_MODULE_RECORDS];
-    uint16_t module_record[PURE_MODULE_RECORDS];
+    unsigned count;
+    uint8_t kinds[PURE_RECORD_FIELDS], items[PURE_RECORD_FIELDS];
+    char names[PURE_RECORD_FIELDS][PURE_MODULE_NAME];
+} PureLayoutRecord;
+/* Its records in record (a few in few, more on the heap: room of them), at most 256 (a store numbers them in a byte),
+ * module_record beside them. Begun (pure_layout_begin) before use, done (pure_layout_done) after; never copied. */
+typedef struct {
+    unsigned records, room;
+    PureLayoutRecord *record;
+    uint16_t *module_record;
+    PureLayoutRecord few[4];
+    uint16_t few_records[4];
 } PureLayout;
-void pure_layout_of(const PureModule *, uint32_t record, PureLayout *out);
+enum { PURE_LAYOUT_RECORDS = 256 };
+void pure_layout_begin(PureLayout *);
+bool pure_layout_room(PureLayout *, unsigned records); /* false without room, or past PURE_LAYOUT_RECORDS */
+void pure_layout_done(PureLayout *);
+/* false: no room, or a graph of more than PURE_LAYOUT_RECORDS records. */
+bool pure_layout_of(const PureModule *, uint32_t record, PureLayout *out);
 bool pure_layout_same(const PureLayout *, const PureLayout *);
 /* A list with record's fields, taking from `from` (laid out as from_layout's record 0) each field of the same name and
  * kind, or a number, a bool and an i64 from each other when the value fits (pure_cell_as), and giving the others their

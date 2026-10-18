@@ -489,6 +489,8 @@ static void faults(void) {
 
 typedef struct { const char *reason; Spec spec; PureResult result; } Rejection;
 
+static char *new_store(void);
+static void remove_store(const char *path);
 static void rejections(void) {
     static const S s1[] = {{"a", 0}};
     static const S dup[] = {{"a", 0}, {"a", 1}};
@@ -590,6 +592,53 @@ static void rejections(void) {
     double shown;
     CHECK(pure_app_view(&wide, VIEWS - 1, &shown) && shown == 1);
     pure_app_stop(&wide);
+    /* Nor of records or their fields in all (027's 4f-3b): 20 records of 10 fields, an item of the last appended. */
+    enum { RECORDS = 20, EACH = 10 };
+    static RF record_fields[RECORDS][EACH];
+    static R records[RECORDS];
+    static char record_names[RECORDS][8], field_names[EACH][8];
+    for (unsigned f = 0; f < EACH; ++f) snprintf(field_names[f], 8, "f%u", f);
+    for (unsigned r = 0; r < RECORDS; ++r) {
+        snprintf(record_names[r], 8, "R%u", r);
+        for (unsigned f = 0; f < EACH; ++f) record_fields[r][f] = (RF){field_names[f], 0, 0};
+        records[r] = (R){record_names[r], record_fields[r], EACH};
+    }
+    static const T last_list[] = {{"items", 3, RECORDS - 1}};
+    static O appended[EACH + 3];
+    for (unsigned f = 0; f < EACH; ++f) appended[f] = (O){C, 0, f};
+    appended[EACH] = (O){PURE_OP_LIST_APPEND, 1, 0};
+    appended[EACH + 1] = (O){PURE_OP_LIST_COUNT, 1, 0};
+    appended[EACH + 2] = (O){ST, 0, 0};
+    static const H appending[] = {{1, 0, EACH + 3}};
+    CHECK(load((Spec){s1, 1, key_in, 1, NULL, 0, appending, 1, appended, EACH + 3, NULL, 0, last_list, 1, NULL, 0, NULL, 0,
+                      records, RECORDS, NULL, 0}, &module_a) == PURE_OK && module_a.records == RECORDS &&
+          module_a.record_fields == RECORDS * EACH);
+    CHECK(pure_app_start(&wide, &module_a, (PureData){0}) == PURE_OK && press(&wide, 0) == PURE_OK && wide.values[0].num == 1 &&
+          pure_list_get(wide.lists[1], 0, EACH - 1).num == EACH - 1);
+    pure_app_stop(&wide);
+    /* A stored list's record graph past the few a layout holds itself: six records, each a list of the next. */
+    enum { DEEP = 6 };
+    static RF chain_fields[DEEP][2];
+    static R chain[DEEP];
+    for (unsigned r = 0; r < DEEP; ++r) {
+        chain_fields[r][0] = (RF){"n", 0, 0};
+        chain_fields[r][1] = (RF){"next", 4, r + 1 < DEEP ? r + 1 : r}; /* the last a list of itself */
+        chain[r] = (R){record_names[r], chain_fields[r], 2};
+    }
+    static const T chained[] = {{"items", 3, 0}, {"let.none", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}};
+    static const O add_one[] = {{C, 0, 7}, {PURE_OP_LIST_VALUE, 2, 0}, {PURE_OP_LIST_APPEND, 1, 0}, {PURE_OP_LIST_COUNT, 1, 0},
+                                {ST, 0, 0}};
+    static const H adding[] = {{1, 0, 5}};
+    Spec deep = {s1, 1, key_in, 1, NULL, 0, adding, 1, add_one, 5, NULL, 0, chained, 2, NULL, 0, NULL, 0, chain, DEEP, NULL, 0};
+    CHECK(load(deep, &module_a) == PURE_OK);
+    char *deep_path = new_store();
+    CHECK(pure_app_start(&wide, &module_a, pure_tree_data(deep_path)) == PURE_OK && press(&wide, 0) == PURE_OK &&
+          press(&wide, 0) == PURE_OK && pure_app_save(&wide) == PURE_OK);
+    pure_app_stop(&wide);
+    CHECK(pure_app_start(&wide, &module_a, pure_tree_data(deep_path)) == PURE_OK && pure_list_count(wide.lists[1]) == 2 &&
+          pure_list_get(wide.lists[1], 1, 0).num == 7);
+    pure_app_stop(&wide);
+    remove_store(deep_path);
     static unsigned char bytes[65536];
     size_t size = build(bytes, (Spec){s1, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0});
     CHECK(pure_module_load(bytes, size - 1, &module_a, error, sizeof(error)) == PURE_INVALID);

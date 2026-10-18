@@ -18,7 +18,8 @@ enum {
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 38,
     /* A message's fields at most: a send pushes them all (the stack's), a width of the stored sends too (027's 4f-3a). */
     PURE_MESSAGE_FIELDS = PURE_MODULE_STACK, PURE_MODULE_CONSTANTS = 4096,
-    PURE_MODULE_CONSTANT_BYTES = 1 << 20, PURE_MODULE_RECORDS = 16, PURE_MODULE_RECORD_FIELDS = 128,
+    PURE_MODULE_CONSTANT_BYTES = 1 << 20,
+    /* A record's fields at most: a list's leaf keeps 16 columns (module-list.c, its runs and arrays too). */
     PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8
 };
 

@@ -1712,7 +1712,6 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     out->state_words = (uint16_t)((out->states + 63) / 64 + !out->states);
     if (out->code_count > PURE_MODULE_CODE || strings > PURE_MODULE_STRINGS ||
         out->constants > PURE_MODULE_CONSTANTS || constant_bytes > PURE_MODULE_CONSTANT_BYTES ||
-        out->records > PURE_MODULE_RECORDS || out->record_fields > PURE_MODULE_RECORD_FIELDS ||
         out->functions > PURE_MODULE_FUNCTIONS) {
         result = PURE_LIMIT;
         REFUSE("module exceeds a limit", 8);
@@ -5998,7 +5997,33 @@ static uint8_t cell_kind(const PureModule *m, uint32_t field, bool kept) {
 /* Whether a stored kind's cell is bytes in the stored form: a text's, or a list's. */
 static bool stored_bytes(uint8_t kind) { return pure_cell_text(kind) || kind == PURE_CELL_LIST; }
 
-PURE_COLD void pure_layout_of(const PureModule *m, uint32_t record, PureLayout *out) {
+void pure_layout_begin(PureLayout *l) {
+    l->records = 0, l->room = 4;
+    l->record = l->few, l->module_record = l->few_records;
+}
+
+bool pure_layout_room(PureLayout *l, unsigned records) {
+    if (records <= l->room) return true;
+    if (records > PURE_LAYOUT_RECORDS) return false;
+    PureLayoutRecord *record = malloc(PURE_LAYOUT_RECORDS * sizeof(*record));
+    uint16_t *module_record = malloc(PURE_LAYOUT_RECORDS * sizeof(*module_record));
+    if (!record || !module_record) {
+        free(record), free(module_record);
+        return false;
+    }
+    memcpy(record, l->record, l->records * sizeof(*record));
+    memcpy(module_record, l->module_record, l->records * sizeof(*module_record));
+    pure_layout_done(l);
+    l->record = record, l->module_record = module_record, l->room = PURE_LAYOUT_RECORDS;
+    return true;
+}
+
+void pure_layout_done(PureLayout *l) {
+    if (l->record != l->few) free(l->record), free(l->module_record);
+    l->record = l->few, l->module_record = l->few_records, l->room = 4;
+}
+
+PURE_COLD bool pure_layout_of(const PureModule *m, uint32_t record, PureLayout *out) {
     out->records = 1;
     out->module_record[0] = (uint16_t)record;
     for (unsigned at = 0; at < out->records; ++at) { /* breadth first: each record once, numbered as first met */
@@ -6013,10 +6038,12 @@ PURE_COLD void pure_layout_of(const PureModule *m, uint32_t record, PureLayout *
             uint32_t items = nested_record(m, field);
             unsigned k = 0;
             while (k < out->records && out->module_record[k] != items) ++k;
+            if (k == out->records && !pure_layout_room(out, out->records + 1)) return false;
             if (k == out->records) out->module_record[out->records++] = (uint16_t)items;
             out->record[at].items[f] = (uint8_t)k;
         }
     }
+    return true;
 }
 
 PURE_COLD bool pure_layout_same(const PureLayout *a, const PureLayout *b) {
@@ -6161,10 +6188,11 @@ PURE_COLD PureResult pure_list_migrate(PureList **out, const PureList *from, con
 PURE_COLD static PureResult keep_list(PureList **out, PureList *from, const PureModule *old, uint32_t old_record,
                             const PureModule *m, uint32_t record, bool kept) {
     PureLayout was, now;
-    pure_layout_of(old, old_record, &was);
-    pure_layout_of(m, record, &now);
-    if (pure_layout_same(&was, &now)) { *out = from; return PURE_OK; }
-    return pure_list_migrate(out, from, &was, m, record, kept);
+    pure_layout_begin(&was), pure_layout_begin(&now);
+    PureResult result = !pure_layout_of(old, old_record, &was) || !pure_layout_of(m, record, &now) ? PURE_ALLOCATION :
+                        pure_layout_same(&was, &now) ? (*out = from, PURE_OK) : pure_list_migrate(out, from, &was, m, record, kept);
+    pure_layout_done(&was), pure_layout_done(&now);
+    return result;
 }
 
 /* Open a module in an app. States keep their values by name and kind (texts

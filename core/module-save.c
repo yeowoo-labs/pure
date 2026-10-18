@@ -198,9 +198,14 @@ static unsigned char *layout_fields(const PureLayout *l, unsigned at, unsigned c
     return out;
 }
 
+/* 0 without room for the record's graph. */
 static size_t image_header(const PureModule *m, uint32_t record, uint64_t seq, unsigned char *out) {
     PureLayout l;
-    pure_layout_of(m, record, &l);
+    pure_layout_begin(&l);
+    if (!pure_layout_of(m, record, &l)) {
+        pure_layout_done(&l);
+        return 0;
+    }
     memcpy(out, image_magic, 4);
     out[4] = (unsigned char)l.record[0].count;
     unsigned char *at = layout_fields(&l, 0, out + 5);
@@ -210,6 +215,7 @@ static size_t image_header(const PureModule *m, uint32_t record, uint64_t seq, u
         *at++ = (unsigned char)l.record[k].count;
         at = layout_fields(&l, k, at);
     }
+    pure_layout_done(&l);
     return (size_t)(put_le(at, seq, 8) - out);
 }
 
@@ -485,7 +491,8 @@ PureResult pure_save_image(PureApp *app, const PureModule *m, uint32_t state, co
     unsigned char *header = malloc(header_room(m));
     if (!header) return PURE_ALLOCATION;
     size_t header_size = image_header(m, m->state_ref[state], app->seq, header);
-    PureResult result = write_image(directory_of(app), m->state_names[state], header, header_size, list);
+    PureResult result = header_size ? write_image(directory_of(app), m->state_names[state], header, header_size, list)
+                                    : PURE_ALLOCATION;
     free(header);
     return result;
 }
@@ -511,7 +518,9 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     }
     /* The stored record graph: its fields' kinds (PURE_CELL_...: a record's, its lists' PURE_CELL_LIST) and names, and
      * the records of the lists in its fields (an image's alone, 027's stage 3). */
-    PureLayout stored_layout = {.records = 1};
+    PureLayout stored_layout, layout;
+    pure_layout_begin(&stored_layout), pure_layout_begin(&layout);
+    stored_layout.records = 1;
     unsigned count = 0;
     size_t at = 0, items = 0;
     uint64_t holds = 0;
@@ -523,7 +532,7 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         at = 5;
         ok = ok && read_fields(bytes, size, &at, count, &stored_layout, 0, 256, &lists) && (image || !lists);
         if (ok && lists) { /* the graph's other records */
-            ok = at < size && bytes[at] < PURE_MODULE_RECORDS;
+            ok = at < size && pure_layout_room(&stored_layout, 1u + bytes[at]);
             stored_layout.records = ok ? 1u + bytes[at++] : 1;
             for (unsigned k = 1; ok && k < stored_layout.records; ++k)
                 ok = at < size && bytes[at] <= PURE_RECORD_FIELDS &&
@@ -564,10 +573,10 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
             saved->logged += change->records.size;
         }
     }
-    PureLayout layout;
-    pure_layout_of(m, record, &layout);
-    bool same = stored && pure_layout_same(&stored_layout, &layout);
+    if (result == PURE_OK && !pure_layout_of(m, record, &layout)) result = PURE_ALLOCATION;
+    bool same = stored && result == PURE_OK && pure_layout_same(&stored_layout, &layout);
     if (result == PURE_OK && same && image) {
+        pure_layout_done(&stored_layout), pure_layout_done(&layout);
         *out = from;
         saved->image = holds;
         return PURE_OK;
@@ -587,6 +596,7 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         }
     }
     pure_list_free(from);
+    pure_layout_done(&stored_layout), pure_layout_done(&layout);
     if (result != PURE_OK) {
         pure_list_free(*out);
         pure_draft_close(*legacy);
@@ -718,6 +728,11 @@ PureCheckpoint *pure_app_checkpoint(PureApp *app) {
     c->header_size = pick == PURE_LIST_OUTBOX ? outbox_header(m, c->seq, c->header) :
                      pick >= PURE_LIST_HEARD ? runtime_header(pick, c->seq, c->header) :
                                                image_header(m, m->state_ref[pick], c->seq, c->header);
+    if (!c->header_size) { /* no room for its record's graph: none now */
+        pure_snapshot_release(c->snapshot);
+        free(c->directory), free(c->header), free(c);
+        return NULL;
+    }
     c->logged = app->logged[slot];
     c->since = app->logged_since[slot];
     app->checkpoint = c;
