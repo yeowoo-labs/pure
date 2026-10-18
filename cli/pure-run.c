@@ -13,7 +13,8 @@
  * every N commands (and at the end), so N events share one commit.
  *   down NAME | up NAME | frame [N] | type NAME HEX|- | message NAME HEX|- | tick NAME | time MS | replace PATH | save | show
  *   budget N (the work an event may do) | memory N (what the states may hold) | work (the last event's work)
- * (type gives a text input its bytes, message a message input its payload, laid out as the module says;
+ * (027's 4d: down and up a key's press and release, type a text's, tick a timer's and frame a frame's message, each by
+ * the input bound so; type gives a text input its bytes, message a message input its payload, laid out as the module says;
  * message NAME @PATH gives it the bytes of the file at PATH, of any size.)
  * Text states and text views print as JSON strings; cursors as byte positions;
  * lists as arrays of objects (a bytes field as a string of its hex digits); indices as positions; a table view as an
@@ -135,6 +136,9 @@ static void show_value(PureApp *app, uint32_t view, size_t row) {
     else printf("%.17g", value);
 }
 
+/* The frames that ran, and the device events no message takes (a release, a frame): a surface's events all the same. */
+static unsigned long long ticks, untaken;
+
 static void show(PureApp *app, const char *failure) {
     const PureModule *m = app->module;
     printf("{\"states\":{");
@@ -170,8 +174,15 @@ static void show(PureApp *app, const char *failure) {
         putchar(']');
     }
     printf("},\"tick\":%llu,\"successfulEvents\":%llu,\"fault\":\"%s\",\"error\":%s%s%s}\n",
-           (unsigned long long)app->ticks, (unsigned long long)app->events, pure_fault_name(app->fault),
+           ticks, (unsigned long long)app->events + untaken, pure_fault_name(app->fault),
            failure ? "\"" : "", failure ? failure : "null", failure ? "\"" : "");
+}
+
+/* The input bound so (027's 4d) with the key of input key (a press's release), or -1. */
+static int bound(const PureModule *m, uint8_t binding, int key) {
+    for (uint32_t i = 0; i < m->inputs; ++i)
+        if (m->input[i].binding == binding && (key < 0 || !strcmp(m->input_keys[i], m->input_keys[key]))) return (int)i;
+    return -1;
 }
 
 static int hex(char c) {
@@ -192,7 +203,8 @@ int main(int argc, char **argv) {
     PureApp app;
     PureResult started = pure_app_start(&app, &modules[active], stored ? pure_tree_data(argv[3]) : (PureData){0});
     if (started != PURE_OK) { fprintf(stderr, "cannot start (%d)\n", (int)started); return 2; }
-    if (batch && !pure_app_defer(&app, true)) { fputs("cannot defer saving\n", stderr); return 2; }
+    /* Frames wait for the next event's save (or the end's, or save): a stored app saves when the rest come. */
+    if (stored && !pure_app_defer(&app, true)) { fputs("cannot defer saving\n", stderr); return 2; }
     long unsaved = 0;
     static char line[1 << 16];
     static unsigned char text[1 << 15];
@@ -202,11 +214,13 @@ int main(int argc, char **argv) {
         const char *failure = NULL;
         line[strcspn(line, "\r\n")] = 0;
         if (sscanf(line, "%15s %255s %65535s", command, argument, data) < 1) continue;
-        if (!strcmp(command, "down") || !strcmp(command, "up")) {
+        bool frame = false;
+        if (!strcmp(command, "down") || !strcmp(command, "up")) { /* a key's press, or its release when a message takes it */
             int input = pure_module_input(app.module, argument);
-            if (input < 0) failure = "unknown input";
-            else if (pure_app_input(&app, (uint32_t)input, command[0] == 'd' ? PURE_EDGE_DOWN : PURE_EDGE_UP) != PURE_OK)
-                failure = "event failed";
+            if (input < 0 || app.module->input[input].binding != PURE_BIND_PRESS) failure = "unknown input";
+            else if (command[0] == 'u') input = bound(app.module, PURE_BIND_RELEASE, input);
+            if (!failure && input < 0) ++untaken, app.fault = PURE_FAULT_NONE; /* an event that runs nothing */
+            else if (!failure && pure_app_message(&app, (uint32_t)input, (PureSpan){0}) != PURE_OK) failure = "event failed";
         } else if (!strcmp(command, "type") || !strcmp(command, "message")) {
             int input = pure_module_input(app.module, argument);
             size_t length = strcmp(data, "-") ? strlen(data) / 2 : 0;
@@ -225,14 +239,12 @@ int main(int argc, char **argv) {
             }
             if (failure) {
             } else if (input < 0) failure = "unknown input";
-            else if ((command[0] == 't' ? pure_app_text(&app, (uint32_t)input, given)
-                                        : pure_app_message(&app, (uint32_t)input, given)) != PURE_OK)
-                failure = "event failed";
+            else if (pure_app_message(&app, (uint32_t)input, given) != PURE_OK) failure = "event failed";
             free(read);
         } else if (!strcmp(command, "tick")) {
             int input = pure_module_input(app.module, argument);
             if (input < 0) failure = "unknown input";
-            else if (pure_app_tick(&app, (uint32_t)input) != PURE_OK) failure = "event failed";
+            else if (pure_app_message(&app, (uint32_t)input, (PureSpan){0}) != PURE_OK) failure = "event failed";
         } else if (!strcmp(command, "time")) {
             char *end;
             double now = strtod(argument, &end);
@@ -240,9 +252,15 @@ int main(int argc, char **argv) {
             else app.now = now;
         } else if (!strcmp(command, "frame")) {
             long count = *argument ? strtol(argument, NULL, 10) : 1;
+            int input = bound(app.module, PURE_BIND_FRAME, -1);
+            double dt = 1.0 / 60.0; /* its one field */
+            frame = true;
             if (count < 1 || count > 600) failure = "frame count";
-            for (long i = 0; !failure && i < count; ++i)
-                if (pure_app_frame(&app) != PURE_OK) failure = "event failed";
+            for (long i = 0; !failure && i < count; ++i) {
+                if (input >= 0 && pure_app_message(&app, (uint32_t)input, (PureSpan){(const unsigned char *)&dt, 8}) != PURE_OK)
+                    failure = "event failed";
+                else if (++ticks, input < 0) ++untaken, app.fault = PURE_FAULT_NONE;
+            }
         } else if (!strcmp(command, "replace")) {
             if (!load(argument, &modules[!active])) failure = "invalid module";
             else if (pure_app_replace(&app, &modules[!active]) != PURE_OK) failure = "replace failed";
@@ -264,7 +282,8 @@ int main(int argc, char **argv) {
         if (batch && strcmp(command, "show") && ++unsaved == batch) {
             unsaved = 0;
             if (pure_app_save(&app) != PURE_OK) failure = "save failed";
-        }
+        } else if (stored && !batch && !frame && strcmp(command, "show") && pure_app_save(&app) != PURE_OK)
+            failure = "save failed";
         if (failure) status = 1;
         show(&app, failure);
     }

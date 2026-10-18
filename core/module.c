@@ -25,7 +25,7 @@ enum { FROM_PAYLOAD, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUM
 /* IN_LOCALS: a handler's locals, read in its walks and the folds in them. */
 /* IN_COMPUTE: what a view's body may do too (018): loops, locals, and changes to an event's lists alone. */
 /* IN_FUNCTION: a function's code (027's 2c), a handler's but for a message. */
-enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64, IN_ARGUMENTS = 128,
+enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_ROW = 32, IN_OUTER = 64, IN_ARGUMENTS = 128,
        IN_LOCALS = 256, IN_COMPUTE = 512, IN_FUNCTION = 1024 };
 enum { READ = IN_VIEW | IN_HANDLER };
 /* What an argument names: nothing (it is 0), a state of one type (A_STATE +
@@ -72,7 +72,6 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_NE] = COMPARE, [PURE_OP_AND] = LOGIC(2), [PURE_OP_OR] = LOGIC(2), [PURE_OP_NOT] = LOGIC(1),
     [PURE_OP_MIN] = NUMS(2), [PURE_OP_MAX] = NUMS(2), [PURE_OP_CLAMP] = NUMS(3),
     [PURE_OP_LOAD] = {0, {0}, T_STATE, READ, A_VALUE, O_ANY},
-    [PURE_OP_DT] = {0, {0}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
     [PURE_OP_STORE] = {1, {T_STATE}, 0, IN_HANDLER, A_VALUE, O_ANY},
     [PURE_OP_JZ] = {1, {T_BOOL}, 0, READ, A_TARGET, O_ANY},
     [PURE_OP_JMP] = {0, {0}, 0, READ, A_TARGET, O_ANY},
@@ -82,7 +81,6 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_REQUIRE] = {1, {T_BOOL}, 0, IN_HANDLER, A_NONE, O_ANY},
     [PURE_OP_TEXT_CONST] = {0, {0}, T_TEXT, READ, A_CONSTANT, O_ANY},
     [PURE_OP_TEXT_LOAD] = {0, {0}, T_TEXT, READ, STATE(TEXT), O_ANY},
-    [PURE_OP_TEXT_INPUT] = {0, {0}, T_TEXT, IN_TEXT, A_NONE, O_ANY},
     [PURE_OP_NUM_TEXT] = {1, {T_NUM}, T_TEXT, READ, A_FORMAT, O_ANY},
     [PURE_OP_CONCAT] = {2, {T_TEXT, T_TEXT}, T_TEXT, READ, A_JOINED, O_ANY},
     [PURE_OP_CHARS] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
@@ -328,8 +326,9 @@ PURE_COLD static bool name_at(const unsigned char *strings, uint32_t size, uint3
     return true;
 }
 
-/* The input whose handler this is, or -1 for frame. */
-static int event_input(uint32_t event) { return event ? (int)((event - 1) / 2) : -1; }
+/* The verifier's arrival: the message input a handler handles or a view's arguments come in, as its number + 1 (0:
+ * none, a function's or a view's without arguments). */
+static int event_input(uint32_t event) { return event ? (int)event - 1 : -1; }
 
 /* The state an argument names must have this type. */
 static bool state_of(const PureModule *m, uint32_t state, uint8_t type) {
@@ -506,7 +505,6 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
                    : !handler ? IN_VIEW | (row >= 0 ? IN_ROW : 0) | (folding && outer >= 0 ? IN_OUTER : 0) | (body ? IN_COMPUTE : 0)
                               : IN_HANDLER | (view == WALK ? IN_ROW : 0);
     if (shape && handler && !steps && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE;
-    if (shape && handler && !steps && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
     if (shape && (!handler || steps) && (shape->kind == PURE_KIND_MESSAGE || shape->kind == PURE_KIND_ARGUMENTS))
         where |= IN_ARGUMENTS;
     if (locals) where |= IN_LOCALS;
@@ -554,7 +552,6 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             if (view == FILTER) REFUSE("filter with an effect");
             if (folding) REFUSE("fold with an effect");
             if (!handler || steps) REFUSE("view with an effect");
-            if (allowed & IN_TEXT) REFUSE("text input outside a text handler");
             REFUSE("message operation outside a message handler");
         }
         uint32_t arg = op->arg;
@@ -1716,36 +1713,38 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t i = 0; i < out->inputs; ++i, at += INPUT_BYTES) {
         PureInputShape *shape = &out->input[i];
         shape->kind = at[4];
+        shape->binding = at[5];
         shape->field_start = (uint16_t)read16(at + 12);
         shape->field_count = (uint16_t)read16(at + 14);
-        /* Arguments bear their view's name (view.args); other inputs are identifiers. */
-        if (!name_at(text, strings, read32(at), shape->kind == PURE_KIND_ARGUMENTS ? NAME_PATH : NAME_IDENTIFIER,
-                     out->input_names[i])) REFUSE("input name", i);
-        if (read16(at + 6) || at[5]) REFUSE("input flags", i);
-        if (shape->kind == PURE_KIND_KEY) {
-            if (shape->field_start || shape->field_count ||
-                !name_at(text, strings, read32(at + 8), NAME_PRINTABLE, out->input_keys[i]) ||
-                !key_name(out->input_keys[i])) REFUSE("input key", i);
+        /* Arguments bear their view's name (view.args), and a message may bear a path (an aup's hidden one: up.up,
+         * list.point); an output is an identifier. */
+        if (!name_at(text, strings, read32(at), shape->kind == PURE_KIND_OUTPUT ? NAME_IDENTIFIER : NAME_PATH, out->input_names[i]))
+            REFUSE("input name", i);
+        bool arguments = shape->kind == PURE_KIND_ARGUMENTS, keyed = shape->binding == PURE_BIND_PRESS || shape->binding == PURE_BIND_RELEASE;
+        if (read16(at + 6) || shape->binding > PURE_BIND_POINT || (shape->binding && shape->kind != PURE_KIND_MESSAGE))
+            REFUSE("input flags", i);
+        /* What a binding names (027's 4d): a key, a timer's period, a pointing's table (checked with the views). */
+        if (keyed) {
+            if (!name_at(text, strings, read32(at + 8), NAME_PRINTABLE, out->input_keys[i]) || !key_name(out->input_keys[i]))
+                REFUSE("input key", i);
             for (uint32_t k = 0; k < i; ++k)
-                if (out->input[k].kind == PURE_KIND_KEY && !strcmp(out->input_keys[k], out->input_keys[i]))
+                if (out->input[k].binding == shape->binding && !strcmp(out->input_keys[k], out->input_keys[i]))
                     REFUSE("duplicate key", i);
-            continue;
         }
-        if (shape->kind == PURE_KIND_TEXT) {
-            if (shape->field_start || shape->field_count || read32(at + 8)) REFUSE("text input shape", i);
-            continue;
-        }
-        if (shape->kind == PURE_KIND_TIMER) {
-            shape->period = read32(at + 8);
-            if (shape->field_start || shape->field_count || !shape->period ||
-                shape->period > PURE_TIMER_LONGEST) REFUSE("timer input", i);
-            continue;
-        }
-        bool arguments = shape->kind == PURE_KIND_ARGUMENTS;
-        if ((shape->kind != PURE_KIND_MESSAGE && shape->kind != PURE_KIND_OUTPUT && !arguments) || (!arguments && read32(at + 8)) ||
-            shape->field_start != next_field ||
+        if (shape->binding == PURE_BIND_TIMER && (!(shape->period = read32(at + 8)) || shape->period > PURE_TIMER_LONGEST))
+            REFUSE("timer input", i);
+        shape->view = arguments || shape->binding == PURE_BIND_POINT ? read32(at + 8) : 0;
+        if ((shape->kind != PURE_KIND_MESSAGE && shape->kind != PURE_KIND_OUTPUT && !arguments) ||
+            (read32(at + 8) && !arguments && !shape->binding) || shape->field_start != next_field ||
             shape->field_count > out->fields - next_field) REFUSE("message shape", i);
-        shape->view = arguments ? read32(at + 8) : 0;
+        /* A binding's fields: a key's and a timer's none, a text's one text, a frame's one number, a pointing's one u32. */
+        static const uint8_t bound_field[] = {[PURE_BIND_TEXT] = PURE_FIELD_TEXT, [PURE_BIND_FRAME] = PURE_FIELD_NUMBER,
+                                              [PURE_BIND_POINT] = PURE_FIELD_U32};
+        if (shape->binding && shape->field_count != (bound_field[shape->binding] != 0)) REFUSE("binding's fields", i);
+        if (shape->binding && shape->field_count &&
+            read32(fields + (size_t)next_field * FIELD_BYTES + 4) != bound_field[shape->binding]) REFUSE("binding's fields", i);
+        for (uint32_t k = 0; shape->binding == PURE_BIND_FRAME && k < i; ++k)
+            if (out->input[k].binding == PURE_BIND_FRAME) REFUSE("second frame input", i);
         for (uint32_t f = 0; f < shape->field_count; ++f) {
             const unsigned char *entry = fields + (size_t)(next_field + f) * FIELD_BYTES;
             PureField *field = &out->field[next_field + f];
@@ -1866,6 +1865,9 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
      * read the table's), one set a view, bearing its name. */
     for (uint32_t i = 0; i < out->inputs; ++i) {
         const PureInputShape *shape = &out->input[i];
+        /* A pointing points at a table's rows (027's 4d). */
+        if (shape->binding == PURE_BIND_POINT && (shape->view >= out->views || out->view_type[shape->view] != PURE_VIEW_TABLE))
+            REFUSE("pointing's table", i);
         if (shape->kind != PURE_KIND_ARGUMENTS) continue;
         char path[PURE_MODULE_NAME + 8];
         if (shape->view >= out->views || out->view_table[shape->view] || out->view_arguments[shape->view]) REFUSE("arguments", i);
@@ -1878,10 +1880,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t i = 0; i < out->handlers; ++i, at += HANDLER_BYTES) {
         uint32_t event = read32(at);
         out->handler[i] = (PureHandler){event, {read32(at + 4), read32(at + 8)}};
-        int input = event_input(event);
-        if (event > 2u * out->inputs || (input >= 0 && out->input[input].kind != PURE_KIND_KEY && !(event & 1)) ||
-            (input >= 0 && (out->input[input].kind == PURE_KIND_OUTPUT || out->input[input].kind == PURE_KIND_ARGUMENTS)))
-            REFUSE("handler event", i);
+        if (event >= out->inputs || out->input[event].kind != PURE_KIND_MESSAGE) REFUSE("handler event", i);
     }
     /* Functions (027's 2c): a block and the counts of its parameters and results, whose types follow every function's. */
     for (uint32_t i = 0, item = 0; i < out->functions; ++i, at += FUNCTION_BYTES) {
@@ -1921,7 +1920,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t i = 0; i < out->views; ++i) {
         bad = i;
         bool table = out->view_type[i] == PURE_VIEW_TABLE;
-        uint32_t event = out->view_arguments[i] ? 2u * out->view_arguments[i] - 1u : 0; /* the arguments' input, as an arrival */
+        uint32_t event = out->view_arguments[i]; /* the arguments' input, as an arrival (its number + 1) */
         bool computes = !table && !out->view_table[i]; /* a view outside a table may have a body */
         if ((!table || out->view_code[i].length) &&
             (why = verify_block(out, out->view_code[i], table ? FILTER : out->view_type[i],
@@ -1960,7 +1959,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     }
     for (uint32_t i = 0; i < out->handlers; ++i) {
         bad = i;
-        if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event, true, 0, 0, -1, &bad))) goto refused;
+        if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event + 1, true, 0, 0, -1, &bad)))
+            goto refused;
         if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
     }
     /* An instruction in no handler's, view's or function's block never runs and was never verified: it becomes CONST 0,
@@ -1994,8 +1994,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             }
     }
     for (uint32_t i = 0; i < out->handlers; ++i) {
-        int input = event_input(out->handler[i].event);
-        input = input >= 0 && out->input[input].kind == PURE_KIND_MESSAGE ? input : -1;
+        int input = (int)out->handler[i].event;
         plan_folds(out, out->handler[i].code, input);
         range_code(out, out->handler[i].code, input);
     }
@@ -2192,13 +2191,6 @@ int pure_module_view(const PureModule *m, const char *name) {
     for (uint32_t i = 0; i < m->views; ++i)
         if (!m->view_table[i] && !strcmp(m->view_names[i], name)) return (int)i;
     return -1;
-}
-
-int pure_module_position(const PureModule *m, uint32_t view) {
-    if (view >= m->views || m->view_type[view] != PURE_VIEW_NUM || m->view_table[view]) return -1;
-    const PureBlock *block = &m->view_code[view];
-    const PureOp *code = &m->code[block->start];
-    return block->length == 2 && code[0].op == PURE_OP_INDEX_LOAD && code[1].op == PURE_OP_INDEX_NUM ? (int)code[0].arg : -1;
 }
 
 int pure_module_text_state(const PureModule *m, uint32_t view) {
@@ -3729,7 +3721,6 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
     case PURE_OP_BREAK: *next = leave_loop(frame); return STEP_NEXT;
     case PURE_OP_CONST: stack[sp++].i64 = op->integer; NEXT; /* the bits: a number's, a bool's or an i64's */
     case PURE_OP_LOAD: stack[sp++].i64 = values[arg].i64; NEXT;
-    case PURE_OP_DT: stack[sp++].num = ev->dt; NEXT;
     case PURE_OP_NOW: stack[sp++].num = app->now; NEXT;
     case PURE_OP_FLOOR: top->num = floor(top->num); NEXT;
     case PURE_OP_STORE: case PURE_OP_CUR_STORE: values[arg].i64 = stack[--sp].i64; NEXT;
@@ -3770,7 +3761,6 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         stack[sp++].bytes = (PureBytes){FROM_CONSTANT, 0, {0, 0}, m->constant_offset[arg], m->constant_length[arg]};
         NEXT;
     case PURE_OP_TEXT_LOAD: stack[sp++].bytes = text_of(app, arg); NEXT;
-    case PURE_OP_TEXT_INPUT: stack[sp++].bytes = (PureBytes){FROM_PAYLOAD, 0, {0, 0}, 0, app->payload.size}; NEXT;
     case PURE_OP_NUM_TEXT: {
         char digits[32];
         if (arg > 2) { /* in a format */
@@ -4804,7 +4794,6 @@ static void open_burst(PureApp *app) {
     if (app->open) return;
     const PureModule *m = app->module;
     memcpy(app->durable_values, app->values, sizeof(app->values));
-    app->durable_ticks = app->ticks;
     app->durable_events = app->events;
     for (uint32_t i = 0; i < m->states; ++i) {
         if (app->texts[i]) {
@@ -4836,7 +4825,6 @@ static void close_burst(PureApp *app, bool keep) {
     else {
         pure_undo_rollback(&app->undo, 0);
         memcpy(app->values, app->durable_values, sizeof(app->values));
-        app->ticks = app->durable_ticks;
         app->events = app->durable_events;
         ++app->changes;
     }
@@ -5140,55 +5128,8 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     memcpy(app->values, pending, sizeof(pending));
     ++app->events;
     ++app->changes;
-    if (!event) ++app->ticks;
     app->delivering.pending = false;
-    return event && !app->deferred ? pure_app_save(app) : PURE_OK;
-}
-
-PureResult pure_app_frame(PureApp *app) {
-    pure_app_finish(app);
-    Event ev = {.app = app, .arena = &app->arena, .dt = 1.0 / 60.0};
-    return dispatch(app, 0, &ev);
-}
-
-PureResult pure_app_tick(PureApp *app, uint32_t input) {
-    if (input >= app->module->inputs || app->module->input[input].kind != PURE_KIND_TIMER) return PURE_INVALID;
-    pure_app_finish(app);
-    Event ev = {.app = app, .arena = &app->arena};
-    return dispatch(app, 1 + 2 * input, &ev);
-}
-
-PureResult pure_app_input(PureApp *app, uint32_t input, PureEdge edge) {
-    if (input >= app->module->inputs || app->module->input[input].kind != PURE_KIND_KEY ||
-        (edge != PURE_EDGE_DOWN && edge != PURE_EDGE_UP)) return PURE_INVALID;
-    pure_app_finish(app);
-    Event ev = {.app = app, .arena = &app->arena};
-    return dispatch(app, 1 + 2 * input + (edge == PURE_EDGE_UP), &ev);
-}
-
-PureResult pure_app_point(PureApp *app, uint32_t state, size_t position) {
-    const PureModule *m = app->module;
-    pure_app_finish(app);
-    if (state >= m->states || m->state_type[state] != PURE_STATE_INDEX) return PURE_INVALID;
-    if (position >= pure_list_count(app->lists[m->state_ref[state]])) return PURE_NOT_FOUND;
-    open_burst(app); /* what a failed save returns to */
-    app->fault = PURE_FAULT_NONE;
-    app->fault_pc = UINT32_MAX;
-    app->values[state].num = (double)position;
-    ++app->events;
-    ++app->changes;
     return app->deferred ? PURE_OK : pure_app_save(app);
-}
-
-PureResult pure_app_text(PureApp *app, uint32_t input, PureSpan text) {
-    pure_app_finish(app);
-    if (input >= app->module->inputs || app->module->input[input].kind != PURE_KIND_TEXT ||
-        (text.size && !text.data) || !pure_utf8_valid(text)) return PURE_INVALID;
-    app->payload = text;
-    Event ev = {.app = app, .arena = &app->arena};
-    PureResult result = dispatch(app, 1 + 2 * input, &ev);
-    app->payload = (PureSpan){0};
-    return result;
 }
 
 static PureResult keep_reply(PureApp *app) {
@@ -5287,7 +5228,7 @@ static PureResult message(PureApp *app, uint32_t input, PureSpan payload, const 
     }
     app->payload = payload;
     Event ev = {.app = app, .shape = shape, .arena = &app->arena, .nested = nested, .spans = spans};
-    PureResult result = dispatch(app, 1 + 2 * input, &ev);
+    PureResult result = dispatch(app, input, &ev);
     if (result != PURE_OK) pure_app_finish(app);
     return result;
 }

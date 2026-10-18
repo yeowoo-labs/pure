@@ -6,7 +6,7 @@
  *
  *   module-probe FILE.pmod INPUT...
  *
- * Each INPUT is a key input's name, pressed. The module must not read the
+ * Each INPUT is a key input's name, pressed (its message, no fields). The module must not read the
  * clock (now): the two runs are not at the same time. Prints a line of
  * JSON: the inputs applied, the ops ranged, and each number state's value;
  * exits 1 at the first difference, naming the state. */
@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
             return 2;
         }
         PureResult results[2];
-        for (int k = 0; k < 2; ++k) results[k] = pure_app_input(&apps[k], (uint32_t)input, PURE_EDGE_DOWN);
+        for (int k = 0; k < 2; ++k) results[k] = pure_app_message(&apps[k], (uint32_t)input, (PureSpan){0});
         int state = differs(&modules[0], &apps[0], &apps[1]);
         if (results[0] != results[1] || state >= 0) {
             fprintf(stderr, "module-probe: after %s (input %d): %s differs ranged and not (results %d, %d)\n", argv[i],

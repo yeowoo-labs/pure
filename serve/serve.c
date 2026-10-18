@@ -900,10 +900,10 @@ static const char *resolve(Connection *c, char *query, Route *route, int *status
         return NULL;
     }
     int found = route->kind == ROUTE_VIEW ? pure_module_view(m, c->key) : pure_module_input(m, c->key);
-    /* An output is the app's to send and a timer ticks by itself: neither is posted. */
+    /* An output is the app's to send, and a host makes a tick, a frame and a pointing: none is posted. */
     if (found >= 0 && route->kind == ROUTE_INPUT &&
-        (m->input[found].kind == PURE_KIND_OUTPUT || m->input[found].kind == PURE_KIND_TIMER ||
-         m->input[found].kind == PURE_KIND_ARGUMENTS)) found = -1;
+        (m->input[found].kind != PURE_KIND_MESSAGE || m->input[found].binding == PURE_BIND_TIMER ||
+         m->input[found].binding == PURE_BIND_FRAME || m->input[found].binding == PURE_BIND_POINT)) found = -1;
     if (found < 0) return route->kind == ROUTE_VIEW ? "no_view" : "no_input";
     *status = 400;
     route->target = (uint32_t)found;
@@ -914,7 +914,7 @@ static const char *resolve(Connection *c, char *query, Route *route, int *status
     if (*c->source && !message) return "delivery";
     if (!app->owned) c->source[0] = 0; /* an app without states or outputs applies it as a message */
     if (shape) {
-        /* A body is a text input's text, a message's one variable field (rows
+        /* A body is a message's one variable field (a text input's text; rows
          * in their list's stored form), or a JSON object of a message's fields
          * (two variable fields need one). */
         unsigned variables = 0;
@@ -923,8 +923,7 @@ static const char *resolve(Connection *c, char *query, Route *route, int *status
                          m->field[shape->field_start + f].type == PURE_FIELD_TEXT ||
                          m->field[shape->field_start + f].type == PURE_FIELD_ROWS;
         if (c->json && !message) return "json";
-        if (!c->json && (variables > 1 || (c->body_size && shape->kind == PURE_KIND_KEY) ||
-                         (c->body_size && message && !variables))) return variables > 1 ? "json" : "body";
+        if (!c->json && (variables > 1 || (c->body_size && !variables))) return variables > 1 ? "json" : "body";
         c->input = (uint32_t)found;
         c->field_bytes = message ? shape->prefix : 0;
     }
@@ -1633,11 +1632,12 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
     size_t lead = 4 + (header & DELIVERED ? DELIVERY : 0), table = header & PLACED ? 8 * (size_t)shape->field_count : 0;
     PureSpan payload = {effect->value.data + lead + batch * table, header & ~(PLACED | DELIVERED)};
     PureResult status;
-    if (shape->kind == PURE_KIND_TEXT) {
-        status = pure_app_text(app, route->target, payload);
-    } else if (shape->kind == PURE_KIND_KEY) {
-        status = pure_app_input(app, route->target, PURE_EDGE_DOWN);
-        if (status == PURE_OK) status = pure_app_input(app, route->target, PURE_EDGE_UP);
+    if (shape->binding == PURE_BIND_PRESS) { /* a key pressed: its press, and its release when a message takes it */
+        const PureModule *m = app->module;
+        status = pure_app_message(app, route->target, (PureSpan){0});
+        for (uint32_t i = 0; status == PURE_OK && i < m->inputs; ++i)
+            if (m->input[i].binding == PURE_BIND_RELEASE && !strcmp(m->input_keys[i], m->input_keys[route->target]))
+                status = pure_app_message(app, i, (PureSpan){0});
     } else {
         uint32_t placed[2 * PURE_MODULE_FIELDS];
         for (size_t i = 0; table && i < 2 * (size_t)shape->field_count; ++i)
@@ -2114,11 +2114,11 @@ static long run_timers(Executor *ex) {
     uint64_t now = now_ms(), soonest = UINT64_MAX;
     bool ticked = false;
     for (uint32_t i = 0; i < m->inputs; ++i) {
-        if (m->input[i].kind != PURE_KIND_TIMER) continue;
+        if (m->input[i].binding != PURE_BIND_TIMER) continue;
         if (!ex->next[i]) ex->next[i] = now + m->input[i].period; /* the first period starts now */
         if (ex->next[i] <= now) {
             ex->app.now = wall_ms();
-            if (pure_app_tick(&ex->app, i) == PURE_OK) ++ex->ticks;
+            if (pure_app_message(&ex->app, i, (PureSpan){0}) == PURE_OK) ++ex->ticks;
             ticked = true;
             ex->next[i] = now + m->input[i].period;
         }
@@ -3138,7 +3138,7 @@ static void surface_release(PureSurfaceHost *s, PureSnapshot *snapshot) {
 static PureResult surface_event(PureSurfaceHost *s, uint32_t input, PureSpan text) {
     Owner *owner = s->owner;
     const PureModule *m = owner->executor.module;
-    if (input >= m->inputs || (m->input[input].kind != PURE_KIND_KEY && m->input[input].kind != PURE_KIND_TEXT) ||
+    if (input >= m->inputs || (m->input[input].binding != PURE_BIND_PRESS && m->input[input].binding != PURE_BIND_TEXT) ||
         (text.size && !text.data))
         return PURE_INVALID;
     if (text.size > PURE_OBJECT_LIMIT) return PURE_LIMIT;
@@ -3167,14 +3167,14 @@ static PureResult surface_event(PureSurfaceHost *s, uint32_t input, PureSpan tex
 
 static PureResult surface_press(PureSurfaceHost *s, uint32_t input) {
     return input < s->owner->executor.module->inputs &&
-                   s->owner->executor.module->input[input].kind == PURE_KIND_KEY
+                   s->owner->executor.module->input[input].binding == PURE_BIND_PRESS
                ? surface_event(s, input, (PureSpan){0})
                : PURE_INVALID;
 }
 
 static PureResult surface_type(PureSurfaceHost *s, uint32_t input, PureSpan text) {
     return input < s->owner->executor.module->inputs &&
-                   s->owner->executor.module->input[input].kind == PURE_KIND_TEXT
+                   s->owner->executor.module->input[input].binding == PURE_BIND_TEXT
                ? surface_event(s, input, text)
                : PURE_INVALID;
 }
@@ -3216,7 +3216,7 @@ static bool start_surface(PureSurfaceHost *s, Owner *owner, int argc, char **arg
  * served by PUT or POST may reply only a field of its message. */
 static bool replies_borrow(const PureModule *m, uint32_t input) {
     for (uint32_t h = 0; h < m->handlers; ++h) {
-        if (m->handler[h].event != 1 + 2 * input) continue;
+        if (m->handler[h].event != input) continue;
         const PureBlock *code = &m->handler[h].code;
         /* A field replied as it is, or a text field as its bytes. */
         for (uint32_t pc = code->start; pc < code->start + code->length; ++pc) {

@@ -107,7 +107,7 @@ typedef struct {
     const char *key;             /* a keyed message's key */
     int64_t base;                /* the revision a message's edit was made against, or -1 */
     PureArena *arena;
-    double dt;
+
     size_t row;   /* the row a column is evaluated for (in a fold, the fold's item) */
     size_t outer; /* in a fold, the row of the column it runs in */
     Walk *walk;   /* the walk the code runs in, or NULL */

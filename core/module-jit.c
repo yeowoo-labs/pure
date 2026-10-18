@@ -2386,7 +2386,7 @@ static uint32_t changes(const PureModule *m, const PureOp *op) {
     switch (op->op) {
     case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: return UINT32_C(1) << (op->arg & 31);
     case PURE_OP_ITEM_SET: return UINT32_C(1) << (list_of(op->arg) & 31);
-    case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_DT: case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL:
+    case PURE_OP_CONST: case PURE_OP_LOAD: case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL:
     case PURE_OP_DIV: case PURE_OP_NEG: case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ:
     case PURE_OP_NE: case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_NOT: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_CLAMP:
     case PURE_OP_STORE: case PURE_OP_JZ: case PURE_OP_JMP: case PURE_OP_FIELD: case PURE_OP_LIST_COUNT: case PURE_OP_ITEM_GET:
@@ -5556,10 +5556,8 @@ static void tier_free(Tier *t) {
 /* The handler's message input the block is, or -1. */
 static int tier_input(const PureModule *m, PureBlock block) {
     for (uint32_t i = 0; i < m->handlers; ++i)
-        if (m->handler[i].code.start == block.start && m->handler[i].code.length == block.length && m->handler[i].event) {
-            int input = (int)((m->handler[i].event - 1) / 2);
-            return m->input[input].kind == PURE_KIND_MESSAGE ? input : -1;
-        }
+        if (m->handler[i].code.start == block.start && m->handler[i].code.length == block.length)
+            return (int)m->handler[i].event; /* a message input's (027's 4d) */
     return -1;
 }
 

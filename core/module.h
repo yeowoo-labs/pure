@@ -23,13 +23,13 @@ enum {
 };
 
 typedef enum {
-    PURE_OP_CONST, PURE_OP_LOAD, PURE_OP_DT, PURE_OP_ADD, PURE_OP_SUB, PURE_OP_MUL,
+    PURE_OP_CONST, PURE_OP_LOAD, PURE_OP_ADD, PURE_OP_SUB, PURE_OP_MUL,
     PURE_OP_DIV, PURE_OP_NEG, PURE_OP_LT, PURE_OP_LE, PURE_OP_GT, PURE_OP_GE,
     PURE_OP_EQ, PURE_OP_NE, PURE_OP_AND, PURE_OP_OR, PURE_OP_NOT, PURE_OP_MIN,
     PURE_OP_MAX, PURE_OP_CLAMP, PURE_OP_STORE, PURE_OP_JZ, PURE_OP_JMP,
     PURE_OP_FIELD, PURE_OP_LEN,
     PURE_OP_REPLY, PURE_OP_REQUIRE,
-    PURE_OP_TEXT_CONST, PURE_OP_TEXT_LOAD, PURE_OP_TEXT_INPUT, PURE_OP_NUM_TEXT,
+    PURE_OP_TEXT_CONST, PURE_OP_TEXT_LOAD, PURE_OP_NUM_TEXT,
     PURE_OP_CONCAT, PURE_OP_CHARS, PURE_OP_LINES, PURE_OP_TEXT_BYTES,
     PURE_OP_ANCHOR_LOAD, PURE_OP_ANCHOR_START, PURE_OP_ANCHOR_END, PURE_OP_ANCHOR_MOVE,
     PURE_OP_ANCHOR_STORE, PURE_OP_TEXT_INSERT, PURE_OP_TEXT_REMOVE, PURE_OP_TEXT_LINE,
@@ -206,15 +206,23 @@ enum { PURE_LOOP_INTEGER = 256, PURE_MODULE_NESTING = 8 };
  * comparisons (LT LE GT GE EQ NE); texts order by their bytes. */
 typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PURE_EQUAL, PURE_NOT_EQUAL } PureRelation;
 
-/* A timer ticks every `period` milliseconds while a host runs the app. An
- * output is a message the app sends (SEND, in a handler; it has fields as a
- * message has and no handler): what receives it is the host's wiring.
- * Arguments are the fields a view takes (a view with arguments, its
- * columns and its filter read them as a message handler reads its message);
- * such an input has no handler and names its view, whose name it bears
- * with .arguments after it. */
-typedef enum { PURE_KIND_KEY = 1, PURE_KIND_MESSAGE = 2, PURE_KIND_TEXT = 3, PURE_KIND_TIMER = 4,
-               PURE_KIND_OUTPUT = 5, PURE_KIND_ARGUMENTS = 6 } PureInputKind;
+/* An input is a message (027's 4d: the only thing an app takes), an output
+ * or a view's arguments. An output is a message the app sends (SEND, in a
+ * handler; it has fields as a message has and no handler): what receives it
+ * is the host's wiring. Arguments are the fields a view takes (a view with
+ * arguments, its columns and its filter read them as a message handler reads
+ * its message); such an input has no handler and names its view, whose name
+ * it bears with .args after it. */
+typedef enum { PURE_KIND_MESSAGE = 1, PURE_KIND_OUTPUT = 2, PURE_KIND_ARGUMENTS = 3 } PureInputKind;
+/* What makes a message, for its hosts and surfaces (027's 4d): nothing said
+ * (a sender's), a key pressed or released (the key's name: no fields), text
+ * that came in (one text field), a timer's tick every period milliseconds
+ * (no fields: the time is the event's now), a frame of the screen (one
+ * number field, the seconds since the last) or a pointing at a row of a
+ * table view (one u32 field, the row). The runtime reads none of it but the
+ * fields it says a message has. */
+typedef enum { PURE_BIND_NONE, PURE_BIND_PRESS, PURE_BIND_RELEASE, PURE_BIND_TEXT, PURE_BIND_TIMER, PURE_BIND_FRAME,
+               PURE_BIND_POINT } PureBinding;
 enum { PURE_TIMER_LONGEST = 86400000, PURE_SOURCE = 64 };
 /* The largest number a delivery may have: it is kept as a binary64. */
 #define PURE_SEQ_MOST (UINT64_C(1) << 53)
@@ -283,7 +291,6 @@ enum { PURE_STATE_TRANSIENT = 256 };
  * empty (a reader's own: readers of one snapshot compute apart). */
 typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2, PURE_VIEW_BOOL = 3, PURE_VIEW_I64 = 4 } PureViewType;
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
-typedef enum { PURE_EDGE_DOWN, PURE_EDGE_UP } PureEdge;
 /* EXISTS: an item with that key is already in the keyed list (the event
  * reports PURE_CONFLICT). MEMORY: the event would leave the states holding
  * more than the app's budget (pure_app_memory; it reports PURE_BUDGET).
@@ -307,7 +314,7 @@ const char *pure_fault_name(PureFault);
  * PureRange + 1). */
 typedef struct { union { double value; int64_t integer; }; uint32_t arg; uint8_t op, plan, shape, range; } PureOp;
 typedef struct { uint32_t start, length; } PureBlock;
-typedef struct { uint32_t event; PureBlock code; } PureHandler;
+typedef struct { uint32_t event; PureBlock code; } PureHandler; /* event: the message input it handles (027's 4d) */
 /* A function's block and its parameters' and results' types, from first among the module's signature items: a record
  * field's type (PureRecordType: a list's with its record, bytes as PURE_RECORD_BYTES). Set at load: the event's lists,
  * registers and held values each call has its own of (a bit each), the lists not an event's it changes (or a function
@@ -321,11 +328,11 @@ typedef struct {
 } PureFunction;
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint16_t rows; uint32_t offset; } PureField;
 typedef struct {
-    uint8_t kind;
+    uint8_t kind, binding; /* PureInputKind, PureBinding (a key's name in input_keys) */
     uint16_t field_start, field_count;
     uint32_t prefix; /* fixed payload bytes before the variable fields */
     uint32_t period; /* a timer's, in milliseconds */
-    uint32_t view;   /* arguments: the view they are for */
+    uint32_t view;   /* arguments: the view they are for; a pointing's: its table */
 } PureInputShape;
 
 /* A record type: fields numbered from first, each a number or text. */
@@ -454,9 +461,6 @@ bool pure_module_takes(const PureModule *, uint32_t input, const unsigned char *
  * when payload is not laid out with them. */
 PureResult pure_module_recast(const PureModule *, uint32_t input, const unsigned char *fields, size_t size,
                               PureSpan payload, unsigned char **out, size_t *out_size);
-/* The index state a number view shows as its position (a view that is just
- * `at.position`), or -1: what a host moves with pure_app_point. */
-int pure_module_position(const PureModule *, uint32_t view);
 /* The text state a text view shows as it is (a view that is just the
  * state), or -1: a host may lend its stored extents instead of copying. */
 int pure_module_text_state(const PureModule *, uint32_t view);
@@ -522,7 +526,7 @@ typedef struct {
     PureValue durable_values[PURE_MODULE_STATES];
     PureVersion durable_texts[PURE_MODULE_STATES];
     size_t durable_lists[PURE_MODULE_STATES]; /* each stored list's journal length */
-    uint64_t durable_ticks, durable_events;
+    uint64_t durable_events;
     PureFault fault;
     uint32_t fault_pc;
     size_t memory; /* the budget of what the states hold (0: none): pure_app_memory */
@@ -533,7 +537,7 @@ typedef struct {
     PureFault view_fault; /* why the last view evaluated had no value (pure_app_view_fault) */
     char why[128]; /* why the last start or replace was refused, when it says (else empty; a failed start keeps it) */
     uint32_t counted; /* the states it counts, a bit each: lists (not a message's rows) and texts */
-    uint64_t ticks, events;
+    uint64_t events;
     /* The time events see as now, in milliseconds since 1970 (UTC). The host
      * sets it, so a script can replay any time; views never see it. */
     double now;
@@ -600,19 +604,10 @@ PureResult pure_app_save(PureApp *);
 /* Defer saving to pure_app_save (false: save after each event). Needs a data
  * host that saves together (PureData.save). */
 bool pure_app_defer(PureApp *, bool deferred);
-/* Leaves unsaved frame changes unsaved: call pure_app_save first to keep them. */
+/* Leaves unsaved changes unsaved: call pure_app_save first to keep them. */
 void pure_app_stop(PureApp *);
-PureResult pure_app_frame(PureApp *);
-/* A timer input's tick: an event saved like a key's. */
-PureResult pure_app_tick(PureApp *, uint32_t input);
-PureResult pure_app_input(PureApp *, uint32_t input, PureEdge);
-/* Point an index state at the item at position (0 first), as a user pointing
- * at a row: an event with no handler, saved like a key event. NOT_FOUND past
- * the last item, INVALID for a state that is not an index. */
-PureResult pure_app_point(PureApp *, uint32_t state, size_t position);
-/* Deliver committed text (for example from an input method). Not UTF-8: invalid. */
-PureResult pure_app_text(PureApp *, uint32_t input, PureSpan text);
-/* Deliver a message. payload stays alive until pure_app_finish. */
+/* Deliver a message (a key's, a text's, a tick's or a frame's too, as its binding says it is laid out). payload stays
+ * alive until pure_app_finish. */
 PureResult pure_app_message(PureApp *, uint32_t input, PureSpan payload);
 /* The same, with the variable fields where the host found them: field f
  * starts at placed[2f] in payload and has placed[2f + 1] bytes (entries of

@@ -35,12 +35,15 @@ int pure_store_test_fault(PureStoreStage stage) {
 
 typedef struct { const char *name; double initial; } S;
 typedef struct { const char *name; uint32_t type; } F;
-/* kind 0 is a key input; otherwise PURE_KIND_MESSAGE with fields. Arguments
- * name their view by its number in key. */
+/* kind 0 is a key input, TEXT_INPUT a text input, TIMER_INPUT a timer; otherwise PURE_KIND_MESSAGE with fields.
+ * Arguments name their view by its number in key. A module has messages bound so (027's 4d): expand writes them. */
 typedef struct { const char *name, *key; int kind; const F *fields; size_t nfields; } I;
+/* POINT_INPUT: a pointing message (one u32 field), its table the view numbered key. DT and TI (250, 251): dt and a
+ * text input's text, which a module reads as fields. */
+enum { TEXT_INPUT = 100, TIMER_INPUT = 101, POINT_INPUT = 102, TEST_DT = 250, TEST_TEXT_IN = 251 };
 #define KEY(name, key) {name, key, 0, NULL, 0}
 /* A timer's period (milliseconds) rides in nfields. */
-#define TIMER(name, period) {name, NULL, PURE_KIND_TIMER, NULL, period}
+#define TIMER(name, period) {name, NULL, TIMER_INPUT, NULL, period}
 /* A number view, or a bool (i64) view when its length carries BOOL_VIEW (I64_VIEW). */
 typedef struct { const char *name; uint32_t start, length; } V;
 #define BOOL_VIEW (1u << 31)
@@ -113,7 +116,74 @@ static uint8_t module_op(uint8_t op) {
     }
 }
 
+/* A test's inputs, handlers and code as a module has them (027's 4d): a key input a message its press makes, one more
+ * its release makes for a key up's handler (event 2 + 2i), a frame's message (one number field) for a frame's handler
+ * (event 0), a text input a message of one text field, a timer a message its ticks make; a handler's event its
+ * message's number; dt (DT, 250) the frame's field in its handler and 0 elsewhere, a text input's text (TI, 251) its
+ * field. */
+static I expanded_in[64];
+static struct { uint8_t binding; uint32_t period; } expanded_bound[64];
+static H expanded_h[64];
+static O expanded_o[8192];
+static Spec expand(Spec spec) {
+    static const F text_field[] = {{"text", PURE_FIELD_TEXT}}, dt_field[] = {{"dt", PURE_FIELD_NUMBER}};
+    static char release_names[64][PURE_MODULE_NAME];
+    static const F position_field[] = {{"position", PURE_FIELD_U32}};
+    size_t ni = 0;
+    for (size_t i = 0; i < spec.ni; ++i) {
+        I in = spec.in[i];
+        uint8_t binding = 0;
+        uint32_t period = 0;
+        if (!in.kind) in = (I){in.name, in.key, PURE_KIND_MESSAGE, NULL, 0}, binding = PURE_BIND_PRESS;
+        else if (in.kind == TEXT_INPUT) in = (I){in.name, NULL, PURE_KIND_MESSAGE, text_field, 1}, binding = PURE_BIND_TEXT;
+        else if (in.kind == TIMER_INPUT)
+            period = (uint32_t)in.nfields, in = (I){in.name, NULL, PURE_KIND_MESSAGE, NULL, 0}, binding = PURE_BIND_TIMER;
+        else if (in.kind == POINT_INPUT) in = (I){in.name, in.key, PURE_KIND_MESSAGE, position_field, 1}, binding = PURE_BIND_POINT;
+        expanded_bound[ni].binding = binding, expanded_bound[ni].period = period;
+        expanded_in[ni++] = in;
+    }
+    int release[64], frame = -1;
+    for (size_t i = 0; i < spec.ni; ++i) release[i] = -1;
+    for (size_t h = 0; h < spec.nh; ++h) {
+        uint32_t e = spec.h[h].event;
+        if (!e && frame < 0) {
+            frame = (int)ni;
+            expanded_bound[ni].binding = PURE_BIND_FRAME, expanded_bound[ni].period = 0;
+            expanded_in[ni++] = (I){"frame", NULL, PURE_KIND_MESSAGE, dt_field, 1};
+        } else if (e && !(e & 1) && (e - 2) / 2 < spec.ni && release[(e - 2) / 2] < 0 &&
+                   expanded_bound[(e - 2) / 2].binding == PURE_BIND_PRESS) {
+            uint32_t of = (e - 2) / 2;
+            snprintf(release_names[of], PURE_MODULE_NAME, "%s.up", spec.in[of].name);
+            release[of] = (int)ni;
+            expanded_bound[ni].binding = PURE_BIND_RELEASE, expanded_bound[ni].period = 0;
+            expanded_in[ni++] = (I){release_names[of], spec.in[of].key, PURE_KIND_MESSAGE, NULL, 0};
+        }
+    }
+    CHECK(ni <= 64 && spec.nh <= 64 && spec.no <= 8192);
+    for (size_t h = 0; h < spec.nh; ++h) {
+        uint32_t e = spec.h[h].event;
+        expanded_h[h] = spec.h[h];
+        /* an event past the inputs, or a release of what is not a key, past them all (a test of a refusal) */
+        int up = !(e & 1) && e && (e - 2) / 2 < spec.ni ? release[(e - 2) / 2] : -1;
+        expanded_h[h].event = !e ? (uint32_t)frame : e & 1 ? (e - 1) / 2 : up >= 0 ? (uint32_t)up : 1000 + e;
+    }
+    for (size_t k = 0; k < spec.no; ++k) {
+        expanded_o[k] = spec.o[k];
+        if (spec.o[k].op == TEST_TEXT_IN) expanded_o[k] = (O){PURE_OP_FIELD, 0, 0};
+        if (spec.o[k].op != TEST_DT) continue;
+        bool in_frame = false;
+        for (size_t h = 0; h < spec.nh; ++h)
+            in_frame = in_frame || (!spec.h[h].event && k >= spec.h[h].start && k < spec.h[h].start + spec.h[h].length);
+        expanded_o[k] = in_frame ? (O){PURE_OP_FIELD, 0, 0} : (O){PURE_OP_CONST, 0, 0};
+    }
+    spec.in = expanded_in, spec.ni = ni;
+    spec.h = expanded_h;
+    spec.o = expanded_o;
+    return spec;
+}
+
 static size_t build(unsigned char *out, Spec spec) {
+    spec = expand(spec);
     unsigned char strings[4096], blob[4096];
     size_t used = 0, blob_used = 0;
     const char *text[512];
@@ -123,9 +193,8 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.nt; ++i) text[names++] = spec.t[i].name;
     for (size_t i = 0; i < spec.ni; ++i) {
         text[names++] = spec.in[i].name;
-        if (!spec.in[i].kind) text[names++] = spec.in[i].key;
-        for (size_t f = 0; spec.in[i].kind != PURE_KIND_TIMER && f < spec.in[i].nfields; ++f)
-            text[names++] = spec.in[i].fields[f].name;
+        if (expanded_bound[i].binding == PURE_BIND_PRESS || expanded_bound[i].binding == PURE_BIND_RELEASE) text[names++] = spec.in[i].key;
+        for (size_t f = 0; f < spec.in[i].nfields; ++f) text[names++] = spec.in[i].fields[f].name;
     }
     for (size_t i = 0; i < spec.nv; ++i) text[names++] = spec.v[i].name;
     for (size_t i = 0; i < spec.ntv; ++i) text[names++] = spec.tv[i].name;
@@ -144,7 +213,7 @@ static size_t build(unsigned char *out, Spec spec) {
         used += length;
     }
     size_t fields = 0;
-    for (size_t i = 0; i < spec.ni; ++i) fields += spec.in[i].kind == PURE_KIND_TIMER ? 0 : spec.in[i].nfields;
+    for (size_t i = 0; i < spec.ni; ++i) fields += spec.in[i].nfields;
     for (size_t i = 0; i < spec.nk; ++i) { memcpy(blob + blob_used, spec.k[i], strlen(spec.k[i])); blob_used += strlen(spec.k[i]); }
     unsigned char *p = out;
     CHECK(!spec.nc); /* (collections are gone: 027's 4b) */
@@ -178,21 +247,21 @@ static size_t build(unsigned char *out, Spec spec) {
     size_t nf = 0;
     for (size_t i = 0; i < spec.ni; ++i) {
         const I *in = &spec.in[i];
+        uint8_t binding = expanded_bound[i].binding;
+        bool keyed = binding == PURE_BIND_PRESS || binding == PURE_BIND_RELEASE;
         p = put32(p, offset[n++]);
-        *p++ = (unsigned char)(in->kind ? in->kind : 1); *p++ = 0; *p++ = 0; *p++ = 0;
-        bool timer = in->kind == PURE_KIND_TIMER;
-        p = put32(p, timer ? (uint32_t)in->nfields : in->kind == PURE_KIND_ARGUMENTS ? (uint32_t)strtoul(in->key, NULL, 10) :
-                     in->kind ? 0 : offset[n++]);
-        uint32_t first = in->kind == PURE_KIND_MESSAGE || in->kind == PURE_KIND_OUTPUT || in->kind == PURE_KIND_ARGUMENTS
-                             ? field_start : 0; /* only messages, outputs and arguments have fields */
-        *p++ = (unsigned char)first; *p++ = (unsigned char)(first >> 8);
-        *p++ = (unsigned char)(timer ? 0 : in->nfields); *p++ = 0;
-        for (size_t f = 0; !timer && f < in->nfields; ++f) field_offsets[nf++] = offset[n++];
-        field_start += timer ? 0 : (uint32_t)in->nfields;
+        *p++ = (unsigned char)in->kind; *p++ = binding; *p++ = 0; *p++ = 0;
+        p = put32(p, binding == PURE_BIND_TIMER ? expanded_bound[i].period :
+                     in->kind == PURE_KIND_ARGUMENTS || binding == PURE_BIND_POINT ? (uint32_t)strtoul(in->key, NULL, 10) :
+                     keyed ? offset[n++] : 0);
+        *p++ = (unsigned char)field_start; *p++ = (unsigned char)(field_start >> 8);
+        *p++ = (unsigned char)in->nfields; *p++ = 0;
+        for (size_t f = 0; f < in->nfields; ++f) field_offsets[nf++] = offset[n++];
+        field_start += (uint32_t)in->nfields;
     }
     nf = 0;
     for (size_t i = 0; i < spec.ni; ++i)
-        for (size_t f = 0; spec.in[i].kind != PURE_KIND_TIMER && f < spec.in[i].nfields; ++f) {
+        for (size_t f = 0; f < spec.in[i].nfields; ++f) {
             p = put32(p, field_offsets[nf++]);
             p = put32(p, spec.in[i].fields[f].type);
         }
@@ -254,6 +323,45 @@ static size_t build(unsigned char *out, Spec spec) {
 }
 
 static PureModule module_a, module_b;
+
+/* A device's events as a module takes them (027's 4d): a key's press and release, a frame, a tick, text, each the
+ * message bound so (a release or a frame no message takes is no event); one for an input not bound so is INVALID. */
+static PureResult press(PureApp *app, uint32_t input) {
+    if (input >= app->module->inputs || app->module->input[input].binding != PURE_BIND_PRESS) return PURE_INVALID;
+    return pure_app_message(app, input, (PureSpan){0});
+}
+static PureResult release(PureApp *app, uint32_t input) {
+    const PureModule *m = app->module;
+    if (input >= m->inputs || m->input[input].binding != PURE_BIND_PRESS) return PURE_INVALID;
+    for (uint32_t i = 0; i < m->inputs; ++i)
+        if (m->input[i].binding == PURE_BIND_RELEASE && !strcmp(m->input_keys[i], m->input_keys[input]))
+            return pure_app_message(app, i, (PureSpan){0});
+    return PURE_OK;
+}
+static PureResult frame(PureApp *app) {
+    static const double dt = 1.0 / 60.0;
+    for (uint32_t i = 0; i < app->module->inputs; ++i)
+        if (app->module->input[i].binding == PURE_BIND_FRAME) return pure_app_message(app, i, (PureSpan){(const unsigned char *)&dt, 8});
+    return PURE_OK;
+}
+static PureResult tick(PureApp *app, uint32_t input) {
+    if (input >= app->module->inputs || app->module->input[input].binding != PURE_BIND_TIMER) return PURE_INVALID;
+    return pure_app_message(app, input, (PureSpan){0});
+}
+/* A test's index put on an item, as a host's pointing did before 027's 4d (now a message an app takes: pointing), and
+ * saved unless deferred. */
+static PureResult place(PureApp *app, uint32_t state, size_t position) {
+    const PureModule *m = app->module;
+    if (state >= m->states || m->state_type[state] != PURE_STATE_INDEX) return PURE_INVALID;
+    if (position >= pure_list_count(app->lists[m->state_ref[state]])) return PURE_NOT_FOUND;
+    app->values[state].num = (double)position;
+    ++app->changes;
+    return app->deferred ? PURE_OK : pure_app_save(app);
+}
+static PureResult type_in(PureApp *app, uint32_t input, PureSpan text) {
+    if (input >= app->module->inputs || app->module->input[input].binding != PURE_BIND_TEXT) return PURE_INVALID;
+    return pure_app_message(app, input, text);
+}
 static char error[128];
 
 static PureResult load(Spec spec, PureModule *out) {
@@ -272,7 +380,7 @@ static PureResult load_functions(Spec spec, const FN *fns, size_t count, PureMod
 #define LEN(a) (sizeof(a) / sizeof(*(a)))
 #define SPEC(s, in, v, h, o) ((Spec){s, LEN(s), in, LEN(in), v, LEN(v), h, LEN(h), o, LEN(o), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0})
 
-enum { C = PURE_OP_CONST, L = PURE_OP_LOAD, DT = PURE_OP_DT, ADD = PURE_OP_ADD,
+enum { C = PURE_OP_CONST, L = PURE_OP_LOAD, DT = TEST_DT, ADD = PURE_OP_ADD,
        MUL = PURE_OP_MUL, DIV = PURE_OP_DIV, GT = PURE_OP_GT, MIN = PURE_OP_MIN,
        MAX = PURE_OP_MAX, CL = PURE_OP_CLAMP, ST = PURE_OP_STORE, JZ = PURE_OP_JZ,
        JMP = PURE_OP_JMP, NEG = PURE_OP_NEG };
@@ -306,16 +414,16 @@ static void behaviour(void) {
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     double value;
     CHECK(pure_app_view(&app, 1, &value) && value == 40);
-    for (int i = 0; i < 25; ++i) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    for (int i = 0; i < 25; ++i) CHECK(press(&app, 0) == PURE_OK);
     CHECK(app.values[0].num == 25 && pure_app_view(&app, 1, &value) && value == 200);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_UP) == PURE_OK && app.events == 26);
+    CHECK(release(&app, 0) == PURE_OK && app.events == 25);
     /* if / else with forward JZ and JMP */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 4);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 5);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 6);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 0);
-    CHECK(pure_app_frame(&app) == PURE_OK && app.values[1].num == 1.0 / 60.0 && app.ticks == 1);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_INVALID);
+    CHECK(press(&app, 1) == PURE_OK && app.values[1].num == 4);
+    CHECK(press(&app, 1) == PURE_OK && app.values[1].num == 5);
+    CHECK(press(&app, 1) == PURE_OK && app.values[1].num == 6);
+    CHECK(press(&app, 1) == PURE_OK && app.values[1].num == 0);
+    CHECK(frame(&app) == PURE_OK && app.values[1].num == 1.0 / 60.0);
+    CHECK(press(&app, 2) == PURE_INVALID);
     CHECK(pure_module_input(&module_a, "move") == 1 && pure_module_view(&module_a, "width") == 1 &&
           pure_module_state(&module_a, "missing") == -1);
 
@@ -352,7 +460,7 @@ static void faults(void) {
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     const PureFault expected[] = {PURE_FAULT_DIVIDE, PURE_FAULT_NON_FINITE, PURE_FAULT_CLAMP};
     for (uint32_t i = 0; i < 3; ++i) {
-        CHECK(pure_app_input(&app, i, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == expected[i]);
+        CHECK(press(&app, i) == PURE_INVALID && app.fault == expected[i]);
         CHECK(app.values[0].num == 1 && app.values[1].num == 2 && app.events == 0);
     }
     /* A later handler of the same event does not run after a fault. */
@@ -376,11 +484,11 @@ static void rejections(void) {
     static const I dup_key[] = {KEY("k", "Space"), KEY("j", "Space")};
     static const V clash[] = {{"a", 0, 1}};
     static const V v_store[] = {{"v", 0, 2}};
-    static const V v_dt[] = {{"v", 2, 1}};
+    static const V v_field[] = {{"v", 2, 1}};
     static const V v_empty[] = {{"v", 0, 0}};
     static const H none[1];
     static const O load_a[] = {{L, 0, 0}};
-    static const O store[] = {{C, 0, 1}, {ST, 0, 0}, {DT, 0, 0}};
+    static const O store[] = {{C, 0, 1}, {ST, 0, 0}, {PURE_OP_FIELD, 0, 0}};
     static const H h0[] = {{0, 0, 2}};
     static const H h_bad_event[] = {{3, 0, 2}};
     static const O back[] = {{C, 1, 1}, {JZ, 0, 0}};
@@ -409,7 +517,7 @@ static void rejections(void) {
         {"duplicate key", {s1, 1, dup_key, 2, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
         {"duplicate name", {s1, 1, i1, 0, clash, 1, none, 0, load_a, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
         {"view with an effect", {s1, 1, i1, 0, v_store, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
-        {"view with an effect", {s1, 1, i1, 0, v_dt, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
+        {"view with an effect", {s1, 1, i1, 0, v_field, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
         {"empty view", {s1, 1, i1, 0, v_empty, 1, none, 0, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
         {"handler event", {s1, 1, i1, 1, clash, 0, h_bad_event, 1, store, 3, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
         {"branch not forward", {s1, 1, i1, 0, clash, 0, h_two, 1, back, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, PURE_INVALID},
@@ -467,8 +575,8 @@ static void mutations(void) {
         PureApp app;
         CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
         for (unsigned e = 0; e < 16; ++e) {
-            if (e % 3 == 0) pure_app_frame(&app);
-            else pure_app_input(&app, e % 4, e & 1 ? PURE_EDGE_UP : PURE_EDGE_DOWN);
+            if (e % 3 == 0) frame(&app);
+            else (e & 1 ? release(&app, e % 4) : press(&app, e % 4));
             for (uint32_t v = 0; v < module_a.views; ++v) { double value; pure_app_view(&app, v, &value); }
             for (uint32_t s = 0; s < module_a.states; ++s) CHECK(isfinite(app.values[s].num));
         }
@@ -512,7 +620,7 @@ enum { FIELD = PURE_OP_FIELD, LEN_ = PURE_OP_LEN, REPLY = PURE_OP_REPLY, REQ = P
 
 /* Messages: echo replies its insert; edit adds start + remove to sum, counts itself and replies its insert; guarded
  * counts itself if its insert holds 8 bytes at most. A payload that does not hold the fields fails as limit, a failed
- * require changes nothing, and a key input takes no message. */
+ * require changes nothing, and a key's press, a message with no fields, is one no handler takes here. */
 static void messages(void) {
     static const F edit_fields[] = {{"start", 1}, {"remove", 1}, {"insert", 2}};
     static const I inputs[] = {
@@ -545,7 +653,7 @@ static void messages(void) {
     CHECK(pure_app_message(&app, 2, edit_payload(buffer, 0, 0, "123456789")) == PURE_LIMIT);
     CHECK(app.values[0].num == 1 && app.values[1].num == 5);
     CHECK(pure_app_message(&app, 2, edit_payload(buffer, 0, 0, "12345678")) == PURE_OK && app.values[0].num == 2);
-    CHECK(pure_app_message(&app, 3, (PureSpan){0}) == PURE_INVALID && app.values[0].num == 2 && app.events == 3);
+    CHECK(pure_app_message(&app, 3, (PureSpan){0}) == PURE_OK && app.values[0].num == 2 && app.events == 4);
     pure_app_stop(&app);
 
     /* Verifier rules for typed operations. */
@@ -553,7 +661,7 @@ static void messages(void) {
     static const H key_handler[] = {{7, 0, 2}};
     Spec bad = spec;
     bad.o = field_in_key; bad.no = 2; bad.h = key_handler; bad.nh = 1;
-    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "message operation outside"));
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "no such state, field")); /* a press holds no fields */
     static const O bytes_state[] = {{FIELD, 2, 0}, {ST, 0, 0}};
     static const H edit_handler[] = {{3, 0, 2}};
     bad.o = bytes_state; bad.no = 2; bad.h = edit_handler;
@@ -610,8 +718,8 @@ static void message_mutations(void) {
                     size_t reply = 0;
                     CHECK(pure_app_reply(&app, count_bytes, &reply) == PURE_OK && reply <= 256);
                 }
-            } else pure_app_input(&app, input, e & 1 ? PURE_EDGE_UP : PURE_EDGE_DOWN);
-            pure_app_frame(&app);
+            } else (e & 1 ? release(&app, input) : press(&app, input));
+            frame(&app);
             for (uint32_t s = 0; s < module_b.states; ++s) CHECK(isfinite(app.values[s].num));
         }
         pure_app_stop(&app);
@@ -663,7 +771,7 @@ static double number_view(PureApp *app, uint32_t view) {
     return value;
 }
 
-enum { CUL = PURE_OP_CUR_LOAD, CS = PURE_OP_CUR_STORE, CM = PURE_OP_CUR_MOVE, TI = PURE_OP_TEXT_INPUT,
+enum { CUL = PURE_OP_CUR_LOAD, CS = PURE_OP_CUR_STORE, CM = PURE_OP_CUR_MOVE, TI = TEST_TEXT_IN,
        TINS = PURE_OP_TEXT_INSERT, TREM = PURE_OP_TEXT_REMOVE, TL = PURE_OP_TEXT_LOAD, TK = PURE_OP_TEXT_CONST,
        CHR = PURE_OP_CHARS, NT = PURE_OP_NUM_TEXT, CAT = PURE_OP_CONCAT, TLN = PURE_OP_TEXT_LINE,
        CC = PURE_OP_CUR_COUNT, CST = PURE_OP_CUR_START };
@@ -678,7 +786,7 @@ static void texts(void) {
                                             "\xeb\xa9\x94\xeb\xaa\xa8", "XYZ",
                                             " \xc2\xb7 ", "\xec\x9e\x90"};
     static const I inputs[] = {
-        {"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("left", "ArrowLeft"), KEY("right", "ArrowRight"),
+        {"typed", NULL, TEXT_INPUT, NULL, 0}, KEY("left", "ArrowLeft"), KEY("right", "ArrowRight"),
         KEY("up", "ArrowUp"), KEY("down", "ArrowDown"), KEY("back", "Backspace"), KEY("home", "Home"), KEY("bad", "KeyB"),
     };
     static const O code[] = {
@@ -709,38 +817,38 @@ static void texts(void) {
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80" "a\nbc") && app.values[2].num == 0);
-    for (int i = 0; i < 6; ++i) CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK);
+    for (int i = 0; i < 6; ++i) CHECK(press(&app, 2) == PURE_OK);
     CHECK(app.values[2].num == 7);                               /* stops at the end */
     CHECK(number_view(&app, 0) == 5 && number_view(&app, 2) == 1 && !strcmp(view_text(&app, 3), "bc"));
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 4);   /* up keeps column 2 */
+    CHECK(press(&app, 3) == PURE_OK && app.values[2].num == 4);   /* up keeps column 2 */
     const char *han = "\xed\x95\x9c";
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)han, 3}) == PURE_OK);
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)han, 3}) == PURE_OK);
     CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80" "a\xed\x95\x9c\nbc") && app.values[2].num == 7 && app.values[0].num == 1);
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 4);   /* back over 3 bytes */
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 3);
+    CHECK(press(&app, 5) == PURE_OK && app.values[2].num == 4);   /* back over 3 bytes */
+    CHECK(press(&app, 5) == PURE_OK && app.values[2].num == 3);
     CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80\nbc"));
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);   /* stops at the start */
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);   /* nothing before */
-    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 4);   /* down to column 0 */
+    CHECK(press(&app, 1) == PURE_OK && app.values[2].num == 0);
+    CHECK(press(&app, 1) == PURE_OK && app.values[2].num == 0);   /* stops at the start */
+    CHECK(press(&app, 5) == PURE_OK && app.values[2].num == 0);   /* nothing before */
+    CHECK(press(&app, 4) == PURE_OK && app.values[2].num == 4);   /* down to column 0 */
     /* A failing event restores the text, the cursor and the states. */
-    CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
+    CHECK(press(&app, 7) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
     CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80\nbc") && app.values[2].num == 4 && app.values[0].num == 1);
     CHECK(!strcmp(view_text(&app, 4), "\xeb\xa9\x94\xeb\xaa\xa8 \xc2\xb7 4\xec\x9e\x90"));
     CHECK(!strcmp(view_text(&app, 5), "0.3333333333333333"));
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xff", 1}) == PURE_INVALID);
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xed\xa0\x80", 3}) == PURE_INVALID); /* surrogate */
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xf0\x9f\x98\x80", 4}) == PURE_OK);
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"\xff", 1}) == PURE_INVALID);
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"\xed\xa0\x80", 3}) == PURE_INVALID); /* surrogate */
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"\xf0\x9f\x98\x80", 4}) == PURE_OK);
     CHECK(app.values[2].num == 8 && number_view(&app, 1) == 3);   /* offset in characters */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 4);  /* back over the emoji */
-    CHECK(pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);
+    CHECK(press(&app, 1) == PURE_OK && app.values[2].num == 4);  /* back over the emoji */
+    CHECK(press(&app, 6) == PURE_OK && app.values[2].num == 0);
     /* Replacement keeps the text and its cursor by name. */
     static const S fresh[] = {{"fresh", 7}};
     static const T kept[] = {{"note", 1, 0}, {"at", 2, 1}};
     static const char *const other[] = {"ignored"};
     Spec next = {fresh, 1, inputs, 0, number_views, 0, handlers, 0, code, 0, NULL, 0, kept, 2, other, 1, text_views, 0, NULL, 0, NULL, 0};
     CHECK(load(next, &module_b) == PURE_OK);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 3);
+    CHECK(press(&app, 2) == PURE_OK && app.values[2].num == 3);
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
     CHECK(app.values[0].num == 7 && app.values[2].num == 3 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\n\xf0\x9f\x98\x80" "bc"));
     pure_app_stop(&app);
@@ -753,7 +861,7 @@ static void texts(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "cursor of another text"));
     static const O input_in_frame[] = {{CUL, 3, 0}, {TI, 0, 0}, {TINS, 1, 0}};
     bad.o = input_in_frame;
-    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "text input outside"));
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type")); /* a frame's field is its dt */
     static const O store_text[] = {{TK, 0, 0}, {ST, 0, 0}};
     static const H frame2[] = {{0, 0, 2}};
     bad.o = store_text; bad.no = 2; bad.h = frame2;
@@ -798,11 +906,11 @@ static void text_mutations(void) {
         if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
         for (unsigned e = 0; e < 16; ++e) {
             uint32_t input = next_random(&state) % 8;
-            if (module_b.input[input].kind == PURE_KIND_TEXT) {
+            if (module_b.input[input].binding == PURE_BIND_TEXT) {
                 const char *word = words[next_random(&state) % LEN(words)];
-                pure_app_text(&app, input, (PureSpan){(const unsigned char *)word, strlen(word)});
-            } else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
-            else pure_app_frame(&app);
+                type_in(&app, input, (PureSpan){(const unsigned char *)word, strlen(word)});
+            } else if (module_b.input[input].binding == PURE_BIND_PRESS) press(&app, input);
+            else frame(&app);
             for (uint32_t v = 0; v < module_b.views; ++v) {
                 double value;
                 if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_view_text(&app, v, ignore_span, NULL);
@@ -1990,7 +2098,7 @@ static void lists(void) {
     static const R records[] = {{"task", task_fields, 2}};
     static const char *const constants[] = {"", "new", "x"};
     static const I inputs[] = {
-        {"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("ins", "KeyI"), KEY("del", "Delete"),
+        {"typed", NULL, TEXT_INPUT, NULL, 0}, KEY("ins", "KeyI"), KEY("del", "Delete"),
         KEY("up", "ArrowUp"), KEY("down", "ArrowDown"), KEY("toggle", "Space"), KEY("rename", "KeyR"), KEY("bad", "KeyB"),
     };
     static const O code[] = {
@@ -2022,34 +2130,34 @@ static void lists(void) {
     CHECK(number_view(&app, 0) == 0 && number_view(&app, 1) == 0 && !pure_app_view(&app, 2, &value));
     CHECK(pure_app_view_text(&app, 3, text_span, &(Text){{0}, 0}) == PURE_NOT_FOUND);  /* no item yet */
     CHECK(app.fault == PURE_FAULT_NONE);                                                /* views leave faults alone */
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"b", 1}) == PURE_OK);
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"b", 1}) == PURE_OK);
     CHECK(pure_list_count(app.lists[1]) == 2 && app.values[2].num == 1 && app.values[0].num == 2);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);   /* stops at the first */
+    CHECK(press(&app, 3) == PURE_OK && app.values[2].num == 0);
+    CHECK(press(&app, 3) == PURE_OK && app.values[2].num == 0);   /* stops at the first */
     /* Inserting before the current item: the index follows it. */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 1);
+    CHECK(press(&app, 1) == PURE_OK && app.values[2].num == 1);
     CHECK(!strcmp(item_title(&app, 1, 0), "new") && !strcmp(view_text(&app, 3), "a"));
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && number_view(&app, 2) == 1);
-    CHECK(pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK && !strcmp(view_text(&app, 3), "ax"));
-    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 2);
-    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 2);   /* stops at the last */
+    CHECK(press(&app, 5) == PURE_OK && number_view(&app, 2) == 1);
+    CHECK(press(&app, 6) == PURE_OK && !strcmp(view_text(&app, 3), "ax"));
+    CHECK(press(&app, 4) == PURE_OK && app.values[2].num == 2);
+    CHECK(press(&app, 4) == PURE_OK && app.values[2].num == 2);   /* stops at the last */
     /* Removing the last item: the index moves to the new last. */
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 1 && pure_list_count(app.lists[1]) == 2);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0);
+    CHECK(press(&app, 2) == PURE_OK && app.values[2].num == 1 && pure_list_count(app.lists[1]) == 2);
+    CHECK(press(&app, 3) == PURE_OK && app.values[2].num == 0);
     /* Removing the current item: the index names the next. */
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 0 && !strcmp(view_text(&app, 3), "ax"));
+    CHECK(press(&app, 2) == PURE_OK && app.values[2].num == 0 && !strcmp(view_text(&app, 3), "ax"));
     /* A failing event undoes a set, a remove and an append. */
-    CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
+    CHECK(press(&app, 7) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
     CHECK(pure_list_count(app.lists[1]) == 1 && !strcmp(item_title(&app, 1, 0), "ax") &&
           pure_list_get(app.lists[1], 0, 1).num == 1 && app.values[2].num == 0 && app.values[0].num == 2);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 0 && app.values[2].num == 0);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_NOT_FOUND && app.fault == PURE_FAULT_NOT_FOUND);
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_NOT_FOUND);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 1 && app.values[2].num == 0);
-    for (int i = 0; i < 3; ++i) CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xea\xb0\x80", 3}) == PURE_OK);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 2);
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(&app, 2) == PURE_OK && pure_list_count(app.lists[1]) == 0 && app.values[2].num == 0);
+    CHECK(press(&app, 2) == PURE_NOT_FOUND && app.fault == PURE_FAULT_NOT_FOUND);
+    CHECK(press(&app, 5) == PURE_NOT_FOUND);
+    CHECK(press(&app, 1) == PURE_OK && pure_list_count(app.lists[1]) == 1 && app.values[2].num == 0);
+    for (int i = 0; i < 3; ++i) CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"\xea\xb0\x80", 3}) == PURE_OK);
+    CHECK(press(&app, 3) == PURE_OK && app.values[2].num == 2);
+    CHECK(press(&app, 5) == PURE_OK);
 
     /* Replacement keeps the list by name. The same record keeps the list
      * itself; a changed record keeps each field by name and kind and gives new
@@ -2146,11 +2254,11 @@ static void list_mutations(void) {
         if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
         for (unsigned e = 0; e < 24; ++e) {
             uint32_t input = next_random(&state) % 8;
-            if (module_b.input[input].kind == PURE_KIND_TEXT) {
+            if (module_b.input[input].binding == PURE_BIND_TEXT) {
                 const char *word = words[next_random(&state) % LEN(words)];
-                pure_app_text(&app, input, (PureSpan){(const unsigned char *)word, strlen(word)});
-            } else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
-            else pure_app_frame(&app);
+                type_in(&app, input, (PureSpan){(const unsigned char *)word, strlen(word)});
+            } else if (module_b.input[input].binding == PURE_BIND_PRESS) press(&app, input);
+            else frame(&app);
             for (uint32_t v = 0; v < module_b.views; ++v) {
                 double value;
                 if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_view_text(&app, v, ignore_span, NULL);
@@ -2198,7 +2306,7 @@ static void tables(void) {
     static const RF task_fields[] = {{"title", 1, 0}, {"done", 2, 0}};
     static const R records[] = {{"task", task_fields, 2}};
     static const char *const constants[] = {"", "x", " ", "empty"};
-    static const I inputs[] = {{"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("toggle", "Space")};
+    static const I inputs[] = {{"typed", NULL, TEXT_INPUT, NULL, 0}, KEY("toggle", "Space")};
     static const O code[] = {
         {TI, 0, 0}, {C, 1, 0}, {LA, 1, 0}, {XE, 1, 0}, {XS, 2, 0},                          /* 0 typed */
         {XL, 2, 0}, {XL, 2, 0}, {IG, DONE, 0}, {NOT, 0, 0}, {IS, DONE, 0},                     /* 5 toggle */
@@ -2224,9 +2332,9 @@ static void tables(void) {
     double value;
     CHECK(pure_app_rows(&app, 1) == 0 && !strcmp(view_text(&app, 0), "empty"));   /* the else branch */
     CHECK(pure_app_cell_text(&app, 2, 0, text_span, &(Text){{0}, 0}) == PURE_NOT_FOUND);
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"\xeb\xb9\xb5", 3}) == PURE_OK);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"\xeb\xb9\xb5", 3}) == PURE_OK);
+    CHECK(press(&app, 1) == PURE_OK);
     CHECK(pure_app_rows(&app, 1) == 2 && !strcmp(view_text(&app, 0), "\xeb\xb9\xb5"));
     CHECK(!strcmp(cell_text(&app, 2, 0), "a") && !strcmp(cell_text(&app, 2, 1), "\xeb\xb9\xb5"));
     CHECK(!strcmp(cell_text(&app, 3, 0), " ") && !strcmp(cell_text(&app, 3, 1), "x"));
@@ -2334,8 +2442,8 @@ static void table_mutations(void) {
         if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
         for (unsigned e = 0; e < 12; ++e) {
             uint32_t input = next_random(&state) % 2;
-            if (module_b.input[input].kind == PURE_KIND_TEXT) pure_app_text(&app, input, (PureSpan){(const unsigned char *)"t", 1});
-            else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
+            if (module_b.input[input].binding == PURE_BIND_TEXT) type_in(&app, input, (PureSpan){(const unsigned char *)"t", 1});
+            else if (module_b.input[input].binding == PURE_BIND_PRESS) press(&app, input);
             for (uint32_t v = 0; v < module_b.views; ++v) {
                 double value;
                 if (!module_b.view_table[v]) {
@@ -2419,14 +2527,14 @@ static void stored_equivalence(Spec spec, const char *const *words, size_t word_
     for (unsigned step = 0; step < 400; ++step) {
         uint32_t input = next_random(&seed) % module_a.inputs;
         PureResult a, b;
-        if (module_a.input[input].kind == PURE_KIND_TEXT) {
+        if (module_a.input[input].binding == PURE_BIND_TEXT) {
             const char *word = words[next_random(&seed) % word_count];
             PureSpan text = {(const unsigned char *)word, strlen(word)};
-            a = pure_app_text(&memory, input, text);
-            b = pure_app_text(&stored, input, text);
+            a = type_in(&memory, input, text);
+            b = type_in(&stored, input, text);
         } else {
-            a = pure_app_input(&memory, input, PURE_EDGE_DOWN);
-            b = pure_app_input(&stored, input, PURE_EDGE_DOWN);
+            a = press(&memory, input);
+            b = press(&stored, input);
         }
         CHECK(a == b);
         same_states(&memory, &stored);
@@ -2475,7 +2583,7 @@ static void stored_crashes(void) {
     CHECK(load(spec, &module_a) == PURE_OK);
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && consistent(&app) == 1);
+    CHECK(press(&app, 0) == PURE_OK && consistent(&app) == 1);
     pure_app_stop(&app);
     unsigned expected = 1;
     for (int stage = PURE_AFTER_HEADER; stage <= PURE_BEFORE_DIR_SYNC; ++stage) {
@@ -2486,7 +2594,7 @@ static void stored_crashes(void) {
             if (pure_app_start(&doomed, &module_a, pure_tree_data(path)) != PURE_OK) _exit(1);
             crash = 1;
             fail_stage = stage;
-            pure_app_input(&doomed, 0, PURE_EDGE_DOWN);
+            press(&doomed, 0);
             _exit(0);
         }
         int status;
@@ -2506,7 +2614,7 @@ static void stored_crashes(void) {
             if (pure_app_start(&doomed, &module_a, pure_tree_data(path)) != PURE_OK) _exit(1);
             crash = 1;
             fail_stage = stage;
-            pure_app_input(&doomed, 0, PURE_EDGE_DOWN);
+            press(&doomed, 0);
             _exit(0);
         }
         int status;
@@ -2519,28 +2627,28 @@ static void stored_crashes(void) {
      * until it starts again, from what the store has. */
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
     for (fail_stage = PURE_AFTER_HEADER; fail_stage <= PURE_BEFORE_RENAME; ++fail_stage) {
-        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_STORE_ERROR && consistent(&app) == expected);
+        CHECK(press(&app, 0) == PURE_STORE_ERROR && consistent(&app) == expected);
     }
     fail_stage = PURE_BEFORE_DIR_SYNC;
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_UNCERTAIN && consistent(&app) == expected);
+    CHECK(press(&app, 0) == PURE_UNCERTAIN && consistent(&app) == expected);
     fail_stage = -1;
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_CONFLICT && consistent(&app) == expected);
+    CHECK(press(&app, 0) == PURE_CONFLICT && consistent(&app) == expected);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected + 1);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && consistent(&app) == expected + 2);
+    CHECK(press(&app, 0) == PURE_OK && consistent(&app) == expected + 2);
     /* The log refusing its entry fails the save and changes nothing; the log
      * failing its sync leaves it uncertain: no save follows until the app
      * starts again, and then the entry does not count (the tree has not its
      * number). */
     fail_stage = PURE_LOG_BEFORE_WRITE;
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_STORE_ERROR && consistent(&app) == expected + 2);
+    CHECK(press(&app, 0) == PURE_STORE_ERROR && consistent(&app) == expected + 2);
     fail_stage = PURE_LOG_BEFORE_SYNC;
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_UNCERTAIN && consistent(&app) == expected + 2);
+    CHECK(press(&app, 0) == PURE_UNCERTAIN && consistent(&app) == expected + 2);
     fail_stage = -1;
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_CONFLICT);
+    CHECK(press(&app, 0) == PURE_CONFLICT);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected + 2);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && consistent(&app) == expected + 3);
+    CHECK(press(&app, 0) == PURE_OK && consistent(&app) == expected + 3);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == expected + 3);
     pure_app_stop(&app);
@@ -2569,13 +2677,13 @@ static void uncertain_numbers(void) {
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
     fail_stage = PURE_BEFORE_DIR_SYNC;
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_UNCERTAIN && app.uncertain && app.values[0].num == 0);
+    CHECK(press(&app, 0) == PURE_UNCERTAIN && app.uncertain && app.values[0].num == 0);
     fail_stage = -1;
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_CONFLICT && !pure_list_count(app.lists[1]));
+    CHECK(press(&app, 1) == PURE_CONFLICT && !pure_list_count(app.lists[1]));
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 1 &&
           !pure_list_count(app.lists[1]));
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_list_get(app.lists[1], 0, 0).num == 1);
+    CHECK(press(&app, 1) == PURE_OK && pure_list_get(app.lists[1], 0, 0).num == 1);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 1 &&
           pure_list_count(app.lists[1]) == 1 && pure_list_get(app.lists[1], 0, 0).num == 1);
@@ -2583,8 +2691,8 @@ static void uncertain_numbers(void) {
     remove_store(path);
 }
 
-/* Frame changes are stored by the next event or by a save; a stop alone
- * leaves them out. */
+/* Frames a host defers (027's 4d: a frame is a message, saved as each is unless deferred) are stored by a save or by
+ * the next event it does not defer; a stop alone leaves them out. */
 static void stored_frames(void) {
     char *path = new_store();
     static const O code[] = {{L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}};
@@ -2593,16 +2701,18 @@ static void stored_frames(void) {
                  NULL, 0, NULL, 0};
     CHECK(load(spec, &module_a) == PURE_OK);
     PureApp app;
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    for (int i = 0; i < 5; ++i) CHECK(pure_app_frame(&app) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&app, true));
+    for (int i = 0; i < 5; ++i) CHECK(frame(&app) == PURE_OK);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 0);
-    for (int i = 0; i < 3; ++i) CHECK(pure_app_frame(&app) == PURE_OK);
+    CHECK(pure_app_defer(&app, true));
+    for (int i = 0; i < 3; ++i) CHECK(frame(&app) == PURE_OK);
     CHECK(pure_app_save(&app) == PURE_OK);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 3);
-    for (int i = 0; i < 2; ++i) CHECK(pure_app_frame(&app) == PURE_OK);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(pure_app_defer(&app, true));
+    for (int i = 0; i < 2; ++i) CHECK(frame(&app) == PURE_OK);
+    CHECK(pure_app_defer(&app, false) && press(&app, 0) == PURE_OK);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 5);
     pure_app_stop(&app);
@@ -2641,7 +2751,7 @@ static void stored_migration(void) {
     CHECK(load(before, &module_a) == PURE_OK && load(after, &module_b) == PURE_OK);
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(&app, 0) == PURE_OK && press(&app, 0) == PURE_OK);
     pure_app_stop(&app);
     for (int round = 0; round < 2; ++round) { /* migrated, then stored as migrated */
         CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && pure_list_count(app.lists[TASKS]) == 2);
@@ -2653,7 +2763,7 @@ static void stored_migration(void) {
     }
     /* Back to the first record by replacing the module; the next save stores it. */
     CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_a) == PURE_OK && press(&app, 0) == PURE_OK);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&app) == 3);
     pure_app_stop(&app);
@@ -2749,7 +2859,7 @@ static void transient_states(void) {
     char *path = new_store();
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(&app, 0) == PURE_OK && press(&app, 0) == PURE_OK);
     CHECK(app.values[N].num == 2 && app.values[T_].num == 2 && pure_list_count(app.lists[LOG]) == 2 &&
           pure_list_count(app.lists[KEEP]) == 2 && app.values[I_].num == 1 && app.values[PICK].num == 1 &&
           pure_draft_size(app.texts[NOTE_]) == 3);
@@ -2762,11 +2872,11 @@ static void transient_states(void) {
     pure_app_stop(&reader);
     pure_snapshot_release(snapshot);
     /* A failed event undoes transient states too. */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) != PURE_OK && app.values[T_].num == 2 &&
+    CHECK(press(&app, 1) != PURE_OK && app.values[T_].num == 2 &&
           pure_list_count(app.lists[LOG]) == 2 && pure_draft_size(app.texts[NOTE_]) == 3);
     /* Changing only transient states stores nothing. */
     uint64_t seq = app.seq;
-    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK);
+    for (int k = 0; k < 3; ++k) CHECK(press(&app, 2) == PURE_OK);
     CHECK(app.seq == seq && app.values[T_].num == 5 && pure_list_count(app.lists[LOG]) == 5);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
@@ -2774,10 +2884,10 @@ static void transient_states(void) {
           !pure_list_count(app.lists[LOG]) && app.values[I_].num == 0 && app.values[PICK].num == 0 &&
           pure_draft_size(app.texts[NOTE_]) == 1);
     /* Into b: t, note and log are stored from now on, keep is not. */
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(&app, 0) == PURE_OK && press(&app, 0) == PURE_OK);
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.values[T_].num == 2 && pure_list_count(app.lists[LOG]) == 2 &&
           pure_list_count(app.lists[KEEP]) == 4 && pure_draft_size(app.texts[NOTE_]) == 3);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(&app, 0) == PURE_OK);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK);
     CHECK(app.values[N].num == 5 && app.values[T_].num == 3 && pure_list_count(app.lists[LOG]) == 3 &&
@@ -2812,8 +2922,8 @@ static void stored_states(void) {
 typedef struct { uint32_t input; const char *word; } Step;
 
 static PureResult apply_step(PureApp *app, Step step) {
-    if (step.word) return pure_app_text(app, step.input, (PureSpan){(const unsigned char *)step.word, strlen(step.word)});
-    return pure_app_input(app, step.input, PURE_EDGE_DOWN);
+    if (step.word) return type_in(app, step.input, (PureSpan){(const unsigned char *)step.word, strlen(step.word)});
+    return press(app, step.input);
 }
 
 /* Deferred events apply at once and last only through a save: an app that
@@ -2831,7 +2941,7 @@ static void deferred_equivalence(Spec spec, const char *const *words, size_t wor
     unsigned lost = 0, saves = 0;
     for (unsigned step = 0; step < 600; ++step) {
         Step next = {next_random(&seed) % module_a.inputs, NULL};
-        if (module_a.input[next.input].kind == PURE_KIND_TEXT) next.word = words[next_random(&seed) % word_count];
+        if (module_a.input[next.input].binding == PURE_BIND_TEXT) next.word = words[next_random(&seed) % word_count];
         PureResult a = apply_step(&memory, next), b = apply_step(&stored, next);
         CHECK(a == b);
         if (a == PURE_OK) history[applied++] = next;
@@ -2869,11 +2979,11 @@ static void deferred_bursts(void) {
     CHECK(load(spec, &module_a) == PURE_OK);
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&app, true));
-    for (int i = 0; i < 5; ++i) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    for (int i = 0; i < 5; ++i) CHECK(press(&app, 0) == PURE_OK);
     CHECK(consistent(&app) == 5 && app.events == 5);
     for (fail_stage = PURE_AFTER_HEADER; fail_stage <= PURE_BEFORE_RENAME; fail_stage += 2) {
         CHECK(pure_app_save(&app) == PURE_STORE_ERROR && consistent(&app) == 0 && app.events == 0);
-        for (int i = 0; i < 5; ++i) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+        for (int i = 0; i < 5; ++i) CHECK(press(&app, 0) == PURE_OK);
     }
     fail_stage = -1;
     CHECK(pure_app_save(&app) == PURE_OK && consistent(&app) == 5);
@@ -2887,7 +2997,7 @@ static void deferred_bursts(void) {
         if (!child) {
             PureApp doomed;
             if (pure_app_start(&doomed, &module_a, pure_tree_data(path)) != PURE_OK || !pure_app_defer(&doomed, true)) _exit(1);
-            for (int i = 0; i < 7; ++i) if (pure_app_input(&doomed, 0, PURE_EDGE_DOWN) != PURE_OK) _exit(2);
+            for (int i = 0; i < 7; ++i) if (press(&doomed, 0) != PURE_OK) _exit(2);
             crash = 1;
             fail_stage = stage;
             pure_app_save(&doomed);
@@ -2916,7 +3026,7 @@ static void marks(void) {
     enum { MARK = 2 | PURE_CURSOR_STAYS << 8 };
     static const T textual[] = {{"note", 1, 0}, {"at", 2, 0}, {"mark", MARK, 0}};
     static const char *const constants[] = {"ab"};
-    static const I inputs[] = {{"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("keep", "KeyK"), KEY("back", "Backspace")};
+    static const I inputs[] = {{"typed", NULL, TEXT_INPUT, NULL, 0}, KEY("keep", "KeyK"), KEY("back", "Backspace")};
     static const O code[] = {
         {CUL, 1, 0}, {TI, 0, 0}, {TINS, 0, 0},                                  /* 0 typed: at the cursor */
         {CUL, 1, 0}, {CS, 2, 0},                                                /* 3 keep: mark = at */
@@ -2929,13 +3039,13 @@ static void marks(void) {
     CHECK(module_a.state_flags[2] == PURE_CURSOR_STAYS && !module_a.state_flags[1]);
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"x", 1}) == PURE_OK);
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"x", 1}) == PURE_OK);
     CHECK(!strcmp(state_text(&app, 0), "xab") && app.values[1].num == 1 && app.values[2].num == 0); /* the mark stayed */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 1);
-    CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"yz", 2}) == PURE_OK);
+    CHECK(press(&app, 1) == PURE_OK && app.values[2].num == 1);
+    CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"yz", 2}) == PURE_OK);
     CHECK(!strcmp(state_text(&app, 0), "xyzab") && app.values[1].num == 3 && app.values[2].num == 1);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 2 && app.values[2].num == 1);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[1].num == 1 && app.values[2].num == 1); /* gathered */
+    CHECK(press(&app, 2) == PURE_OK && app.values[1].num == 2 && app.values[2].num == 1);
+    CHECK(press(&app, 2) == PURE_OK && app.values[1].num == 1 && app.values[2].num == 1); /* gathered */
     pure_app_stop(&app);
     /* A flag only on a cursor, and only this one. */
     static const T wrong_flag[] = {{"note", 1, 0}, {"at", 2 | 2 << 8, 0}, {"mark", MARK, 0}};
@@ -2955,7 +3065,7 @@ static const RF fold_fields[] = {{"title", 1, 0}, {"done", 2, 0}, {"points", 0, 
 static const R fold_records[] = {{"task", fold_fields, 3}};
 static const T fold_states[] = {{"tasks", 3, 0}, {"at", 4, 0}};
 static const char *const fold_constants[] = {""};
-static const I fold_inputs[] = {{"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("toggle", "KeyT")};
+static const I fold_inputs[] = {{"typed", NULL, TEXT_INPUT, NULL, 0}, KEY("toggle", "KeyT")};
 enum { F_TITLE = 0, F_DONE = 1u << 16, F_POINTS = 2u << 16 };
 static const O fold_code[] = {
     {TI, 0, 0}, {C, 1, 0}, {TI, 0, 0}, {CHR, 0, 0}, {LA, 0, 0}, {XE, 0, 0}, {XS, 1, 0},     /* 0 typed */
@@ -2990,15 +3100,15 @@ static void folds(void) {
     CHECK(!pure_app_view(&app, 6, &value));                           /* no first open task yet */
     const char *const words[] = {"a", "bbb", "\xea\xb0\x80\xea\xb0\x80"}; /* one, three and two characters */
     for (size_t i = 0; i < 3; ++i)
-        CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)words[i], strlen(words[i])}) == PURE_OK);
+        CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)words[i], strlen(words[i])}) == PURE_OK);
     CHECK(number_view(&app, 0) == 3 && number_view(&app, 1) == 6 && number_view(&app, 2) == 3);
     CHECK(number_view(&app, 3) == 0 && number_view(&app, 4) == 1 && number_view(&app, 5) == 13);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);   /* the last task is done */
+    CHECK(press(&app, 1) == PURE_OK);   /* the last task is done */
     CHECK(number_view(&app, 0) == 2 && number_view(&app, 3) == 2 && number_view(&app, 4) == 1);
     CHECK(number_view(&app, 6) == 0);                                 /* the first open one: an index */
-    CHECK(pure_app_point(&app, 1, 0) == PURE_OK && pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(place(&app, 1, 0) == PURE_OK && press(&app, 1) == PURE_OK);
     CHECK(number_view(&app, 6) == 1);
-    CHECK(pure_app_point(&app, 1, 1) == PURE_OK && pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(place(&app, 1, 1) == PURE_OK && press(&app, 1) == PURE_OK);
     CHECK(!pure_app_view(&app, 6, &value));
     CHECK(number_view(&app, 0) == 0 && number_view(&app, 3) == 6 && !pure_app_view(&app, 4, &value)); /* none open */
     pure_app_stop(&app);
@@ -3073,16 +3183,16 @@ static void filters(void) {
     size_t at;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && pure_app_rows(&app, 0) == 0);
     for (const char *word = "abc"; *word; ++word)
-        CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK);
+        CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK);
     CHECK(pure_app_rows(&app, 0) == 3 && !strcmp(cell_title(&app, 1, 2), "c") && pure_app_cell(&app, 2, 2, &value) && value == 2);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);   /* c is done: it leaves */
+    CHECK(press(&app, 1) == PURE_OK);   /* c is done: it leaves */
     CHECK(pure_app_rows(&app, 0) == 2 && !pure_app_cell(&app, 2, 2, &value) && !pure_app_item_row(&app, 0, 2, &at));
-    CHECK(pure_app_point(&app, 1, 0) == PURE_OK && pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK); /* a too */
+    CHECK(place(&app, 1, 0) == PURE_OK && press(&app, 1) == PURE_OK); /* a too */
     CHECK(pure_app_rows(&app, 0) == 1 && !strcmp(cell_title(&app, 1, 0), "b"));
     CHECK(pure_app_cell(&app, 2, 0, &value) && value == 1);      /* the item's position, not the row's */
     CHECK(pure_app_row_item(&app, 0, 0, &at) && at == 1 && !pure_app_row_item(&app, 0, 1, &at));
     CHECK(pure_app_item_row(&app, 0, 1, &at) && at == 0 && !pure_app_item_row(&app, 0, 0, &at));
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);   /* a comes back, before b */
+    CHECK(press(&app, 1) == PURE_OK);   /* a comes back, before b */
     CHECK(pure_app_rows(&app, 0) == 2 && !strcmp(cell_title(&app, 1, 0), "a") && pure_app_item_row(&app, 0, 1, &at) && at == 1);
     CHECK(pure_app_replace(&app, &module_a) == PURE_OK && pure_app_rows(&app, 0) == 2);
     pure_app_stop(&app);
@@ -3402,7 +3512,7 @@ static void lane_folds(void) {
             }
         }
         passes += pure_app_passes(&a);
-        PureResult went_a = pure_app_input(&a, 0, PURE_EDGE_DOWN), went_b = pure_app_input(&b, 0, PURE_EDGE_DOWN);
+        PureResult went_a = press(&a, 0), went_b = press(&b, 0);
         if (went_a != went_b || a.fault != b.fault || a.fault_pc != b.fault_pc || a.work != b.work ||
             memcmp(a.values, b.values, 4 * sizeof(double))) {
             fprintf(stderr, "lane round %u handler: %d %d %u / %d %d %u\n", round, went_a, a.fault, a.fault_pc, went_b, b.fault,
@@ -3546,7 +3656,7 @@ static void walks(void) {
                 ++orders;
             }
         } else { /* clean */
-            result = pure_app_input(&app, 1, PURE_EDGE_DOWN);
+            result = press(&app, 1);
             size_t at = 0;
             while (at < shop.stocked) {
                 bool gone = false;
@@ -3566,7 +3676,7 @@ static void walks(void) {
                 if (!gone) ++at;
             }
             ++cleaned;
-            pure_app_input(&app, 1, PURE_EDGE_UP);
+            release(&app, 1);
         }
         if (!ok) {
             shop = before;
@@ -3655,8 +3765,8 @@ static void walk_mutations(void) {
                 put_row(payload + k, (double)(next_random(&state) % 8), (double)(next_random(&state) % 3));
             if (module_b.input[input].kind == PURE_KIND_MESSAGE)
                 pure_app_message(&app, input, (PureSpan){payload, length});
-            else if (module_b.input[input].kind == PURE_KIND_KEY)
-                pure_app_input(&app, input, PURE_EDGE_DOWN);
+            else if (module_b.input[input].binding == PURE_BIND_PRESS)
+                press(&app, input);
             for (uint32_t s_ = 0; s_ < module_b.states; ++s_)
                 if (module_b.state_type[s_] == PURE_STATE_LIST && module_b.state_flags[s_] & PURE_LIST_ROWS >> 8)
                     CHECK(!pure_list_count(app.lists[s_])); /* rows go with their event */
@@ -3840,7 +3950,7 @@ static void locals(void) {
         items[count] = (double)(next_random(&seed) % 20) - 5;
         put_double(payload, items[count++]);
         CHECK(pure_app_message(&app, 1, (PureSpan){payload, 8}) == PURE_OK);
-        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+        CHECK(press(&app, 0) == PURE_OK);
         double total = 1, below = 0;
         for (size_t i = 0; i < count; ++i) total += items[i];
         for (size_t i = 0; i < count; ++i) below += items[i] < total;
@@ -4003,7 +4113,7 @@ static void ranges(void) {
                 CHECK(pure_app_cell(&a, 7, row, &x) && pure_app_cell(&b, 7, row, &y) && x == y);
             }
             unsigned input = 1 + next_random(&seed) % 3;
-            PureResult went_a = pure_app_input(&a, input, PURE_EDGE_DOWN), went_b = pure_app_input(&b, input, PURE_EDGE_DOWN);
+            PureResult went_a = press(&a, input), went_b = press(&b, input);
             CHECK(went_a == went_b && same_lists(&a, &b) && !memcmp(a.values, b.values, 3 * sizeof(double)));
             walked += input == 1;
         }
@@ -4031,8 +4141,8 @@ static void fold_mutations(void) {
         if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
         for (unsigned e = 0; e < 16; ++e) {
             uint32_t input = next_random(&state) % 2;
-            if (module_b.input[input].kind == PURE_KIND_TEXT) pure_app_text(&app, input, (PureSpan){(const unsigned char *)"ab", 2});
-            else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
+            if (module_b.input[input].binding == PURE_BIND_TEXT) type_in(&app, input, (PureSpan){(const unsigned char *)"ab", 2});
+            else if (module_b.input[input].binding == PURE_BIND_PRESS) press(&app, input);
             for (uint32_t v = 0; v < module_b.views; ++v) {
                 double value;
                 size_t item;
@@ -4053,33 +4163,53 @@ static void fold_mutations(void) {
     }
 }
 
-/* A host points at an item: the index a view shows as its position moves
- * there, as an event with no handler, saved like a key event; deferred, it
- * joins the burst and a failed save undoes it with the rest. */
+/* A host points at a row (027's 4d): a message bound to the table (one u32 field, the row's item), whose handler moves
+ * the index there; saved like any other event, and deferred, it joins the burst. A pointing names a table. */
 static void pointing(void) {
-    CHECK(load(list_spec, &module_a) == PURE_OK);
-    CHECK(pure_module_position(&module_a, 1) == 2); /* position = at.position */
-    CHECK(pure_module_position(&module_a, 0) == -1 && pure_module_position(&module_a, 2) == -1 &&
-          pure_module_position(&module_a, 3) == -1 && pure_module_position(&module_a, 99) == -1);
+    enum { XAT_ = PURE_OP_INDEX_AT };
+    static const S nums[] = {{"made", 0}};
+    static const T states[] = {{"tasks", 3, 0}, {"at", 4, 1}};
+    static const RF task_fields[] = {{"title", 1, 0}};
+    static const R records[] = {{"task", task_fields, 1}};
+    static const char *const constants[] = {""};
+    static const I inputs[] = {{"typed", NULL, TEXT_INPUT, NULL, 0}, {"rows.point", "1", POINT_INPUT, NULL, 0}};
+    static const O code[] = {
+        {TI, 0, 0}, {LA, 1, 0}, {XE, 1, 0}, {XS, 2, 0},     /* 0 typed: a task, at it */
+        {FIELD, 0, 0}, {XAT_, 1, 0}, {XS, 2, 0},            /* 4 rows.point: at the row's item */
+        {XL, 2, 0}, {XN, 1, 0},                             /* 7 view position */
+        {ROW, 1, 0}, {IG, 1, 0},                            /* 9 column title */
+    };
+    static const H handlers[] = {{1, 0, 4}, {3, 4, 3}};
+    static const V views[] = {{"position", 7, 2}};
+    static const W tables[] = {{"rows", 2, 0, 1, 0}, {"title", 1, 2, 9, 2}};
+    Spec spec = {nums, 1, inputs, LEN(inputs), views, 1, handlers, LEN(handlers), code, LEN(code), NULL, 0, states, 2,
+                 constants, 1, NULL, 0, records, 1, tables, 2};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "pointing: %s\n", error); abort(); }
     char path[] = "/tmp/pure-point-XXXXXX";
     CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
     PureApp app;
+    unsigned char row[4];
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_app_point(&app, 2, 0) == PURE_NOT_FOUND); /* nothing to point at */
-    for (int i = 0; i < 3; ++i) CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
+    CHECK(pure_app_message(&app, 1, (PureSpan){put32(row, 0) - 4, 4}) == PURE_NOT_FOUND); /* nothing to point at */
+    for (int i = 0; i < 3; ++i) CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)"a", 1}) == PURE_OK);
     uint64_t events = app.events;
-    CHECK(app.values[2].num == 2 && pure_app_point(&app, 2, 0) == PURE_OK && app.values[2].num == 0 && app.events == events + 1);
-    CHECK(pure_app_point(&app, 2, 3) == PURE_NOT_FOUND && app.values[2].num == 0);
-    CHECK(pure_app_point(&app, 0, 1) == PURE_INVALID && pure_app_point(&app, 1, 1) == PURE_INVALID); /* a number, a list */
-    CHECK(pure_app_point(&app, 2, 1) == PURE_OK);
+    CHECK(app.values[2].num == 2 && pure_app_message(&app, 1, (PureSpan){put32(row, 0) - 4, 4}) == PURE_OK);
+    CHECK(app.values[2].num == 0 && app.events == events + 1);
+    CHECK(pure_app_message(&app, 1, (PureSpan){put32(row, 3) - 4, 4}) == PURE_NOT_FOUND && app.values[2].num == 0);
+    CHECK(pure_app_message(&app, 1, (PureSpan){put32(row, 1) - 4, 4}) == PURE_OK);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[2].num == 1);
-    CHECK(pure_app_defer(&app, true) && pure_app_point(&app, 2, 2) == PURE_OK && app.open && app.values[2].num == 2);
+    CHECK(pure_app_defer(&app, true) && pure_app_message(&app, 1, (PureSpan){put32(row, 2) - 4, 4}) == PURE_OK && app.open &&
+          app.values[2].num == 2);
     CHECK(pure_app_save(&app) == PURE_OK);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[2].num == 2);
     pure_app_stop(&app);
     remove_store(path);
+    static const W columns_only[] = {{"rows", 1, 0, 9, 2}}; /* no table: a pointing has none to point at */
+    Spec bad = spec;
+    bad.w = columns_only, bad.nw = 1;
+    CHECK(load(bad, &module_b) != PURE_OK && strstr(error, "pointing's table"));
 }
 
 /* Keyed lists: items in key order (texts by bytes, numbers by value), each
@@ -4095,9 +4225,9 @@ static const RF score_fields[] = {{"score", 0, 0}}, flag_fields[] = {{"on", 2, 0
 static const R keyed_records[] = {{"person", person_fields, 2}, {"score", score_fields, 1}, {"flag", flag_fields, 1}};
 static const char *const keyed_constants[] = {"", "bob", "m"};
 static const I keyed_inputs[] = {
-    {"typed", NULL, PURE_KIND_TEXT, NULL, 0}, {"seek", NULL, PURE_KIND_TEXT, NULL, 0},
-    {"has", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("drop", "Delete"), KEY("bump", "KeyB"),
-    KEY("two", "KeyN"), KEY("zero", "KeyO"), KEY("minus_zero", "KeyM"), {"twice", NULL, PURE_KIND_TEXT, NULL, 0},
+    {"typed", NULL, TEXT_INPUT, NULL, 0}, {"seek", NULL, TEXT_INPUT, NULL, 0},
+    {"has", NULL, TEXT_INPUT, NULL, 0}, KEY("drop", "Delete"), KEY("bump", "KeyB"),
+    KEY("two", "KeyN"), KEY("zero", "KeyO"), KEY("minus_zero", "KeyM"), {"twice", NULL, TEXT_INPUT, NULL, 0},
 };
 static const O keyed_code[] = {
     {TI, 0, 0}, {C, 0, 0}, {LA, PEOPLE, 0}, {TI, 0, 0}, {FIND, PEOPLE, 0}, {XS, K_AT, 0},        /* 0 typed: add, point at it */
@@ -4132,7 +4262,7 @@ static Spec keyed_spec(const T *states, const O *code, size_t count, const H *ha
 }
 
 static PureResult type_text(PureApp *app, uint32_t input, const char *text) {
-    return pure_app_text(app, input, (PureSpan){(const unsigned char *)text, strlen(text)});
+    return type_in(app, input, (PureSpan){(const unsigned char *)text, strlen(text)});
 }
 
 /* A list's first field (text) of every item, comma separated. */
@@ -4164,8 +4294,8 @@ static void keyed(void) {
     CHECK(type_text(&app, 1, "q") == PURE_NOT_FOUND && app.fault == PURE_FAULT_NOT_FOUND && app.values[K_AT].num == 3);
     CHECK(type_text(&app, 2, "m") == PURE_OK && app.values[K_FOUND].num == 1);
     CHECK(type_text(&app, 2, "c") == PURE_OK && app.values[K_FOUND].num == 0);
-    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && pure_list_get(app.lists[PEOPLE], 3, 1).num == 1);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && !strcmp(names_of(&app, PEOPLE), "a,b,m"));
+    CHECK(press(&app, 4) == PURE_OK && pure_list_get(app.lists[PEOPLE], 3, 1).num == 1);
+    CHECK(press(&app, 3) == PURE_OK && !strcmp(names_of(&app, PEOPLE), "a,b,m"));
     CHECK(app.values[K_AT].num == 2 && number_view(&app, 2) == 0 && number_view(&app, 3) == 0);  /* "m": not bob, not before m */
     CHECK(type_text(&app, 1, "b") == PURE_OK && number_view(&app, 2) == 0 && number_view(&app, 3) == 1);
     CHECK(type_text(&app, 0, "bob") == PURE_OK && number_view(&app, 2) == 1 && number_view(&app, 3) == 1);
@@ -4174,8 +4304,8 @@ static void keyed(void) {
     CHECK(type_text(&app, 0, "") == PURE_OK && type_text(&app, 0, "") == PURE_CONFLICT);
     CHECK(!strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,m,\xea\xb0\x80") && app.values[K_AT].num == 0);
     /* Numbers order by value, and -0 is the key 0. */
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK);
-    CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_CONFLICT && number_view(&app, 4) == 2);
+    CHECK(press(&app, 5) == PURE_OK && press(&app, 6) == PURE_OK);
+    CHECK(press(&app, 7) == PURE_CONFLICT && number_view(&app, 4) == 2);
     CHECK(pure_list_get(app.lists[SCORES], 0, 0).num == 0 && !signbit(pure_list_get(app.lists[SCORES], 0, 0).num) &&
           pure_list_get(app.lists[SCORES], 1, 0).num == 2);
 
@@ -4183,7 +4313,7 @@ static void keyed(void) {
     CHECK(load(keyed_spec(unkeyed_states, unkeyed_code, LEN(unkeyed_code), unkeyed_handlers, 1), &module_b) == PURE_OK);
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK && type_text(&app, 0, "c") == PURE_OK);
     CHECK(!strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,m,\xea\xb0\x80,c") && app.values[K_AT].num == 7);
-    CHECK(pure_app_point(&app, K_AT, 6) == PURE_OK);                     /* at the Korean name */
+    CHECK(place(&app, K_AT, 6) == PURE_OK);                     /* at the Korean name */
     /* Keyed again: put in order, the index following its item. */
     CHECK(pure_app_replace(&app, &module_a) == PURE_OK && !strcmp(names_of(&app, PEOPLE), ",a,ab,b,bob,c,m,\xea\xb0\x80"));
     CHECK(app.values[K_AT].num == 7 && !strcmp(view_text(&app, 5), "\xea\xb0\x80"));
@@ -4197,7 +4327,7 @@ static void keyed(void) {
     CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK);
     for (const char *const *word = (const char *const[]){"m", "b", "z", NULL}; *word; ++word)
         CHECK(type_text(&app, 0, *word) == PURE_OK);
-    CHECK(pure_app_point(&app, K_AT, 1) == PURE_OK);
+    CHECK(place(&app, K_AT, 1) == PURE_OK);
     pure_app_stop(&app);
     for (int round = 0; round < 2; ++round) {
         CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
@@ -4266,8 +4396,8 @@ static void keyed_mutations(void) {
         if (pure_app_start(&app, &module_b, (PureData){0}) != PURE_OK) continue;
         for (unsigned e = 0; e < 24; ++e) {
             uint32_t input = next_random(&state) % module_b.inputs;
-            if (module_b.input[input].kind == PURE_KIND_TEXT) type_text(&app, input, words[next_random(&state) % LEN(words)]);
-            else if (module_b.input[input].kind == PURE_KIND_KEY) pure_app_input(&app, input, PURE_EDGE_DOWN);
+            if (module_b.input[input].binding == PURE_BIND_TEXT) type_text(&app, input, words[next_random(&state) % LEN(words)]);
+            else if (module_b.input[input].binding == PURE_BIND_PRESS) press(&app, input);
             for (uint32_t v = 0; v < module_b.views; ++v) {
                 double value;
                 if (module_b.view_type[v] == PURE_VIEW_TEXT) pure_app_view_text(&app, v, ignore_span, NULL);
@@ -4348,8 +4478,8 @@ static void describe(PureApp *app, Shown *s) {
 static void keyed_event(PureApp *app, uint32_t *seed) {
     static const char *const names[] = {"a", "b", "ab", "", "\xea\xb0\x80", "zz", "bob", "m", "q", "c"};
     uint32_t input = next_random(seed) % app->module->inputs;
-    if (app->module->input[input].kind == PURE_KIND_TEXT) type_text(app, input, names[next_random(seed) % LEN(names)]);
-    else pure_app_input(app, input, PURE_EDGE_DOWN);
+    if (app->module->input[input].binding == PURE_BIND_TEXT) type_text(app, input, names[next_random(seed) % LEN(names)]);
+    else press(app, input);
 }
 
 /* A snapshot shows the states of the save before it, as they were, however
@@ -4547,7 +4677,7 @@ static void snapshot_held(Spec spec, void (*event)(PureApp *, uint32_t *)) {
 
 static void crash_event(PureApp *app, uint32_t *seed) {
     (void)seed;
-    CHECK(pure_app_input(app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(app, 0) == PURE_OK);
 }
 
 static void snapshots(void) {
@@ -5055,10 +5185,10 @@ static void work_budget(void) {
         CHECK(pure_app_message(&app, 2, (PureSpan){payload, 8}) == PURE_OK && app.work == 3);
     }
     pure_app_work(&app, 23 + 22 * 5 - 1);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
+    CHECK(press(&app, 1) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
     for (size_t i = 0; i < 5; ++i) CHECK(pure_list_get(app.lists[W_STOCK], i, 1).num == 2); /* nothing changed */
     pure_app_work(&app, 23 + 22 * 5);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.work == 23 + 22 * 5);
+    CHECK(press(&app, 1) == PURE_OK && app.work == 23 + 22 * 5);
     for (size_t i = 0; i < 5; ++i) CHECK(pure_list_get(app.lists[W_STOCK], i, 1).num == 3);
     pure_app_work(&app, 2);
     put32(put32(payload, 9), 1);
@@ -5074,7 +5204,7 @@ static void work_budget(void) {
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     pure_app_work(&app, UINT64_MAX);
     for (const char *word = "abc"; *word; ++word)
-        CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK && app.work == 7);
+        CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK && app.work == 7);
     double value;
     CHECK(number_view(&app, 0) == 3 && app.work == 4 + 3 * 3);
     pure_app_work(&app, 4 + 3 * 3 - 1);
@@ -5083,9 +5213,9 @@ static void work_budget(void) {
     pure_app_work(&app, 4 + 3 * 3);
     CHECK(number_view(&app, 0) == 3);
     pure_app_work(&app, 0);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_app_point(&app, 1, 0) == PURE_OK &&
-          pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && pure_app_point(&app, 1, 1) == PURE_OK &&
-          pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK); /* all done */
+    CHECK(press(&app, 1) == PURE_OK && place(&app, 1, 0) == PURE_OK &&
+          press(&app, 1) == PURE_OK && place(&app, 1, 1) == PURE_OK &&
+          press(&app, 1) == PURE_OK); /* all done */
     CHECK(!pure_app_view(&app, 4, &value) && pure_app_view_fault(&app) == PURE_FAULT_NOT_FOUND); /* fewest open: none */
     pure_app_stop(&app);
     pure_module_release(&module_a);
@@ -5094,7 +5224,7 @@ static void work_budget(void) {
     CHECK(load(filter_spec(filter_code, LEN(filter_code), filter_views, 3), &module_a) == PURE_OK);
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     for (const char *word = "abcd"; *word; ++word)
-        CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK);
+        CHECK(type_in(&app, 0, (PureSpan){(const unsigned char *)word, 1}) == PURE_OK);
     pure_app_work(&app, 3 * 4 - 1);
     size_t at;
     CHECK(pure_app_rows(&app, 0) == 0 && pure_app_view_fault(&app) == PURE_FAULT_WORK && !pure_app_row_item(&app, 0, 0, &at));
@@ -5134,31 +5264,31 @@ static void memory_budget(void) {
     char *path = new_store();
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, ADD, PURE_EDGE_DOWN) == PURE_OK);
+    for (int k = 0; k < 3; ++k) CHECK(press(&app, ADD) == PURE_OK);
     size_t three = pure_app_state_bytes(&app);
     CHECK(three == 3 * 8); /* a row's number as it is stored */
     /* Room for one row more: the next is refused, and nothing of it stays. */
     pure_app_memory(&app, three + 8);
-    CHECK(pure_app_input(&app, ADD, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 4);
-    CHECK(pure_app_input(&app, ADD, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY &&
+    CHECK(press(&app, ADD) == PURE_OK && pure_list_count(app.lists[1]) == 4);
+    CHECK(press(&app, ADD) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY &&
           pure_list_count(app.lists[1]) == 4 && pure_app_state_bytes(&app) == three + 8);
     /* Over the budget (made smaller), what frees goes on and what grows does not. */
     pure_app_memory(&app, 8);
-    CHECK(pure_app_input(&app, ADD, PURE_EDGE_DOWN) == PURE_BUDGET);
-    CHECK(pure_app_input(&app, DROP, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.lists[1]) == 3);
+    CHECK(press(&app, ADD) == PURE_BUDGET);
+    CHECK(press(&app, DROP) == PURE_OK && pure_list_count(app.lists[1]) == 3);
     /* Sends count while they wait: a full outbox refuses the next until some are trimmed. */
     size_t before = pure_app_state_bytes(&app);
     pure_app_memory(&app, before);
-    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_BUDGET && !pure_list_count(app.outbox));
+    CHECK(press(&app, SEND_KEY) == PURE_BUDGET && !pure_list_count(app.outbox));
     pure_app_memory(&app, 0);
-    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_OK && pure_list_count(app.outbox) == 1);
+    CHECK(press(&app, SEND_KEY) == PURE_OK && pure_list_count(app.outbox) == 1);
     size_t one = pure_app_state_bytes(&app) - before;
     pure_app_memory(&app, before + 2 * one);
-    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_OK);
-    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_BUDGET && pure_list_count(app.outbox) == 2);
+    CHECK(press(&app, SEND_KEY) == PURE_OK);
+    CHECK(press(&app, SEND_KEY) == PURE_BUDGET && pure_list_count(app.outbox) == 2);
     pure_app_trim(&app, OUT, 1);
     CHECK(pure_app_save(&app) == PURE_OK && pure_list_count(app.outbox) == 1);
-    CHECK(pure_app_input(&app, SEND_KEY, PURE_EDGE_DOWN) == PURE_OK && outbox_of(&app).items[1].seq == 3);
+    CHECK(press(&app, SEND_KEY) == PURE_OK && outbox_of(&app).items[1].seq == 3);
     /* A delivery refused for memory is not heard: given again with room, it is applied once. */
     double taken = 7;
     pure_app_memory(&app, pure_app_state_bytes(&app));
@@ -5286,19 +5416,19 @@ static void output_meaning(void) {
     char *path = new_store();
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pay_reads(&app, 0, 10, 20));
+    CHECK(press(&app, 0) == PURE_OK && pay_reads(&app, 0, 10, 20));
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK && app.module == &module_b && pay_reads(&app, 0, 20, 10));
     pure_app_stop(&app); /* no save since: the links name a's fields, the outbox's image b's */
     CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && pay_reads(&app, 0, 20, 10));
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pay_reads(&app, 0, 10, 20));
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pay_reads(&app, 1, 10, 20));
+    CHECK(press(&app, 0) == PURE_OK && pay_reads(&app, 1, 10, 20));
     CHECK(outbox_of(&app).items[1].seq == 2);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && pay_reads(&app, 0, 20, 10) &&
           pay_reads(&app, 1, 20, 10) && outbox_of(&app).items[1].seq == 2);
     /* Sent with b's fields, logged after the image named them. */
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pay_reads(&app, 2, 20, 10));
+    CHECK(press(&app, 0) == PURE_OK && pay_reads(&app, 2, 20, 10));
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pay_reads(&app, 2, 10, 20));
     pure_app_stop(&app);
@@ -5357,11 +5487,11 @@ static void bools(void) {
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && app.values[B_ON].num == 1 && app.values[B_OFF].num == 0);
     CHECK(number_view(&app, 0) == 1 && number_view(&app, 1) == 0 && number_view(&app, 2) == 0 && number_view(&app, 3) == 0);
     CHECK(!strcmp(view_text(&app, 4), "true1"));
-    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK);
+    for (int k = 0; k < 3; ++k) CHECK(press(&app, 1) == PURE_OK);
     CHECK(app.values[B_N].num == 3 && number_view(&app, 1) == 1 && number_view(&app, 3) == 1);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_LIMIT && app.values[B_OFF].num == 0); /* require failed: undone */
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && app.values[B_ON].num == 0 && !strcmp(view_text(&app, 4), "false1"));
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[B_N].num == 3 && number_view(&app, 2) == 1);
+    CHECK(press(&app, 2) == PURE_LIMIT && app.values[B_OFF].num == 0); /* require failed: undone */
+    CHECK(press(&app, 0) == PURE_OK && app.values[B_ON].num == 0 && !strcmp(view_text(&app, 4), "false1"));
+    CHECK(press(&app, 1) == PURE_OK && app.values[B_N].num == 3 && number_view(&app, 2) == 1);
     /* A message's bool is a byte, 0 or 1; any other byte fails the message. */
     unsigned char payload[9] = {1};
     double five = 5;
@@ -5374,7 +5504,7 @@ static void bools(void) {
     CHECK(pure_app_message(&app, 4, (PureSpan){payload, 9}) == PURE_LIMIT && app.values[B_N].num == 5);
     pure_app_finish(&app);
     /* A send holds its bools as bytes. */
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(&app, 3) == PURE_OK);
     Outbox o = outbox_of(&app);
     double n;
     memcpy(&n, o.items[0].payload + 2, 8);
@@ -5382,8 +5512,8 @@ static void bools(void) {
     /* Stored, a waiting send keeps its bools. */
     char *sends = new_store();
     PureApp kept;
-    CHECK(pure_app_start(&kept, &module_a, pure_tree_data(sends)) == PURE_OK && pure_app_input(&kept, 1, PURE_EDGE_DOWN) == PURE_OK);
-    CHECK(pure_app_input(&kept, 3, PURE_EDGE_DOWN) == PURE_OK && pure_app_save(&kept) == PURE_OK);
+    CHECK(pure_app_start(&kept, &module_a, pure_tree_data(sends)) == PURE_OK && press(&kept, 1) == PURE_OK);
+    CHECK(press(&kept, 3) == PURE_OK && pure_app_save(&kept) == PURE_OK);
     pure_app_stop(&kept);
     CHECK(pure_app_start(&kept, &module_a, pure_tree_data(sends)) == PURE_OK);
     Outbox stored_sends = outbox_of(&kept);
@@ -5522,7 +5652,7 @@ static void bools(void) {
                     NULL, 0, flagged_records, 1, NULL, 0};
     CHECK(load(numbers, &module_a) == PURE_OK && load(flagged, &module_b) == PURE_OK);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    for (int k = 0; k < 3; ++k) CHECK(press(&app, 0) == PURE_OK);
     pure_app_stop(&app);
     for (int round = 0; round < 2; ++round) { /* migrated, then stored as migrated */
         CHECK(pure_app_start(&app, &module_b, pure_tree_data(path)) == PURE_OK && app.values[0].num == 0);
@@ -5568,7 +5698,7 @@ static Ran run_code(const O *code, uint32_t count) {
     if (load(spec, &module_b) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
     PureApp app;
     CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
-    Ran ran = {pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK ? PURE_FAULT_NONE : app.fault, {{0}}};
+    Ran ran = {press(&app, 0) == PURE_OK ? PURE_FAULT_NONE : app.fault, {{0}}};
     memcpy(ran.values, app.values, sizeof(ran.values));
     pure_app_stop(&app);
     return ran;
@@ -5691,20 +5821,20 @@ static void integers(void) {
     CHECK(i64_view(&app, 0) == 0 && !pure_app_view_i64(&app, 1, &value) && !pure_app_view_i64(&app, 4, &value));
     double number;
     CHECK(!pure_app_view(&app, 0, &number) && pure_app_view(&app, 3, &number) && number == 0);
-    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK); /* -3 steps */
+    for (int k = 0; k < 3; ++k) CHECK(press(&app, 0) == PURE_OK);
+    CHECK(press(&app, 1) == PURE_OK); /* -3 steps */
     CHECK(pure_list_count(app.lists[KI_ITEMS]) == 4 && pure_list_get(app.lists[KI_ITEMS], 0, 0).i64 == -3 * STEP &&
           pure_list_get(app.lists[KI_ITEMS], 1, 0).i64 == 0 && pure_list_get(app.lists[KI_ITEMS], 3, 0).i64 == 2 * STEP);
     CHECK(i64_view(&app, 0) == 0 && i64_view(&app, 1) == 2 * STEP && i64_view(&app, 2) == -3 * STEP &&
           pure_app_view(&app, 3, &number) && number == 4 && i64_view(&app, 4) == -3 * STEP);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_CONFLICT && app.fault == PURE_FAULT_EXISTS); /* -3 steps again */
-    for (int k = 0; k < 4; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(&app, 1) == PURE_CONFLICT && app.fault == PURE_FAULT_EXISTS); /* -3 steps again */
+    for (int k = 0; k < 4; ++k) CHECK(press(&app, 0) == PURE_OK);
     CHECK(app.values[KI_NEXT].i64 == INT64_MAX && !pure_app_view_i64(&app, 0, &value)); /* the sum overflows */
     CHECK(!strcmp(view_text(&app, 5), "9223372036854775807"));
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_OVERFLOW);
+    CHECK(press(&app, 0) == PURE_INVALID && app.fault == PURE_FAULT_OVERFLOW);
     CHECK(pure_list_count(app.lists[KI_ITEMS]) == 8 && app.values[KI_NEXT].i64 == INT64_MAX && app.values[KI_N].num == 7);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[KI_FOUND].num == 1);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && i64_view(&app, 4) == 0);
+    CHECK(press(&app, 3) == PURE_OK && app.values[KI_FOUND].num == 1);
+    CHECK(press(&app, 2) == PURE_OK && i64_view(&app, 4) == 0);
     /* A message's i64 is 8 bytes, a send's too. */
     unsigned char payload[16];
     int64_t least = INT64_MIN;
@@ -5846,7 +5976,7 @@ static Byted run_bytes(const O *code, uint32_t count) {
     if (load(spec, &module_b) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
     PureApp app;
     CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
-    Byted ran = {pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK ? PURE_FAULT_NONE : app.fault, app.values[0].num,
+    Byted ran = {press(&app, 0) == PURE_OK ? PURE_FAULT_NONE : app.fault, app.values[0].num,
                  app.values[3].i64, {0}, pure_list_count(app.lists[2])};
     snprintf(ran.said, sizeof(ran.said), "%s", state_text(&app, 4));
     pure_app_stop(&app);
@@ -6029,9 +6159,9 @@ static void formats_and_held(void) {
     if (load(spec, &module_b) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
     PureApp app;
     CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(&app, 0) == PURE_OK && press(&app, 0) == PURE_OK);
     CHECK(!strcmp(state_text(&app, 4), "Az\xc3\xa9")); /* held5 began empty again */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY);
+    CHECK(press(&app, 1) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY);
     CHECK(!strcmp(state_text(&app, 4), "Az\xc3\xa9")); /* nothing changed */
     CHECK(pure_app_message(&app, 2, (PureSpan){NULL, 0}) == PURE_OK);
     Text replied = {{0}, 0};
@@ -6094,7 +6224,7 @@ static void lists_in_records(void) {
     PureApp app;
     CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
     for (int round = 0; round < 3; ++round) { /* each event begins with its lists and theirs empty */
-        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+        CHECK(press(&app, 0) == PURE_OK);
         if (app.values[0].num != 33443 || app.values[4].i64 != 27) {
             fprintf(stderr, "lists in records: n %g, i %" PRId64 "\n", app.values[0].num, app.values[4].i64);
             abort();
@@ -6202,21 +6332,21 @@ static void functions_and_characters(void) {
     PureApp app;
     CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
     for (int round = 0; round < 3; ++round) { /* the frames' room used again, each event alike */
-        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 6765);
-        CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 18);
-        CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 1111 && app.values[0].num == 1);
-        CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && !strcmp(state_text(&app, SAID), "210212"));
-        CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 0x61 + 0xE9 + 0x20AC + 0x1F600 &&
+        CHECK(press(&app, 0) == PURE_OK && app.values[IV].i64 == 6765);
+        CHECK(press(&app, 1) == PURE_OK && app.values[IV].i64 == 18);
+        CHECK(press(&app, 2) == PURE_OK && app.values[IV].i64 == 1111 && app.values[0].num == 1);
+        CHECK(press(&app, 3) == PURE_OK && !strcmp(state_text(&app, SAID), "210212"));
+        CHECK(press(&app, 4) == PURE_OK && app.values[IV].i64 == 0x61 + 0xE9 + 0x20AC + 0x1F600 &&
               !strcmp(state_text(&app, SAID), constants[1]));
     }
     /* A call without end: the room runs out (MEMORY) where the work does not; with a smaller work budget, WORK. Either
      * way nothing changed, and the lists are the app's own again. */
     uint64_t before = (uint64_t)app.values[IV].i64;
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY);
+    CHECK(press(&app, 5) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY);
     CHECK((uint64_t)app.values[IV].i64 == before && pure_list_count(app.lists[OWN]) == 0 && app.calls.at == 0 && !app.calls.used);
     pure_app_work(&app, 100000);
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 1111 && app.values[0].num == 1);
+    CHECK(press(&app, 5) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
+    CHECK(press(&app, 2) == PURE_OK && app.values[IV].i64 == 1111 && app.values[0].num == 1);
     pure_app_stop(&app);
     /* Characters that fail: within one (é at 2), past the end, a surrogate, past U+10FFFF, below 0. */
     const O chars_bad[][3] = {{{TK, 1, 0}, IC(2), {CHAT, 0, 0}}, {{TK, 1, 0}, IC(10), {CHAT, 0, 0}},
@@ -6230,7 +6360,7 @@ static void functions_and_characters(void) {
                     NULL, 0, records, 2, NULL, 0};
         if (load(bad, &module_a) != PURE_OK) { fprintf(stderr, "chars %zu: %s\n", k, error); abort(); }
         CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
-        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) != PURE_OK && app.fault == chars_fault[k]);
+        CHECK(press(&app, 0) != PURE_OK && app.fault == chars_fault[k]);
         pure_app_stop(&app);
     }
     /* Refused: no return; a result of another type; code after a return; RETURN outside a function; a call with an
@@ -6325,7 +6455,7 @@ static void nested_crashes(void) {
     char *path = new_store();
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(press(&app, 0) == PURE_OK && press(&app, 0) == PURE_OK);
     CHECK(nested_consistent(&app) == 2);
     pure_app_stop(&app);
     unsigned expected = 2;
@@ -6338,7 +6468,7 @@ static void nested_crashes(void) {
             if (pure_app_start(&doomed, &module_a, pure_tree_data(path)) != PURE_OK) _exit(1);
             crash = 1;
             fail_stage = at;
-            pure_app_input(&doomed, 0, PURE_EDGE_DOWN);
+            press(&doomed, 0);
             _exit(0);
         }
         int status;
@@ -6350,11 +6480,11 @@ static void nested_crashes(void) {
     crash = 0;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
     for (fail_stage = PURE_AFTER_HEADER; fail_stage <= PURE_BEFORE_RENAME; ++fail_stage) /* a failed commit: nothing */
-        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_STORE_ERROR && nested_consistent(&app) == expected);
+        CHECK(press(&app, 0) == PURE_STORE_ERROR && nested_consistent(&app) == expected);
     fail_stage = PURE_LOG_BEFORE_WRITE;
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_STORE_ERROR && nested_consistent(&app) == expected);
+    CHECK(press(&app, 0) == PURE_STORE_ERROR && nested_consistent(&app) == expected);
     fail_stage = -1;
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && nested_consistent(&app) == expected + 1);
+    CHECK(press(&app, 0) == PURE_OK && nested_consistent(&app) == expected + 1);
     pure_app_stop(&app);
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && nested_consistent(&app) == expected + 1);
     pure_app_stop(&app);
@@ -6385,7 +6515,7 @@ static void nested_replace(void) {
     if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "nested replace: %s\n", error); abort(); }
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
-    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    for (int k = 0; k < 3; ++k) CHECK(press(&app, 0) == PURE_OK);
     /* The leaves gain w (7 by default) and the boards' fields swap places. */
     static const RF leaf_wider[] = {{"v", 3, 0}, {"w", 0, 7}};
     static const RF board_swapped[] = {{"items", 4, 0}, {"id", 3, 0}};
@@ -6558,7 +6688,7 @@ static void anchors(void) {
     CHECK(!pure_app_view(&app, 3, &value) && pure_app_view_fault(&app) == PURE_FAULT_NOT_FOUND);
     CHECK(!pure_app_view(&app, 4, &value) && pure_app_view_fault(&app) == PURE_FAULT_LIMIT);
     CHECK(!pure_app_view(&app, 5, &value) && pure_app_view_fault(&app) == PURE_FAULT_NOT_FOUND);
-    for (int k = 0; k < 2; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    for (int k = 0; k < 2; ++k) CHECK(press(&app, 0) == PURE_OK);
     CHECK(number_view(&app, 5) == 1);
     pure_app_stop(&app);
     const struct { O code[4]; uint32_t count; const char *why; } refused[] = {
@@ -6601,14 +6731,14 @@ static void timers(void) {
     Spec spec = SPEC(nums, inputs, one_view, handlers, code);
     spec.nv = 0;
     if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
-    CHECK(module_a.input[0].kind == PURE_KIND_TIMER && module_a.input[0].period == 1000);
+    CHECK(module_a.input[0].binding == PURE_BIND_TIMER && module_a.input[0].period == 1000);
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     app.now = 1700000123456.0;
-    CHECK(pure_app_tick(&app, 0) == PURE_OK && app.values[0].num == 1700000123456.0 &&
+    CHECK(tick(&app, 0) == PURE_OK && app.values[0].num == 1700000123456.0 &&
           app.values[1].num == (double)(1700000123 % 60) && app.values[2].num == 1);
-    CHECK(pure_app_tick(&app, 1) == PURE_INVALID && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_INVALID);
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[3].num == 2 - 20);
+    CHECK(tick(&app, 1) == PURE_INVALID && press(&app, 0) == PURE_INVALID);
+    CHECK(press(&app, 1) == PURE_OK && app.values[3].num == 2 - 20);
     /* A zero takes the divisor's sign too. */
     static const O zeros[] = {{C, 0, -6}, {C, 0, 3}, {MOD, 0, 0}, {ST, 0, 0}, {C, 0, 6}, {C, 0, -3}, {MOD, 0, 0}, {ST, 1, 0}};
     static const H zero_handler[] = {{3, 0, 8}};
@@ -6616,10 +6746,10 @@ static void timers(void) {
     signs.o = zeros; signs.no = 8; signs.h = zero_handler; signs.nh = 1;
     CHECK(load(signs, &module_b) == PURE_OK);
     PureApp zero;
-    CHECK(pure_app_start(&zero, &module_b, (PureData){0}) == PURE_OK && pure_app_input(&zero, 1, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(pure_app_start(&zero, &module_b, (PureData){0}) == PURE_OK && press(&zero, 1) == PURE_OK);
     CHECK(zero.values[0].num == 0 && !signbit(zero.values[0].num) && zero.values[1].num == 0 && signbit(zero.values[1].num));
     pure_app_stop(&zero);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
+    CHECK(press(&app, 2) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE);
     pure_app_stop(&app);
     /* A timer's period is 1 ms to a day, and it has nothing else; now is for handlers. */
     static const I no_period[] = {TIMER("tick", 0)}, too_long[] = {TIMER("tick", PURE_TIMER_LONGEST + 1)};
@@ -6731,30 +6861,30 @@ static void loops(void) {
     CHECK(module_a.state_key[SEEN] == 1 && module_a.state_flags[SEEN] == PURE_LIST_ROWS >> 8);
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
-    for (int k = 0; k < 10; ++k) CHECK(pure_app_input(&app, 9, PURE_EDGE_DOWN) == PURE_OK);
+    for (int k = 0; k < 10; ++k) CHECK(press(&app, 9) == PURE_OK);
     CHECK(app.values[N].num == 10 && pure_list_count(app.lists[XS]) == 10);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 45);
+    CHECK(press(&app, 0) == PURE_OK && app.values[S_].num == 45);
     CHECK(app.work == 9 + 10 * (4 + 1)); /* the LOOP counts its block and itself each time round */
-    CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 5);
-    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 100 + 3 * 2 * 100);
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 3 && !pure_list_count(app.lists[SEEN]));
-    CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 3); /* each event's own */
-    CHECK(pure_app_input(&app, 6, PURE_EDGE_DOWN) == PURE_OK && app.values[S_].num == 3);
+    CHECK(press(&app, 1) == PURE_OK && app.values[S_].num == 5);
+    CHECK(press(&app, 2) == PURE_OK && app.values[S_].num == 100 + 3 * 2 * 100);
+    CHECK(press(&app, 3) == PURE_OK && app.values[S_].num == 3 && !pure_list_count(app.lists[SEEN]));
+    CHECK(press(&app, 3) == PURE_OK && app.values[S_].num == 3); /* each event's own */
+    CHECK(press(&app, 6) == PURE_OK && app.values[S_].num == 3);
     /* A loop that would not end runs out of work, by default too, and changes nothing. */
-    CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_WORK && app.values[S_].num == 3);
+    CHECK(press(&app, 4) == PURE_LIMIT && app.fault == PURE_FAULT_WORK && app.values[S_].num == 3);
     CHECK(app.work <= PURE_WORK_DEFAULT && app.work > PURE_WORK_DEFAULT - 5);
-    CHECK(pure_app_input(&app, 8, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
-    CHECK(pure_app_input(&app, 7, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT); /* not a whole number */
+    CHECK(press(&app, 8) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
+    CHECK(press(&app, 7) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT); /* not a whole number */
     /* A list that would fill the memory fails as it passes the default room, or the budget. */
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY &&
+    CHECK(press(&app, 5) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY &&
           app.values[S_].num == 3 && !pure_list_count(app.lists[PAGES]));
     CHECK(app.grown > (int64_t)PURE_GROWTH_DEFAULT && app.grown < (int64_t)PURE_GROWTH_DEFAULT + 8192);
     pure_app_memory(&app, 1 << 20);
-    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY &&
+    CHECK(press(&app, 5) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY &&
           app.grown < (1 << 20) + 8192 && !pure_list_count(app.lists[PAGES]));
     pure_app_memory(&app, 0);
     pure_app_work(&app, 10); /* a budget of its own: the sum's 9, and not one time round */
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_LIMIT && app.values[S_].num == 3);
+    CHECK(press(&app, 0) == PURE_LIMIT && app.values[S_].num == 3);
     pure_app_stop(&app);
 
     /* What the verifier refuses. */
@@ -6868,7 +6998,7 @@ static void view_bodies(void) {
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
     double total = 0, value;
     for (int k = 0; k < 20; ++k) {
-        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+        CHECK(press(&app, 0) == PURE_OK);
         total += k % 7;
     }
     for (int round = 0; round < 2; ++round) /* each evaluation begins anew */
@@ -6878,7 +7008,7 @@ static void view_bodies(void) {
     pure_app_memory(&app, 4096);
     CHECK(!pure_app_view(&app, 3, &value) && pure_app_view_fault(&app) == PURE_FAULT_MEMORY && !pure_list_count(app.lists[SEEN]));
     pure_app_memory(&app, 0);
-    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK); /* the app goes on */
+    CHECK(press(&app, 0) == PURE_OK); /* the app goes on */
     total += 20 % 7;
     /* Readers of one snapshot compute at once, each in its own lists. */
     BodyReads reads = {pure_app_snapshot(&app), total, 7, 2000};
