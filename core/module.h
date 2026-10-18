@@ -46,6 +46,7 @@ typedef enum {
     PURE_OP_I64_BITS, PURE_OP_BYTE_AT, PURE_OP_BYTES_OF, PURE_OP_INDEX_AT,
     PURE_OP_BYTES_SLICE, PURE_OP_BYTE, PURE_OP_BYTES_LOAD, PURE_OP_BYTES_STORE,
     PURE_OP_LIST_VALUE, PURE_OP_LIST_BIND, PURE_OP_APPEND_IN, PURE_OP_NUM_PARSE,
+    PURE_OP_CALL, PURE_OP_RETURN, PURE_OP_CHAR_AT, PURE_OP_CHAR,
     PURE_OP_COUNT
 } PureOpcode;
 /* A bool is its own type (docs/design/016-bool-and-i64.md), held as a
@@ -110,10 +111,31 @@ enum { PURE_MODULE_HELD = 32, PURE_HELD_TEXT = 16, PURE_HELD_APPEND = 1 << 8 };
 typedef enum { PURE_FORMAT_PLAIN, PURE_FORMAT_DECIMAL, PURE_FORMAT_HEX, PURE_FORMAT_HEX_UPPER, PURE_FORMAT_BINARY,
                PURE_FORMAT_OCTAL, PURE_FORMAT_FIXED } PureFormat;
 enum { PURE_FORMAT_WIDTH = 8, PURE_FORMAT_ZEROS = 1 << 16, PURE_FORMAT_FORM = 17, PURE_FORMAT_DIGITS = 20 };
+/* 027's stage 2c: functions and characters. A function (PureFunction) is a
+ * block CALL runs (its argument the function's number): the block begins with
+ * the call's arguments as its stack, its parameters' types, and RETURN ends
+ * it with its results on top (the rest of its stack let go), which take the
+ * arguments' place on the caller's stack. Each call has its own stack and
+ * locals (0 as it begins), and its own of what the function's code names:
+ * values held by name (empty), an event's lists (empty) and registers (bound
+ * to none); the caller's are as they were when the call returns. A function
+ * runs as a handler's code does but for a message (no field, document or
+ * reply); a handler and the functions run CALL (not a view), and a walk around
+ * a call keeps to what the callee changes as it keeps to its own block's
+ * changes. Calls nest as deep as the event's room allows: each counts its
+ * frame's bytes there (MEMORY past it) and its block's length as work.
+ * Outside a function, LOOP and EACH take their operands from a stack that
+ * holds nothing else: a loop's block begins at the bottom of its run's stack.
+ * CHAR_AT gives the character at a byte position of a text (an i64: its code
+ * point), failing as LIMIT where no character begins there; CHAR makes the
+ * text of a code point, failing as LIMIT outside 0-0x10FFFF and as ENCODING
+ * for a surrogate. */
+enum { PURE_MODULE_FUNCTIONS = 64, PURE_MODULE_SIGNATURES = 1024, PURE_SIGNATURE_BYTES = 5 };
 /* A local: one of an event's PURE_MODULE_LOCALS slots, 0 when the event
  * begins and never saved. LOCAL_LOAD and LOCAL_STORE name the slot (bits
- * 0-7), what it holds (bits 8-15: 0 a number, 1 an index, 2 a bool) and an index's
- * list (bits 16-31); a handler uses a slot for one of them. A handler, the
+ * 0-7), what it holds (bits 8-15: 0 a number, 1 an index, 2 a bool, 3 an i64,
+ * 4 a list value, 027's 2c) and an index's list or a list's record (bits
+ * 16-31); a handler uses a slot for one of them. A handler, the
  * walks in it and the folds in those read locals; the handler and its walks
  * store them. */
 enum { PURE_MODULE_LOCALS = 64 };
@@ -256,6 +278,17 @@ const char *pure_fault_name(PureFault);
 typedef struct { union { double value; int64_t integer; }; uint32_t arg; uint8_t op, plan, shape, range; } PureOp;
 typedef struct { uint32_t start, length; } PureBlock;
 typedef struct { uint32_t event; PureBlock code; } PureHandler;
+/* A function's block and its parameters' and results' types, from first among the module's signature items: a record
+ * field's type (PureRecordType: a list's with its record) or PURE_SIGNATURE_BYTES. Set at load: the event's lists,
+ * registers and held values each call has its own of (a bit each), the lists not an event's it changes (or a function
+ * it calls does), and its frame: its stack's height at most, its locals and its loops. */
+typedef struct {
+    PureBlock code;
+    uint16_t first;
+    uint8_t params, results;
+    uint32_t lists, registers, held, changes;
+    uint8_t height, locals, nesting;
+} PureFunction;
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint16_t rows; uint32_t offset; } PureField;
 typedef struct {
     uint8_t kind;
@@ -315,6 +348,7 @@ typedef struct {
     uint32_t batch_plan_count;          /* in their loops' order */
     struct PureJit *jit; /* its blocks compiled (module-jit.c, docs/design/021), or NULL */
     bool batches;        /* a loop of it is planned to run in batches (module-batch.c, docs/design/024) */
+    uint8_t runner;      /* which executor runs its blocks: 0 run's own steps, 1 with batches, 2 with calls (module.c) */
     bool held;           /* it holds bytes or texts by name (BYTES_STORE): events and views empty them as they begin */
     PureInputShape input[PURE_MODULE_INPUTS];
     PureField field[PURE_MODULE_FIELDS];
@@ -347,6 +381,11 @@ typedef struct {
     PureValue record_field_default[PURE_MODULE_RECORD_FIELDS]; /* a number (a bool's 0 or 1), an i64, a text constant's index
                                                                   * or a list's record (LIST, its i64) */
     bool record_nested[PURE_MODULE_RECORDS]; /* a record with a LIST field (set at load) */
+    uint16_t functions;
+    PureFunction function[PURE_MODULE_FUNCTIONS];
+    uint8_t signature_type[PURE_MODULE_SIGNATURES];
+    uint16_t signature_record[PURE_MODULE_SIGNATURES];
+    bool calls; /* it has functions: its blocks run in the executor that calls (module.c) */
 } PureModule;
 
 /* Whether a state of m is transient (PURE_STATE_TRANSIENT). */
@@ -540,11 +579,16 @@ typedef struct {
     PureRetired retired;           /* list items let go since it was made */
     bool reading;                  /* a reader: its states are a snapshot's */
     /* The values an event or a view's body holds by name (BYTES_STORE): emptied as it begins. */
-    struct { unsigned char *data; size_t size, capacity; } held[PURE_MODULE_HELD];
+    /* A value of the event's payload, arguments or constants is held as it is (by_ref: ref, nothing copied). */
+    struct { unsigned char *data; size_t size, capacity; PureBytes ref; bool by_ref; } held[PURE_MODULE_HELD];
     /* The lists in records an event or a view's body made (LIST fields: a value is a number here, 1 on), how many
      * values share each, and the bound lists' own (a register's list while another is bound to it). */
     struct { PureList **list; uint32_t *shared; size_t count, capacity; } nested;
     PureList *unbound[PURE_MODULE_STATES];
+    /* Calls (027's 2c): the frames of those open, in blocks that never move (code points into a frame), the block in
+     * use and how much of it; and the event's lists calls let go, emptied, each state's for its next calls. */
+    struct { unsigned char **blocks; size_t *sizes; unsigned count, at; size_t used; } calls;
+    struct { PureList **lists; unsigned count, capacity; } spare[PURE_MODULE_STATES];
 } PureApp;
 
 PureResult pure_app_start(PureApp *, const PureModule *, PureData data);

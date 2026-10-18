@@ -62,12 +62,18 @@ typedef struct { const char *name; const RF *fields; size_t nfields; } R;
 /* A further view: a table (type 2, start = list state) or a column of the
  * view numbered table - 1. */
 typedef struct { const char *name; uint32_t type, table, start, length; } W;
+/* A function (027's 2c): its block, and its parameters' then its results' types (a record field's: 0 a number, 1 a
+ * text, 2 a bool, 3 an i64, 4 a list whose record is beside it; 5 bytes). */
+typedef struct { uint32_t start, length; uint8_t params, results, types[16]; uint16_t records[16]; } FN;
 typedef struct {
     const S *s; size_t ns; const I *in; size_t ni; const V *v; size_t nv;
     const H *h; size_t nh; const O *o; size_t no; const char *const *c; size_t nc;
     const T *t; size_t nt; const char *const *k; size_t nk; const V *tv; size_t ntv;
     const R *r; size_t nr; const W *w; size_t nw;
 } Spec;
+/* The functions the next build writes (load_functions sets them a moment). */
+static const FN *spec_fn;
+static size_t spec_nfn;
 
 static unsigned char *put32(unsigned char *p, uint32_t v) {
     for (unsigned i = 0; i < 4; ++i) p[i] = (unsigned char)(v >> (8 * i));
@@ -125,7 +131,7 @@ static size_t build(unsigned char *out, Spec spec) {
     put32(p + 16, (uint32_t)spec.no);
     put32(p + 20, (uint32_t)used);
     p[24] = (unsigned char)fields; p[26] = (unsigned char)spec.nc; p[28] = (unsigned char)spec.nk;
-    p[30] = (unsigned char)spec.nr; p[36] = (unsigned char)record_fields;
+    p[30] = (unsigned char)spec.nr; p[36] = (unsigned char)record_fields; p[38] = (unsigned char)spec_nfn;
     put32(p + 32, (uint32_t)blob_used);
     p += 40;
     size_t n = 0;
@@ -203,6 +209,16 @@ static size_t build(unsigned char *out, Spec spec) {
         p = put32(p, w->length);
     }
     for (size_t i = 0; i < spec.nh; ++i) { p = put32(p, spec.h[i].event); p = put32(p, spec.h[i].start); p = put32(p, spec.h[i].length); }
+    for (size_t i = 0; i < spec_nfn; ++i) {
+        p = put32(p, spec_fn[i].start);
+        p = put32(p, spec_fn[i].length);
+        *p++ = spec_fn[i].params; *p++ = spec_fn[i].results; *p++ = 0; *p++ = 0;
+    }
+    for (size_t i = 0; i < spec_nfn; ++i)
+        for (unsigned k = 0; k < (unsigned)spec_fn[i].params + spec_fn[i].results; ++k) {
+            *p++ = spec_fn[i].types[k]; *p++ = 0;
+            *p++ = (unsigned char)spec_fn[i].records[k]; *p++ = (unsigned char)(spec_fn[i].records[k] >> 8);
+        }
     for (size_t i = 0; i < spec.no; ++i) {
         *p++ = spec.o[i].op; *p++ = 0; *p++ = 0; *p++ = 0;
         p = put32(p, spec.o[i].arg);
@@ -220,6 +236,13 @@ static PureResult load(Spec spec, PureModule *out) {
     static unsigned char bytes[65536];
     size_t size = build(bytes, spec);
     return pure_module_load(bytes, size, out, error, sizeof(error));
+}
+
+static PureResult load_functions(Spec spec, const FN *fns, size_t count, PureModule *out) {
+    spec_fn = fns, spec_nfn = count;
+    PureResult result = load(spec, out);
+    spec_fn = NULL, spec_nfn = 0;
+    return result;
 }
 
 #define LEN(a) (sizeof(a) / sizeof(*(a)))
@@ -6318,6 +6341,168 @@ static void lists_in_records(void) {
     printf("{\"lists_in_records\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(refused) + 1);
 }
 
+/* Functions and characters (027's 2c): a function calls itself; each call has its own locals, lists, registers and
+ * held values (a caller's as they were when it returns); a walk goes on around a call; calls count as work and memory;
+ * the verifier keeps to a function's types and to what a walk around a call keeps to. */
+enum { CALL = PURE_OP_CALL, RET = PURE_OP_RETURN, CHAT = PURE_OP_CHAR_AT, CHAR_ = PURE_OP_CHAR, FN_TEXT = 1, FN_I64 = 3,
+       FN_LIST = 4 };
+#define I64_LOCAL(slot) ((uint32_t)(slot) | 3u << 8)
+#define WALK_OF(list, length) ((uint32_t)(list) << 8 | (uint32_t)(length) << 16)
+#define LIST_LOCAL(slot, record) ((uint32_t)(slot) | 4u << 8 | (uint32_t)(record) << 16)
+static void functions_and_characters(void) {
+    static const S nums[] = {{"n", 0}};
+    static const RF leaf_fields[] = {{"v", 3, 0}};
+    static const RF node_fields[] = {{"v", 3, 0}, {"kids", 4, 1}}; /* kids: a list of Node */
+    static const R records[] = {{"Leaf", leaf_fields, 1}, {"Node", node_fields, 2}};
+    enum { IV = 1, SAID, OWN, NODES, KIDS, R_, STORED, NONE };
+    static const T others[] = {{"i", PURE_STATE_I64, 0}, {"said", 1, 0}, {"let.own", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0},
+                               {"let.nodes", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}, {"let.kids", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1},
+                               {"let.r", 3 | (uint32_t)(PURE_LIST_ROWS | PURE_LIST_BOUND) << 8, 1}, {"stored", 3, 0},
+                               {"let.none", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}};
+    static const char *const constants[] = {"", "a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80"}; /* a é € 😀 */
+    static const I inputs[] = {KEY("fib", "KeyF"), KEY("tree", "KeyT"), KEY("own", "KeyO"), KEY("held", "KeyH"),
+                               KEY("chars", "KeyC"), KEY("deep", "KeyD")};
+    enum { LS_ = PURE_OP_LOCAL_STORE, LL_ = PURE_OP_LOCAL_LOAD };
+    const O code[] = {
+        /* 0 fib(n): n < 2 ? n : fib(n - 1) + fib(n - 2) */
+        {LS_, I64_LOCAL(0), 0}, {LL_, I64_LOCAL(0), 0}, IC(2), {ICMP, PURE_LESS, 0}, {JZ, 7, 0},
+        {LL_, I64_LOCAL(0), 0}, {RET, 0, 0},
+        {LL_, I64_LOCAL(0), 0}, IC(1), {ISUB, 0, 0}, {CALL, 0, 0}, {LL_, I64_LOCAL(0), 0}, IC(2), {ISUB, 0, 0}, {CALL, 0, 0},
+        {IADD, 0, 0}, {RET, 0, 0},
+        /* 17 sum(xs): the v of every node in xs and under it, by a walk of its register that calls itself */
+        {BIND, R_, 0}, IC(0), {LS_, I64_LOCAL(0), 0}, {EACH, WALK_OF(R_, 9), 0},
+        {LL_, I64_LOCAL(0), 0}, {ROW, R_, 0}, {IG, ITEM(R_, 0), 0}, {IADD, 0, 0}, {ROW, R_, 0}, {IG, ITEM(R_, 1), 0}, {CALL, 1, 0},
+        {IADD, 0, 0}, {LS_, I64_LOCAL(0), 0},
+        {LL_, I64_LOCAL(0), 0}, {RET, 1, 0},
+        /* 32 own(n): own.append(n); n == 0 ? own.count : own(n - 1) * 10 + own.count (each call's own list holds one) */
+        {LS_, I64_LOCAL(0), 0}, {LL_, I64_LOCAL(0), 0}, {LA, OWN, 0}, {LL_, I64_LOCAL(0), 0}, IC(0), {ICMP, PURE_EQUAL, 0},
+        {JZ, 42, 0}, {LC, OWN, 0}, {IFROM, 0, 0}, {RET, 2, 0},
+        {LL_, I64_LOCAL(0), 0}, IC(1), {ISUB, 0, 0}, {CALL, 2, 0}, IC(10), {IMUL, 0, 0}, {LC, OWN, 0}, {IFROM, 0, 0}, {IADD, 0, 0},
+        {RET, 2, 0},
+        /* 52 held(t, k): s = t + "k"; k == 0 ? s : held(s, k - 1) + s (each call's s its own) */
+        {LS_, I64_LOCAL(0), 0}, {LL_, I64_LOCAL(0), 0}, {NTX, 2, 0}, {CAT, 0, 0}, {HST, 16, 0},
+        {LL_, I64_LOCAL(0), 0}, IC(0), {ICMP, PURE_EQUAL, 0}, {JZ, 63, 0}, {HLD, 16, 0}, {RET, 3, 0},
+        {HLD, 16, 0}, {LL_, I64_LOCAL(0), 0}, IC(1), {ISUB, 0, 0}, {CALL, 3, 0}, {HLD, 16, 0}, {CAT, 0, 0}, {RET, 3, 0},
+        /* 71 deep(n): deep(n + 1), never returning */
+        IC(1), {IADD, 0, 0}, {CALL, 4, 0}, {RET, 4, 0},
+        /* 75 handler fib: i = fib(20) */
+        IC(20), {CALL, 0, 0}, {ST, IV, 0},
+        /* 78 handler tree: kids = [4, 1 [2 [4], 3]]; i = sum(kids) + r[0].v, r bound by the handler around the calls */
+        IC(4), {LV, NONE, 0}, {LA, KIDS, 0}, IC(2), {LV, KIDS, 0}, {LA, NODES, 0}, IC(3), {LV, NONE, 0}, {LA, NODES, 0},
+        {LV, NONE, 0}, {CALL, 1, 0}, {ST, IV, 0},                                           /* sum of nothing: 0 */
+        IC(1), {LV, NODES, 0}, {LA, KIDS, 0}, {LV, KIDS, 0}, {BIND, R_, 0},
+        {LV, KIDS, 0}, {LS_, LIST_LOCAL(0, 1), 0}, {LL_, LIST_LOCAL(0, 1), 0}, {CALL, 1, 0}, /* by way of a local */
+        {XF, R_, 0}, {IG, ITEM(R_, 0), 0}, {IADD, 0, 0}, {ST, IV, 0},                    /* 14 + 4 */
+        /* 103 handler own: own = [7]; i = own(3); n = own.count */
+        IC(7), {LA, OWN, 0}, IC(3), {CALL, 2, 0}, {ST, IV, 0}, {LC, OWN, 0}, {ST, 0, 0},
+        /* 110 handler held: said = held("", 2) */
+        {TK, 0, 0}, IC(2), {CALL, 3, 0}, {PURE_OP_TEXT_SET, SAID, 0},
+        /* 114 handler chars: i = the code points at 0, 1, 3 and 6, packed; said = char(...) joined, the constant again */
+        {TK, 1, 0}, IC(0), {CHAT, 0, 0}, {TK, 1, 0}, IC(1), {CHAT, 0, 0}, {IADD, 0, 0}, {TK, 1, 0}, IC(3), {CHAT, 0, 0},
+        {IADD, 0, 0}, {TK, 1, 0}, IC(6), {CHAT, 0, 0}, {IADD, 0, 0}, {ST, IV, 0},
+        IC(0x61), {CHAR_, 0, 0}, IC(0xE9), {CHAR_, 0, 0}, {CAT, 0, 0}, IC(0x20AC), {CHAR_, 0, 0}, {CAT, 0, 0}, IC(0x1F600), {CHAR_, 0, 0},
+        {CAT, 0, 0}, {PURE_OP_TEXT_SET, SAID, 0},
+        /* 142 handler deep: own = [5]; deep(0) */
+        IC(5), {LA, OWN, 0}, IC(0), {CALL, 4, 0}, {ST, IV, 0},
+    };
+    static const FN fns[] = {{0, 17, 1, 1, {FN_I64, FN_I64}, {0}}, {17, 15, 1, 1, {FN_LIST, FN_I64}, {1, 0}},
+                             {32, 20, 1, 1, {FN_I64, FN_I64}, {0}}, {52, 19, 2, 1, {FN_TEXT, FN_I64, FN_TEXT}, {0}},
+                             {71, 4, 1, 1, {FN_I64, FN_I64}, {0}}};
+    static const H handlers[] = {{1, 75, 3}, {3, 78, 25}, {5, 103, 7}, {7, 110, 4}, {9, 114, 28}, {11, 142, 5}};
+    CHECK(LEN(code) == 147);
+    Spec spec = {nums, 1, inputs, LEN(inputs), NULL, 0, handlers, LEN(handlers), code, LEN(code), NULL, 0,
+                 others, LEN(others), constants, LEN(constants), NULL, 0, records, 2, NULL, 0};
+    if (load_functions(spec, fns, LEN(fns), &module_b) != PURE_OK) { fprintf(stderr, "functions: %s\n", error); abort(); }
+    CHECK(module_b.function[2].lists == UINT32_C(1) << OWN && module_b.function[1].registers == UINT32_C(1) << R_ &&
+          module_b.function[3].held == UINT32_C(1) << 16 && module_b.runner == 2);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
+    for (int round = 0; round < 3; ++round) { /* the frames' room used again, each event alike */
+        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 6765);
+        CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 18);
+        CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 1111 && app.values[0].num == 1);
+        CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && !strcmp(state_text(&app, SAID), "210212"));
+        CHECK(pure_app_input(&app, 4, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 0x61 + 0xE9 + 0x20AC + 0x1F600 &&
+              !strcmp(state_text(&app, SAID), constants[1]));
+    }
+    /* A call without end: the room runs out (MEMORY) where the work does not; with a smaller work budget, WORK. Either
+     * way nothing changed, and the lists are the app's own again. */
+    uint64_t before = (uint64_t)app.values[IV].i64;
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY);
+    CHECK((uint64_t)app.values[IV].i64 == before && pure_list_count(app.lists[OWN]) == 0 && app.calls.at == 0 && !app.calls.used);
+    pure_app_work(&app, 100000);
+    CHECK(pure_app_input(&app, 5, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
+    CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK && app.values[IV].i64 == 1111 && app.values[0].num == 1);
+    pure_app_stop(&app);
+    /* Characters that fail: within one (é at 2), past the end, a surrogate, past U+10FFFF, below 0. */
+    const O chars_bad[][3] = {{{TK, 1, 0}, IC(2), {CHAT, 0, 0}}, {{TK, 1, 0}, IC(10), {CHAT, 0, 0}},
+                              {IC(0xD800), {CHAR_, 0, 0}, {PURE_OP_TEXT_SET, SAID, 0}}, {IC(0x110000), {CHAR_, 0, 0}, {PURE_OP_TEXT_SET, SAID, 0}},
+                              {IC(-1), {CHAR_, 0, 0}, {PURE_OP_TEXT_SET, SAID, 0}}};
+    static const PureFault chars_fault[] = {PURE_FAULT_LIMIT, PURE_FAULT_LIMIT, PURE_FAULT_ENCODING, PURE_FAULT_LIMIT, PURE_FAULT_LIMIT};
+    for (size_t k = 0; k < LEN(chars_bad); ++k) {
+        O one[4] = {chars_bad[k][0], chars_bad[k][1], chars_bad[k][2], {ST, IV, 0}};
+        H go = {1, 0, chars_bad[k][2].op == CHAT ? 4 : 3};
+        Spec bad = {nums, 1, inputs, 1, NULL, 0, &go, 1, one, LEN(one), NULL, 0, others, LEN(others), constants, LEN(constants),
+                    NULL, 0, records, 2, NULL, 0};
+        if (load(bad, &module_a) != PURE_OK) { fprintf(stderr, "chars %zu: %s\n", k, error); abort(); }
+        CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) != PURE_OK && app.fault == chars_fault[k]);
+        pure_app_stop(&app);
+    }
+    /* Refused: no return; a result of another type; code after a return; RETURN outside a function; a call with an
+     * argument of another type, in a view, or changing a list a walk around it walks; a message's field in a function;
+     * a loop above values; a signature's type or record. */
+    const struct { O code[6]; uint32_t count; FN fn; const char *why; } refused[] = {
+        {{IC(1), {ST, IV, 0}}, 2, {0, 2, 0, 0, {0}, {0}}, "function ends without return"},
+        {{{C, 0, 1}, {RET, 0, 0}}, 2, {0, 2, 0, 1, {FN_I64}, {0}}, "operand type"},
+        {{{RET, 0, 0}, {C, 0, 0}}, 2, {0, 2, 0, 0, {0}, {0}}, "unreachable instruction"},
+        {{{C, 0, 1}, {CALL, 0, 0}, {RET, 0, 0}}, 3, {0, 3, 1, 0, {FN_I64}, {0}}, "operand type"},
+        {{IC(1), {LA, STORED, 0}, {RET, 0, 0}}, 3, {0, 3, 0, 0, {0}, {0}}, NULL},
+        {{{PURE_OP_FIELD, 0, 0}, {RET, 0, 0}}, 2, {0, 2, 0, 0, {0}, {0}}, "message operation outside a message handler"},
+        {{IC(0), IC(1), IC(0), IC(1), {PURE_OP_LOOP, PURE_LOOP_INTEGER, 0}, {RET, 0, 0}}, 6,
+         {0, 6, 0, 0, {0}, {0}}, "loop above values"},
+        {{{RET, 0, 0}}, 1, {0, 1, 0, 0, {6}, {0}}, "function signature"},
+    };
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        FN fn = refused[k].fn;
+        if (k == 7) fn.params = 1;
+        O all[12];
+        uint32_t n = refused[k].count;
+        memcpy(all, refused[k].code, n * sizeof(O));
+        H go = {1, n, 1};
+        all[n] = (O){C, 0, 0}; /* a handler that stores nothing: C, ST */
+        all[n + 1] = (O){ST, 0, 0};
+        go.length = 2;
+        if (k == 4) { /* the call in a walk of the list it appends to */
+            all[n] = (O){EACH, WALK_OF(STORED, 1), 0}, all[n + 1] = (O){CALL, 0, 0};
+        }
+        Spec bad = {nums, 1, inputs, 1, NULL, 0, &go, 1, all, n + 2, NULL, 0, others, LEN(others), constants, LEN(constants),
+                    NULL, 0, records, 2, NULL, 0};
+        const char *why = refused[k].why ? refused[k].why : "call that changes a list walked";
+        if (load_functions(bad, &fn, 1, &module_a) == PURE_OK || !strstr(error, why)) {
+            fprintf(stderr, "functions: refused %zu: %s\n", k, error);
+            abort();
+        }
+    }
+    static const O in_view[] = {{CALL, 0, 0}, {RET, 0, 0}, {RET, 0, 0}};
+    static const V call_view[] = {{"v", 0, 1}};
+    static const FN nothing = {1, 1, 0, 0, {0}, {0}};
+    Spec viewed = {nums, 1, inputs, 1, call_view, 1, NULL, 0, in_view, 2, NULL, 0, others, LEN(others), constants, LEN(constants),
+                   NULL, 0, records, 2, NULL, 0};
+    CHECK(load_functions(viewed, &nothing, 1, &module_a) != PURE_OK && strstr(error, "call outside a handler or a function"));
+    static const H returning = {1, 2, 1};
+    Spec handler_return = {nums, 1, inputs, 1, NULL, 0, &returning, 1, in_view, 3, NULL, 0, others,
+                           LEN(others), constants, LEN(constants), NULL, 0, records, 2, NULL, 0};
+    CHECK(load_functions(handler_return, &nothing, 1, &module_a) != PURE_OK && strstr(error, "return outside a function"));
+    /* A handler's loop above values: its block would begin above them (once past the run's stack). */
+    const O above[] = {IC(0), IC(0), IC(1), {PURE_OP_LOOP, PURE_LOOP_INTEGER, 0}, {ST, IV, 0}};
+    static const H whole = {1, 0, 5};
+    Spec looped = {nums, 1, inputs, 1, NULL, 0, &whole, 1, above, LEN(above), NULL, 0, others, LEN(others), constants,
+                   LEN(constants), NULL, 0, records, 2, NULL, 0};
+    CHECK(load(looped, &module_a) != PURE_OK && strstr(error, "loop above values"));
+    printf("{\"functions_and_characters\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(refused) + 3);
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -6694,6 +6879,7 @@ int main(void) {
     bits_and_bytes();
     formats_and_held();
     lists_in_records();
+    functions_and_characters();
     memory_budget();
     work_budget();
     fold_mutations();

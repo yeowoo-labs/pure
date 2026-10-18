@@ -5750,7 +5750,7 @@ static bool in_code(const PureModule *m, const PureOp *op) {
     }
 }
 
-/* Whether a block is worth code: it has a loop, and its loops' blocks have
+/* Whether a block is worth code: it has a loop and no call, and its loops' blocks have
  * code for every instruction. Each step a loop calls gives back what the
  * code keeps in registers (read again after it), and costs more than the
  * executor's own dispatch: a loop of steps (TPC-C's lines, 123) runs as
@@ -5763,6 +5763,8 @@ static bool worth(const PureModule *m, PureBlock block) {
     int input = tier_input(m, block);
     for (uint32_t pc = block.start; pc < block.start + block.length; pc = after(&m->code[pc], pc)) {
         const PureOp *op = &m->code[pc];
+        if (op->op == PURE_OP_CALL) return false; /* the executor's frames (module.c's run_calls) */
+        if ((op->op == PURE_OP_LOCAL_LOAD || op->op == PURE_OP_LOCAL_STORE) && (op->arg >> 8 & 0xFF) == 4) return false; /* a list */
         if (op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP) {
             loops = true;
             uint32_t ends = pc + 1 + (op->arg >> 16);

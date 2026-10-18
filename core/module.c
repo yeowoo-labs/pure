@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum { FUNCTION_BYTES = 12, SIGNATURE_BYTES = 4 };
 enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 8,
        CONSTANT_BYTES = 8, RECORD_BYTES = 8, RECORD_FIELD_BYTES = 16, VIEW_BYTES = 16,
        HANDLER_BYTES = 12, OP_BYTES = 16 };
@@ -23,8 +24,9 @@ enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_AR
 /* IN_ARGUMENTS: fields read where nothing is done with them (a view's arguments, a message's fields in a fold). */
 /* IN_LOCALS: a handler's locals, read in its walks and the folds in them. */
 /* IN_COMPUTE: what a view's body may do too (018): loops, locals, and changes to an event's lists alone. */
+/* IN_FUNCTION: a function's code (027's 2c), a handler's but for a message. */
 enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64, IN_ARGUMENTS = 128,
-       IN_LOCALS = 256, IN_COMPUTE = 512 };
+       IN_LOCALS = 256, IN_COMPUTE = 512, IN_FUNCTION = 1024 };
 enum { READ = IN_VIEW | IN_HANDLER };
 /* What an argument names: nothing (it is 0), a state of one type (A_STATE +
  * the type), a list and one of its record's fields, a message field, the
@@ -34,18 +36,20 @@ enum { READ = IN_VIEW | IN_HANDLER };
  * (A_TYPE: 0 a number, 1 a bool, 2 an i64), how I64_BITS computes (A_BITS),
  * what a position is (A_POSITION: 0 a number, 1 an i64), what CONCAT joins
  * (A_JOINED: 0 texts, 1 bytes), how NUM_TEXT writes (A_FORMAT) or the value
- * held by name (A_HELD). */
+ * held by name (A_HELD), or a function (A_FUNCTION: CALL's, and RETURN's own). */
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
        A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL, A_VALUE, A_TYPE,
-       A_LOOP, A_BITS, A_POSITION, A_JOINED, A_FORMAT, A_HELD };
+       A_LOOP, A_BITS, A_POSITION, A_JOINED, A_FORMAT, A_HELD, A_FUNCTION };
 /* A fold's block is verified as a column that leaves one bool (count, first)
  * or a value and whether to include it (a bool): a number (FOLD_TWO) or an
  * i64 (FOLD_I64). A table's filter is verified as a column that leaves a
  * bool: these stand for a view type. A walk's block (EACH) is verified as
  * its handler's code that may read the item it runs for (WALK). In a view's
  * body a loop's block leaves nothing either (STEPS), and a walk's reads its
- * item (STEPS_WALK); neither changes a state. */
-enum { FOLD_ONE = 100, FOLD_TWO, FOLD_I64, FILTER, WALK, STEPS, STEPS_WALK };
+ * item (STEPS_WALK); neither changes a state. A function's block begins with
+ * its parameters on the stack and ends at RETURN alone (FUNCTION); the loops'
+ * blocks in it are a handler's code. */
+enum { FOLD_ONE = 100, FOLD_TWO, FOLD_I64, FILTER, WALK, STEPS, STEPS_WALK, FUNCTION };
 /* The text or list an opcode works on: its cursor and index operands belong
  * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_OPERAND:
  * it pushes a position in its operand's text or list. O_ARG: the argument.
@@ -149,6 +153,11 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     /* APPEND_IN also takes as many values as the record of the list in the field has fields. */
     [PURE_OP_APPEND_IN] = {1, {T_INDEX}, 0, IN_HANDLER | IN_COMPUTE, A_ITEM, O_LIST},
     [PURE_OP_NUM_PARSE] = {1, {T_TEXT}, T_NUM, READ, A_NONE, O_ANY},
+    /* CALL takes its function's parameters and gives its results; RETURN takes its function's results (verify_code). */
+    [PURE_OP_CALL] = {0, {0}, 0, IN_HANDLER, A_FUNCTION, O_ANY},
+    [PURE_OP_RETURN] = {0, {0}, 0, IN_FUNCTION, A_FUNCTION, O_ANY},
+    [PURE_OP_CHAR_AT] = {2, {T_TEXT, T_I64}, T_I64, READ, A_NONE, O_ANY},
+    [PURE_OP_CHAR] = {1, {T_I64}, T_TEXT, READ, A_NONE, O_ANY},
 };
 #undef NUMS
 #undef COMPARE
@@ -362,17 +371,26 @@ static bool bound_list(const PureModule *m, uint32_t list) {
     return event_list_state(m, list) && m->state_flags[list] & PURE_LIST_BOUND >> 8;
 }
 
-/* The stack type of a record field (the module's numbering). */
-static unsigned char record_type(const PureModule *m, uint32_t field) {
+/* The stack type of a record field's type (PureRecordType), and of a record field (the module's numbering). */
+static unsigned char record_type_of(uint8_t type) {
     static const unsigned char types[] = {[PURE_RECORD_NUMBER] = T_NUM, [PURE_RECORD_TEXT] = T_TEXT,
                                           [PURE_RECORD_BOOL] = T_BOOL, [PURE_RECORD_I64] = T_I64, [PURE_RECORD_LIST] = T_LIST};
-    return types[m->record_field_type[field]];
+    return types[type];
+}
+static unsigned char record_type(const PureModule *m, uint32_t field) { return record_type_of(m->record_field_type[field]); }
+
+/* The stack type of a function's signature item (a record field's type, or PURE_SIGNATURE_BYTES). */
+static unsigned char signature_stack_type(const PureModule *m, uint32_t item) {
+    return m->signature_type[item] == PURE_SIGNATURE_BYTES ? T_BYTES : record_type_of(m->signature_type[item]);
 }
 
 /* The record of the list value an instruction takes as its operand k (bottom 0). */
 static unsigned list_wanted(const PureModule *m, const PureOp *op, unsigned k) {
     uint32_t arg = op->arg;
     switch (op->op) {
+    case PURE_OP_CALL: return m->signature_record[m->function[arg].first + k];
+    case PURE_OP_LOCAL_STORE: return arg >> 16;
+    case PURE_OP_RETURN: return m->signature_record[m->function[arg].first + m->function[arg].params + k];
     case PURE_OP_LIST_BIND: return m->state_ref[arg];
     case PURE_OP_LIST_APPEND: return nested_record(m, m->record[m->state_ref[arg]].first + k);
     case PURE_OP_LIST_INSERT: return nested_record(m, m->record[m->state_ref[arg]].first + k - 1); /* the index first */
@@ -399,10 +417,10 @@ static bool text_field(const PureModule *m, uint32_t list, uint32_t field) {
     return m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_TEXT;
 }
 
-/* What a local holds (its argument's bits 8-15): a number, an index, a bool or an i64. */
+/* What a local holds (its argument's bits 8-15): a number, an index, a bool, an i64 or a list (027's 2c). */
 static unsigned char local_type(uint32_t arg) {
-    static const unsigned char types[] = {T_NUM, T_INDEX, T_BOOL, T_I64};
-    return types[arg >> 8 & 3];
+    static const unsigned char types[] = {T_NUM, T_INDEX, T_BOOL, T_I64, T_LIST};
+    return (arg >> 8 & 0xFF) <= 4 ? types[arg >> 8 & 0xFF] : T_NUM;
 }
 
 PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg, const PureInputShape *shape, int row,
@@ -426,15 +444,17 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
         return (kind == A_FOLD ? how <= PURE_FOLD_DISTINCT && (valued || !(flags & PURE_FOLD_INTEGER)) : flags <= PURE_EACH_SLICED) &&
                state_of(m, list, PURE_STATE_LIST) && arg >> 16 && (!sliced || key == T_NUM || key == T_I64);
     }
-    case A_LOCAL: /* a slot, and a number, an index of a list, a bool or an i64 */
-        return (arg & 0xFF) < PURE_MODULE_LOCALS && (arg >> 8 & 0xFF) <= 3 &&
-               ((arg >> 8 & 0xFF) == 1 ? state_of(m, arg >> 16, PURE_STATE_LIST) : !(arg >> 16));
+    case A_LOCAL: /* a slot, and a number, an index of a list, a bool, an i64 or a list of a record */
+        return (arg & 0xFF) < PURE_MODULE_LOCALS && (arg >> 8 & 0xFF) <= 4 &&
+               ((arg >> 8 & 0xFF) == 1 ? state_of(m, arg >> 16, PURE_STATE_LIST) :
+                (arg >> 8 & 0xFF) == 4 ? (arg >> 16) < m->records : !(arg >> 16));
     case A_VALUE: return state_of(m, arg, PURE_STATE_NUM) || state_of(m, arg, PURE_STATE_BOOL) || state_of(m, arg, PURE_STATE_I64);
     case A_LOOP: return (arg & 0xFF) < PURE_MODULE_LOCALS && !(arg & 0xFE00); /* a slot, and whether i64s */
     case A_TYPE: return arg <= 2;
     case A_BITS: return arg <= PURE_BITS_RIGHT;
     case A_POSITION: case A_JOINED: return arg <= 1;
     case A_HELD: return (arg & ~(uint32_t)PURE_HELD_APPEND) < PURE_MODULE_HELD;
+    case A_FUNCTION: return arg < m->functions;
     case A_FORMAT: { /* a type; a width, zeros, a form fitting it and digits for FIXED alone */
         uint32_t type = arg & 3, form = arg >> PURE_FORMAT_FORM & 7, digits = arg >> PURE_FORMAT_DIGITS & 31;
         return type <= 2 && !(arg & 0xFC) && !(arg >> 25) && form <= PURE_FORMAT_FIXED && (type != 1 || !form) &&
@@ -468,17 +488,18 @@ static bool same_stack(const Join *join, int height, const unsigned char *types,
  * into it. Returns why the block is refused, with at moved to the
  * instruction when one is at fault, or NULL. */
 PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int view, int row, int outer, uint32_t event,
-                                          bool locals, unsigned nest, uint32_t walked, uint32_t *at);
+                                          bool locals, unsigned nest, uint32_t walked, int fn, uint32_t *at);
 
 /* target marks, per instruction of the block, a branch into it with an empty stack. */
 /* outer: the row of the column a fold's block runs in (-1: none). */
 /* locals: the block is a handler's, or runs in one (a walk, a fold): it reads the handler's locals. */
 /* nest: the loops (LOOP, EACH) the block runs in; walked: a bit for each list the walks among them walk. */
+/* fn: the function whose code the block is (its own block, FUNCTION, or a loop's in it), or -1. */
 PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, int view, int row, int outer,
-                                         uint32_t event, bool locals, unsigned nest, uint32_t walked, uint32_t *at,
+                                         uint32_t event, bool locals, unsigned nest, uint32_t walked, int fn, uint32_t *at,
                                          unsigned char *target) {
 #define REFUSE(why) do { *at = pc; return why; } while (0)
-    bool steps = view == STEPS || view == STEPS_WALK, handler = view < 0 || view == WALK || steps;
+    bool steps = view == STEPS || view == STEPS_WALK, handler = view < 0 || view == WALK || steps || view == FUNCTION;
     bool folding = view == FOLD_ONE || view == FOLD_TWO || view == FOLD_I64;
     /* A view outside a table computes (locals: its code reads them): a body, and the loops in it. */
     bool body = steps || (!handler && !folding && view != FILTER && row < 0 && locals);
@@ -494,11 +515,17 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
     if (shape && (!handler || steps) && (shape->kind == PURE_KIND_MESSAGE || shape->kind == PURE_KIND_ARGUMENTS))
         where |= IN_ARGUMENTS;
     if (locals) where |= IN_LOCALS;
+    if (fn >= 0) where |= IN_FUNCTION;
     unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK];
     Join joins[PURE_MODULE_JOINS];
     unsigned open = 0;
     int height = 0;
     bool reachable = true;
+    if (view == FUNCTION) /* its parameters */
+        for (const PureFunction *f = &m->function[fn]; height < f->params; ++height) {
+            types[height] = signature_stack_type(m, f->first + (uint32_t)height);
+            owners[height] = (unsigned char)(types[height] == T_LIST ? m->signature_record[f->first + height] : 0);
+        }
     for (uint32_t i = 0; i <= block.length; ++i) {
         uint32_t pc = block.start + i;
         /* Branches here brought an empty stack (target) or the stack of a join. */
@@ -524,6 +551,8 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (op->op >= PURE_OP_COUNT) REFUSE("unknown opcode");
         unsigned allowed = signature[op->op].where, kind = signature[op->op].arg, of = signature[op->op].of;
         if (!(allowed & where)) {
+            if (allowed & IN_FUNCTION) REFUSE("return outside a function");
+            if (op->op == PURE_OP_CALL) REFUSE("call outside a handler or a function");
             if (allowed & IN_ROW) REFUSE("row outside a column");
             if (allowed & IN_OUTER) REFUSE("outer row outside a fold in a column");
             if (allowed & IN_LOCALS) REFUSE("local outside a handler");
@@ -595,13 +624,14 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             uint32_t list = arg >> 8 & 0xFF;
             /* A fold in a walk reads the walk's item as a fold in a column reads its row; a loop's block is its block's code. */
             const char *why = kind == A_EACH ? verify_block(m, (PureBlock){pc + 1, skip}, body ? STEPS_WALK : WALK, (int)list, -1,
-                                                            event, locals, nest + 1, walked | UINT32_C(1) << (list & 31), &inner)
-                            : kind == A_LOOP ? verify_block(m, (PureBlock){pc + 1, skip}, body && !steps ? STEPS : view, row,
-                                                            outer, event, locals, nest + 1, walked, &inner)
+                                                            event, locals, nest + 1, walked | UINT32_C(1) << (list & 31), fn, &inner)
+                            : kind == A_LOOP ? verify_block(m, (PureBlock){pc + 1, skip}, body && !steps ? STEPS :
+                                                            view == FUNCTION ? -1 : view, row, outer, event, locals, nest + 1,
+                                                            walked, fn, &inner)
                                              : verify_block(m, (PureBlock){pc + 1, skip},
                                                             how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? FOLD_ONE :
                                                             arg & PURE_FOLD_INTEGER ? FOLD_I64 : FOLD_TWO,
-                                                            (int)list, row, event, locals, nest, walked, &inner);
+                                                            (int)list, row, event, locals, nest, walked, -1, &inner);
             if (why) { *at = inner; return why; }
             for (uint32_t k = i + 1; k <= i + skip; ++k) {
                 const char *into = kind == A_FOLD ? "branch into a fold" : kind == A_EACH ? "branch into an each" :
@@ -654,7 +684,17 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         } else if (kind == A_LOOP) {
             need[0] = need[1] = arg & PURE_LOOP_INTEGER ? T_I64 : T_NUM; /* low and high */
             pops = 2;
+        } else if (kind == A_FUNCTION) { /* a function's parameters, or the results its RETURN gives */
+            const PureFunction *f = &m->function[arg];
+            if (op->op == PURE_OP_RETURN && (int)arg != fn) REFUSE("return from another function");
+            uint32_t first = f->first + (op->op == PURE_OP_RETURN ? f->params : 0);
+            pops = op->op == PURE_OP_RETURN ? f->results : f->params;
+            for (unsigned k = 0; k < pops; ++k) need[k] = signature_stack_type(m, first + k);
         }
+        /* A loop's block begins at the bottom of its run's stack: its operands are all the stack holds. */
+        if ((kind == A_LOOP || kind == A_EACH) && height != (int)pops) REFUSE("loop above values");
+        /* What a walk keeps to, a call keeps to as well: a call changes no list a walk around it walks. */
+        if (op->op == PURE_OP_CALL && m->function[arg].changes & walked) REFUSE("call that changes a list walked");
         if (height < (int)pops) REFUSE("stack underflow");
         height -= (int)pops;
         for (unsigned k = 0; k < pops; ++k)
@@ -686,11 +726,18 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (integer) out = T_I64;
         if ((op->op == PURE_OP_CONCAT && arg) || (op->op == PURE_OP_BYTES_LOAD && (arg & 0xFF) < PURE_HELD_TEXT)) out = T_BYTES;
         else if (op->op == PURE_OP_BYTES_LOAD) out = T_TEXT;
+        if (op->op == PURE_OP_CALL) /* its results */
+            for (uint32_t k = 0, first = m->function[arg].first + m->function[arg].params; k < m->function[arg].results; ++k) {
+                if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
+                types[height] = signature_stack_type(m, first + k);
+                owners[height] = (unsigned char)(types[height] == T_LIST ? m->signature_record[first + k] : 0);
+                ++height;
+            }
         if (out) {
             if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
             owners[height] = (unsigned char)(out != T_CURSOR && out != T_INDEX ? 0 : of == O_OPERAND ? owners[height] : owner);
             if (out == T_LIST) /* the record of its items */
-                owners[height] = (unsigned char)(op->op == PURE_OP_LIST_VALUE ? m->state_ref[arg] :
+                owners[height] = (unsigned char)(op->op == PURE_OP_LIST_VALUE ? m->state_ref[arg] : op->op == PURE_OP_LOCAL_LOAD ? arg >> 16 :
                                                  nested_record(m, m->record[m->state_ref[list_of(arg)]].first + item_field(arg)));
             types[height++] = out;
         }
@@ -716,9 +763,12 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             target[block.length] = 1;
             reachable = false;
         }
+        if (op->op == PURE_OP_RETURN) reachable = false; /* the rest of its stack let go */
         i += skip;
     }
-    if (!reachable) return "block end is unreachable";
+    if (view == FUNCTION) return reachable ? "function ends without return" : NULL;
+    if (!reachable && fn < 0) return "block end is unreachable";
+    if (!reachable) return NULL; /* a loop's block in a function that returns */
     if (view == FILTER) return height != 1 || types[0] != T_BOOL ? "filter must leave one bool" : NULL;
     if (view == FOLD_ONE) return height != 1 || types[0] != T_BOOL ? "fold block must leave one bool" : NULL;
     if (view == FOLD_TWO)
@@ -733,11 +783,11 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
 }
 
 PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, int view, int row, int outer,
-                                          uint32_t event, bool locals, unsigned nest, uint32_t walked, uint32_t *at) {
+                                          uint32_t event, bool locals, unsigned nest, uint32_t walked, int fn, uint32_t *at) {
     if (block.start > m->code_count || block.length > m->code_count - block.start) return "code range outside module";
     unsigned char *target = calloc((size_t)block.length + 1, 1);
     if (!target) return "out of memory";
-    const char *why = verify_code(m, block, view, row, outer, event, locals, nest, walked, at, target);
+    const char *why = verify_code(m, block, view, row, outer, event, locals, nest, walked, fn, at, target);
     free(target);
     return why;
 }
@@ -752,7 +802,7 @@ PURE_COLD static bool has_lanes(const PureModule *m, const PureOp *op, int input
     }
     case PURE_OP_CONST: return op->arg != 2;
     case PURE_OP_LOAD: return m->state_type[op->arg] != PURE_STATE_I64;
-    case PURE_OP_LOCAL_LOAD: return local_type(op->arg) != T_I64;
+    case PURE_OP_LOCAL_LOAD: return local_type(op->arg) != T_I64 && local_type(op->arg) != T_LIST;
     case PURE_OP_ADD: case PURE_OP_SUB: case PURE_OP_MUL: case PURE_OP_DIV: case PURE_OP_NEG:
     case PURE_OP_LT: case PURE_OP_LE: case PURE_OP_GT: case PURE_OP_GE: case PURE_OP_EQ: case PURE_OP_NE:
     case PURE_OP_AND: case PURE_OP_OR: case PURE_OP_NOT: case PURE_OP_MIN: case PURE_OP_MAX: case PURE_OP_CLAMP:
@@ -842,7 +892,7 @@ PURE_COLD static bool batch_block(const PureModule *m, uint32_t start, uint32_t 
             if (op->arg > arms) arms = op->arg;
             break;
         case PURE_OP_LOCAL_STORE:
-            if (local_type(op->arg) == T_I64) return false;
+            if (local_type(op->arg) == T_I64 || local_type(op->arg) == T_LIST) return false;
             if (at >= arms) sure[local / 64] |= bit;
             break;
         case PURE_OP_LOCAL_LOAD:
@@ -1451,6 +1501,46 @@ PURE_COLD static void range_code(PureModule *m, PureBlock block, int input) {
     }
 }
 
+/* What a function's code names (027's 2c), read before it is verified (its arguments bounded here): the event's lists,
+ * the registers and the values held by name each call has its own of, the lists not an event's it changes, its locals
+ * and how deep its loops nest; the functions it calls (calls, a bit each). */
+PURE_COLD static void function_names(const PureModule *m, PureFunction *f, uint64_t *calls) {
+    uint32_t end = f->code.start + f->code.length, ends[PURE_MODULE_NESTING];
+    unsigned depth = 0;
+    if (f->code.start > m->code_count || f->code.length > m->code_count - f->code.start) return; /* refused as it is verified */
+    for (uint32_t pc = f->code.start; pc < end; ++pc) {
+        const PureOp *op = &m->code[pc];
+        uint32_t arg = op->arg, list = UINT32_MAX;
+        while (depth && pc >= ends[depth - 1]) --depth;
+        switch (op->op) {
+        case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE:
+            list = arg;
+            if (state_of(m, list, PURE_STATE_LIST) && !event_list_state(m, list)) f->changes |= UINT32_C(1) << list;
+            break;
+        case PURE_OP_LIST_COUNT: case PURE_OP_LIST_VALUE: case PURE_OP_LIST_BIND: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
+        case PURE_OP_INDEX_AT: case PURE_OP_BYTES_OF: case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_LIST_FIND:
+        case PURE_OP_LIST_HAS:
+            list = arg;
+            break;
+        case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: case PURE_OP_APPEND_IN: list = list_of(arg); break;
+        case PURE_OP_EACH: case PURE_OP_FOLD: case PURE_OP_LOOP: case PURE_OP_LOCAL_LOAD: case PURE_OP_LOCAL_STORE:
+            if (op->op == PURE_OP_EACH || op->op == PURE_OP_FOLD) list = arg >> 8 & 0xFF;
+            if ((op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP) && depth < PURE_MODULE_NESTING) {
+                ends[depth++] = pc + 1 + (arg >> 16);
+                if (depth > f->nesting) f->nesting = (uint8_t)depth;
+            }
+            if (op->op == PURE_OP_EACH || op->op == PURE_OP_FOLD) break;
+            if ((arg & 0xFF) < PURE_MODULE_LOCALS && (arg & 0xFF) >= f->locals) f->locals = (uint8_t)((arg & 0xFF) + 1);
+            if (op->op != PURE_OP_LOOP && (arg >> 8 & 0xFF) == 1) list = arg >> 16; /* an index's list */
+            break;
+        case PURE_OP_BYTES_LOAD: case PURE_OP_BYTES_STORE: f->held |= UINT32_C(1) << (arg & 31); break;
+        case PURE_OP_CALL: if (arg < PURE_MODULE_FUNCTIONS) *calls |= UINT64_C(1) << arg; break;
+        default: break;
+        }
+        if (event_list_state(m, list)) *(bound_list(m, list) ? &f->registers : &f->lists) |= UINT32_C(1) << list;
+    }
+}
+
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
     FILE *file = fopen(path, "rb");
     unsigned char *bytes = NULL;
@@ -1479,7 +1569,8 @@ PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *e
 void pure_module_release(PureModule *m) {
     pure_jit_free(m->jit);
     m->jit = NULL;
-    m->batches = false;
+    m->batches = m->calls = false;
+    m->runner = 0;
     free(m->height);
     m->height = NULL;
     free(m->reuse_from), free(m->reuse_length);
@@ -1516,21 +1607,31 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     out->records = (uint16_t)read16(p + 30);
     uint32_t constant_bytes = read32(p + 32);
     out->record_fields = (uint16_t)read16(p + 36);
-    if (read16(p + 38)) REFUSE("reserved header bytes", 38);
+    out->functions = (uint16_t)read16(p + 38);
     if (out->states > PURE_MODULE_STATES || out->inputs > PURE_MODULE_INPUTS ||
         out->views > PURE_MODULE_VIEWS || out->handlers > PURE_MODULE_HANDLERS ||
         out->code_count > PURE_MODULE_CODE || strings > PURE_MODULE_STRINGS ||
         out->fields > PURE_MODULE_FIELDS || out->collections > PURE_MODULE_COLLECTIONS ||
         out->constants > PURE_MODULE_CONSTANTS || constant_bytes > PURE_MODULE_CONSTANT_BYTES ||
-        out->records > PURE_MODULE_RECORDS || out->record_fields > PURE_MODULE_RECORD_FIELDS) {
+        out->records > PURE_MODULE_RECORDS || out->record_fields > PURE_MODULE_RECORD_FIELDS ||
+        out->functions > PURE_MODULE_FUNCTIONS) {
         result = PURE_LIMIT;
         REFUSE("module exceeds a limit", 8);
     }
-    size_t expected = PURE_MODULE_HEADER + (size_t)out->states * STATE_BYTES +
+    size_t functions_at = PURE_MODULE_HEADER + (size_t)out->states * STATE_BYTES +
         (size_t)out->collections * COLLECTION_BYTES + (size_t)out->inputs * INPUT_BYTES +
         (size_t)out->fields * FIELD_BYTES + (size_t)out->constants * CONSTANT_BYTES +
         (size_t)out->records * RECORD_BYTES + (size_t)out->record_fields * RECORD_FIELD_BYTES +
-        (size_t)out->views * VIEW_BYTES + (size_t)out->handlers * HANDLER_BYTES +
+        (size_t)out->views * VIEW_BYTES + (size_t)out->handlers * HANDLER_BYTES;
+    size_t signatures = 0; /* the functions' parameters' and results' items, in their order */
+    if (size < functions_at + (size_t)out->functions * FUNCTION_BYTES) REFUSE("module size", functions_at);
+    for (uint32_t i = 0; i < out->functions; ++i) signatures += (size_t)p[functions_at + i * FUNCTION_BYTES + 8] +
+                                                                 p[functions_at + i * FUNCTION_BYTES + 9];
+    if (signatures > PURE_MODULE_SIGNATURES) {
+        result = PURE_LIMIT;
+        REFUSE("module exceeds a limit", functions_at);
+    }
+    size_t expected = functions_at + (size_t)out->functions * FUNCTION_BYTES + signatures * SIGNATURE_BYTES +
         (size_t)out->code_count * OP_BYTES + strings + constant_bytes;
     if (size != expected) REFUSE("module size", expected);
     /* The code, the constants' offsets and lengths, then their bytes, in one block. */
@@ -1766,6 +1867,21 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             (input >= 0 && (out->input[input].kind == PURE_KIND_OUTPUT || out->input[input].kind == PURE_KIND_ARGUMENTS)))
             REFUSE("handler event", i);
     }
+    /* Functions (027's 2c): a block and the counts of its parameters and results, whose types follow every function's. */
+    for (uint32_t i = 0, item = 0; i < out->functions; ++i, at += FUNCTION_BYTES) {
+        out->function[i] = (PureFunction){.code = {read32(at), read32(at + 4)}, .first = (uint16_t)item, .params = at[8],
+                                          .results = at[9]};
+        if (read16(at + 10)) REFUSE("function padding", i);
+        item += (uint32_t)at[8] + at[9];
+    }
+    for (uint32_t k = 0; k < signatures; ++k, at += SIGNATURE_BYTES) {
+        out->signature_type[k] = at[0];
+        out->signature_record[k] = (uint16_t)read16(at + 2);
+        if (at[1] || at[0] > PURE_SIGNATURE_BYTES ||
+            (at[0] == PURE_RECORD_LIST ? out->signature_record[k] >= out->records : out->signature_record[k] != 0))
+            REFUSE("function signature", k);
+    }
+    out->calls = out->functions > 0;
     for (uint32_t i = 0; i < out->code_count; ++i, at += OP_BYTES) {
         if (at[1] || at[2] || at[3]) REFUSE("instruction padding", i);
         out->code[i] = (PureOp){.op = at[0], .arg = read32(at + 4), .value = read_double(at + 8)};
@@ -1794,7 +1910,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         bool computes = !table && !out->view_table[i]; /* a view outside a table may have a body */
         if ((!table || out->view_code[i].length) &&
             (why = verify_block(out, out->view_code[i], table ? FILTER : out->view_type[i],
-                                table || out->view_table[i] ? out->view_list[i] : -1, -1, event, computes, 0, 0, &bad)))
+                                table || out->view_table[i] ? out->view_list[i] : -1, -1, event, computes, 0, 0, -1, &bad)))
             goto refused;
         if (computes && !locals_agree(out, out->view_code[i])) { why = "local used as two things"; goto refused; }
         for (uint32_t pc = out->view_code[i].start; computes && pc < out->view_code[i].start + out->view_code[i].length; ++pc) {
@@ -1807,9 +1923,29 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         }
         if (out->view_lists[i]) out->view_body[i] = true;
     }
+    /* What each function names, and the lists it changes with those the functions it calls change (until none adds). */
+    uint64_t calls[PURE_MODULE_FUNCTIONS] = {0};
+    for (uint32_t i = 0; i < out->functions; ++i) function_names(out, &out->function[i], &calls[i]);
+    for (bool more = out->functions > 0; more;) {
+        more = false;
+        for (uint32_t i = 0; i < out->functions; ++i)
+            for (uint64_t left = calls[i]; left; left &= left - 1) {
+                uint32_t was = out->function[i].changes;
+                out->function[i].changes |= out->function[__builtin_ctzll(left)].changes;
+                more = more || out->function[i].changes != was;
+            }
+    }
+    for (uint32_t i = 0; i < out->functions; ++i) {
+        bad = i;
+        PureFunction *f = &out->function[i];
+        if ((why = verify_block(out, f->code, FUNCTION, -1, -1, 0, true, 0, 0, (int)i, &bad))) goto refused;
+        if (!locals_agree(out, f->code)) { why = "local used as two things"; goto refused; }
+        for (uint32_t pc = f->code.start; pc < f->code.start + f->code.length; ++pc) /* its frame's stack: as the verifier went */
+            if (out->height[pc] >= f->height) f->height = (uint8_t)(out->height[pc] + 1);
+    }
     for (uint32_t i = 0; i < out->handlers; ++i) {
         bad = i;
-        if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event, true, 0, 0, &bad))) goto refused;
+        if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event, true, 0, 0, -1, &bad))) goto refused;
         if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
     }
     for (uint32_t i = 0; i < out->views; ++i) {
@@ -1907,6 +2043,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         result = PURE_ALLOCATION;
         REFUSE("out of memory", 0);
     }
+    out->runner = out->calls ? 2 : out->batches ? 1 : 0;
     out->jit = pure_jit_make(out); /* none: the executor runs it all */
     return PURE_OK;
 refused:
@@ -2226,8 +2363,24 @@ static bool copy_out(void *context, PureSpan span) {
 }
 
 /* BYTES_STORE: the value held by name slot becomes v, or v after it (append); what it holds counts in the room.
- * 1 where that passes the room (MEMORY), 2 out of memory, else 0. */
+ * 1 where that passes the room (MEMORY), 2 out of memory, else 0. A value of the payload, the arguments or the constants
+ * lasts the event: it is held as it is (by_ref), nothing copied, until something is appended to it. */
+static int hold_copy(PureApp *app, PureArena *arena, unsigned slot, PureBytes v, bool append);
 static int hold(PureApp *app, PureArena *arena, unsigned slot, PureBytes v, bool append) {
+    __typeof__(app->held[0]) *h = &app->held[slot];
+    if (!append && (v.source == FROM_PAYLOAD || v.source == FROM_ARGUMENTS || v.source == FROM_CONSTANT)) {
+        if (!h->by_ref) (void)grows(app, (Held){0, h->size}, (Held){0, 0});
+        h->ref = v, h->size = (size_t)v.length, h->by_ref = true;
+        return 0;
+    }
+    if (h->by_ref) { /* what it held as it was: copied first when v follows it */
+        h->by_ref = false, h->size = 0;
+        int held = append ? hold_copy(app, arena, slot, h->ref, false) : 0;
+        if (held) return held;
+    }
+    return hold_copy(app, arena, slot, v, append);
+}
+static int hold_copy(PureApp *app, PureArena *arena, unsigned slot, PureBytes v, bool append) {
     __typeof__(app->held[0]) *h = &app->held[slot];
     size_t mark = arena->used, before = h->size, at = append ? h->size : 0, size = at + (size_t)v.length;
     if (v.source == FROM_HELD && v.owner == slot && v.length) { /* a part of itself: by way of the arena */
@@ -3753,7 +3906,8 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         NEXT;
     }
     case PURE_OP_BYTES_LOAD:
-        stack[sp++].bytes = (PureBytes){FROM_HELD, (uint16_t)(arg & 0xFF), {0, 0}, 0, app->held[arg & 0xFF].size};
+        stack[sp++].bytes = app->held[arg & 0xFF].by_ref ? app->held[arg & 0xFF].ref
+                                                         : (PureBytes){FROM_HELD, (uint16_t)(arg & 0xFF), {0, 0}, 0, app->held[arg & 0xFF].size};
         NEXT;
     case PURE_OP_BYTES_STORE: {
         int held = hold(app, arena, arg & 0xFF, stack[--sp].bytes, arg & PURE_HELD_APPEND);
@@ -3821,6 +3975,38 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (status != PURE_OK) REFUSED;
         if (m->record_nested[inner]) share_cells(app, m, inner, cells);
         if (!grows(app, before, (Held){0, pure_list_size(in)})) { kind = PURE_FAULT_MEMORY; FAILED; }
+        NEXT;
+    }
+    case PURE_OP_CALL: case PURE_OP_RETURN: /* run_calls' (the frames are its): no other run meets one */
+        frame->fault_pc = pc;
+        return !batches ? STEP_FAULT : op->op == PURE_OP_CALL ? STEP_CALL : STEP_BACK;
+    case PURE_OP_CHAR_AT: { /* the character beginning at a byte position of a text (UTF-8: whole from there) */
+        int64_t at = stack[--sp].i64;
+        PureBytes v = stack[sp - 1].bytes;
+        if (at < 0 || (uint64_t)at >= v.length) { kind = PURE_FAULT_LIMIT; FAILED; }
+        unsigned char b[4] = {0};
+        Copy into = {b};
+        v.offset += (uint64_t)at;
+        v.length = v.length - (uint64_t)at < 4 ? v.length - (uint64_t)at : 4;
+        if ((status = visit_value(app, arena, v, copy_out, &into)) != PURE_OK) STOPPED(status);
+        if ((b[0] & 0xC0) == 0x80) { kind = PURE_FAULT_LIMIT; FAILED; } /* within a character */
+        stack[sp - 1].i64 = b[0] < 0x80 ? b[0] : b[0] < 0xE0 ? (b[0] & 0x1F) << 6 | (b[1] & 0x3F) :
+                            b[0] < 0xF0 ? (b[0] & 0x0F) << 12 | (b[1] & 0x3F) << 6 | (b[2] & 0x3F) :
+                            (b[0] & 0x07) << 18 | (b[1] & 0x3F) << 12 | (b[2] & 0x3F) << 6 | (b[3] & 0x3F);
+        NEXT;
+    }
+    case PURE_OP_CHAR: { /* the text of a code point */
+        int64_t c = top->i64;
+        if (c < 0 || c > 0x10FFFF) { kind = PURE_FAULT_LIMIT; FAILED; }
+        if (c >= 0xD800 && c < 0xE000) { kind = PURE_FAULT_ENCODING; FAILED; }
+        unsigned char b[4];
+        size_t n = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+        if (n == 1) b[0] = (unsigned char)c;
+        else {
+            for (size_t k = n - 1; k > 0; --k, c >>= 6) b[k] = (unsigned char)(0x80 | (c & 0x3F));
+            b[0] = (unsigned char)((0xF00 >> n & 0xF0) | c); /* 110x, 1110, 11110 */
+        }
+        if ((status = keep_bytes(arena, b, n, &top->bytes)) != PURE_OK) STOPPED(status);
         NEXT;
     }
     default: break;
@@ -3956,6 +4142,245 @@ static __attribute__((noinline)) PureResult run_compiled(PureCompiled code, cons
     return finish(&frame, code(&frame), result);
 }
 
+/* ---- Calls (027's 2c). A call's frame, in the app's blocks of frames (they never move: a loop points into its frame):
+ * the frame below, where the caller was (what follows its CALL, where its code ends, its loops, stack, locals and walk),
+ * where the blocks stood before it and its bytes (counted in the event's room); then what it keeps of the caller's own
+ * (the lists the function's code names, its held values) and the callee's stack, locals and loops. */
+typedef struct Call {
+    struct Call *below;
+    uint32_t back, end, function;
+    unsigned depth, block;
+    size_t sp, used, bytes, row;
+    Slot *stack;
+    Loop *loops;
+    PureValue *locals;
+    Walk *walk;
+} Call;
+typedef __typeof__(((PureApp *)0)->held[0]) Kept;
+
+/* Room for a frame of bytes among the app's blocks: where they stood before it, or NULL out of memory. */
+static void *frame_room(PureApp *app, size_t bytes, unsigned *block, size_t *used) {
+    __typeof__(app->calls) *c = &app->calls;
+    *block = c->at, *used = c->used;
+    if (c->count && c->sizes[c->at] - c->used >= bytes) {
+        void *room = c->blocks[c->at] + c->used;
+        c->used += bytes;
+        return room;
+    }
+    unsigned next = c->count ? c->at + 1 : 0; /* the blocks after the one in use are free */
+    if (next < c->count && c->sizes[next] < bytes) free(c->blocks[next]), c->blocks[next] = NULL;
+    if (next == c->count) {
+        unsigned char **blocks = realloc(c->blocks, (c->count + 1) * sizeof(*blocks));
+        if (blocks) c->blocks = blocks;
+        size_t *sizes = blocks ? realloc(c->sizes, (c->count + 1) * sizeof(*sizes)) : NULL;
+        if (!sizes) return NULL;
+        c->sizes = sizes;
+        c->blocks[c->count++] = NULL;
+    }
+    if (!c->blocks[next]) {
+        size_t size = (size_t)64 << 10 << (next < 8 ? next : 8); /* 64 KB, twice as much each block on to 16 MB */
+        if (size < bytes) size = bytes;
+        if (!(c->blocks[next] = malloc(size))) return NULL;
+        c->sizes[next] = size;
+    }
+    c->at = next, c->used = bytes;
+    return c->blocks[next];
+}
+
+/* An empty list of an event's list state for a call: one a call let go, or a new one (NULL: out of memory). */
+static PureList *spare_list(PureApp *app, uint32_t state) {
+    __typeof__(app->spare[0]) *spare = &app->spare[state];
+    return spare->count ? spare->lists[--spare->count] : new_list(app->module, app->module->state_ref[state]);
+}
+
+/* A call's list let go: emptied (what it held no longer counted) and kept for the next calls. */
+static void let_list_go(PureApp *app, uint32_t state, PureList *list) {
+    Held before = list_held(app, list);
+    pure_list_clear(list);
+    (void)grows(app, before, list_held(app, list));
+    __typeof__(app->spare[0]) *spare = &app->spare[state];
+    if (spare->count == spare->capacity) {
+        unsigned capacity = spare->capacity ? 2 * spare->capacity : 4;
+        PureList **lists = realloc(spare->lists, capacity * sizeof(*lists));
+        if (!lists) { pure_list_free(list); return; }
+        spare->lists = lists, spare->capacity = capacity;
+    }
+    spare->lists[spare->count++] = list;
+}
+
+static void drop_spares(PureApp *app) {
+    for (unsigned i = 0; i < PURE_MODULE_STATES; ++i) {
+        for (unsigned k = 0; k < app->spare[i].count; ++k) pure_list_free(app->spare[i].lists[k]);
+        free(app->spare[i].lists);
+        app->spare[i].lists = NULL, app->spare[i].count = app->spare[i].capacity = 0;
+    }
+}
+
+/* The first count of the lists and registers a function's code names given back what a call kept of them (its own
+ * lists let go). */
+static void restore_lists(PureApp *app, const PureFunction *f, PureList **kept, unsigned count) {
+    unsigned k = 0;
+    for (uint32_t left = f->lists | f->registers; left && k < count; left &= left - 1, ++k) {
+        uint32_t state = (uint32_t)__builtin_ctz(left);
+        if (!(f->registers >> state & 1)) let_list_go(app, state, app->lists[state]);
+        app->lists[state] = kept[k];
+    }
+}
+
+/* A frame closed: the caller's lists, registers and held values given back (the callee's let go), its locals and walk,
+ * the frame's room in the blocks and in the event's room. The frame below. */
+static Call *give_back(PureApp *app, Call *call, Event *ev) {
+    const PureFunction *f = &app->module->function[call->function];
+    unsigned keeps = (unsigned)__builtin_popcount(f->lists | f->registers), j = 0;
+    PureList **kept = (PureList **)(call + 1);
+    Kept *held = (Kept *)(kept + keeps);
+    restore_lists(app, f, kept, keeps);
+    for (uint32_t left = f->held; left; left &= left - 1, ++j) {
+        Kept *h = &app->held[__builtin_ctz(left)];
+        if (!h->by_ref) (void)grows(app, (Held){0, h->size}, (Held){0, 0});
+        free(h->data);
+        *h = held[j];
+    }
+    ev->locals = call->locals, ev->walk = call->walk, ev->row = call->row;
+    (void)grows(app, (Held){0, call->bytes}, (Held){0, 0});
+    app->calls.at = call->block, app->calls.used = call->used;
+    return call->below;
+}
+
+/* A bytes or text value a call would lose (held by name in a slot the callee has its own of): a copy in the arena. */
+static bool kept_apart(PureApp *app, PureArena *arena, const PureFunction *f, uint8_t type, PureBytes *v) {
+    if ((type != PURE_RECORD_TEXT && type != PURE_SIGNATURE_BYTES) || v->source != FROM_HELD || !(f->held >> v->owner & 1))
+        return true;
+    size_t start = arena->used;
+    if (append_value(app, arena, *v) != PURE_OK) return false;
+    *v = (PureBytes){FROM_ARENA, 0, {0, 0}, start, v->length};
+    return true;
+}
+
+/* CALL (just before *pc): its function's frame open (*top), its block next. STEP_NEXT, or a fault (WORK, MEMORY) or a
+ * stop out of memory, nothing opened. */
+static __attribute__((noinline, cold)) int enter_call(Frame *frame, Call **top, uint32_t *pc) {
+    const PureModule *m = frame->m;
+    PureApp *app = frame->app;
+    Event *ev = frame->ev;
+    uint32_t function = m->code[*pc - 1].arg;
+    const PureFunction *f = &m->function[function];
+    unsigned keeps = (unsigned)__builtin_popcount(f->lists | f->registers), holds = (unsigned)__builtin_popcount(f->held);
+    size_t bytes = (sizeof(Call) + keeps * sizeof(PureList *) + holds * sizeof(Kept) + f->height * sizeof(Slot) +
+                    f->locals * sizeof(PureValue) + f->nesting * sizeof(Loop) + 15) & ~(size_t)15;
+    frame->fault_pc = *pc - 1;
+    if (!charge(app, f->code.length)) { frame->kind = PURE_FAULT_WORK; return STEP_FAULT; }
+    if (!grows(app, (Held){0, 0}, (Held){0, bytes})) { frame->kind = PURE_FAULT_MEMORY; return STEP_FAULT; }
+    unsigned block;
+    size_t used, base = frame->sp - f->params;
+    Call *call = frame_room(app, bytes, &block, &used);
+    if (!call) { frame->status = PURE_ALLOCATION; return STEP_RETURN; }
+    PureList **kept = (PureList **)(call + 1);
+    Kept *held = (Kept *)(kept + keeps);
+    Slot *stack = (Slot *)(held + holds);
+    PureValue *locals = (PureValue *)(stack + f->height);
+    bool whole = true;
+    unsigned k = 0;
+    for (unsigned i = 0; whole && i < f->params; ++i) { /* its arguments, its stack as it begins */
+        stack[i] = frame->stack[base + i];
+        whole = kept_apart(app, frame->arena, f, m->signature_type[f->first + i], &stack[i].bytes);
+    }
+    for (uint32_t left = f->lists | f->registers; whole && left; left &= left - 1, ++k) { /* its own lists, registers */
+        uint32_t state = (uint32_t)__builtin_ctz(left);
+        PureList *own = f->registers >> state & 1 ? (app->unbound[state] ? app->unbound[state] : app->lists[state])
+                                                  : spare_list(app, state);
+        if (!own) {
+            restore_lists(app, f, kept, k);
+            whole = false;
+            break;
+        }
+        kept[k] = app->lists[state], app->lists[state] = own;
+    }
+    if (!whole) {
+        app->calls.at = block, app->calls.used = used;
+        frame->status = PURE_ALLOCATION;
+        return STEP_RETURN;
+    }
+    unsigned j = 0;
+    for (uint32_t left = f->held; left; left &= left - 1, ++j) { /* its held values, empty */
+        Kept *h = &app->held[__builtin_ctz(left)];
+        held[j] = *h;
+        *h = (Kept){0};
+    }
+    *call = (Call){.below = *top, .back = *pc, .end = frame->end, .function = function, .depth = frame->depth, .block = block,
+                   .sp = base, .used = used, .bytes = bytes, .row = ev->row, .stack = frame->stack, .loops = frame->loops,
+                   .locals = ev->locals, .walk = ev->walk};
+    if (f->locals) memset(locals, 0, f->locals * sizeof(*locals));
+    frame->stack = stack, frame->sp = f->params, frame->loops = (Loop *)(locals + f->locals), frame->depth = 0;
+    frame->end = f->code.start + f->code.length;
+    ev->locals = locals, ev->walk = NULL;
+    *top = call;
+    *pc = f->code.start;
+    return STEP_NEXT;
+}
+
+/* RETURN (just before *pc): its results in the place of the call's arguments, the frame closed, what follows the CALL
+ * next. STEP_NEXT, or a stop out of memory (the frame still open). */
+static __attribute__((noinline, cold)) int leave_call(Frame *frame, Call **top, uint32_t *pc) {
+    const PureModule *m = frame->m;
+    Call *call = *top;
+    const PureFunction *f = &m->function[call->function];
+    Slot *results = frame->stack + frame->sp - f->results;
+    for (unsigned i = 0; i < f->results; ++i)
+        if (!kept_apart(frame->app, frame->arena, f, m->signature_type[f->first + f->params + i], &results[i].bytes)) {
+            frame->status = PURE_ALLOCATION;
+            return STEP_RETURN;
+        }
+    for (unsigned i = 0; i < f->results; ++i) call->stack[call->sp + i] = results[i];
+    frame->stack = call->stack, frame->sp = call->sp + f->results, frame->loops = call->loops, frame->depth = call->depth;
+    frame->end = call->end;
+    *pc = call->back;
+    *top = give_back(frame->app, call, frame->ev);
+    return STEP_NEXT;
+}
+
+/* Every frame still open closed (a run stopped in a call). */
+static __attribute__((noinline, cold)) void unwind_calls(Frame *frame, Call *top) {
+    while (top) top = give_back(frame->app, top, frame->ev);
+}
+
+/* The executor's run of a block of a module with functions (027's 2c): run_batches' steps and batches, and calls: a
+ * CALL opens its function's frame and its block runs on in this loop, a RETURN closes it. Its own copy of the steps,
+ * as run_batches is. */
+static __attribute__((noinline, aligned(64))) PureResult run_calls(const PureModule *m, PureValue *values, PureBlock block, Event *ev,
+                                                      Slot *result) {
+    Slot stack[PURE_MODULE_STACK];
+    Loop loops[PURE_MODULE_NESTING];
+    Frame frame;
+    open_frame(&frame, m, values, block, ev, stack, loops);
+    Call *top = NULL;
+    int how = STEP_NEXT;
+    for (uint32_t pc = block.start;;) {
+        if (pc >= frame.end) {
+            if (!frame.depth || (how = iterate(&frame, &pc)) != STEP_NEXT) break;
+            continue;
+        }
+        if ((how = step(&frame, &m->code[pc], pc, &pc, true)) == STEP_NEXT) continue;
+        if (how != STEP_CALL && how != STEP_BACK && how != STEP_BATCH) break;
+        Frame apart = frame; /* the frame's copy (no call sees the frame itself: its fields stay in registers) */
+        if (how == STEP_CALL) how = enter_call(&apart, &top, &pc);
+        else if (how == STEP_BACK) how = leave_call(&apart, &top, &pc);
+        else {
+            uint32_t past = 0;
+            how = open_batches(&apart, pc - 1, &past);
+            pc = past;
+        }
+        frame = apart;
+        if (how != STEP_NEXT) break;
+    }
+    if (top) {
+        Frame apart = frame;
+        unwind_calls(&apart, top);
+        frame = apart;
+    }
+    return finish(&frame, how, result);
+}
+
 /* The executor's run of a block of a module with loops planned PLAN_BATCH:
  * run's, those loops in batches (module-batch.c). Its own copy of the
  * steps: in run's, a batch's way among them would cost every instruction
@@ -3987,7 +4412,7 @@ static __attribute__((noinline, aligned(64))) PureResult run_batches(const PureM
 static __attribute__((aligned(64))) PureResult run(const PureModule *m, PureValue *values, PureBlock block, Event *ev, Slot *result) {
     PureCompiled code = m->jit ? pure_jit_code(m->jit, block) : NULL;
     if (code) return run_compiled(code, m, values, block, ev, result);
-    if (m->batches) return run_batches(m, values, block, ev, result);
+    if (m->runner) return m->runner == 2 ? run_calls(m, values, block, ev, result) : run_batches(m, values, block, ev, result);
     Slot stack[PURE_MODULE_STACK];
     Loop loops[PURE_MODULE_NESTING];
     Frame frame;
@@ -4246,6 +4671,9 @@ void pure_app_stop(PureApp *app) {
     }
     pure_retired_free(&app->retired);
     for (unsigned i = 0; i < PURE_MODULE_HELD; ++i) free(app->held[i].data);
+    for (unsigned i = 0; i < app->calls.count; ++i) free(app->calls.blocks[i]);
+    free(app->calls.blocks), free(app->calls.sizes);
+    drop_spares(app);
     drop_nested(app);
     free(app->nested.list);
     free(app->nested.shared);
@@ -4385,7 +4813,7 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
      * holds for it the default room, or the budget when that is larger. */
     app->grown = app->spent = 0;
     app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
-    for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
+    for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0, app->held[i].by_ref = false;
     if (app->nested.count) unbind(app), drop_nested(app); /* a view's body bound some on the app itself */
     Mark mark;
     mark_event(app, &mark);
@@ -4734,7 +5162,7 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
         if (!own_lists(app, m->view_lists[view])) return PURE_ALLOCATION;
         app->grown = app->spent = 0;
         app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
-        for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0;
+        for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0, app->held[i].by_ref = false;
         unbind(app);
         if (app->nested.count) drop_nested(app);
     }
@@ -5429,6 +5857,7 @@ PURE_COLD PureResult pure_app_start(PureApp *app, const PureModule *module, Pure
 PURE_COLD PureResult pure_app_replace(PureApp *app, const PureModule *module) {
     unbind(app); /* lists are laid out again: none bound, the event's in records let go */
     drop_nested(app);
+    drop_spares(app);
     pure_app_finish(app);
     if (app->open || app->pending_count) {
         PureResult saved = pure_app_save(app); /* the burst belongs to the module that made it */

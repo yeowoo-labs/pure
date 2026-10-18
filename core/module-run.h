@@ -145,6 +145,8 @@ static inline uint32_t after(const PureOp *op, uint32_t pc) {
  * loop ended). STEP_BATCH: step leaves a LOOP planned PLAN_BATCH to its
  * caller (module.c). */
 enum { STEP_SKIP = 4, STEP_DONE = 5, STEP_BATCH = 6 };
+/* STEP_CALL: step leaves a CALL to its caller (module.c's run_calls), and STEP_BACK a RETURN (027's 2c). */
+enum { STEP_CALL = 7, STEP_BACK = 8 };
 int pure_run_step(Frame *, uint32_t pc);
 int pure_run_each(Frame *, uint32_t pc);
 int pure_run_loop(Frame *, uint32_t pc);
