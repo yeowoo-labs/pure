@@ -28,6 +28,9 @@
 #include <stddef.h>
 #include <sys/mman.h>
 
+/* The states a module it compiles has at most: its sets of lists and states are a word's bits (027's 4f-2). */
+enum { JIT_STATES = 32 };
+
 struct PureJit {
     unsigned char *memory; /* the code, executable */
     size_t size;
@@ -4131,7 +4134,7 @@ static int tlist(Tier *t, TList *lists, unsigned list, unsigned part) {
 
 /* What each list access needs, as values where the tier begins: a column (its address tagged with its cells' width), the count, the key bits and their reach. */
 static void tier_lists(Tier *t, TList *lists) {
-    for (unsigned i = 0; i < PURE_MODULE_STATES; ++i) {
+    for (unsigned i = 0; i < JIT_STATES; ++i) {
         for (unsigned p = 0; p < L_PARTS; ++p) lists[i].part[p] = -1;
         lists[i].position = lists[i].key = lists[i].full = false;
     }
@@ -4167,7 +4170,7 @@ static void tier_lists(Tier *t, TList *lists) {
     }
     for (size_t i = 0; i < made; ++i)
         if (t->vals[i].op == T_FIND) lists[t->vals[i].list].full = true;
-    for (unsigned i = 0; i < PURE_MODULE_STATES; ++i) { /* found by key and by position: DENSE and full, its count its keys' reach */
+    for (unsigned i = 0; i < JIT_STATES; ++i) { /* found by key and by position: DENSE and full, its count its keys' reach */
         if (lists[i].key && lists[i].position) lists[i].full = true;
         if (lists[i].full) (void)tlist(t, lists, i, L_COUNT);
     }
@@ -4583,10 +4586,9 @@ static unsigned tbase(Tier *t, unsigned which, unsigned into) {
     case B_LOCALS: load64(e, into, X19, offsetof(Frame, ev)), load64(e, into, into, offsetof(Event, locals)); break;
     case B_VALUES: load64(e, into, X19, offsetof(Frame, values)); break;
     case B_APP: load64(e, into, X19, offsetof(Frame, app)); break;
-    case B_LISTS:
+    case B_LISTS: /* the app's lists (an array of them since 027's 4f-2) */
         load64(e, into, X19, offsetof(Frame, app));
-        mov_imm(e, X10, offsetof(PureApp, lists));
-        add_reg(e, into, into, X10);
+        load64(e, into, into, offsetof(PureApp, lists));
         break;
     case B_LOOPS: load64(e, into, X19, offsetof(Frame, loops)); break;
     case B_EV: load64(e, into, X19, offsetof(Frame, ev)); break;
@@ -4602,8 +4604,7 @@ static void tier_fixed(Tier *t) {
     load64(e, X21, X19, offsetof(Frame, values));
     load64(e, X22, X19, offsetof(Frame, ev));
     load64(e, X23, X19, offsetof(Frame, app));
-    mov_imm(e, X24, offsetof(PureApp, lists));
-    add_reg(e, X24, X23, X24);
+    load64(e, X24, X23, offsetof(PureApp, lists));
     load64(e, X27, X19, offsetof(Frame, loops));
     load64(e, X28, X22, offsetof(Event, locals));
 }
@@ -5354,7 +5355,7 @@ static void tier_emit(Tier *t, int entry, int fallback) {
     Emit *e = k->e;
     const LoopAt *l0 = &k->loops[t->nest];
     bind(e, entry);
-    for (unsigned list = 0; list < PURE_MODULE_STATES; ++list) { /* each list as the tier reads it (pure_list_suits) */
+    for (unsigned list = 0; list < JIT_STATES; ++list) { /* each list as the tier reads it (pure_list_suits) */
         const TList *l = &t->lists[list];
         unsigned needs = 0, narrow = 0;
         for (unsigned f = 0; f < 16; ++f) narrow |= l->part[f] >= 0 ? 1u << f : 0;
@@ -5606,7 +5607,7 @@ static Tier *tier_plan(Block *k, unsigned li) {
         if (!k->loops[l].walk && k->loops[l].at >= l0->at && k->loops[l].end <= l0->end) t->slots |= UINT64_C(1) << (k->m->code[k->loops[l].at].arg & 0x3F);
     tier_liveness(t);
     tier_build(t);
-    if (!t->failed && !(t->lists = calloc(PURE_MODULE_STATES, sizeof(*t->lists)))) t->failed = true;
+    if (!t->failed && !(t->lists = calloc(JIT_STATES, sizeof(*t->lists)))) t->failed = true;
     if (!t->failed) tier_lists(t, t->lists);
     const char *hoist = getenv("PURE_TIER_HOIST");
     if (!t->failed && !(hoist && !strcmp(hoist, "0"))) tier_hoist(t);
@@ -5656,8 +5657,7 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
         load64(e, X21, X19, offsetof(Frame, values));
         load64(e, X22, X19, offsetof(Frame, ev));
         load64(e, X23, X19, offsetof(Frame, app));
-        mov_imm(e, X24, offsetof(PureApp, lists));
-        add_reg(e, X24, X23, X24);        /* the app's lists */
+        load64(e, X24, X23, offsetof(PureApp, lists)); /* the app's lists */
         load64(e, X27, X19, offsetof(Frame, loops));
         load64(e, X28, X22, offsetof(Event, locals));
         mov_imm(e, X9, UINT64_C(0x7FF0000000000000));
@@ -5786,7 +5786,9 @@ static bool want(const PureModule *m, PureBlock block, unsigned leaves, Made **m
 
 struct PureJit *pure_jit_make(const PureModule *m) {
     const char *enabled = getenv("PURE_JIT");
-    if ((enabled && !strcmp(enabled, "0")) || !m->height || !m->code_count) return NULL;
+    /* What it makes keeps its lists' and states' sets in a word each: a module of more states runs in the executor
+     * alone (027's 4f-2). */
+    if ((enabled && !strcmp(enabled, "0")) || !m->height || !m->code_count || m->states > JIT_STATES) return NULL;
     Made *made = NULL;
     size_t count = 0, room = 0;
     bool ok = true;

@@ -67,7 +67,7 @@ enum { JOURNAL_MIN = 1 << 20 };
 static const unsigned char links_magic[4] = {'P', 'L', 'K', '4'}, links_magic_3[4] = {'P', 'L', 'K', '3'},
                            links_magic_2[4] = {'P', 'L', 'K', '2'}, links_magic_1[4] = {'P', 'L', 'K', '1'};
 typedef struct { const char *name; unsigned fields; uint8_t kinds[3]; char names[3][PURE_MODULE_NAME]; } RuntimeList;
-static const RuntimeList runtime_lists[PURE_LISTS_STORED - PURE_LIST_HEARD] = {
+static const RuntimeList runtime_lists[PURE_LIST_RUNTIME] = {
     {"0heard", 2, {1, 0}, {"source", "seq"}},
     {"0sent", 3, {1, 0, 2}, {"output", "seq", "payload"}},
 };
@@ -429,7 +429,7 @@ PURE_COLD PureResult pure_save_open_log(PureApp *app) {
 void pure_save_release(PureApp *app) {
     if (!app->log) return;
     uint64_t kept = app->seq + 1;
-    for (uint32_t i = 0; i < PURE_LISTS_STORED; ++i)
+    for (size_t i = 0; i < pure_slots(app); ++i)
         if (app->logged_since[i] && app->logged_since[i] < kept) kept = app->logged_since[i];
     pure_log_release(app->log, kept - 1);
 }
@@ -673,35 +673,36 @@ PureCheckpoint *pure_app_checkpoint(PureApp *app) {
     if (!app->log || app->checkpoint || app->open || app->uncertain || app->reading) return NULL;
     /* A list whose logged changes outgrew its items, or, when the log grew
      * past LOG_KEPT, the one that holds it back most: the heard list is one. */
-    int due = -1, oldest = -1;
+    int due = -1, oldest = -1; /* slots */
     uint64_t items = 0;
-    for (uint32_t i = 0; i < PURE_LISTS_STORED && due < 0; ++i) {
-        const PureList *list = stored_list(app, i);
+    for (size_t i = 0; i < pure_slots(app) && due < 0; ++i) {
+        const PureList *list = stored_list(app, pure_place(app, i));
         size_t size = list ? pure_list_size(list) : 0;
         items += size;
         if (!list || !app->logged_since[i]) continue;
         if (app->logged[i] > (size > JOURNAL_MIN ? size : JOURNAL_MIN)) due = (int)i;
         else if (oldest < 0 || app->logged_since[i] < app->logged_since[oldest]) oldest = (int)i;
     }
-    int pick = due >= 0 ? due : pure_log_bytes(app->log) > (items > LOG_KEPT ? items : LOG_KEPT) ? oldest : -1;
-    if (pick < 0) return NULL;
+    int slot = due >= 0 ? due : pure_log_bytes(app->log) > (items > LOG_KEPT ? items : LOG_KEPT) ? oldest : -1;
+    if (slot < 0) return NULL;
+    uint32_t pick = pure_place(app, (size_t)slot);
     PureCheckpoint *c = calloc(1, sizeof(*c));
     const char *directory = directory_of(app);
     size_t length = strlen(directory) + 1;
     if (c && (c->directory = malloc(length))) memcpy(c->directory, directory, length);
-    if (!c || !c->directory || !(c->snapshot = pure_save_snapshot(app, pick >= PURE_LIST_HEARD ? (uint32_t)pick : UINT32_MAX))) {
+    if (!c || !c->directory || !(c->snapshot = pure_save_snapshot(app, pick >= PURE_LIST_HEARD ? pick : UINT32_MAX))) {
         if (c) free(c->directory);
         free(c);
         return NULL;
     }
-    c->state = (uint32_t)pick;
-    snprintf(c->name, sizeof(c->name), "%s", stored_name(app, (uint32_t)pick));
+    c->state = pick;
+    snprintf(c->name, sizeof(c->name), "%s", stored_name(app, pick));
     c->seq = app->seq;
     c->header_size = pick == PURE_LIST_OUTBOX ? outbox_header(m, c->seq, c->header) :
-                     pick >= PURE_LIST_HEARD ? runtime_header((uint32_t)pick, c->seq, c->header) :
+                     pick >= PURE_LIST_HEARD ? runtime_header(pick, c->seq, c->header) :
                                                image_header(m, m->state_ref[pick], c->seq, c->header);
-    c->logged = app->logged[pick];
-    c->since = app->logged_since[pick];
+    c->logged = app->logged[slot];
+    c->since = app->logged_since[slot];
     app->checkpoint = c;
     return c;
 }
@@ -712,7 +713,7 @@ PureResult pure_checkpoint_write(PureCheckpoint *c) {
 
 void pure_app_checkpointed(PureApp *app, PureCheckpoint *c, PureResult result) {
     if (!c) return;
-    uint32_t i = c->state;
+    size_t i = pure_slot(app, c->state);
     if (result == PURE_OK && app->checkpoint == c) {
         /* The image holds every change logged up to its save: those logged
          * since stay (counted from the save after it). */
@@ -769,7 +770,9 @@ static size_t encode_values(const PureModule *m, const PureValue *values, unsign
     return at;
 }
 
-enum { VALUES_BYTES = 4 + PURE_MODULE_STATES * (2 + PURE_MODULE_NAME + 8) };
+/* The values' bytes at most for states of them (and as many for a few on the stack). */
+static size_t values_bytes(uint32_t states) { return 4 + (size_t)states * (2 + PURE_MODULE_NAME + 8); }
+enum { FEW_STATES = 64, FEW_VALUES_BYTES = 4 + FEW_STATES * (2 + PURE_MODULE_NAME + 8) };
 
 PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, PureValue *values, const int *kept,
                                  PureDraft *const *texts, PureList *const *lists) {
@@ -1040,12 +1043,14 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, boo
  * its name and its records. NULL with size 0 when no list changed. */
 static unsigned char *list_changes(const PureApp *app, size_t *size) {
     *size = 0;
-    for (uint32_t i = 0; i < PURE_LISTS_STORED; ++i) {
+    for (size_t s = 0; s < pure_slots(app); ++s) {
+        uint32_t i = pure_place(app, s);
         const PureList *list = stored_list(app, i);
         if (list && pure_list_changes(list).size) *size += 1 + strlen(stored_name(app, i)) + 4 + pure_list_changes(list).size;
     }
     unsigned char *payload = *size ? malloc(*size) : NULL, *at = payload;
-    for (uint32_t i = 0; payload && i < PURE_LISTS_STORED; ++i) {
+    for (size_t s = 0; payload && s < pure_slots(app); ++s) {
+        uint32_t i = pure_place(app, s);
         const PureList *list = stored_list(app, i);
         PureSpan changes = list ? pure_list_changes(list) : (PureSpan){0};
         if (!changes.size) continue;
@@ -1065,8 +1070,15 @@ PureResult pure_save_commit(PureApp *app, const PureValue *values) {
      * from what the store has, no save follows it. */
     if (app->uncertain) return PURE_CONFLICT;
     const PureModule *m = app->module;
-    PureDraft *drafts[2 * PURE_MODULE_STATES + 3];
-    uint32_t states[2 * PURE_MODULE_STATES + 3];
+    /* A draft a state at most, and three more: on the stack for a few states (027's 4f-2). */
+    PureDraft *few_drafts[FEW_STATES + 3], **drafts = few_drafts;
+    uint32_t few_states[FEW_STATES + 3], *states = few_states;
+    if (m->states > FEW_STATES && (!(drafts = malloc((m->states + 3) * sizeof(*drafts))) |
+                                   !(states = malloc((m->states + 3) * sizeof(*states))))) {
+        if (drafts != few_drafts) free(drafts);
+        if (states != few_states) free(states);
+        return PURE_ALLOCATION;
+    }
     size_t count = 0;
     for (uint32_t i = 0; i < m->states; ++i) {
         PureDraft *draft = pure_state_transient(m, i) ? NULL :
@@ -1081,9 +1093,11 @@ PureResult pure_save_commit(PureApp *app, const PureValue *values) {
     PureVersion values_before = {0, 0}, links_before = {0, 0}, seq_before = {0, 0};
     bool values_changed = false, links_written = false, seq_written = false;
     PureResult result = PURE_OK;
-    if (app->stored_values) {
-        unsigned char encoded[VALUES_BYTES], *stored;
-        size_t length = encode_values(m, values, encoded), size;
+    unsigned char few_encoded[FEW_VALUES_BYTES], *encoded = few_encoded;
+    if (app->stored_values && m->states > FEW_STATES && !(encoded = malloc(values_bytes(m->states)))) result = PURE_ALLOCATION;
+    if (app->stored_values && result == PURE_OK) {
+        unsigned char *stored;
+        size_t length = encode_values(m, values, encoded), size = 0;
         result = read_whole(app->stored_values, &stored, &size);
         if (result == PURE_OK) {
             values_changed = size != length || memcmp(stored, encoded, length);
@@ -1149,8 +1163,8 @@ PureResult pure_save_commit(PureApp *app, const PureValue *values) {
     if (result == PURE_OK) {
         for (size_t k = 0; k < count; ++k)
             if (states[k] != UINT32_MAX) app->saved[states[k]] = pure_draft_version(drafts[k]);
-        for (uint32_t i = 0; i < PURE_LISTS_STORED; ++i) {
-            PureList *list = stored_list(app, i);
+        for (size_t i = 0; i < pure_slots(app); ++i) {
+            PureList *list = stored_list(app, pure_place(app, i));
             PureSpan changes = list ? pure_list_changes(list) : (PureSpan){0};
             if (!changes.size) continue;
             app->logged[i] += changes.size;
@@ -1171,5 +1185,7 @@ PureResult pure_save_commit(PureApp *app, const PureValue *values) {
         if (result != PURE_OK) pure_draft_restore(app->stored_seq, seq_before);
         pure_draft_hold(app->stored_seq, false);
     }
+    if (encoded != few_encoded) free(encoded);
+    if (drafts != few_drafts) free(drafts), free(states);
     return result;
 }

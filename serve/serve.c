@@ -2279,7 +2279,10 @@ static PureSnapshot *read_newest(PureApp *reader, App *app) {
     PureSnapshot *snapshot = published->snapshot;
     if (snapshot) pure_snapshot_hold(snapshot);
     pthread_mutex_unlock(&published->lock);
-    if (snapshot) pure_app_read(reader, snapshot);
+    if (snapshot && !pure_app_read(reader, snapshot)) { /* no room for its states: none shown */
+        pure_snapshot_release(snapshot);
+        snapshot = NULL;
+    }
     reader->work_budget = atomic_load_explicit(&app->work, memory_order_relaxed);
     reader->memory = atomic_load_explicit(&app->memory, memory_order_relaxed); /* what a view's body may add to its own lists */
     return snapshot;
@@ -2847,7 +2850,11 @@ static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) 
         return PURE_BUSY;
     }
     PureApp reader = {0};
-    pure_app_read(&reader, snapshot);
+    if (!pure_app_read(&reader, snapshot)) {
+        pure_app_stop(&reader);
+        let_go_query(held);
+        return PURE_ALLOCATION;
+    }
     if (reader.module != checked && !same_states(&held->module, reader.module)) { /* its app's states are laid out anew */
         pure_app_stop(&reader);
         let_go_query(held);
@@ -3178,7 +3185,10 @@ static PureSnapshot *surface_read(PureSurfaceHost *s, PureApp *reader) {
     PureSnapshot *snapshot = published->snapshot;
     if (snapshot) pure_snapshot_hold(snapshot);
     pthread_mutex_unlock(&published->lock);
-    if (snapshot) pure_app_read(reader, snapshot);
+    if (snapshot && !pure_app_read(reader, snapshot)) { /* no room for its states: none shown */
+        pure_snapshot_release(snapshot);
+        snapshot = NULL;
+    }
     return snapshot;
 }
 

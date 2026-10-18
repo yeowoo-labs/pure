@@ -95,4 +95,13 @@ bool pure_layout_same(const PureLayout *, const PureLayout *);
  * them in their stored form, else an event's, holding none yet). */
 PureResult pure_list_migrate(PureList **out, const PureList *from, const PureLayout *from_layout, const PureModule *m,
                              uint32_t record, bool kept);
+/* A stored list's place (a state's number, PURE_LIST_HEARD or PURE_LIST_OUTBOX) and its slot in an app's arrays of
+ * them (its states', then the runtime's two), and how many slots (027's 4f-2). */
+static inline size_t pure_slot(const PureApp *app, uint32_t place) {
+    return place >= PURE_LIST_HEARD ? app->laid + (place - PURE_LIST_HEARD) : place;
+}
+static inline uint32_t pure_place(const PureApp *app, size_t slot) {
+    return slot < app->laid ? (uint32_t)slot : PURE_LIST_HEARD + (uint32_t)(slot - app->laid);
+}
+static inline size_t pure_slots(const PureApp *app) { return (size_t)app->laid + PURE_LIST_RUNTIME; }
 #endif

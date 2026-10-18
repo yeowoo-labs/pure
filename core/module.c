@@ -486,16 +486,24 @@ static bool same_stack(const Join *join, int height, const unsigned char *types,
  * into it. Returns why the block is refused, with at moved to the
  * instruction when one is at fault, or NULL. */
 PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int view, int row, int outer, uint32_t event,
-                                          bool locals, unsigned nest, uint32_t walked, int fn, uint32_t *at);
+                                          bool locals, unsigned nest, uint32_t *walked, unsigned walks, int fn, uint32_t *at);
+
+/* Whether a walk among walks walks list. */
+static bool walking(const uint32_t *walked, unsigned walks, uint32_t list) {
+    for (unsigned k = 0; k < walks; ++k)
+        if (walked[k] == list) return true;
+    return false;
+}
 
 /* target marks, per instruction of the block, a branch into it with an empty stack. */
 /* outer: the row of the column a fold's block runs in (-1: none). */
 /* locals: the block is a handler's, or runs in one (a walk, a fold): it reads the handler's locals. */
-/* nest: the loops (LOOP, EACH) the block runs in; walked: a bit for each list the walks among them walk. */
+/* nest: the loops (LOOP, EACH) the block runs in; walked: the lists the walks among them walk, walks of them (its room
+ * the module's code: a walk's list goes after them for the walk's block). */
 /* fn: the function whose code the block is (its own block, FUNCTION, or a loop's in it), or -1. */
 PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, int view, int row, int outer,
-                                         uint32_t event, bool locals, unsigned nest, uint32_t walked, int fn, uint32_t *at,
-                                         unsigned char *target) {
+                                         uint32_t event, bool locals, unsigned nest, uint32_t *walked, unsigned walks, int fn,
+                                         uint32_t *at, unsigned char *target) {
 #define REFUSE(why) do { *at = pc; return why; } while (0)
     bool steps = view == STEPS || view == STEPS_WALK, handler = view < 0 || view == WALK || steps || view == FUNCTION;
     bool folding = view == FOLD_ONE || view == FOLD_TWO || view == FOLD_I64;
@@ -568,9 +576,9 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         /* A keyed list places its items by key, and an item's key stays. */
         if (op->op == PURE_OP_LIST_INSERT && m->state_key[arg]) REFUSE("insert by position into a keyed list");
         /* A walk ends: no list a walk walks grows while it runs, and only the innermost walk's may shrink (it moves with it). */
-        if ((op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT) && walked >> arg & 1)
+        if ((op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT) && walking(walked, walks, arg))
             REFUSE("insert into the list walked");
-        if (op->op == PURE_OP_LIST_REMOVE && walked >> arg & 1 && (int)arg != row)
+        if (op->op == PURE_OP_LIST_REMOVE && walking(walked, walks, arg) && (int)arg != row)
             REFUSE("remove from a list an outer walk walks");
         if (nest && op->op == PURE_OP_REPLY) REFUSE("reply inside a loop");
         if (nest == PURE_MODULE_NESTING && (op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP)) REFUSE("loops nested deeper than 8");
@@ -617,15 +625,16 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             unsigned how = arg & PURE_FOLD_KIND;
             uint32_t list = arg >> 8 & 0xFF;
             /* A fold in a walk reads the walk's item as a fold in a column reads its row; a loop's block is its block's code. */
+            if (kind == A_EACH) walked[walks] = list; /* its block's walks: these and its own */
             const char *why = kind == A_EACH ? verify_block(m, (PureBlock){pc + 1, skip}, body ? STEPS_WALK : WALK, (int)list, -1,
-                                                            event, locals, nest + 1, walked | UINT32_C(1) << (list & 31), fn, &inner)
+                                                            event, locals, nest + 1, walked, walks + 1, fn, &inner)
                             : kind == A_LOOP ? verify_block(m, (PureBlock){pc + 1, skip}, body && !steps ? STEPS :
                                                             view == FUNCTION ? -1 : view, row, outer, event, locals, nest + 1,
-                                                            walked, fn, &inner)
+                                                            walked, walks, fn, &inner)
                                              : verify_block(m, (PureBlock){pc + 1, skip},
                                                             how == PURE_FOLD_COUNT || how == PURE_FOLD_FIRST ? FOLD_ONE :
                                                             arg & PURE_FOLD_INTEGER ? FOLD_I64 : FOLD_TWO,
-                                                            (int)list, row, event, locals, nest, walked, -1, &inner);
+                                                            (int)list, row, event, locals, nest, walked, walks, -1, &inner);
             if (why) { *at = inner; return why; }
             for (uint32_t k = i + 1; k <= i + skip; ++k) {
                 const char *into = kind == A_FOLD ? "branch into a fold" : kind == A_EACH ? "branch into an each" :
@@ -688,7 +697,8 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         /* A loop's block begins at the bottom of its run's stack: its operands are all the stack holds. */
         if ((kind == A_LOOP || kind == A_EACH) && height != (int)pops) REFUSE("loop above values");
         /* What a walk keeps to, a call keeps to as well: a call changes no list a walk around it walks. */
-        if (op->op == PURE_OP_CALL && m->function[arg].changes & walked) REFUSE("call that changes a list walked");
+        for (unsigned k = 0; op->op == PURE_OP_CALL && k < walks; ++k)
+            if (pure_states_has(m->function_changes + (size_t)arg * m->state_words, walked[k])) REFUSE("call that changes a list walked");
         if (height < (int)pops) REFUSE("stack underflow");
         height -= (int)pops;
         for (unsigned k = 0; k < pops; ++k)
@@ -780,12 +790,17 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
 }
 
 PURE_COLD static const char *verify_block(const PureModule *m, PureBlock block, int view, int row, int outer,
-                                          uint32_t event, bool locals, unsigned nest, uint32_t walked, int fn, uint32_t *at) {
+                                          uint32_t event, bool locals, unsigned nest, uint32_t *walked, unsigned walks, int fn,
+                                          uint32_t *at) {
     if (block.start > m->code_count || block.length > m->code_count - block.start) return "code range outside module";
     unsigned char *target = calloc((size_t)block.length + 1, 1);
-    if (!target) return "out of memory";
-    const char *why = verify_code(m, block, view, row, outer, event, locals, nest, walked, fn, at, target);
-    free(target);
+    uint32_t *own = walked ? NULL : malloc(((size_t)m->code_count + 1) * sizeof(*own)); /* a walk's an instruction at least */
+    if (!target || (!walked && !own)) {
+        free(target);
+        return "out of memory";
+    }
+    const char *why = verify_code(m, block, view, row, outer, event, locals, nest, walked ? walked : own, walks, fn, at, target);
+    free(target), free(own);
     return why;
 }
 
@@ -1498,10 +1513,24 @@ PURE_COLD static void range_code(PureModule *m, PureBlock block, int input) {
     }
 }
 
+/* A name and its place among those of one namespace, in order of name and then of place. */
+typedef struct { const char *name; size_t index; } Named;
+static int by_name(const void *a, const void *b) {
+    const Named *x = a, *y = b;
+    int order = strcmp(x->name, y->name);
+    return order ? order : (x->index > y->index) - (x->index < y->index);
+}
+
+/* A state added to a set of them (027's 4f-2). */
+static void states_add(uint64_t *set, uint32_t state) { set[state >> 6] |= UINT64_C(1) << (state & 63); }
+
 /* What a function's code names (027's 2c), read before it is verified (its arguments bounded here): the event's lists,
  * the registers and the values held by name each call has its own of, the lists not an event's it changes, its locals
  * and how deep its loops nest; the functions it calls (calls, a bit each). */
-PURE_COLD static void function_names(const PureModule *m, PureFunction *f, uint64_t *calls) {
+PURE_COLD static void function_names(PureModule *m, uint32_t fn, uint64_t *calls) {
+    PureFunction *f = &m->function[fn];
+    uint64_t *lists = m->function_lists + (size_t)fn * m->state_words, *registers = m->function_registers + (size_t)fn * m->state_words,
+             *changes = m->function_changes + (size_t)fn * m->state_words;
     uint32_t end = f->code.start + f->code.length, ends[PURE_MODULE_NESTING];
     unsigned depth = 0;
     if (f->code.start > m->code_count || f->code.length > m->code_count - f->code.start) return; /* refused as it is verified */
@@ -1512,7 +1541,7 @@ PURE_COLD static void function_names(const PureModule *m, PureFunction *f, uint6
         switch (op->op) {
         case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE:
             list = arg;
-            if (state_of(m, list, PURE_STATE_LIST) && !event_list_state(m, list)) f->changes |= UINT32_C(1) << list;
+            if (state_of(m, list, PURE_STATE_LIST) && !event_list_state(m, list)) states_add(changes, list);
             break;
         case PURE_OP_LIST_COUNT: case PURE_OP_LIST_VALUE: case PURE_OP_LIST_BIND: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
         case PURE_OP_INDEX_AT: case PURE_OP_BYTES_OF: case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_LIST_FIND:
@@ -1534,7 +1563,7 @@ PURE_COLD static void function_names(const PureModule *m, PureFunction *f, uint6
         case PURE_OP_CALL: if (arg < PURE_MODULE_FUNCTIONS) *calls |= UINT64_C(1) << arg; break;
         default: break;
         }
-        if (event_list_state(m, list)) *(bound_list(m, list) ? &f->registers : &f->lists) |= UINT32_C(1) << list;
+        if (event_list_state(m, list)) states_add(bound_list(m, list) ? registers : lists, list);
     }
 }
 
@@ -1577,15 +1606,18 @@ static size_t lay_tables(PureModule *m, uintptr_t base, size_t views, size_t sig
     (m->member = (void *)(base + at), at += (((size_t)(count) * sizeof(*m->member) + 7) & ~(size_t)7) + TABLE_GAP)
     LAY(state_names, m->states), LAY(state_type, m->states), LAY(state_ref, m->states), LAY(state_flags, m->states);
     LAY(state_key, m->states), LAY(state_indexed, m->states), LAY(initial, m->states);
+    LAY(state_transient, m->states), LAY(state_counted, m->states);
     LAY(input_names, m->inputs), LAY(input_keys, m->inputs), LAY(input, m->inputs), LAY(field, m->fields);
     LAY(view_names, views), LAY(view_type, views), LAY(view_table, views), LAY(view_list, views), LAY(view_record, views);
     LAY(view_field, views), LAY(view_computed, views), LAY(view_code, views), LAY(view_plan, views);
-    LAY(view_arguments, views), LAY(view_body, views), LAY(view_lists, views), LAY(view_range, views);
+    LAY(view_arguments, views), LAY(view_body, views), LAY(view_lists, views * m->state_words), LAY(view_range, views);
     LAY(handler, m->handlers);
     LAY(record_names, m->records), LAY(record, m->records), LAY(record_nested, m->records), LAY(record_held, m->records);
     LAY(record_field_names, m->record_fields), LAY(record_field_type, m->record_fields);
     LAY(record_field_default, m->record_fields);
     LAY(function, m->functions), LAY(signature_type, signatures), LAY(signature_record, signatures);
+    LAY(function_lists, (size_t)m->functions * m->state_words), LAY(function_registers, (size_t)m->functions * m->state_words);
+    LAY(function_changes, (size_t)m->functions * m->state_words);
 #undef LAY
     return at;
 }
@@ -1605,6 +1637,7 @@ static bool make_tables(PureModule *m, size_t views, size_t signatures) {
         GAP(view_field) GAP(view_computed) GAP(view_code) GAP(view_plan) GAP(view_arguments) GAP(view_body) GAP(view_lists)
         GAP(view_range) GAP(handler) GAP(record_names) GAP(record) GAP(record_nested) GAP(record_held) GAP(record_field_names)
         GAP(record_field_type) GAP(record_field_default) GAP(function) GAP(signature_type) GAP(signature_record)
+        GAP(state_transient) GAP(state_counted) GAP(function_lists) GAP(function_registers) GAP(function_changes)
 #undef GAP
         ASAN_POISON_MEMORY_REGION(next - TABLE_GAP, TABLE_GAP);
         at = (size_t)(next - base);
@@ -1676,7 +1709,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     uint32_t constant_bytes = read32(p + 30);
     out->record_fields = (uint16_t)read16(p + 34);
     out->functions = (uint16_t)read16(p + 36);
-    if (out->states > PURE_MODULE_STATES || out->inputs > PURE_MODULE_INPUTS ||
+    out->state_words = (uint16_t)((out->states + 63) / 64 + !out->states);
+    if (out->inputs > PURE_MODULE_INPUTS ||
         out->views > PURE_MODULE_VIEWS || out->handlers > PURE_MODULE_HANDLERS ||
         out->code_count > PURE_MODULE_CODE || strings > PURE_MODULE_STRINGS ||
         out->fields > PURE_MODULE_FIELDS || out->constants > PURE_MODULE_CONSTANTS || constant_bytes > PURE_MODULE_CONSTANT_BYTES ||
@@ -1746,7 +1780,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         uint32_t type = read32(at + 4);
         if ((type & ~(uint32_t)PURE_STATE_TRANSIENT) > PURE_MODULE_I64) REFUSE("state type", i);
         out->state_type[i] = held_as[type & 0xFF];
-        if (type & PURE_STATE_TRANSIENT) out->transient |= UINT32_C(1) << i;
+        out->state_transient[i] = type & PURE_STATE_TRANSIENT;
         /* A number's, a bool's or an i64's value is its 8 bytes; others have flags:
          * a mark (cursor), a keyed list's key field + 1, or a list of a message's rows. */
         bool value = out->state_type[i] == PURE_STATE_NUM || out->state_type[i] == PURE_STATE_BOOL ||
@@ -1757,6 +1791,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         bool bound = list && flags & PURE_LIST_BOUND; /* a register: an event's list, not keyed */
         uint32_t key = list ? flags & ~(uint32_t)(PURE_LIST_ROWS | PURE_LIST_BOUND) : 0;
         if (bound && (!rows || key)) REFUSE("state type", i);
+        /* What the states hold counts a text and a list, a message's rows aside (they are its own, gone when it ends). */
+        out->state_counted[i] = out->state_type[i] == PURE_STATE_TEXT || (list && !rows);
         if (rows && type & PURE_STATE_TRANSIENT) REFUSE("state type", i); /* an event's own, saved or not */
         /* A list of a message's rows is named by the field's path (input.field), no other state. */
         if (!name_at(text, strings, read32(at), rows ? NAME_PATH : NAME_IDENTIFIER, out->state_names[i]) ||
@@ -1917,7 +1953,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     /* A stored position into what is not stored would come back meaning nothing. */
     for (uint32_t i = 0; i < out->states; ++i)
         if ((out->state_type[i] == PURE_STATE_CURSOR || out->state_type[i] == PURE_STATE_INDEX) &&
-            !(out->transient >> i & 1) && out->transient >> out->state_ref[i] & 1)
+            !out->state_transient[i] && out->state_transient[out->state_ref[i]])
             REFUSE("stored position in a transient state", i);
     /* Views (027's 4e): a list view names its list state (+ 1; its block a filter) or none (its block leaves its list),
      * and its items' record (+ 1; a map of a list state 0, its columns following it, each naming it + 1). */
@@ -2001,16 +2037,23 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if (at[0] >= PURE_OP_COUNT) REFUSE("unknown opcode", i);
         out->code[i] = (PureOp){.op = anchor_step(out, at[0], read32(at + 4)), .arg = read32(at + 4), .value = read_double(at + 8)};
     }
-    /* States, records, inputs and views share one namespace. */
-    const char *names[PURE_MODULE_STATES + PURE_MODULE_RECORDS + PURE_MODULE_INPUTS + PURE_MODULE_VIEWS];
-    size_t count = 0;
-    for (uint32_t i = 0; i < out->states; ++i) names[count++] = out->state_names[i];
-    for (uint32_t i = 0; i < out->records; ++i) names[count++] = out->record_names[i];
-    for (uint32_t i = 0; i < out->inputs; ++i) names[count++] = out->input_names[i];
-    for (uint32_t i = 0; i < out->views; ++i) if (!out->view_table[i]) names[count++] = out->view_names[i];
-    for (size_t i = 0; i < count; ++i)
-        for (size_t k = 0; k < i; ++k)
-            if (!strcmp(names[i], names[k])) REFUSE("duplicate name", i);
+    /* States, records, inputs and views share one namespace: in order of name, the first name again (in their order) is
+     * refused. */
+    Named *names = malloc(((size_t)out->states + out->records + out->inputs + out->views + 1) * sizeof(*names));
+    if (!names) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
+    size_t count = 0, again = SIZE_MAX;
+    for (uint32_t i = 0; i < out->states; ++i) names[count] = (Named){out->state_names[i], count}, ++count;
+    for (uint32_t i = 0; i < out->records; ++i) names[count] = (Named){out->record_names[i], count}, ++count;
+    for (uint32_t i = 0; i < out->inputs; ++i) names[count] = (Named){out->input_names[i], count}, ++count;
+    for (uint32_t i = 0; i < out->views; ++i) if (!out->view_table[i]) names[count] = (Named){out->view_names[i], count}, ++count;
+    qsort(names, count, sizeof(*names), by_name);
+    for (size_t i = 1; i < count; ++i)
+        if (!strcmp(names[i].name, names[i - 1].name) && names[i].index < again) again = names[i].index;
+    free(names);
+    if (again != SIZE_MAX) REFUSE("duplicate name", again);
     /* Column names are unique within their table. */
     for (uint32_t i = 0; i < out->views; ++i)
         for (uint32_t k = 0; k < i; ++k)
@@ -2024,7 +2067,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         int kind = table ? FILTER : out->view_type[i] == PURE_VIEW_LIST ? LIST_OF + out->view_record[i] - 1 : out->view_type[i];
         if (!out->view_field[i] && (!table || out->view_code[i].length) &&
             (why = verify_block(out, out->view_code[i], kind, table || out->view_table[i] ? out->view_list[i] : -1, -1, event,
-                                computes, 0, 0, -1, &bad)))
+                                computes, 0, NULL, 0, -1, &bad)))
             goto refused;
         if (computes && !locals_agree(out, out->view_code[i])) { why = "local used as two things"; goto refused; }
         for (uint32_t pc = out->view_code[i].start; computes && pc < out->view_code[i].start + out->view_code[i].length; ++pc) {
@@ -2032,34 +2075,36 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             if (op->op == PURE_OP_LOCAL_LOAD || op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH)
                 out->view_body[i] = true;
             if (op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT || op->op == PURE_OP_LIST_REMOVE)
-                out->view_lists[i] |= UINT32_C(1) << (op->arg & 31);
-            if (op->op == PURE_OP_ITEM_SET) out->view_lists[i] |= UINT32_C(1) << (list_of(op->arg) & 31);
+                states_add(out->view_lists + (size_t)i * out->state_words, op->arg);
+            if (op->op == PURE_OP_ITEM_SET) states_add(out->view_lists + (size_t)i * out->state_words, list_of(op->arg));
         }
-        if (out->view_lists[i]) out->view_body[i] = true;
+        for (uint32_t w = 0; w < out->state_words; ++w)
+            if (out->view_lists[(size_t)i * out->state_words + w]) out->view_body[i] = true;
     }
     /* What each function names, and the lists it changes with those the functions it calls change (until none adds). */
     uint64_t calls[PURE_MODULE_FUNCTIONS] = {0};
-    for (uint32_t i = 0; i < out->functions; ++i) function_names(out, &out->function[i], &calls[i]);
+    for (uint32_t i = 0; i < out->functions; ++i) function_names(out, i, &calls[i]);
     for (bool more = out->functions > 0; more;) {
         more = false;
         for (uint32_t i = 0; i < out->functions; ++i)
-            for (uint64_t left = calls[i]; left; left &= left - 1) {
-                uint32_t was = out->function[i].changes;
-                out->function[i].changes |= out->function[__builtin_ctzll(left)].changes;
-                more = more || out->function[i].changes != was;
-            }
+            for (uint64_t left = calls[i]; left; left &= left - 1)
+                for (uint32_t w = 0; w < out->state_words; ++w) {
+                    uint64_t *mine = &out->function_changes[(size_t)i * out->state_words + w], was = *mine;
+                    *mine |= out->function_changes[(size_t)__builtin_ctzll(left) * out->state_words + w];
+                    more = more || *mine != was;
+                }
     }
     for (uint32_t i = 0; i < out->functions; ++i) {
         bad = i;
         PureFunction *f = &out->function[i];
-        if ((why = verify_block(out, f->code, FUNCTION, -1, -1, 0, true, 0, 0, (int)i, &bad))) goto refused;
+        if ((why = verify_block(out, f->code, FUNCTION, -1, -1, 0, true, 0, NULL, 0, (int)i, &bad))) goto refused;
         if (!locals_agree(out, f->code)) { why = "local used as two things"; goto refused; }
         for (uint32_t pc = f->code.start; pc < f->code.start + f->code.length; ++pc) /* its frame's stack: as the verifier went */
             if (out->height[pc] >= f->height) f->height = (uint8_t)(out->height[pc] + 1);
     }
     for (uint32_t i = 0; i < out->handlers; ++i) {
         bad = i;
-        if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event + 1, true, 0, 0, -1, &bad)))
+        if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event + 1, true, 0, NULL, 0, -1, &bad)))
             goto refused;
         if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
     }
@@ -2591,7 +2636,7 @@ static uint64_t nest(PureApp *app, uint32_t record, const PureList *from) {
 
 /* The bound lists given back their own, and the event's lists in records let go (an event or a view begins). */
 static void unbind(PureApp *app) {
-    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i)
+    for (uint32_t i = 0; i < app->laid; ++i) /* (a start that failed laid none, or none for a module) */
         if (app->unbound[i]) app->lists[i] = app->unbound[i], app->unbound[i] = NULL;
 }
 static void drop_nested(PureApp *app) {
@@ -4619,32 +4664,55 @@ static void let_list_go(PureApp *app, uint32_t state, PureList *list) {
 }
 
 static void drop_spares(PureApp *app) {
-    for (unsigned i = 0; i < PURE_MODULE_STATES; ++i) {
+    for (unsigned i = 0; i < app->laid; ++i) {
         for (unsigned k = 0; k < app->spare[i].count; ++k) pure_list_free(app->spare[i].lists[k]);
         free(app->spare[i].lists);
         app->spare[i].lists = NULL, app->spare[i].count = app->spare[i].capacity = 0;
     }
 }
 
-/* The first count of the lists and registers a function's code names given back what a call kept of them (its own
- * lists let go). */
-static void restore_lists(PureApp *app, const PureFunction *f, PureList **kept, unsigned count) {
+/* The next state from on in the union of two sets of them (words each; b may be NULL), or UINT32_MAX. */
+static uint32_t states_next(const uint64_t *a, const uint64_t *b, unsigned words, uint32_t from) {
+    for (uint32_t w = from >> 6; w < words; ++w) {
+        uint64_t bits = (a[w] | (b ? b[w] : 0)) & (w == from >> 6 ? ~UINT64_C(0) << (from & 63) : ~UINT64_C(0));
+        if (bits) return w * 64 + (uint32_t)__builtin_ctzll(bits);
+    }
+    return UINT32_MAX;
+}
+static unsigned states_count(const uint64_t *set, unsigned words) {
+    unsigned count = 0;
+    for (unsigned w = 0; w < words; ++w) count += (unsigned)__builtin_popcountll(set[w]);
+    return count;
+}
+
+/* The first count of the lists and registers function's code names given back what a call kept of them (its own lists
+ * let go). */
+static void restore_lists(PureApp *app, uint32_t function, PureList **kept, unsigned count) {
+    const PureModule *m = app->module;
+    const uint64_t *lists = m->function_lists + (size_t)function * m->state_words,
+                   *registers = m->function_registers + (size_t)function * m->state_words;
     unsigned k = 0;
-    for (uint32_t left = f->lists | f->registers; left && k < count; left &= left - 1, ++k) {
-        uint32_t state = (uint32_t)__builtin_ctz(left);
-        if (!(f->registers >> state & 1)) let_list_go(app, state, app->lists[state]);
+    for (uint32_t state = states_next(lists, registers, m->state_words, 0); state != UINT32_MAX && k < count;
+         state = states_next(lists, registers, m->state_words, state + 1), ++k) {
+        if (!pure_states_has(registers, state)) let_list_go(app, state, app->lists[state]);
         app->lists[state] = kept[k];
     }
+}
+
+/* What a call of function keeps of its caller's: the lists and registers its code names (its own). */
+static unsigned call_keeps(const PureModule *m, uint32_t function) {
+    return states_count(m->function_lists + (size_t)function * m->state_words, m->state_words) +
+           states_count(m->function_registers + (size_t)function * m->state_words, m->state_words);
 }
 
 /* A frame closed: the caller's lists, registers and held values given back (the callee's let go), its locals and walk,
  * the frame's room in the blocks and in the event's room. The frame below. */
 static Call *give_back(PureApp *app, Call *call, Event *ev) {
     const PureFunction *f = &app->module->function[call->function];
-    unsigned keeps = (unsigned)__builtin_popcount(f->lists | f->registers), j = 0;
+    unsigned keeps = call_keeps(app->module, call->function), j = 0;
     PureList **kept = (PureList **)(call + 1);
     Kept *held = (Kept *)(kept + keeps);
-    restore_lists(app, f, kept, keeps);
+    restore_lists(app, call->function, kept, keeps);
     for (uint32_t left = f->held; left; left &= left - 1, ++j) {
         Kept *h = &app->held[__builtin_ctz(left)];
         if (!h->by_ref) (void)grows(app, (Held){0, h->size}, (Held){0, 0});
@@ -4675,12 +4743,14 @@ static __attribute__((noinline, cold)) int enter_call(Frame *frame, Call **top, 
     Event *ev = frame->ev;
     uint32_t function = m->code[*pc - 1].arg;
     const PureFunction *f = &m->function[function];
-    unsigned keeps = (unsigned)__builtin_popcount(f->lists | f->registers), holds = (unsigned)__builtin_popcount(f->held);
+    const uint64_t *lists = m->function_lists + (size_t)function * m->state_words,
+                   *registers = m->function_registers + (size_t)function * m->state_words;
+    unsigned keeps = call_keeps(m, function), holds = (unsigned)__builtin_popcount(f->held);
     size_t bytes = (sizeof(Call) + keeps * sizeof(PureList *) + holds * sizeof(Kept) + f->height * sizeof(Slot) +
                     f->locals * sizeof(PureValue) + f->nesting * sizeof(Loop) + 15) & ~(size_t)15;
     size_t counted = PURE_CALL_BYTES + (size_t)f->height * PURE_CALL_VALUE + (size_t)f->locals * PURE_CALL_LOCAL +
-                     (size_t)f->nesting * PURE_CALL_LOOP + (size_t)__builtin_popcount(f->lists) * PURE_CALL_LIST +
-                     (size_t)holds * PURE_CALL_HELD + (size_t)__builtin_popcount(f->registers) * PURE_CALL_REGISTER;
+                     (size_t)f->nesting * PURE_CALL_LOOP + (size_t)states_count(lists, m->state_words) * PURE_CALL_LIST +
+                     (size_t)holds * PURE_CALL_HELD + (size_t)states_count(registers, m->state_words) * PURE_CALL_REGISTER;
     frame->fault_pc = *pc - 1;
     if (!charge(app, f->code.length)) { frame->kind = PURE_FAULT_WORK; return STEP_FAULT; }
     if (!grows(app, (Held){0, 0}, (Held){0, counted})) { frame->kind = PURE_FAULT_MEMORY; return STEP_FAULT; }
@@ -4698,12 +4768,12 @@ static __attribute__((noinline, cold)) int enter_call(Frame *frame, Call **top, 
         stack[i] = frame->stack[base + i];
         whole = kept_apart(app, frame->arena, f, m->signature_type[f->first + i], &stack[i].bytes);
     }
-    for (uint32_t left = f->lists | f->registers; whole && left; left &= left - 1, ++k) { /* its own lists, registers */
-        uint32_t state = (uint32_t)__builtin_ctz(left);
-        PureList *own = f->registers >> state & 1 ? (app->unbound[state] ? app->unbound[state] : app->lists[state])
-                                                  : spare_list(app, state);
+    for (uint32_t state = states_next(lists, registers, m->state_words, 0); whole && state != UINT32_MAX;
+         state = states_next(lists, registers, m->state_words, state + 1), ++k) { /* its own lists, registers */
+        PureList *own = pure_states_has(registers, state) ? (app->unbound[state] ? app->unbound[state] : app->lists[state])
+                                                          : spare_list(app, state);
         if (!own) {
-            restore_lists(app, f, kept, k);
+            restore_lists(app, function, kept, k);
             whole = false;
             break;
         }
@@ -4897,7 +4967,7 @@ void pure_app_finish(PureApp *app) {
 static void open_burst(PureApp *app) {
     if (app->open) return;
     const PureModule *m = app->module;
-    memcpy(app->durable_values, app->values, sizeof(app->values));
+    memcpy(app->durable_values, app->values, m->states * sizeof(*app->values));
     app->durable_events = app->events;
     for (uint32_t i = 0; i < m->states; ++i) {
         if (app->texts[i]) {
@@ -4928,7 +4998,7 @@ static void close_burst(PureApp *app, bool keep) {
     if (keep) pure_undo_commit(&app->undo);
     else {
         pure_undo_rollback(&app->undo, 0);
-        memcpy(app->values, app->durable_values, sizeof(app->values));
+        memcpy(app->values, app->durable_values, m->states * sizeof(*app->values));
         app->events = app->durable_events;
         ++app->changes;
     }
@@ -4989,10 +5059,11 @@ struct PureSnapshot {
     unsigned refs;
     const PureModule *module;
     uint64_t changes, epoch;
-    PureValue values[PURE_MODULE_STATES];
-    PureDraft *texts[PURE_MODULE_STATES];
-    PureList *lists[PURE_MODULE_STATES];
-    PureList *runtime[PURE_LISTS_STORED - PURE_LIST_HEARD]; /* only in a checkpoint's of one */
+    uint32_t states;
+    PureValue *values; /* each state's (027's 4f-2), after it in its block */
+    PureDraft **texts;
+    PureList **lists;
+    PureList *runtime[PURE_LIST_RUNTIME]; /* only in a checkpoint's of one */
     PureRetired retired;
     struct PureSnapshot *older, *newer; /* the held ones beside it */
     Register *all;
@@ -5021,11 +5092,11 @@ void pure_snapshot_release(PureSnapshot *snapshot) {
         unlock_register(all);
     }
     pure_retired_free(&snapshot->retired); /* what it had when never linked, else its room */
-    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
+    for (uint32_t i = 0; i < snapshot->states; ++i) {
         pure_draft_close(snapshot->texts[i]);
         pure_list_free(snapshot->lists[i]);
     }
-    for (unsigned r = 0; r < PURE_LISTS_STORED - PURE_LIST_HEARD; ++r) pure_list_free(snapshot->runtime[r]);
+    for (unsigned r = 0; r < PURE_LIST_RUNTIME; ++r) pure_list_free(snapshot->runtime[r]);
     free(snapshot);
     if (all && !__atomic_sub_fetch(&all->refs, 1, __ATOMIC_ACQ_REL)) {
         pure_retired_free(&all->returned); /* the app is gone: no list takes it back */
@@ -5035,12 +5106,38 @@ void pure_snapshot_release(PureSnapshot *snapshot) {
 
 static void let_own_go(PureApp *app);
 
+/* The arrays of each state an app holds (027's 4f-2) laid out from base for states of them: the bytes they take (a
+ * stored list's slots then the runtime's two). */
+static size_t lay_states(PureApp *app, uint32_t states, uintptr_t base) {
+    size_t at = 0, slots = (size_t)states + PURE_LIST_RUNTIME;
+#define LAY(member, count) (app->member = (void *)(base + at), at += ((size_t)(count) * sizeof(*app->member) + 7) & ~(size_t)7)
+    LAY(values, states), LAY(texts, states), LAY(lists, states), LAY(list_drafts, states);
+    LAY(image_seq, slots), LAY(logged_since, slots), LAY(logged, slots);
+    LAY(saved, states), LAY(durable_values, states), LAY(durable_texts, states), LAY(durable_lists, states);
+    LAY(own, states), LAY(unbound, states), LAY(spare, states), LAY(pending, states);
+    LAY(marked_texts, states), LAY(marked_lists, states);
+#undef LAY
+    return at;
+}
+
+/* A new block of them for states, zeroed, laid out in app (its old one the caller's to give back first, or after it
+ * moved what it keeps); false without room (app as it was). */
+static bool lay_app(PureApp *app, uint32_t states) {
+    PureApp laid = *app;
+    size_t size = lay_states(&laid, states, 0);
+    unsigned char *base = calloc(1, size ? size : 1);
+    if (!base) return false;
+    lay_states(app, states, (uintptr_t)base);
+    app->states = base, app->laid = states;
+    return true;
+}
+
 void pure_app_stop(PureApp *app) {
     unbind(app); /* a register's own list goes with the lists, the bound one with the event's */
     pure_app_finish(app);
     close_burst(app, true); /* unsaved changes are dropped with the app */
     let_own_go(app);
-    for (uint32_t i = 0; i < PURE_MODULE_STATES && !app->reading; ++i) {
+    for (uint32_t i = 0; i < app->laid && !app->reading; ++i) {
         pure_draft_close(app->texts[i]);
         pure_list_free(app->lists[i]);
         pure_draft_close(app->list_drafts[i]);
@@ -5074,13 +5171,13 @@ void pure_app_stop(PureApp *app) {
     drop_passes(app);
     free(app->arena.bytes);
     free(app->view_arena.bytes);
+    free(app->states);
     memset(app, 0, sizeof(*app));
 }
 
 /* Where one event began inside the burst: a failed event returns there. */
-typedef struct {
-    PureVersion texts[PURE_MODULE_STATES];
-    size_t lists[PURE_MODULE_STATES], heard, outbox; /* stored lists' journal lengths */
+typedef struct { /* (each state's text version and list journal length in the app's marked_texts, marked_lists) */
+    size_t heard, outbox; /* stored lists' journal lengths */
     size_t undo, sent_saved;
     uint64_t last_sent[PURE_MODULE_INPUTS];
     bool opened;
@@ -5090,8 +5187,8 @@ static void mark_event(PureApp *app, Mark *mark) {
     mark->opened = !app->open;
     open_burst(app);
     for (uint32_t i = 0; i < app->module->states; ++i) {
-        if (app->texts[i]) mark->texts[i] = pure_draft_version(app->texts[i]);
-        if (app->lists[i]) mark->lists[i] = pure_list_changes(app->lists[i]).size;
+        if (app->texts[i]) app->marked_texts[i] = pure_draft_version(app->texts[i]);
+        if (app->lists[i]) app->marked_lists[i] = pure_list_changes(app->lists[i]).size;
     }
     mark->heard = app->heard ? pure_list_changes(app->heard).size : 0;
     mark->outbox = app->outbox ? pure_list_changes(app->outbox).size : 0;
@@ -5102,8 +5199,8 @@ static void mark_event(PureApp *app, Mark *mark) {
 
 static void undo_event(PureApp *app, const Mark *mark) {
     for (uint32_t i = 0; i < app->module->states; ++i) {
-        if (app->texts[i]) pure_draft_restore(app->texts[i], mark->texts[i]);
-        if (app->lists[i]) pure_list_forget(app->lists[i], mark->lists[i]);
+        if (app->texts[i]) pure_draft_restore(app->texts[i], app->marked_texts[i]);
+        if (app->lists[i]) pure_list_forget(app->lists[i], app->marked_lists[i]);
     }
     if (app->heard) pure_list_forget(app->heard, mark->heard);
     if (app->outbox) pure_list_forget(app->outbox, mark->outbox);
@@ -5174,10 +5271,9 @@ PureFault pure_app_view_fault(const PureApp *app) { return app->view_fault; }
 
 size_t pure_app_state_bytes(const PureApp *app) {
     size_t bytes = (app->outbox ? pure_list_size(app->outbox) : 0) + (app->heard ? pure_list_size(app->heard) : 0);
-    for (uint32_t left = app->counted; left; left &= left - 1) {
-        unsigned i = (unsigned)__builtin_ctz(left);
-        bytes += app->lists[i] ? pure_list_size(app->lists[i]) : app->texts[i] ? pure_draft_size(app->texts[i]) : 0;
-    }
+    for (uint32_t i = 0; i < app->module->states; ++i)
+        if (app->module->state_counted[i])
+            bytes += app->lists[i] ? pure_list_size(app->lists[i]) : app->texts[i] ? pure_draft_size(app->texts[i]) : 0;
     return bytes;
 }
 
@@ -5188,7 +5284,7 @@ size_t pure_app_state_bytes(const PureApp *app) {
  * holding more than before, fails. */
 static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     const PureModule *m = app->module;
-    PureValue pending[PURE_MODULE_STATES], locals[PURE_MODULE_LOCALS] = {{0}};
+    PureValue *pending = app->pending, locals[PURE_MODULE_LOCALS] = {{0}};
     ev->locals = locals;
     size_t held = app->memory ? pure_app_state_bytes(app) : 0;
     /* What the event may add as it runs, whatever it gives back later: the
@@ -5200,7 +5296,7 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     if (app->nested.count && !ev->nested) unbind(app), drop_nested(app); /* a view's body bound some on the app itself */
     Mark mark;
     mark_event(app, &mark);
-    memcpy(pending, app->values, sizeof(app->values));
+    memcpy(pending, app->values, m->states * sizeof(*pending));
     app->fault = PURE_FAULT_NONE;
     app->fault_pc = UINT32_MAX;
     app->work = 0;
@@ -5229,7 +5325,7 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
      * last changed is packed now (docs/design/022). */
     for (uint32_t i = 0; i < m->states; ++i)
         if (app->lists[i]) (void)pure_list_settle(app->lists[i]);
-    memcpy(app->values, pending, sizeof(pending));
+    memcpy(app->values, pending, m->states * sizeof(*pending));
     ++app->events;
     ++app->changes;
     app->delivering.pending = false;
@@ -5461,8 +5557,8 @@ static bool own_lists(PureApp *app, uint32_t lists) {
 
 static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     const PureModule *m = app->module;
-    PureValue values[PURE_MODULE_STATES], locals[PURE_MODULE_LOCALS];
-    memcpy(values, app->values, sizeof(values));
+    /* The states as they are: a view's code changes none (the verifier holds it to that). */
+    PureValue *values = app->values, locals[PURE_MODULE_LOCALS];
     app->view_arena.used = 0;
     Event ev = {.app = app, .arena = &app->view_arena, .row = row};
     if (!argue(app, view, &ev)) return PURE_INVALID;
@@ -5782,14 +5878,16 @@ static void reuse_returned(PureApp *app, Register *all) {
     PureRetired returned = all->returned;
     all->returned = (PureRetired){0};
     unlock_register(all);
-    if (returned.count) {
-        PureList *lists[PURE_MODULE_STATES + 2];
+    PureList *few[64], **lists = !returned.count ? NULL : app->module->states + 2 <= 64 ? few :
+                                 malloc((app->module->states + 2) * sizeof(*lists));
+    if (lists) {
         unsigned count = 0;
         for (uint32_t i = 0; i < app->module->states; ++i)
             if (app->lists[i]) lists[count++] = app->lists[i];
         lists[count++] = app->outbox;
         lists[count++] = app->heard;
         pure_retired_reuse(&returned, lists, count);
+        if (lists != few) free(lists);
     }
     lock_register(all);
     bool kept = !all->returned.entries; /* none came back meanwhile: the room stays for the next */
@@ -5801,7 +5899,8 @@ static void reuse_returned(PureApp *app, Register *all) {
 PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
     if (app->open || app->reading) return NULL;
     const PureModule *m = app->module;
-    PureSnapshot *made = calloc(1, sizeof(*made)), *last = app->snapshot;
+    size_t each = sizeof(PureValue) + sizeof(PureDraft *) + sizeof(PureList *);
+    PureSnapshot *made = calloc(1, sizeof(*made) + m->states * each), *last = app->snapshot;
     Register *all = last ? last->all : calloc(1, sizeof(*all));
     if (!made || !all) {
         free(made);
@@ -5810,9 +5909,13 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
     }
     made->refs = 1;
     made->module = m;
+    made->states = m->states;
+    made->values = (PureValue *)(made + 1);
+    made->texts = (PureDraft **)(made->values + m->states);
+    made->lists = (PureList **)(made->texts + m->states);
     made->changes = app->changes;
     made->epoch = all->epoch + 1; /* the app's thread alone makes them */
-    memcpy(made->values, app->values, sizeof(made->values));
+    memcpy(made->values, app->values, m->states * sizeof(*made->values));
     bool ok = true;
     for (uint32_t i = 0; i < m->states && ok; ++i) {
         /* A stored text is shared as its store holds it; a transient one, never stored, is copied. */
@@ -5820,14 +5923,14 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
             ok = (made->texts[i] = pure_state_transient(m, i) ? text_copy(app->texts[i]) : pure_draft_freeze(app->texts[i])) !=
                  NULL;
         if (!ok || !app->lists[i]) continue;
-        if (last && last->lists[i] && pure_list_current(last->lists[i], app->lists[i])) {
+        if (last && i < last->states && last->lists[i] && pure_list_current(last->lists[i], app->lists[i])) {
             pure_list_hold(last->lists[i]);
             made->lists[i] = last->lists[i];
             pure_list_mark(app->lists[i], made->epoch);
         } else
             ok = (made->lists[i] = pure_list_share(app->lists[i], &app->retired, made->epoch)) != NULL;
     }
-    if (ok && runtime >= PURE_LIST_HEARD && runtime < PURE_LISTS_STORED) {
+    if (ok && runtime >= PURE_LIST_HEARD && runtime < PURE_LIST_HEARD + PURE_LIST_RUNTIME) {
         PureList *list = runtime == PURE_LIST_HEARD ? app->heard : app->outbox;
         ok = (made->runtime[runtime - PURE_LIST_HEARD] = pure_list_share(list, &app->retired, made->epoch)) != NULL;
     }
@@ -5856,20 +5959,26 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
 
 /* A reader's own lists go: its next views compute in new ones. */
 static void let_own_go(PureApp *app) {
-    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
+    for (uint32_t i = 0; i < app->laid; ++i) {
         pure_list_free(app->own[i]);
         app->own[i] = app->unbound[i] = NULL;
     }
 }
 
-void pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
+bool pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
     if (reader->module != snapshot->module) drop_passes(reader), let_own_go(reader); /* laid out for its module */
+    if (!reader->states || reader->laid != snapshot->states) { /* its arrays for as many states (027's 4f-2) */
+        void *was = reader->states;
+        if (!lay_app(reader, snapshot->states)) return false;
+        free(was);
+    }
     reader->module = snapshot->module;
     reader->reading = true;
     reader->changes = snapshot->changes; /* what the row cache is fresh for */
-    memcpy(reader->values, snapshot->values, sizeof(reader->values));
-    memcpy(reader->texts, snapshot->texts, sizeof(reader->texts));
-    memcpy(reader->lists, snapshot->lists, sizeof(reader->lists));
+    memcpy(reader->values, snapshot->values, snapshot->states * sizeof(*reader->values));
+    memcpy(reader->texts, snapshot->texts, snapshot->states * sizeof(*reader->texts));
+    memcpy(reader->lists, snapshot->lists, snapshot->states * sizeof(*reader->lists));
+    return true;
 }
 
 uint8_t pure_record_kind(const PureModule *m, uint32_t field) {
@@ -6171,20 +6280,41 @@ PURE_COLD static PureResult remap_outputs(PureApp *app, const PureModule *old, c
     return PURE_OK;
 }
 
+/* The arrays of each state next laid out given to app, its old ones given back (027's 4f-2). */
+static void take_states(PureApp *app, const PureApp *next) {
+    free(app->states);
+    app->states = next->states, app->laid = next->laid;
+    app->values = next->values, app->texts = next->texts, app->lists = next->lists, app->list_drafts = next->list_drafts;
+    app->image_seq = next->image_seq, app->logged_since = next->logged_since, app->logged = next->logged;
+    app->saved = next->saved, app->durable_values = next->durable_values, app->durable_texts = next->durable_texts;
+    app->durable_lists = next->durable_lists, app->own = next->own, app->unbound = next->unbound, app->spare = next->spare;
+    app->pending = next->pending, app->marked_texts = next->marked_texts;
+    app->marked_lists = next->marked_lists;
+}
+
 PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) {
     const PureModule *old = app->module;
     bool stored = pure_save_enabled(app);
-    PureValue values[PURE_MODULE_STATES] = {0};
-    PureDraft *texts[PURE_MODULE_STATES] = {0}, *list_drafts[PURE_MODULE_STATES] = {0};
-    PureList *lists[PURE_MODULE_STATES] = {0};
-    PureVersion saved[PURE_MODULE_STATES] = {{0, 0}};
-    PureSaved listed[PURE_MODULE_STATES] = {{0}};
-    int kept[PURE_MODULE_STATES];
-    bool rewrite[PURE_MODULE_STATES] = {false};
-    /* Lists are stored where the host names a directory for them (module-save.c). */
-    bool lists_stored = stored && app->data.directory && app->data.directory(app->data.context);
     app->why[0] = 0;
     if (old && app->checkpoint) return PURE_CONFLICT; /* the host has a checkpoint of the running module out */
+    /* The new arrays of each state, laid out apart (next) and given to app once nothing can fail; what is worked out
+     * for each state. */
+    PureApp next = {0};
+    uint32_t states = module->states;
+    int *kept = malloc((states + 1) * sizeof(*kept));
+    PureSaved *listed = calloc(states + 1, sizeof(*listed));
+    bool *rewrite = calloc(states + 1, sizeof(*rewrite));
+    size_t **moved = calloc(states + 1, sizeof(*moved));
+    if (!kept || !listed || !rewrite || !moved || !lay_app(&next, states)) {
+        free(kept), free(listed), free(rewrite), free(moved), free(next.states);
+        return PURE_ALLOCATION;
+    }
+    PureValue *values = next.values;
+    PureDraft **texts = next.texts, **list_drafts = next.list_drafts;
+    PureList **lists = next.lists;
+    PureVersion *saved = next.saved;
+    /* Lists are stored where the host names a directory for them (module-save.c). */
+    bool lists_stored = stored && app->data.directory && app->data.directory(app->data.context);
     PureResult result = !old && lists_stored ? pure_save_open_log(app) : PURE_OK;
     /* The numbers heard and the outbox belong to the app, whatever its module. */
     PureSaved heard = {0}, sent = {0};
@@ -6236,7 +6366,6 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
     /* A keyed list keeps its items in key order: one that was not keyed, or
      * keyed by another field, is put in order and its indices follow their
      * items. Two items with one key refuse the module: nothing is dropped. */
-    size_t *moved[PURE_MODULE_STATES] = {0};
     for (uint32_t i = 0; i < module->states && result == PURE_OK; ++i) {
         if (module->state_type[i] != PURE_STATE_LIST || !module->state_key[i]) continue;
         size_t count = pure_list_count(lists[i]);
@@ -6316,6 +6445,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
             pure_list_free(lists[i]);
             pure_draft_close(list_drafts[i]);
         }
+        free(kept), free(listed), free(rewrite), free(moved), free(next.states);
         return result;
     }
     for (uint32_t i = 0; old && i < old->states; ++i) {
@@ -6330,25 +6460,23 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         }
         if (!draft_reused) pure_draft_close(app->list_drafts[i]);
     }
-    memcpy(app->values, values, sizeof(values));
-    memcpy(app->texts, texts, sizeof(texts));
-    memcpy(app->lists, lists, sizeof(lists));
-    memcpy(app->list_drafts, list_drafts, sizeof(list_drafts));
-    memcpy(app->saved, saved, sizeof(saved));
-    for (uint32_t i = 0; i < PURE_MODULE_STATES; ++i) {
-        app->image_seq[i] = listed[i].image;
-        app->logged_since[i] = listed[i].since;
-        app->logged[i] = listed[i].logged;
+    for (uint32_t i = 0; i < states; ++i) {
+        next.image_seq[i] = listed[i].image;
+        next.logged_since[i] = listed[i].since;
+        next.logged[i] = listed[i].logged;
     }
     if (!old) {
-        app->image_seq[PURE_LIST_HEARD] = heard.image;
-        app->logged_since[PURE_LIST_HEARD] = heard.since;
-        app->logged[PURE_LIST_HEARD] = heard.logged;
-        app->image_seq[PURE_LIST_OUTBOX] = sent.image;
-        app->logged_since[PURE_LIST_OUTBOX] = sent.since;
-        app->logged[PURE_LIST_OUTBOX] = sent.logged;
+        next.image_seq[states] = heard.image, next.logged_since[states] = heard.since, next.logged[states] = heard.logged;
+        next.image_seq[states + 1] = sent.image, next.logged_since[states + 1] = sent.since, next.logged[states + 1] = sent.logged;
         if (lists_stored) pure_list_journal(app->heard, true), pure_list_journal(app->outbox, true);
-    }
+    } else
+        for (unsigned r = 0; r < PURE_LIST_RUNTIME; ++r) { /* the runtime's lists, past the new module's states */
+            next.image_seq[states + r] = app->image_seq[app->laid + r];
+            next.logged_since[states + r] = app->logged_since[app->laid + r];
+            next.logged[states + r] = app->logged[app->laid + r];
+        }
+    take_states(app, &next);
+    free(kept), free(listed), free(rewrite), free(moved);
     pure_save_release(app);
     for (uint32_t i = 0; i < module->states; ++i) {
         /* A stored list's changes are recorded from now on; a transient one's never. */
@@ -6370,17 +6498,12 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         if (lists_stored) pure_list_journal(recast, true);
     }
     if (outbox_imaged) {
-        app->image_seq[PURE_LIST_OUTBOX] = app->seq;
-        app->logged_since[PURE_LIST_OUTBOX] = 0;
-        app->logged[PURE_LIST_OUTBOX] = 0;
+        app->image_seq[states + 1] = app->seq;
+        app->logged_since[states + 1] = 0;
+        app->logged[states + 1] = 0;
     }
     drop_passes(app); /* kept by instruction of the module they were made for */
     app->module = module;
-    app->counted = 0;
-    for (uint32_t i = 0; i < module->states; ++i)
-        if (module->state_type[i] == PURE_STATE_TEXT ||
-            (module->state_type[i] == PURE_STATE_LIST && !(module->state_flags[i] & PURE_LIST_ROWS >> 8)))
-            app->counted |= UINT32_C(1) << i; /* a message's rows are its own, gone when it ends */
     ++app->changes;
     return PURE_OK;
 }

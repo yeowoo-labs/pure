@@ -14,7 +14,7 @@
  * belongs to), stack heights and the stack at every join, forward-only
  * branches, names, records, tables, constants and effects. */
 enum {
-    PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 64,
+    PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 64,
     PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 65535, PURE_MODULE_STACK = 64,
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 38,
     PURE_MODULE_FIELDS = 64, PURE_MODULE_CONSTANTS = 4096,
@@ -329,7 +329,7 @@ typedef struct {
     PureBlock code;
     uint16_t first;
     uint8_t params, results;
-    uint32_t lists, registers, held, changes;
+    uint32_t held;
     uint8_t height, locals, nesting;
 } PureFunction;
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint16_t rows; uint32_t offset; } PureField;
@@ -362,7 +362,6 @@ typedef struct { uint8_t form, relation; uint16_t field; uint32_t test; PureBloc
 enum { PURE_MODULE_RANGES = 64 };
 typedef struct { uint8_t lower_relation, upper_relation; PureBlock lower, upper; } PureRange;
 
-_Static_assert(PURE_MODULE_STATES <= 32, "a state is a bit of PureApp.counted");
 
 typedef struct {
     uint16_t states, inputs, views, handlers, fields, constants, records, record_fields;
@@ -378,7 +377,9 @@ typedef struct {
     uint8_t *state_type;
     uint16_t *state_ref; /* text: constant; cursor: text; list: record; index: list */
     uint8_t *state_flags; /* cursor: PURE_CURSOR_STAYS; list: PURE_LIST_ROWS >> 8 */
-    uint32_t transient; /* a bit per transient state */
+    bool *state_transient; /* PURE_STATE_TRANSIENT */
+    bool *state_counted; /* what the states hold counts it (a text, a list not a message's rows: the memory budget's) */
+    uint16_t state_words; /* a set of states' words, a bit each (027's 4f-2): (states + 63) / 64, at least 1 */
     /* A keyed list: its key field + 1 (0: none). Its items stay in key order
      * (numbers by value, texts by bytes), each key once, and keys do not change. */
     uint8_t *state_key;
@@ -407,9 +408,10 @@ typedef struct {
     PureBlock *view_code;
     uint8_t *view_plan; /* a table's filter runs a leaf of its list at once (as a fold may) */
     uint8_t *view_arguments; /* the input of a view's arguments + 1 (a column's: its table's), or 0 */
-    /* Set at load: a view's code computes (its locals and loops: a body), and the event's lists it changes, a bit each. */
+    /* Set at load: a view's code computes (its locals and loops: a body), and the event's lists it changes (a set of
+     * states, state_words for each view). */
     bool *view_body;
-    uint32_t *view_lists;
+    uint64_t *view_lists;
     PureShape shape[PURE_MODULE_SHAPES];
     uint8_t shapes;
     PureRange range[PURE_MODULE_RANGES];
@@ -432,13 +434,18 @@ typedef struct {
     uint16_t *record_held; /* its fields held as bytes are (pure_record_bytes), a bit each (set at load) */
     uint16_t functions;
     PureFunction *function;
+    /* Each function's sets of states (state_words each): the event's lists and the registers its code names, each
+     * call's own, and the lists not an event's it changes (or a function it calls does). */
+    uint64_t *function_lists, *function_registers, *function_changes;
     uint8_t *signature_type;
     uint16_t *signature_record;
     bool calls; /* it has functions: its blocks run in the executor that calls (module.c) */
 } PureModule;
 
 /* Whether a state of m is transient (PURE_STATE_TRANSIENT). */
-static inline bool pure_state_transient(const PureModule *m, uint32_t state) { return m->transient >> state & 1; }
+static inline bool pure_state_transient(const PureModule *m, uint32_t state) { return m->state_transient[state]; }
+/* Whether a set of states (state_words words) holds state. */
+static inline bool pure_states_has(const uint64_t *set, uint32_t state) { return set[state >> 6] >> (state & 63) & 1; }
 
 /* Decode and verify into out, which must be zeroed (a static one is) or hold
  * a loaded module: what it held is given back first. On failure out holds
@@ -507,24 +514,29 @@ typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
  * each key, text and message event saves before it returns (a frame waits for
  * the next one). Deferred, events apply at once and a host saves a burst with
  * one commit: an event is durable once a later save succeeds. */
-/* The runtime's lists' places among the stored lists' records (PureApp):
- * the numbers heard, and the outbox. */
-enum { PURE_LIST_HEARD = PURE_MODULE_STATES, PURE_LIST_OUTBOX, PURE_LISTS_STORED };
+/* The runtime's lists' places among the stored lists' records (PureApp),
+ * past any state's: the numbers heard, and the outbox. A place's slot in
+ * the arrays of them is a state's number, or states and states + 1. */
+enum { PURE_LIST_HEARD = 0x10000, PURE_LIST_OUTBOX, PURE_LIST_RUNTIME = 2 };
 typedef struct {
     const PureModule *module;
     PureData data;
-    PureValue values[PURE_MODULE_STATES]; /* numbers, bools, cursor byte positions and list indices */
-    PureDraft *texts[PURE_MODULE_STATES];
-    PureList *lists[PURE_MODULE_STATES];
+    /* The arrays of each state (027's 4f-2), sized to the module in one block (states) for the states it was laid out
+     * for (laid). */
+    void *states;
+    uint32_t laid;
+    PureValue *values; /* numbers, bools, cursor byte positions and list indices */
+    PureDraft **texts;
+    PureList **lists;
     PureUndo undo; /* list changes of the current event */
-    PureDraft *list_drafts[PURE_MODULE_STATES]; /* lists the tree kept before images, until emptied */
-    /* Stored lists (module-save.c), by state, then the runtime's (the heard
-     * list and the outbox): the save each one's image holds, the first save
-     * logged since that changed it (0: none), and the bytes of its changes
-     * logged since; the log, the tree's number of its last save, the last
-     * save's number, and a checkpoint being written. */
-    uint64_t image_seq[PURE_LISTS_STORED], logged_since[PURE_LISTS_STORED];
-    size_t logged[PURE_LISTS_STORED];
+    PureDraft **list_drafts; /* lists the tree kept before images, until emptied */
+    /* Stored lists (module-save.c), by slot (a state's, then the runtime's:
+     * the heard list and the outbox): the save each one's image holds, the
+     * first save logged since that changed it (0: none), and the bytes of its
+     * changes logged since; the log, the tree's number of its last save, the
+     * last save's number, and a checkpoint being written. */
+    uint64_t *image_seq, *logged_since;
+    size_t *logged;
     struct PureLog *log;
     PureDraft *stored_seq;
     uint64_t seq;
@@ -533,23 +545,22 @@ typedef struct {
     bool background_checkpoints;
     bool uncertain; /* a save may or may not be stored: none follows until a start */
     PureDraft *stored_values;                   /* numbers, cursors and indices, when kept */
-    PureVersion saved[PURE_MODULE_STATES];      /* text and list versions at the last save */
+    PureVersion *saved; /* text and list versions at the last save */
     /* Events since the last save: what a failed save returns to. */
     bool deferred, open;
-    PureValue durable_values[PURE_MODULE_STATES];
-    PureVersion durable_texts[PURE_MODULE_STATES];
-    size_t durable_lists[PURE_MODULE_STATES]; /* each stored list's journal length */
+    PureValue *durable_values;
+    PureVersion *durable_texts;
+    size_t *durable_lists; /* each stored list's journal length */
     uint64_t durable_events;
     PureFault fault;
     uint32_t fault_pc;
     size_t memory; /* the budget of what the states hold (0: none): pure_app_memory */
     uint64_t work_budget, work; /* pure_app_work's budget (0: PURE_WORK_DEFAULT), and what the unit running has used */
     int64_t grown, spent; /* what the event running has added to the states (and its lists), as stored and in all */
-    PureList *own[PURE_MODULE_STATES]; /* a reader's: the event's lists its views compute in, its own */
+    PureList **own; /* a reader's: the event's lists its views compute in, its own */
     size_t room;          /* what it may hold for that in all: PURE_GROWTH_DEFAULT, or the memory budget if larger */
     PureFault view_fault; /* why the last view evaluated had no value (pure_app_view_fault) */
     char why[128]; /* why the last start or replace was refused, when it says (else empty; a failed start keeps it) */
-    uint32_t counted; /* the states it counts, a bit each: lists (not a message's rows) and texts */
     uint64_t events;
     /* The time events see as now, in milliseconds since 1970 (UTC). The host
      * sets it, so a script can replay any time; views never see it. */
@@ -605,11 +616,14 @@ typedef struct {
     /* The lists in records an event or a view's body made (LIST fields: a value is a number here, 1 on), how many
      * values share each, and the bound lists' own (a register's list while another is bound to it). */
     struct { PureList **list; uint32_t *shared; size_t count, capacity; } nested;
-    PureList *unbound[PURE_MODULE_STATES];
+    PureList **unbound;
     /* Calls (027's 2c): the frames of those open, in blocks that never move (code points into a frame), the block in
      * use and how much of it; and the event's lists calls let go, emptied, each state's for its next calls. */
     struct { unsigned char **blocks; size_t *sizes; unsigned count, at; size_t used; } calls;
-    struct { PureList **lists; unsigned count, capacity; } spare[PURE_MODULE_STATES];
+    struct PureSpare { PureList **lists; unsigned count, capacity; } *spare;
+    PureValue *pending; /* the values an event works on until it ends */
+    PureVersion *marked_texts; /* where the event running began: each text's version, each stored list's journal */
+    size_t *marked_lists;
 } PureApp;
 
 PureResult pure_app_start(PureApp *, const PureModule *, PureData data);
@@ -764,5 +778,5 @@ void pure_snapshot_release(PureSnapshot *);
  * views read them while the snapshot is held, with the reader's own arena and
  * row cache (one thread at a time). It applies no events. pure_app_stop frees
  * the reader and leaves the snapshot alone. */
-void pure_app_read(PureApp *reader, const PureSnapshot *);
+bool pure_app_read(PureApp *reader, const PureSnapshot *); /* false without room for its states: it shows none */
 #endif

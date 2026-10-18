@@ -1,17 +1,18 @@
 #include "module-store.h"
+#include <stdlib.h>
 
 static PureResult state(void *context, const char *name, PureDraft **out) {
     return pure_state_open(context, name, out);
 }
 
-enum { SAVED = 2 * PURE_MODULE_STATES + 3 };
-
-/* The app's changed states in one tree commit. */
+/* The app's changed states in one tree commit (their revisions on the stack for a few). */
 static PureResult save(void *context, PureDraft *const *states, size_t count) {
     (void)context;
-    int64_t revisions[SAVED];
-    if (count > SAVED) return PURE_LIMIT;
-    return pure_draft_commit_all(states, count, revisions);
+    int64_t few[67], *revisions = count <= 67 ? few : malloc(count * sizeof(*revisions));
+    if (!revisions) return PURE_ALLOCATION;
+    PureResult result = pure_draft_commit_all(states, count, revisions);
+    if (revisions != few) free(revisions);
+    return result;
 }
 
 static const char *path_directory(void *context) { return context; }

@@ -190,10 +190,10 @@ static Spec expand(Spec spec) {
 
 static size_t build(unsigned char *out, Spec spec) {
     spec = expand(spec);
-    unsigned char strings[4096], blob[4096];
+    static unsigned char strings[16384], blob[4096];
     size_t used = 0, blob_used = 0;
-    const char *text[512];
-    uint32_t offset[512];
+    static const char *text[2048];
+    static uint32_t offset[2048];
     size_t names = 0;
     for (size_t i = 0; i < spec.ns; ++i) text[names++] = spec.s[i].name;
     for (size_t i = 0; i < spec.nt; ++i) text[names++] = spec.t[i].name;
@@ -555,10 +555,21 @@ static void rejections(void) {
             abort();
         }
     }
-    static S many[33];
-    static char many_names[33][8];
-    for (unsigned i = 0; i < 33; ++i) { snprintf(many_names[i], 8, "s%u", i % 100u); many[i] = (S){many_names[i], 0}; }
-    CHECK(load((Spec){many, 33, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0}, &module_a) == PURE_LIMIT);
+    /* No fixed count of states (027's 4f-2): 300 of them (sets of them past a word), the last one counted by a key; a
+     * module of as many runs in the executor alone (the JIT's sets are a word). */
+    enum { MANY = 300 };
+    static S many[MANY];
+    static char many_names[MANY][8];
+    for (unsigned i = 0; i < MANY; ++i) { snprintf(many_names[i], 8, "s%u", i); many[i] = (S){many_names[i], 0}; }
+    static const O count_last[] = {{L, MANY - 1, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, MANY - 1, 0}};
+    static const I key_in[] = {KEY("go", "KeyG")};
+    static const H go[] = {{1, 0, 4}};
+    CHECK(load((Spec){many, MANY, key_in, 1, clash, 0, go, 1, count_last, 4, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0},
+               &module_a) == PURE_OK && module_a.state_words == 5 && !module_a.jit);
+    PureApp wide;
+    CHECK(pure_app_start(&wide, &module_a, (PureData){0}) == PURE_OK && press(&wide, 0) == PURE_OK && press(&wide, 0) == PURE_OK &&
+          wide.values[MANY - 1].num == 2 && wide.values[0].num == 0);
+    pure_app_stop(&wide);
     static unsigned char bytes[65536];
     size_t size = build(bytes, (Spec){s1, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0});
     CHECK(pure_module_load(bytes, size - 1, &module_a, error, sizeof(error)) == PURE_INVALID);
@@ -6343,8 +6354,9 @@ static void functions_and_characters(void) {
     Spec spec = {nums, 1, inputs, LEN(inputs), NULL, 0, handlers, LEN(handlers), code, LEN(code), NULL, 0,
                  others, LEN(others), constants, LEN(constants), NULL, 0, records, 2, NULL, 0};
     if (load_functions(spec, fns, LEN(fns), &module_b) != PURE_OK) { fprintf(stderr, "functions: %s\n", error); abort(); }
-    CHECK(module_b.function[2].lists == UINT32_C(1) << OWN && module_b.function[1].registers == UINT32_C(1) << R_ &&
-          module_b.function[3].held == UINT32_C(1) << 16 && module_b.runner == 2);
+    CHECK(module_b.state_words == 1 && module_b.function_lists[2] == UINT64_C(1) << OWN &&
+          module_b.function_registers[1] == UINT64_C(1) << R_ && module_b.function[3].held == UINT32_C(1) << 16 &&
+          module_b.runner == 2);
     PureApp app;
     CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
     for (int round = 0; round < 3; ++round) { /* the frames' room used again, each event alike */
@@ -7109,7 +7121,8 @@ static void view_bodies(void) {
     Spec spec = {nums, 2, inputs, 1, views, 4, handlers, 1, code, LEN(code), NULL, 0, states, 2, NULL, 0, NULL, 0,
                  records, 1, NULL, 0};
     CHECK(load(spec, &module_a) == PURE_OK);
-    CHECK(module_a.view_body[0] && module_a.view_body[1] && !module_a.view_lists[0] && module_a.view_lists[1] == 1u << SEEN);
+    CHECK(module_a.view_body[0] && module_a.view_body[1] && module_a.state_words == 1 && !module_a.view_lists[0] &&
+          module_a.view_lists[1] == UINT64_C(1) << SEEN);
     char *path = new_store();
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
