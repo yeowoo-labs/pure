@@ -135,7 +135,7 @@ typedef struct {
     PureFault kind;    /* a fault's */
     PureResult status; /* what refused or stopped it */
     uint32_t fault_pc; /* the instruction that faulted or refused */
-    Loop *loops;       /* PURE_MODULE_NESTING of them, apart: a walk points into its loop */
+    Loop *loops;       /* the module's nesting of them (PURE_MODULE_NESTING on the stack, more the app's), apart: a walk points into its loop */
     /* The run of a tree compiled code read an item from last (pure_run_item):
      * the list as it was (its version), its positions and each field's cells. */
     struct { const PureList *list; uint64_t version; size_t start, count; const void *columns[16]; } run;

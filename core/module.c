@@ -581,7 +581,6 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (op->op == PURE_OP_LIST_REMOVE && walking(walked, walks, arg) && (int)arg != row)
             REFUSE("remove from a list an outer walk walks");
         if (nest && op->op == PURE_OP_REPLY) REFUSE("reply inside a loop");
-        if (nest == PURE_MODULE_NESTING && (op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP)) REFUSE("loops nested deeper than 8");
         if (op->op == PURE_OP_BREAK && !nest) REFUSE("break outside a loop");
         if (op->op == PURE_OP_BREAK && height) REFUSE("break with values on the stack");
         if (op->op == PURE_OP_ITEM_SET && m->state_key[list_of(arg)] == item_field(arg) + 1)
@@ -1513,6 +1512,20 @@ PURE_COLD static void range_code(PureModule *m, PureBlock block, int input) {
     }
 }
 
+/* How deep the loops of m's verified code nest (its blocks apart, each loop's within its own); UINT32_MAX without room. */
+static uint32_t nesting_of(const PureModule *m) {
+    uint32_t *ends = malloc(((size_t)m->code_count + 1) * sizeof(*ends)), depth = 0, most = 0;
+    if (!ends) return UINT32_MAX;
+    for (uint32_t pc = 0; pc < m->code_count; ++pc) {
+        while (depth && pc >= ends[depth - 1]) --depth;
+        if (m->code[pc].op != PURE_OP_EACH && m->code[pc].op != PURE_OP_LOOP) continue;
+        ends[depth++] = pc + 1 + (m->code[pc].arg >> 16);
+        if (depth > most) most = depth;
+    }
+    free(ends);
+    return most;
+}
+
 /* A name and its place among those of one namespace, in order of name and then of place. */
 typedef struct { const char *name; size_t index; } Named;
 static int by_name(const void *a, const void *b) {
@@ -1527,13 +1540,14 @@ static void states_add(uint64_t *set, uint32_t state) { set[state >> 6] |= UINT6
 /* What a function's code names (027's 2c), read before it is verified (its arguments bounded here): the event's lists,
  * the registers and the values held by name each call has its own of, the lists not an event's it changes, its locals
  * and how deep its loops nest; the functions it calls (calls, a bit each). */
-PURE_COLD static void function_names(PureModule *m, uint32_t fn, uint64_t *calls) {
+PURE_COLD static bool function_names(PureModule *m, uint32_t fn, uint64_t *calls) {
     PureFunction *f = &m->function[fn];
     uint64_t *lists = m->function_lists + (size_t)fn * m->state_words, *registers = m->function_registers + (size_t)fn * m->state_words,
              *changes = m->function_changes + (size_t)fn * m->state_words;
-    uint32_t end = f->code.start + f->code.length, ends[PURE_MODULE_NESTING];
+    if (f->code.start > m->code_count || f->code.length > m->code_count - f->code.start) return true; /* refused as it is verified */
+    uint32_t end = f->code.start + f->code.length, *ends = malloc(((size_t)f->code.length + 1) * sizeof(*ends));
     unsigned depth = 0;
-    if (f->code.start > m->code_count || f->code.length > m->code_count - f->code.start) return; /* refused as it is verified */
+    if (!ends) return false;
     for (uint32_t pc = f->code.start; pc < end; ++pc) {
         const PureOp *op = &m->code[pc];
         uint32_t arg = op->arg, list = UINT32_MAX;
@@ -1551,9 +1565,9 @@ PURE_COLD static void function_names(PureModule *m, uint32_t fn, uint64_t *calls
         case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: case PURE_OP_APPEND_IN: list = list_of(arg); break;
         case PURE_OP_EACH: case PURE_OP_FOLD: case PURE_OP_LOOP: case PURE_OP_LOCAL_LOAD: case PURE_OP_LOCAL_STORE:
             if (op->op == PURE_OP_EACH || op->op == PURE_OP_FOLD) list = arg >> 8 & 0xFF;
-            if ((op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP) && depth < PURE_MODULE_NESTING) {
+            if (op->op == PURE_OP_EACH || op->op == PURE_OP_LOOP) { /* (a loop an instruction at least: depth within ends) */
                 ends[depth++] = pc + 1 + (arg >> 16);
-                if (depth > f->nesting) f->nesting = (uint8_t)depth;
+                if (depth > f->nesting) f->nesting = depth;
             }
             if (op->op == PURE_OP_EACH || op->op == PURE_OP_FOLD) break;
             if ((arg & 0xFF) < PURE_MODULE_LOCALS && (arg & 0xFF) >= f->locals) f->locals = (uint8_t)((arg & 0xFF) + 1);
@@ -1565,6 +1579,8 @@ PURE_COLD static void function_names(PureModule *m, uint32_t fn, uint64_t *calls
         }
         if (event_list_state(m, list)) states_add(bound_list(m, list) ? registers : lists, list);
     }
+    free(ends);
+    return true;
 }
 
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
@@ -2082,7 +2098,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     }
     /* What each function names, and the lists it changes with those the functions it calls change (until none adds). */
     uint64_t calls[PURE_MODULE_FUNCTIONS] = {0};
-    for (uint32_t i = 0; i < out->functions; ++i) function_names(out, i, &calls[i]);
+    for (uint32_t i = 0; i < out->functions; ++i)
+        if (!function_names(out, i, &calls[i])) {
+            result = PURE_ALLOCATION;
+            REFUSE("out of memory", i);
+        }
     for (bool more = out->functions > 0; more;) {
         more = false;
         for (uint32_t i = 0; i < out->functions; ++i)
@@ -2233,7 +2253,13 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t i = 0; i < out->views; ++i)
         for (uint32_t pc = out->view_code[i].start; pc < out->view_code[i].start + out->view_code[i].length; ++pc)
             if (out->code[pc].op == PURE_OP_KEPT_GET) out->view_body[i] = true;
-    out->runner = out->calls ? 2 : out->batches ? 1 : 0;
+    /* How deep its loops nest (027's 4f-4): past what a run keeps on its stack, its blocks run in the executor that calls,
+     * its loops in its app's room. */
+    if ((out->nesting = nesting_of(out)) == UINT32_MAX) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
+    out->runner = out->calls || out->nesting > PURE_MODULE_NESTING ? 2 : out->batches ? 1 : 0;
     out->jit = pure_jit_make(out); /* none: the executor runs it all */
     return PURE_OK;
 refused:
@@ -4829,10 +4855,21 @@ static __attribute__((noinline, cold)) void unwind_calls(Frame *frame, Call *top
 /* The executor's run of a block of a module with functions (027's 2c): run_batches' steps and batches, and calls: a
  * CALL opens its function's frame and its block runs on in this loop, a RETURN closes it. Its own copy of the steps,
  * as run_batches is. */
+/* Room for a run's loops nested deeper than PURE_MODULE_NESTING (027's 4f-4): the app's, grown to nesting; NULL without. */
+static __attribute__((cold, noinline)) Loop *deep_loops(PureApp *app, uint32_t nesting) {
+    if (app->deep_room < nesting) {
+        Loop *grown = realloc(app->deep, nesting * sizeof(*grown));
+        if (!grown) return NULL;
+        app->deep = grown, app->deep_room = nesting;
+    }
+    return app->deep;
+}
+
 static __attribute__((noinline, aligned(64))) PureResult run_calls(const PureModule *m, PureValue *values, PureBlock block, Event *ev,
                                                       Slot *result) {
     Slot stack[PURE_MODULE_STACK];
-    Loop loops[PURE_MODULE_NESTING];
+    Loop few[PURE_MODULE_NESTING], *loops = m->nesting > PURE_MODULE_NESTING ? deep_loops(ev->app, m->nesting) : few;
+    if (!loops) return PURE_ALLOCATION;
     Frame frame;
     open_frame(&frame, m, values, block, ev, stack, loops);
     Call *top = NULL;
@@ -5161,6 +5198,7 @@ void pure_app_stop(PureApp *app) {
     pure_draft_close(app->stored_values);
     free(app->carried);
     free(app->by_input);
+    free(app->deep);
     pure_draft_close(app->stored_links);
     pure_draft_close(app->stored_seq);
     pure_save_close_start(app);

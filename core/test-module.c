@@ -7100,14 +7100,17 @@ static void loops(void) {
         deep[3 * d + 1] = (O){C, 0, 1};
         deep[3 * d + 2] = (O){LOOP, BODY(0, 26 - 3 * d - 3), 0};
     }
-    O deeper[9 * 3 + 2];
-    for (unsigned d = 0; d < 9; ++d) {
+    enum { DEEPER = 40 }; /* nested past what a run keeps on its stack (027's 4f-4): its app's room */
+    O deeper[DEEPER * 3 + 4];
+    for (unsigned d = 0; d < DEEPER; ++d) {
         deeper[3 * d] = (O){C, 0, 0};
-        deeper[3 * d + 1] = (O){C, 0, 1};
-        deeper[3 * d + 2] = (O){LOOP, BODY(0, 29 - 3 * d - 3), 0};
+        deeper[3 * d + 1] = (O){C, 0, 2}; /* each twice: the innermost 2^40 times past any budget, so its first fault */
+        deeper[3 * d + 2] = (O){LOOP, BODY(0, DEEPER * 3 + 4 - 3 * d - 3), 0};
     }
-    deeper[27] = (O){C, 0, 1};
-    deeper[28] = (O){ST, S_, 0};
+    deeper[3 * DEEPER] = (O){PURE_OP_LOAD, S_, 0};
+    deeper[3 * DEEPER + 1] = (O){C, 0, 1};
+    deeper[3 * DEEPER + 2] = (O){PURE_OP_ADD, 0, 0};
+    deeper[3 * DEEPER + 3] = (O){ST, S_, 0};
     const struct { const O *code; size_t count; const char *why; } refused[] = {
         {outside, LEN(outside), "break outside a loop"},
         {valued, LEN(valued), "break with values on the stack"},
@@ -7116,7 +7119,6 @@ static void loops(void) {
         {flagged, LEN(flagged), "no such state"},
         {two_ways, LEN(two_ways), "local used as two things"},
         {into_outer, LEN(into_outer), "insert into the list walked"},
-        {deeper, LEN(deeper), "loops nested deeper than 8"},
     };
     for (size_t i = 0; i < LEN(refused); ++i) {
         H one[] = {{1, 0, (uint32_t)refused[i].count}};
@@ -7136,7 +7138,22 @@ static void loops(void) {
     nested.no = LEN(deep);
     nested.h = eight;
     nested.nh = 1;
-    CHECK(load(nested, &module_b) == PURE_OK); /* eight deep is allowed */
+    CHECK(load(nested, &module_b) == PURE_OK && module_b.nesting == 8 && module_b.runner != 2); /* on the stack */
+    H forty[] = {{1, 0, LEN(deeper)}};
+    nested.o = deeper, nested.no = LEN(deeper), nested.h = forty;
+    CHECK(load(nested, &module_b) == PURE_OK && module_b.nesting == DEEPER && module_b.runner == 2 && !module_b.jit);
+    PureApp deep_app;
+    CHECK(pure_app_start(&deep_app, &module_b, (PureData){0}) == PURE_OK);
+    pure_app_work(&deep_app, 100000); /* (2^40 rounds would never end) */
+    CHECK(press(&deep_app, 0) == PURE_LIMIT && deep_app.fault == PURE_FAULT_WORK && deep_app.values[S_].num == 0);
+    pure_app_work(&deep_app, 0);
+    pure_app_stop(&deep_app);
+    for (unsigned d = 0; d < DEEPER; ++d) deeper[3 * d + 1] = (O){C, 0, d % 2 ? 1 : 2}; /* 2^20 rounds */
+    CHECK(load(nested, &module_b) == PURE_OK && pure_app_start(&deep_app, &module_b, (PureData){0}) == PURE_OK);
+    pure_app_work(&deep_app, UINT64_C(1) << 40);
+    CHECK(press(&deep_app, 0) == PURE_OK && deep_app.values[S_].num == 1 << 20 && press(&deep_app, 0) == PURE_OK &&
+          deep_app.values[S_].num == 2 << 20);
+    pure_app_stop(&deep_app);
     pure_module_release(&module_b);
     pure_module_release(&module_a);
 #undef BODY

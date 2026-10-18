@@ -194,6 +194,8 @@ enum { PURE_FOLD_SLICED = 0x80, PURE_EACH_SLICED = 1 };
  * Loops (LOOP and EACH) nest 8 deep. Within a walk, code that a loop runs
  * may change the items of any list but not add to or remove from a list an
  * outer walk walks; the innermost walk may remove from its own. */
+/* PURE_MODULE_NESTING: the loops nested that a run keeps on its stack; a module nesting deeper (027's 4f-4) runs in the
+ * executor that calls, its loops in its app's room (PureApp.deep). */
 enum { PURE_LOOP_INTEGER = 256, PURE_MODULE_NESTING = 8 };
 /* What a unit (an event, or a view's evaluation) may run when its app sets
  * no work budget (pure_app_work), and what an event may hold for what it
@@ -331,7 +333,8 @@ typedef struct {
     uint16_t first;
     uint8_t params, results;
     uint32_t held;
-    uint8_t height, locals, nesting;
+    uint8_t height, locals;
+    uint32_t nesting;
 } PureFunction;
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint16_t rows; uint32_t offset; } PureField;
 typedef struct {
@@ -441,6 +444,7 @@ typedef struct {
     uint8_t *signature_type;
     uint16_t *signature_record;
     bool calls; /* it has functions: its blocks run in the executor that calls (module.c) */
+    uint32_t nesting; /* its loops' deepest nesting (set at load) */
 } PureModule;
 
 /* Whether a state of m is transient (PURE_STATE_TRANSIENT). */
@@ -623,6 +627,8 @@ typedef struct {
     struct { unsigned char **blocks; size_t *sizes; unsigned count, at; size_t used; } calls;
     struct PureSpare { PureList **lists; unsigned count, capacity; } *spare;
     PureValue *pending; /* the values an event works on until it ends */
+    void *deep; /* a run's loops, a module nesting past PURE_MODULE_NESTING's (its nesting of them) */
+    uint32_t deep_room;
     PureVersion *marked_texts; /* where the event running began: each text's version, each stored list's journal, */
     size_t *marked_lists;
     /* Each input's: its last number sent and as saved, and where the event running began; one block (by_input) for

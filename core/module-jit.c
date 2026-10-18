@@ -5788,7 +5788,9 @@ struct PureJit *pure_jit_make(const PureModule *m) {
     const char *enabled = getenv("PURE_JIT");
     /* What it makes keeps its lists' and states' sets in a word each: a module of more states runs in the executor
      * alone (027's 4f-2). */
-    if ((enabled && !strcmp(enabled, "0")) || !m->height || !m->code_count || m->states > JIT_STATES) return NULL;
+    if ((enabled && !strcmp(enabled, "0")) || !m->height || !m->code_count || m->states > JIT_STATES ||
+        m->nesting > PURE_MODULE_NESTING) /* (its loops' tables hold PURE_MODULE_NESTING) */
+        return NULL;
     Made *made = NULL;
     size_t count = 0, room = 0;
     bool ok = true;
