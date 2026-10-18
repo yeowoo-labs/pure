@@ -50,33 +50,28 @@ static bool collect(void *context, PureSpan span) {
     return true;
 }
 
-static uint32_t le32(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
-
 static void show_cell(const PureModule *m, uint32_t field, PureCell cell, bool kept);
 
 /* A list kept past an event holds a list field's value in its items' stored form (Pure 027's stage 3): its items. */
 static void show_value_items(const PureModule *m, uint32_t record, const unsigned char *bytes, size_t size) {
     const PureRecord *r = &m->record[record];
+    PureCell cells[PURE_RECORD_FIELDS];
     putchar('[');
-    for (size_t at = 0, item = 0; at < size; ++item) {
+    for (size_t at = 0, item = 0; pure_items_next(m, record, (PureSpan){bytes, size}, &at, cells); ++item) {
         printf("%s{", item ? "," : "");
-        for (unsigned f = 0; f < r->count && at <= size; ++f) {
-            uint8_t type = m->record_field_type[r->first + f];
-            PureCell cell = {0};
-            if (pure_record_bytes(type) || type == PURE_RECORD_LIST) {
-                cell.size = size - at >= 4 ? le32(bytes + at) : 0;
-                cell.text = (unsigned char *)bytes + at + 4;
-                at += 4 + cell.size;
-            } else {
-                memcpy(&cell.i64, bytes + at, 8);
-                at += 8;
-            }
+        for (unsigned f = 0; f < r->count; ++f) {
             printf("%s\"%s\":", f ? "," : "", m->record_field_names[r->first + f]);
-            show_cell(m, r->first + f, cell, true);
+            show_cell(m, r->first + f, cells[f], true);
         }
         putchar('}');
     }
     putchar(']');
+}
+
+static void show_hex(PureSpan bytes) {
+    putchar('"');
+    for (size_t i = 0; i < bytes.size; ++i) printf("%02x", bytes.data[i]);
+    putchar('"');
 }
 
 static void show_cell(const PureModule *m, uint32_t field, PureCell cell, bool kept) {
@@ -86,11 +81,8 @@ static void show_cell(const PureModule *m, uint32_t field, PureCell cell, bool k
     else if (type == PURE_RECORD_NUMBER) printf("%.17g", cell.num);
     else if (type == PURE_RECORD_LIST && kept) show_value_items(m, (uint32_t)m->record_field_default[field].i64, cell.text, cell.size);
     else if (type == PURE_RECORD_LIST) printf("%" PRId64, cell.i64); /* an event's list: its number among the event's */
-    else if (type == PURE_RECORD_BYTES) {
-        putchar('"');
-        for (size_t i = 0; i < cell.size; ++i) printf("%02x", cell.text[i]);
-        putchar('"');
-    } else {
+    else if (type == PURE_RECORD_BYTES) show_hex((PureSpan){cell.text, cell.size});
+    else {
         putchar('"');
         json_span(NULL, (PureSpan){cell.text, cell.size});
         putchar('"');
@@ -110,7 +102,7 @@ static void show_list(const PureModule *m, const PureList *list, const PureRecor
     putchar(']');
 }
 
-/* A number, bool, i64 or text view, or a column at a row. */
+/* A number, bool, i64, text or bytes view, or a column at a row (a list column's cell as its items). */
 static void show_value(PureApp *app, uint32_t view, size_t row) {
     const PureModule *m = app->module;
     static Collected text;
@@ -122,15 +114,20 @@ static void show_value(PureApp *app, uint32_t view, size_t row) {
     if (m->view_type[view] == PURE_VIEW_I64) {
         if (!(column ? pure_app_cell_i64(app, view, row, &integer) : pure_app_view_i64(app, view, &integer))) printf("null");
         else printf("%" PRId64, integer);
-    } else if (m->view_type[view] == PURE_VIEW_TEXT) {
+    } else if (m->view_type[view] == PURE_VIEW_TEXT || m->view_type[view] == PURE_VIEW_BYTES) {
         PureResult result = column ? pure_app_cell_text(app, view, row, collect, &text)
                                    : pure_app_view_text(app, view, collect, &text);
         if (result != PURE_OK || !text.fits) printf("null");
+        else if (m->view_type[view] == PURE_VIEW_BYTES) show_hex((PureSpan){text.bytes, text.used});
         else {
             putchar('"');
             json_span(NULL, (PureSpan){text.bytes, text.used});
             putchar('"');
         }
+    } else if (m->view_type[view] == PURE_VIEW_LIST) {
+        PureSpan items;
+        if (pure_app_cell_items(app, view, row, &items) != PURE_OK) printf("null");
+        else show_value_items(m, m->view_record[view] - 1u, items.data, items.size);
     } else if (!(column ? pure_app_cell(app, view, row, &value) : pure_app_view(app, view, &value))) printf("null");
     else if (m->view_type[view] == PURE_VIEW_BOOL) printf("%s", value ? "true" : "false");
     else printf("%.17g", value);
@@ -160,7 +157,7 @@ static void show(PureApp *app, const char *failure) {
         if (m->view_table[i]) continue;
         printf("%s\"%s\":", first ? "" : ",", m->view_names[i]);
         first = false;
-        if (m->view_type[i] != PURE_VIEW_TABLE) { show_value(app, i, 0); continue; }
+        if (m->view_type[i] != PURE_VIEW_LIST) { show_value(app, i, 0); continue; }
         putchar('[');
         for (size_t row = 0; row < pure_app_rows(app, i); ++row) {
             printf("%s{", row ? "," : "");

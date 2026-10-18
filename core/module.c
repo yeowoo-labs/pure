@@ -11,7 +11,7 @@
 
 enum { FUNCTION_BYTES = 12, SIGNATURE_BYTES = 4 };
 enum { STATE_BYTES = 16, INPUT_BYTES = 16, FIELD_BYTES = 8,
-       CONSTANT_BYTES = 8, RECORD_BYTES = 8, RECORD_FIELD_BYTES = 16, VIEW_BYTES = 16,
+       CONSTANT_BYTES = 8, RECORD_BYTES = 8, RECORD_FIELD_BYTES = 16, VIEW_BYTES = 20,
        HANDLER_BYTES = 12, OP_BYTES = 16 };
 /* T_FIELD and T_ITEM stand for the type of the message or record field
  * named, T_KEY for the type of the named keyed list's key, T_LOCAL for what
@@ -49,7 +49,7 @@ enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_CONSTA
  * item (STEPS_WALK); neither changes a state. A function's block begins with
  * its parameters on the stack and ends at RETURN alone (FUNCTION); the loops'
  * blocks in it are a handler's code. */
-enum { FOLD_ONE = 100, FOLD_TWO, FOLD_I64, FILTER, WALK, STEPS, STEPS_WALK, FUNCTION };
+enum { FOLD_ONE = 100, FOLD_TWO, FOLD_I64, FILTER, WALK, STEPS, STEPS_WALK, FUNCTION, LIST_OF = 200 }; /* LIST_OF + r: a list of r's */
 /* The text or list an opcode works on: its cursor and index operands belong
  * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_ARG: the
  * argument. O_REF: the text or list of the argument's cursor or index state.
@@ -351,6 +351,10 @@ static unsigned char field_type(const PureModule *m, uint32_t list, uint32_t fie
 static uint32_t nested_record(const PureModule *m, uint32_t field) {
     return m->record_field_type[field] == PURE_RECORD_LIST ? (uint32_t)m->record_field_default[field].i64 : UINT32_MAX;
 }
+
+/* A list view (not a list column), and one over a list state (not computed: its rows that state's items) (027's 4e). */
+static bool list_view(const PureModule *m, uint32_t view) { return m->view_type[view] == PURE_VIEW_LIST && !m->view_table[view]; }
+static bool over_state(const PureModule *m, uint32_t view) { return list_view(m, view) && !m->view_computed[view]; }
 
 /* A list kept past an event: stored or transient, not an event's (027's stage 3). */
 static bool kept_list(const PureModule *m, uint32_t list) { return !(m->state_flags[list] & PURE_LIST_ROWS >> 8); }
@@ -765,7 +769,10 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         return height != 2 || types[0] != T_NUM || types[1] != T_BOOL ? "fold block must leave a number and a bool" : NULL;
     if (view == FOLD_I64)
         return height != 2 || types[0] != T_I64 || types[1] != T_BOOL ? "fold block must leave an i64 and a bool" : NULL;
-    unsigned char result = view == PURE_VIEW_TEXT ? T_TEXT : view == PURE_VIEW_BOOL ? T_BOOL : view == PURE_VIEW_I64 ? T_I64 : T_NUM;
+    if (view >= LIST_OF) /* a list view's or a list column's: a list of its record's items */
+        return height != 1 || types[0] != T_LIST || owners[0] != view - LIST_OF ? "view must leave one value of its type" : NULL;
+    unsigned char result = view == PURE_VIEW_TEXT ? T_TEXT : view == PURE_VIEW_BOOL ? T_BOOL : view == PURE_VIEW_I64 ? T_I64 :
+                           view == PURE_VIEW_BYTES ? T_BYTES : T_NUM;
     if (!handler ? height != 1 || types[0] != result : height != 0)
         return !handler ? "view must leave one value of its type" : "handler must leave no value";
     return NULL;
@@ -1843,30 +1850,53 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if ((out->state_type[i] == PURE_STATE_CURSOR || out->state_type[i] == PURE_STATE_INDEX) &&
             !(out->transient >> i & 1) && out->transient >> out->state_ref[i] & 1)
             REFUSE("stored position in a transient state", i);
-    /* A table names its list in place of code; its columns follow it. */
-    for (uint32_t i = 0; i < out->views; ++i, at += VIEW_BYTES) {
+    /* Views (027's 4e): a list view names its list state (+ 1; its block a filter) or none (its block leaves its list),
+     * and its items' record (+ 1; a map of a list state 0, its columns following it, each naming it + 1). */
+    uint32_t declared = out->views;
+    for (uint32_t i = 0; i < declared; ++i, at += VIEW_BYTES) {
         if (!name_at(text, strings, read32(at), NAME_IDENTIFIER, out->view_names[i])) REFUSE("view name", i);
         out->view_type[i] = at[4];
         out->view_table[i] = (uint16_t)read16(at + 6);
-        out->view_code[i] = (PureBlock){read32(at + 8), read32(at + 12)};
-        uint32_t table = out->view_table[i];
-        if (at[4] > PURE_VIEW_I64 || (at[5] && at[4] != PURE_VIEW_TABLE) ||
-            (table && (table > i || out->view_type[table - 1] != PURE_VIEW_TABLE || at[4] == PURE_VIEW_TABLE)))
+        out->view_record[i] = (uint16_t)read16(at + 8);
+        out->view_code[i] = (PureBlock){read32(at + 12), read32(at + 16)};
+        uint32_t table = out->view_table[i], record = out->view_record[i], list = read16(at + 10);
+        bool listed = at[4] == PURE_VIEW_LIST;
+        if (at[4] > PURE_VIEW_BYTES || at[5] || listed != (record || (!table && list)) || record > out->records ||
+            (table && (table > i || !over_state(out, table - 1) || out->view_record[table - 1] || list)) ||
+            (!listed && list))
             REFUSE("view type", i);
-        /* A table names its list in start, or, filtered, in the byte after its
-         * type (list + 1) with its filter's block in start and length. */
-        if (at[4] == PURE_VIEW_TABLE) {
-            uint32_t list = at[5] ? at[5] - 1u : out->view_code[i].start;
-            if (!state_of(out, list, PURE_STATE_LIST) || !at[5] != !out->view_code[i].length) REFUSE("table list", i);
-            out->view_list[i] = (uint16_t)list;
+        if (listed && !table) {
+            if (list ? !state_of(out, list - 1, PURE_STATE_LIST) || (record && record - 1 != out->state_ref[list - 1])
+                     : !out->view_code[i].length)
+                REFUSE("list view's list", i);
+            out->view_list[i] = (uint16_t)(list ? list - 1 : 0);
+            out->view_computed[i] = !list;
         } else if (table) out->view_list[i] = out->view_list[table - 1];
+    }
+    /* A list view of a record (a list state as it is, or a list its block leaves) has the record's fields as its
+     * columns, made here: each reads its field of the row's item as it is. */
+    for (uint32_t i = 0; i < declared; ++i) {
+        if (!list_view(out, i) || !out->view_record[i]) continue;
+        const PureRecord *r = &out->record[out->view_record[i] - 1];
+        for (unsigned f = 0; f < r->count; ++f) {
+            if (out->views == PURE_MODULE_VIEWS) REFUSE("views and their columns", i);
+            uint32_t c = out->views++, field = r->first + f;
+            memcpy(out->view_names[c], out->record_field_names[field], PURE_MODULE_NAME);
+            out->view_type[c] = out->record_field_type[field];
+            out->view_table[c] = (uint16_t)(i + 1);
+            out->view_list[c] = out->view_list[i];
+            out->view_record[c] = (uint16_t)(out->view_type[c] == PURE_VIEW_LIST ? nested_record(out, field) + 1 : 0);
+            out->view_field[c] = (uint8_t)(f + 1);
+            out->view_computed[c] = out->view_computed[i];
+            out->view_code[c] = (PureBlock){0, 0};
+        }
     }
     /* Arguments are a view's (not a column's: a table's columns and filter
      * read the table's), one set a view, bearing its name. */
     for (uint32_t i = 0; i < out->inputs; ++i) {
         const PureInputShape *shape = &out->input[i];
         /* A pointing points at a table's rows (027's 4d). */
-        if (shape->binding == PURE_BIND_POINT && (shape->view >= out->views || out->view_type[shape->view] != PURE_VIEW_TABLE))
+        if (shape->binding == PURE_BIND_POINT && (shape->view >= declared || !over_state(out, shape->view)))
             REFUSE("pointing's table", i);
         if (shape->kind != PURE_KIND_ARGUMENTS) continue;
         char path[PURE_MODULE_NAME + 8];
@@ -1919,12 +1949,13 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                 !strcmp(out->view_names[i], out->view_names[k])) REFUSE("duplicate column", i);
     for (uint32_t i = 0; i < out->views; ++i) {
         bad = i;
-        bool table = out->view_type[i] == PURE_VIEW_TABLE;
+        bool table = over_state(out, i);
         uint32_t event = out->view_arguments[i]; /* the arguments' input, as an arrival (its number + 1) */
-        bool computes = !table && !out->view_table[i]; /* a view outside a table may have a body */
-        if ((!table || out->view_code[i].length) &&
-            (why = verify_block(out, out->view_code[i], table ? FILTER : out->view_type[i],
-                                table || out->view_table[i] ? out->view_list[i] : -1, -1, event, computes, 0, 0, -1, &bad)))
+        bool computes = !table && !out->view_table[i]; /* a view outside a list over a state may have a body */
+        int kind = table ? FILTER : out->view_type[i] == PURE_VIEW_LIST ? LIST_OF + out->view_record[i] - 1 : out->view_type[i];
+        if (!out->view_field[i] && (!table || out->view_code[i].length) &&
+            (why = verify_block(out, out->view_code[i], kind, table || out->view_table[i] ? out->view_list[i] : -1, -1, event,
+                                computes, 0, 0, -1, &bad)))
             goto refused;
         if (computes && !locals_agree(out, out->view_code[i])) { why = "local used as two things"; goto refused; }
         for (uint32_t pc = out->view_code[i].start; computes && pc < out->view_code[i].start + out->view_code[i].length; ++pc) {
@@ -1980,12 +2011,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t i = 0; i < out->views; ++i) {
         int given = (int)out->view_arguments[i] - 1;
         plan_folds(out, out->view_code[i], given);
-        out->view_plan[i] = out->view_type[i] == PURE_VIEW_TABLE && out->view_code[i].length &&
-                            block_has_lanes(out, out->view_code[i], given);
+        out->view_plan[i] = over_state(out, i) && out->view_code[i].length && block_has_lanes(out, out->view_code[i], given);
         PureRange range;
         if (out->view_plan[i] && block_range(out, out->view_code[i], out->view_list[i], true, &range))
             out->view_range[i] = keep_range(out, &range);
-        if (out->view_type[i] != PURE_VIEW_TABLE) range_code(out, out->view_code[i], given);
+        if (!over_state(out, i)) range_code(out, out->view_code[i], given);
         /* A fold in a column runs for every row: one pass may answer them all. */
         for (uint32_t pc = out->view_code[i].start; out->view_table[i] && pc < out->view_code[i].start + out->view_code[i].length; ++pc)
             if (out->code[pc].op == PURE_OP_FOLD) {
@@ -2085,6 +2115,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                            op->op == PURE_OP_LIST_APPEND ? PURE_OP_KEPT_APPEND : op->op == PURE_OP_LIST_INSERT ? PURE_OP_KEPT_INSERT :
                            PURE_OP_KEPT_APPEND_IN);
     }
+    /* A view or a column reading a kept list's list counts what it adds as a body does, from none at each evaluation
+     * (a reader's too, which no event began). */
+    for (uint32_t i = 0; i < out->views; ++i)
+        for (uint32_t pc = out->view_code[i].start; pc < out->view_code[i].start + out->view_code[i].length; ++pc)
+            if (out->code[pc].op == PURE_OP_KEPT_GET) out->view_body[i] = true;
     out->runner = out->calls ? 2 : out->batches ? 1 : 0;
     out->jit = pure_jit_make(out); /* none: the executor runs it all */
     return PURE_OK;
@@ -4965,7 +5000,7 @@ void pure_app_stop(PureApp *app) {
     pure_save_close_start(app);
     pure_log_close(app->log);
     pure_undo_free(&app->undo);
-    for (unsigned i = 0; i < app->row_tables; ++i) free(app->rows[i].items);
+    for (unsigned i = 0; i < app->row_tables; ++i) free(app->rows[i].items), pure_list_free(app->rows[i].list);
     free(app->rows);
     drop_passes(app);
     free(app->arena.bytes);
@@ -5405,12 +5440,51 @@ static bool keep_evaluated(PureApp *app, uint32_t table, struct PureRows *rows, 
     return evaluate(app, table, item, &kept) != PURE_OK || kept.num == 0 || keep_row(rows, item);
 }
 
-/* A filtered table's items, as fresh as the app's states: the filter runs
- * once per item after each change (an item it fails on is left out), not
- * once per cell. NULL for a table without a filter, or without room. */
+/* A computed list view's list (027's 4e): the one its block leaves, copied into a kept list (its lists in stored form)
+ * so its rows and cells outlive the evaluations a host asks for between them; false without room. */
+static __attribute__((cold, noinline)) bool computed(PureApp *app, uint32_t view, struct PureRows *rows) {
+    const PureModule *m = app->module;
+    uint32_t record = m->view_record[view] - 1u;
+    const PureRecord *r = &m->record[record];
+    pure_list_free(rows->list); /* (another module's view, after a replace, may have been here) */
+    if (!(rows->list = new_list(m, record, true))) return false;
+    Slot slot;
+    PureResult result = evaluate(app, view, 0, &slot);
+    rows->changes = app->changes;
+    rows->given = app->arguments_given;
+    rows->fault = result == PURE_OK ? PURE_FAULT_NONE : app->view_fault;
+    if (result != PURE_OK) return result != PURE_ALLOCATION; /* no rows: the fault says why */
+    const PureList *made = slot.i64 ? app->nested.list[slot.i64 - 1] : NULL;
+    for (size_t at = 0, count = made ? pure_list_count(made) : 0; at < count; ++at) {
+        PureCell cells[PURE_RECORD_FIELDS];
+        size_t room = 0;
+        for (unsigned f = 0; f < r->count; ++f) {
+            cells[f] = pure_list_get(made, at, f);
+            if (m->record_field_type[r->first + f] == PURE_RECORD_LIST)
+                room += value_size(app, nested_record(m, r->first + f), (uint64_t)cells[f].i64);
+        }
+        app->view_arena.used = 0;
+        if (!reserve(&app->view_arena, room)) return false; /* all of it first: no span moves while the next is made */
+        for (unsigned f = 0; f < r->count; ++f) {
+            if (m->record_field_type[r->first + f] != PURE_RECORD_LIST) continue;
+            unsigned char *to = app->view_arena.bytes + app->view_arena.used;
+            size_t size = (size_t)(value_put(app, nested_record(m, r->first + f), (uint64_t)cells[f].i64, to) - to);
+            app->view_arena.used += size;
+            cells[f] = (PureCell){.text = to, .size = size};
+        }
+        if (pure_list_insert(rows->list, at, cells, NULL) != PURE_OK || !keep_row(rows, at)) return false;
+    }
+    return true; /* its rows its items, in order (as a filter's are) */
+}
+
+/* A list view's rows, as fresh as the app's states: a filtered one's items
+ * (the filter runs once per item after each change, an item it fails on
+ * left out, not once per cell), or a computed one's list (its block run
+ * once after each change). NULL for a list state's view without a filter,
+ * or without room. */
 static struct PureRows *filtered(PureApp *app, uint32_t table) {
     const PureModule *m = app->module;
-    if (!m->view_code[table].length) return NULL;
+    if (!m->view_computed[table] && !m->view_code[table].length) return NULL;
     struct PureRows *rows = NULL;
     for (unsigned i = 0; i < app->row_tables && !rows; ++i) if (app->rows[i].table == table) rows = &app->rows[i];
     if (!rows) {
@@ -5422,6 +5496,7 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
     }
     if (rows->changes == app->changes && (!m->view_arguments[table] || rows->given == app->arguments_given)) return rows;
     rows->count = 0;
+    if (m->view_computed[table]) return computed(app, table, rows) ? rows : NULL;
     /* A unit of work of its own, counted as written: the filter for every item. */
     const PureList *list = app->lists[m->view_list[table]];
     app->work = 0;
@@ -5466,8 +5541,8 @@ static struct PureRows *filtered(PureApp *app, uint32_t table) {
 
 bool pure_app_row_item(PureApp *app, uint32_t table, size_t row, size_t *item) {
     const PureModule *m = app->module;
-    if (table >= m->views || m->view_type[table] != PURE_VIEW_TABLE) return false;
-    if (!m->view_code[table].length) {
+    if (table >= m->views || !list_view(m, table)) return false;
+    if (!m->view_code[table].length) { /* (a computed one's has its block, and its rows as a filter's are) */
         *item = row;
         if (row < pure_list_count(app->lists[m->view_list[table]])) return true;
         app->view_fault = PURE_FAULT_NONE;
@@ -5484,7 +5559,7 @@ bool pure_app_row_item(PureApp *app, uint32_t table, size_t row, size_t *item) {
 
 bool pure_app_item_row(PureApp *app, uint32_t table, size_t item, size_t *row) {
     const PureModule *m = app->module;
-    if (table >= m->views || m->view_type[table] != PURE_VIEW_TABLE) return false;
+    if (table >= m->views || !list_view(m, table)) return false;
     if (!m->view_code[table].length) {
         *row = item;
         return item < pure_list_count(app->lists[m->view_list[table]]);
@@ -5501,15 +5576,43 @@ bool pure_app_item_row(PureApp *app, uint32_t table, size_t item, size_t *row) {
     return true;
 }
 
-/* A view outside a table (column false), or a column and a row of its table. */
-static PureResult view_of(PureApp *app, uint32_t view, bool column, size_t row, uint8_t type, Slot *slot) {
+/* A view's type as it is lent: a bool's value is 0 or 1 (a number's), bytes as a text is. */
+static uint8_t lent_type(uint8_t type) {
+    return type == PURE_VIEW_BOOL ? PURE_VIEW_NUM : type == PURE_VIEW_BYTES ? PURE_VIEW_TEXT : type;
+}
+
+/* A column the load made (027's 4e) at an item: its field as it is, a text's, bytes' or list's (in its stored form)
+ * copied into the view's arena. */
+static __attribute__((cold, noinline)) PureResult field_of(PureApp *app, uint32_t column, size_t item, Slot *slot) {
     const PureModule *m = app->module;
-    if (view >= m->views || (m->view_type[view] == PURE_VIEW_BOOL ? PURE_VIEW_NUM : m->view_type[view]) != type ||
-        (m->view_table[view] != 0) != column) { /* a bool's value is 0 or 1 */
+    uint32_t table = m->view_table[column] - 1u;
+    const PureList *items = m->view_computed[table] ? filtered(app, table)->list : app->lists[m->view_list[table]];
+    PureCell cell = pure_list_get(items, item, m->view_field[column] - 1u);
+    app->view_fault = PURE_FAULT_NONE;
+    app->view_arena.used = 0;
+    uint8_t type = m->view_type[column];
+    if (type != PURE_VIEW_TEXT && type != PURE_VIEW_BYTES && type != PURE_VIEW_LIST) {
+        slot->i64 = cell.i64; /* a number's, a bool's or an i64's bits */
+        return PURE_OK;
+    }
+    if (!reserve(&app->view_arena, cell.size)) return PURE_ALLOCATION;
+    if (cell.size) memcpy(app->view_arena.bytes, cell.text, cell.size);
+    app->view_arena.used = cell.size;
+    slot->bytes = (PureBytes){FROM_ARENA, 0, {0, 0}, 0, cell.size};
+    return PURE_OK;
+}
+
+/* A view outside a list view (column false), or a column and a row of its list view (inlined in each, as it was before
+ * 4e added a caller). */
+static inline __attribute__((always_inline)) PureResult view_of(PureApp *app, uint32_t view, bool column, size_t row, uint8_t type,
+                                                          Slot *slot) {
+    const PureModule *m = app->module;
+    if (view >= m->views || lent_type(m->view_type[view]) != type || (m->view_table[view] != 0) != column) {
         app->view_fault = PURE_FAULT_NONE;
         return PURE_INVALID;
     }
     if (column && !pure_app_row_item(app, m->view_table[view] - 1u, row, &row)) return PURE_NOT_FOUND; /* it says why */
+    if (m->view_field[view]) return field_of(app, view, row, slot);
     return evaluate(app, view, row, slot); /* and so does this */
 }
 
@@ -5535,10 +5638,11 @@ PureResult pure_app_view_text(PureApp *app, uint32_t view, bool (*visit)(void *,
 
 size_t pure_app_rows(PureApp *app, uint32_t table) {
     const PureModule *m = app->module;
-    if (table >= m->views || m->view_type[table] != PURE_VIEW_TABLE) return 0;
+    if (table >= m->views || !list_view(m, table)) return 0;
     struct PureRows *rows = filtered(app, table);
     app->view_fault = rows ? rows->fault : PURE_FAULT_NONE;
-    return rows ? rows->count : m->view_code[table].length ? 0 : pure_list_count(app->lists[m->view_list[table]]);
+    return rows ? rows->count
+                : m->view_computed[table] || m->view_code[table].length ? 0 : pure_list_count(app->lists[m->view_list[table]]);
 }
 
 bool pure_app_cell(PureApp *app, uint32_t column, size_t row, double *out) {
@@ -5559,6 +5663,43 @@ PureResult pure_app_cell_text(PureApp *app, uint32_t column, size_t row, bool (*
     Slot slot;
     PureResult result = view_of(app, column, true, row, PURE_VIEW_TEXT, &slot);
     return result == PURE_OK ? visit_value(app, &app->view_arena, slot.bytes, visit, context) : result;
+}
+
+PureResult pure_app_cell_items(PureApp *app, uint32_t column, size_t row, PureSpan *items) {
+    Slot slot;
+    PureResult result = view_of(app, column, true, row, PURE_VIEW_LIST, &slot);
+    if (result != PURE_OK) return result;
+    /* A made column's is a kept list's cell (a list state kept past an event, or a computed view's), in that form
+     * already; a map's column leaves one of the evaluation's lists, written in that form in the view's arena. */
+    if (app->module->view_field[column]) {
+        *items = (PureSpan){app->view_arena.bytes + slot.bytes.offset, (size_t)slot.bytes.length};
+        return PURE_OK;
+    }
+    PureCell field;
+    if (value_cell(app, &app->view_arena, app->module->view_record[column] - 1u, (uint64_t)slot.i64, &field) != PURE_OK)
+        return PURE_ALLOCATION;
+    *items = (PureSpan){field.text, field.size};
+    return PURE_OK;
+}
+
+bool pure_items_next(const PureModule *m, uint32_t record, PureSpan items, size_t *at, PureCell *cells) {
+    if (record >= m->records || *at >= items.size) return false;
+    const PureRecord *r = &m->record[record];
+    size_t from = *at;
+    for (unsigned f = 0; f < r->count; ++f) {
+        uint8_t type = m->record_field_type[r->first + f];
+        if (pure_record_bytes(type) || type == PURE_RECORD_LIST) {
+            if (items.size - from < 4 || read32(items.data + from) > items.size - from - 4) return false;
+            cells[f] = (PureCell){.text = (unsigned char *)items.data + from + 4, .size = read32(items.data + from)};
+            from += 4 + cells[f].size;
+        } else {
+            if (items.size - from < 8) return false;
+            cells[f] = (PureCell){.i64 = read_i64(items.data + from)};
+            from += 8;
+        }
+    }
+    *at = from;
+    return true;
 }
 
 PureSnapshot *pure_app_snapshot(PureApp *app) { return pure_save_snapshot(app, UINT32_MAX); }

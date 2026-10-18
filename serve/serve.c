@@ -937,7 +937,7 @@ static const char *resolve(Connection *c, char *query, Route *route, int *status
             uint64_t n;
             bool from = !strcmp(pair, "from"), paging = from || !strcmp(pair, "count");
             if (!paging && m->view_arguments[found]) route->argued = true; /* an argument, read when shown */
-            else if (!number(value, SIZE_MAX, &n) || m->view_type[found] != PURE_VIEW_TABLE || !paging) return "query";
+            else if (!number(value, SIZE_MAX, &n) || m->view_type[found] != PURE_VIEW_LIST || !paging) return "query";
             else if (from) route->from = (size_t)n;
             else route->count = (size_t)n;
         } else {
@@ -1411,6 +1411,48 @@ static void put_integer(Output *o, int64_t value) {
     put_bytes(o, digits, (size_t)snprintf(digits, sizeof(digits), "%" PRId64, value));
 }
 
+/* Bytes in JSON: a string of their hex digits (as pure-run shows them). */
+static __attribute__((noinline)) bool put_hex(void *context, PureSpan span) {
+    static const char digits[] = "0123456789abcdef";
+    char pair[2];
+    bool ok = true;
+    for (size_t i = 0; i < span.size; ++i) {
+        pair[0] = digits[span.data[i] >> 4], pair[1] = digits[span.data[i] & 15];
+        ok = put_bytes(context, pair, 2) && ok;
+    }
+    return ok;
+}
+
+/* A list cell's items (027's 4e), lent in their stored form: an array of objects of the record's fields. */
+static __attribute__((cold, noinline)) void put_items(Output *o, const PureModule *m, uint32_t record, PureSpan items) {
+    const PureRecord *r = &m->record[record];
+    PureCell cells[PURE_RECORD_FIELDS];
+    put_bytes(o, "[", 1);
+    for (size_t at = 0, item = 0; pure_items_next(m, record, items, &at, cells); ++item) {
+        put_bytes(o, item ? ",{" : "{", item ? 2 : 1);
+        for (unsigned f = 0; f < r->count; ++f) {
+            uint32_t field = r->first + f;
+            uint8_t type = m->record_field_type[field];
+            if (f) put_bytes(o, ",", 1);
+            put_bytes(o, "\"", 1);
+            put_json_span(o, (PureSpan){(const unsigned char *)m->record_field_names[field], strlen(m->record_field_names[field])});
+            put_bytes(o, "\":", 2);
+            PureSpan bytes = {cells[f].text, cells[f].size};
+            if (type == PURE_RECORD_NUMBER) put_number(o, cells[f].num);
+            else if (type == PURE_RECORD_BOOL) put_bytes(o, cells[f].num ? "true" : "false", cells[f].num ? 4 : 5);
+            else if (type == PURE_RECORD_I64) put_integer(o, cells[f].i64);
+            else if (type == PURE_RECORD_LIST) put_items(o, m, (uint32_t)m->record_field_default[field].i64, bytes);
+            else {
+                put_bytes(o, "\"", 1);
+                (type == PURE_RECORD_BYTES ? put_hex : put_json_span)(o, bytes);
+                put_bytes(o, "\"", 1);
+            }
+        }
+        put_bytes(o, "}", 1);
+    }
+    put_bytes(o, "]", 1);
+}
+
 /* A view's arguments from a query's name=value pairs (values %XX decoded;
  * from and count page a table): a payload of their input's shape, the
  * fixed fields in its prefix, the texts and bytes after it in order, each's
@@ -1476,9 +1518,11 @@ static PureResult show_view(PureApp *app, const Route *route, size_t available, 
     return status;
 }
 
-/* A view's value: a number in Pure's shortest form or a text, as text; a
- * table as {"rows":N,"from":F,"items":[{column: value}...]} for the rows
- * asked, each cell computed only for them (a cell without a value is null). */
+/* A view's value: a number in Pure's shortest form or a text, as text;
+ * bytes as they are; a list as {"rows":N,"from":F,"items":[{column:
+ * value}...]} for the rows asked, each cell computed only for them (a cell
+ * without a value is null, bytes a string of hex digits, a list an array of
+ * objects). */
 static PureResult show_given(PureApp *app, const Route *route, size_t available, Applied *answer) {
     const PureModule *m = app->module;
     uint32_t view = route->target;
@@ -1488,7 +1532,7 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
     Output o = {0};
     PureResult status = PURE_OK;
     double value;
-    if (m->view_type[view] == PURE_VIEW_TABLE && !(o.bytes = malloc(o.capacity = 1024))) return PURE_ALLOCATION;
+    if (m->view_type[view] == PURE_VIEW_LIST && !(o.bytes = malloc(o.capacity = 1024))) return PURE_ALLOCATION;
     if (m->view_type[view] == PURE_VIEW_I64) {
         int64_t integer;
         *type = "text/plain; charset=utf-8";
@@ -1512,6 +1556,9 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
             bool read = pure_draft_read_version(text, version, 0, (size_t)version.bytes, gather_extents, &gather) == PURE_OK;
             if (lend(answer, mapping, &gather, read, (size_t)version.bytes)) return PURE_OK;
         }
+        status = pure_app_view_text(app, view, put_span, &o);
+    } else if (m->view_type[view] == PURE_VIEW_BYTES) {
+        *type = "application/octet-stream";
         status = pure_app_view_text(app, view, put_span, &o);
     } else {
         *type = "application/json";
@@ -1543,10 +1590,16 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
                     if (!(valued = pure_app_cell(app, columns[k].view, row, &value))) {
                     } else if (kind == PURE_VIEW_BOOL) put_bytes(&o, value ? "true" : "false", value ? 4 : 5);
                     else put_number(&o, value);
+                } else if (kind == PURE_VIEW_LIST) {
+                    PureSpan items;
+                    if ((valued = pure_app_cell_items(app, columns[k].view, row, &items) == PURE_OK))
+                        put_items(&o, m, m->view_record[columns[k].view] - 1u, items);
                 } else {
                     size_t mark = o.size;
                     put_bytes(&o, "\"", 1);
-                    if ((valued = pure_app_cell_text(app, columns[k].view, row, put_json_span, &o) == PURE_OK)) put_bytes(&o, "\"", 1);
+                    if ((valued = pure_app_cell_text(app, columns[k].view, row, kind == PURE_VIEW_BYTES ? put_hex : put_json_span,
+                                                     &o) == PURE_OK))
+                        put_bytes(&o, "\"", 1);
                     else o.size = o.failed ? o.size : mark;
                 }
                 if (valued) continue;
@@ -2263,7 +2316,7 @@ static unsigned online_cpus(void);
 /* Whether a view may run long: it has a body, or it is a table one of whose columns has. */
 static bool computes(const PureModule *m, uint32_t view) {
     if (m->view_body[view]) return true;
-    if (m->view_type[view] != PURE_VIEW_TABLE) return false;
+    if (m->view_type[view] != PURE_VIEW_LIST) return false;
     for (uint32_t column = 0; column < m->views; ++column)
         if (m->view_table[column] == view + 1 && m->view_body[column]) return true;
     return false;

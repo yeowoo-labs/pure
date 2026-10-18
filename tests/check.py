@@ -3684,6 +3684,7 @@ state nodes = 0
 state total = 0
 state deepest = 0
 state name_bytes = 0
+state kept: list of Node
 input tree = message {
   label: text
   roots: list of Node
@@ -3699,13 +3700,23 @@ fn walk(x, depth) {
 
 on tree {
   require tree.label != "refuse"
-  for r in tree.roots { walk(r, 1) }
+  for r in tree.roots {
+    walk(r, 1)
+    kept.append(r)
+  }
 }
 
 view count = nodes
 view sum = total
 view depth = deepest
 view named = name_bytes
+view forest = kept
+view top = each k in kept {
+  label = k.name
+  kids = k.kids
+  tag = k.tag
+}
+view mark = bytes("pure")
 '''
 
 
@@ -3713,7 +3724,9 @@ def server_trees(aup, pure, work):
     """A message's rows whose records hold lists (027's 4a): a JSON forest
     read straight into the event's lists, nested to any depth up to 64, and
     walked by a function that calls itself, a field of bytes among them
-    (027's 4b). Random forests (names with
+    (027's 4b), and kept in a stored list its list views show (027's 4e:
+    the list as it is and a map, nested arrays and bytes as hex in JSON, a
+    bytes view as its bytes). Random forests (names with
     escapes and characters past ASCII, fields left out taking their
     defaults) against a model walking them in the same order; a require
     refusing one leaves everything as it was; malformed trees (a list field
@@ -3737,6 +3750,20 @@ def server_trees(aup, pure, work):
 
     def views(port):
         return tuple(float(call(port, 'GET', f'/views/{v}')[2]) for v in ('count', 'sum', 'depth', 'named'))
+
+    def stored(node):  # a node as the stored list holds it: defaults filled, bytes as hex
+        return {'name': node['name'], 'tag': node.get('tag', '-').encode().hex(), 'n': node.get('n', 0),
+                'kids': [stored(k) for k in node.get('kids', [])]}
+    kept = []
+
+    def lists_shown(port):
+        forest = json.loads(call(port, 'GET', '/views/forest?count=100000')[2])
+        top = json.loads(call(port, 'GET', '/views/top?count=100000')[2])
+        assert forest['rows'] == top['rows'] == len(kept) and forest['items'] == kept, (forest['rows'], len(kept))
+        want = [{'label': k['name'], 'kids': k['kids'], 'tag': k['tag']} for k in kept]
+        assert top['items'] == want, next((a, b) for a, b in zip(top['items'], want) if a != b)
+        status, _, mark = call(port, 'GET', '/views/mark')
+        assert (status, mark) == (200, b'pure'), (status, mark)
 
     rng = random.Random(44)
     names = ['', 'a', 'node', '빨리', 'a "quoted" \\ name', 'tab\there', '😀', 'line\nbreak', 'é']
@@ -3781,9 +3808,11 @@ def server_trees(aup, pure, work):
             else:
                 assert (status, error) == (200, 'none'), (status, error)
                 model = after
+                kept += [stored(r) for r in roots]
                 sent += 1
             if i % 25 == 0:
                 assert views(host.port) == tuple(model), (views(host.port), model)
+                lists_shown(host.port)
         deep = {'name': 'z'}
         for _ in range(63):
             deep = {'name': 'z', 'kids': [deep]}
@@ -3793,16 +3822,19 @@ def server_trees(aup, pure, work):
             assert call(host.port, 'POST', '/inputs/tree', json.dumps(body).encode())[:2] == want, body
         assert call(host.port, 'POST', '/inputs/tree', json.dumps({'label': 'x', 'roots': [deep]}).encode())[:2] == (200, 'none')
         walk(deep, 1, model)
+        kept.append(stored(deep))
         assert views(host.port) == tuple(model) and model[2] == 64
+        lists_shown(host.port)
     finally:
         host.stop()
     host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store])
     try:
         assert views(host.port) == tuple(model)
+        lists_shown(host.port)
     finally:
         host.stop()
     assert sent > 200 and refused > 10
-    return {'forests': sent, 'refused': refused, 'nodes': model[0], 'deepest': model[2]}
+    return {'forests': sent, 'refused': refused, 'nodes': model[0], 'deepest': model[2], 'kept': len(kept)}
 
 ARGUED = '''
 record Account {

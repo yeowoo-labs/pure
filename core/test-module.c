@@ -63,9 +63,15 @@ typedef struct { const char *name; uint32_t type, ref; } T; /* type: the state t
  * a constant as a text's). */
 typedef struct { const char *name; uint32_t text; double initial; } RF;
 typedef struct { const char *name; const RF *fields; size_t nfields; } R;
-/* A further view: a table (type 2, start = list state) or a column of the
- * view numbered table - 1. */
+/* A further view: a table (type 2, start = list state, or bits 8-15 its
+ * list + 1 with a filter's block) or a column of the view numbered table - 1
+ * (0 a number, 1 a text, 3 a bool, 4 an i64, as views were numbered before
+ * 027's 4e; 5 bytes); 6 a list view of a record (bits 16-23 its record + 1,
+ * bits 8-15 its list + 1 or none: its block leaves its list), 7 a list
+ * column (bits 16-23 its record + 1). Types from 8 on are written as they
+ * are. */
 typedef struct { const char *name; uint32_t type, table, start, length; } W;
+enum { W_BYTES = 5, W_OF = 6, W_LIST = 7 };
 /* A function (027's 2c): its block, and its parameters' then its results' types (a record field's: 0 a number, 1 a
  * text, 2 a bool, 3 an i64, 4 a list whose record is beside it; 5 bytes). */
 typedef struct { uint32_t start, length; uint8_t params, results, types[16]; uint16_t records[16]; } FN;
@@ -289,16 +295,26 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.nv; ++i) {
         p = put32(p, offset[n++]);
         p = put32(p, spec.v[i].length & BOOL_VIEW ? PURE_VIEW_BOOL : spec.v[i].length & I64_VIEW ? PURE_VIEW_I64 : 0);
+        p = put32(p, 0);
         p = put32(p, spec.v[i].start);
         p = put32(p, spec.v[i].length & ~(BOOL_VIEW | I64_VIEW));
     }
-    for (size_t i = 0; i < spec.ntv; ++i) { p = put32(p, offset[n++]); p = put32(p, 1); p = put32(p, spec.tv[i].start); p = put32(p, spec.tv[i].length); }
-    for (size_t i = 0; i < spec.nw; ++i) {
+    for (size_t i = 0; i < spec.ntv; ++i) {
+        p = put32(p, offset[n++]); p = put32(p, PURE_VIEW_TEXT); p = put32(p, 0);
+        p = put32(p, spec.tv[i].start); p = put32(p, spec.tv[i].length);
+    }
+    static const uint8_t w_types[] = {PURE_VIEW_NUM, PURE_VIEW_TEXT, PURE_VIEW_LIST, PURE_VIEW_BOOL, PURE_VIEW_I64,
+                                      PURE_VIEW_BYTES, PURE_VIEW_LIST, PURE_VIEW_LIST};
+    for (size_t i = 0; i < spec.nw; ++i) { /* 20 bytes (027's 4e): type, 0, table + 1, record + 1, list + 1, block */
         const W *w = &spec.w[i];
+        uint32_t code = w->type & 0xFF, list = w->type >> 8 & 0xFF, record = w->type >> 16 & 0xFF, start = w->start;
+        if (code == 2 && !list) list = start + 1, start = 0; /* a table without a filter named its list in start */
         p = put32(p, offset[n++]);
-        *p++ = (unsigned char)w->type; *p++ = (unsigned char)(w->type >> 8); /* a filtered table: its list + 1 */
+        *p++ = code < sizeof(w_types) ? w_types[code] : (unsigned char)code; *p++ = 0;
         *p++ = (unsigned char)w->table; *p++ = (unsigned char)(w->table >> 8);
-        p = put32(p, w->start);
+        *p++ = (unsigned char)record; *p++ = 0;
+        *p++ = (unsigned char)list; *p++ = 0;
+        p = put32(p, start);
         p = put32(p, w->length);
     }
     for (size_t i = 0; i < spec.nh; ++i) { p = put32(p, spec.h[i].event); p = put32(p, spec.h[i].start); p = put32(p, spec.h[i].length); }
@@ -2320,7 +2336,7 @@ static void tables(void) {
     static const H handlers[] = {{1, 0, 5}, {3, 5, 5}};
     static const V text_views[] = {{"current", 10, 8}};
     static const W table[] = {{"board", 2, 0, 1, 0}, {"title", 1, 2, 18, 2}, {"mark", 1, 2, 20, 6},
-                              {"pos", 0, 2, 26, 2}, {"here", PURE_VIEW_BOOL, 2, 28, 5}};
+                              {"pos", 0, 2, 26, 2}, {"here", 3, 2, 28, 5}};
     Spec spec = {nums, 1, inputs, 2, NULL, 0, handlers, 2, code, LEN(code), NULL, 0, states, 2, constants, 4,
                  text_views, 1, records, 1, table, 5};
     table_spec = spec;
@@ -2367,7 +2383,7 @@ static void tables(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view type"));
     static const W over_number[] = {{"board", 2, 0, 0, 0}};
     bad = spec; bad.w = over_number; bad.nw = 1;
-    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "table list"));
+    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "list view's list"));
     static const O other_row[] = {{ROW, 2, 0}, {XN, 2, 0}};
     static const W other_row_column[] = {{"board", 2, 0, 1, 0}, {"pos", 0, 1, 0, 2}};
     bad = spec; bad.o = other_row; bad.no = 2; bad.h = NULL; bad.nh = 0; bad.tv = NULL; bad.ntv = 0;
@@ -3202,7 +3218,7 @@ static void filters(void) {
     static const O text_filter[] = {{ROW, 0, 0}, {IG, F_TITLE, 0}};
     static const O number_filter[] = {{ROW, 0, 0}, {IG, F_POINTS, 0}};
     static const O folded[] = {{FOLD, FOLDING(PURE_FOLD_COUNT, 0, 1), 0}, {C, 1, 1}};
-    static const W filtered_by[] = {{"open", FILTERED, 0, 0, 0}}, open3[] = {{"open", FILTERED, 0, 0, 3}},
+    static const W filtered_by[] = {{"open", W_OF | 1 << 16, 0, 0, 0}}, open3[] = {{"open", FILTERED, 0, 0, 3}},
                    open2[] = {{"open", FILTERED, 0, 0, 2}};
     static const W not_a_list[] = {{"open", 2 | 2 << 8, 0, 0, 3}};
     static const W flagged_column[] = {{"open", FILTERED, 0, 0, 3}, {"c", 0 | 1 << 8, 1, 0, 3}};
@@ -3211,8 +3227,8 @@ static void filters(void) {
         {text_filter, LEN(text_filter), open2, 1, "filter must leave one bool"},
         {number_filter, LEN(number_filter), open2, 1, "filter must leave one bool"},
         {folded, LEN(folded), open2, 1, "fold inside a filter"},
-        {effect, LEN(effect), filtered_by, 1, "table list"},       /* a filtered table needs its block */
-        {effect, LEN(effect), not_a_list, 1, "table list"},        /* state 1 is an index */
+        {effect, LEN(effect), filtered_by, 1, "list view's list"}, /* a computed list view needs its block */
+        {effect, LEN(effect), not_a_list, 1, "list view's list"},  /* state 1 is an index */
         {effect, LEN(effect), flagged_column, 2, "view type"},     /* only a table has a list byte */
     };
     for (size_t i = 0; i < LEN(refused); ++i)
@@ -4146,7 +4162,7 @@ static void fold_mutations(void) {
             for (uint32_t v = 0; v < module_b.views; ++v) {
                 double value;
                 size_t item;
-                if (module_b.view_type[v] == PURE_VIEW_TABLE) {
+                if (module_b.view_type[v] == PURE_VIEW_LIST) {
                     size_t rows = pure_app_rows(&app, v);
                     for (size_t row = 0; row < rows + 1; ++row) pure_app_row_item(&app, v, row, &item);
                 } else if (module_b.view_table[v]) {
@@ -4464,7 +4480,7 @@ static void describe(PureApp *app, Shown *s) {
     }
     for (uint32_t v = 0; v < m->views; ++v) {
         double value;
-        if (m->view_table[v] || m->view_type[v] == PURE_VIEW_TABLE) continue;
+        if (m->view_table[v] || m->view_type[v] == PURE_VIEW_LIST) continue;
         if (m->view_type[v] == PURE_VIEW_TEXT) {
             if (pure_app_view_text(app, v, show_span, s) != PURE_OK) show(s, "!", 0);
         } else if (pure_app_view(app, v, &value)) show(s, "%g", value);
@@ -5628,7 +5644,7 @@ static void bools(void) {
     static const RF two_default[] = {{"done", 2, 2}};
     static const R two_record[] = {{"r", two_default, 1}};
     static const T with_list[] = {{"on", 5, 1}, {"off", 5, 0}, {"rs", 3, 0}};
-    static const W fifth_view[] = {{"x", 5, 0, 25, 1}};
+    static const W fifth_view[] = {{"x", 8, 0, 25, 1}};
     bad = spec;
     bad.t = two_initial;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "bool initial value"));
@@ -6713,6 +6729,107 @@ static void anchors(void) {
     printf("{\"anchors\":{\"views\":6,\"refused\":%zu}}\n", LEN(refused) + 1);
 }
 
+/* List views (027's 4e): a list state as it is and filtered (its record's fields its columns, made at load, a list
+ * field's cell lent in its stored form), a list a view's body builds (kept for its rows and cells until a change), a
+ * map's list and bytes columns, a bytes view; refused: a computed view without its block, a record not its list's, a
+ * column of a view of a record, a list column without its record, a body leaving a list of another record, a pointing
+ * at a computed list. */
+static bool tags_are(PureApp *app, uint32_t column, size_t row, const int64_t *want, size_t count) {
+    PureSpan items;
+    PureCell cells[PURE_RECORD_FIELDS];
+    if (pure_app_cell_items(app, column, row, &items) != PURE_OK) return false;
+    size_t at = 0, seen = 0;
+    while (pure_items_next(app->module, 0, items, &at, cells))
+        if (seen >= count || cells[0].i64 != want[seen++]) return false;
+    return seen == count && at == items.size;
+}
+
+static void list_views(void) {
+    enum { BF = PURE_OP_BYTES_FROM, TB = PURE_OP_TEXT_BYTES, ITEMS = 1, TAGS = 2, MADE = 3 };
+    enum { ALL, LONG, COMPUTED, MAP, MAP_TAGS, MAP_RAW, BLOB };
+    static const S nums[] = {{"n", 0}};
+    static const char *const constants[] = {"", "a", "zz", "bb"};
+    static const RF tag_fields[] = {{"v", 3, 0}};
+    static const RF item_fields[] = {{"name", 1, 0}, {"raw", 5, 0}, {"tags", 4, 0}};
+    static const R records[] = {{"Tag", tag_fields, 1}, {"Item", item_fields, 3}};
+    static const T others[] = {{"items", 3, 1}, {"let.tags", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0},
+                               {"let.made", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}};
+    static const I inputs[] = {KEY("go", "KeyG")};
+    const O code[] = {
+        IC(7), {LA, TAGS, 0}, IC(9), {LA, TAGS, 0},                                /* 0 tags = [7, 9] */
+        {TK, 1, 0}, {TK, 2, 0}, {BF, 0, 0}, {LV, TAGS, 0}, {LA, ITEMS, 0},          /* 4 items += { a, zz, tags } */
+        IC(11), {LA, TAGS, 0},                                                     /* 9 tags += 11 */
+        {TK, 3, 0}, {TK, 0, 0}, {BF, 0, 0}, {LV, TAGS, 0}, {LA, ITEMS, 0},          /* 11 items += { bb, "", tags } */
+        {LC, ITEMS, 0}, {ST, 0, 0},                                                /* 16 n = items.count */
+        {ROW, ITEMS, 0}, {IG, ITEM(ITEMS, 0), 0}, {TB, 0, 0}, {C, 0, 1}, {GT, 0, 0}, /* 18 long: a name past a byte */
+        IC(5), {LA, TAGS, 0}, {TK, 1, 0}, {TK, 2, 0}, {BF, 0, 0}, {LV, TAGS, 0},    /* 23 computed: [{ a, zz, [5] }] */
+        {LA, MADE, 0}, {LV, MADE, 0},
+        {ROW, ITEMS, 0}, {IG, ITEM(ITEMS, 2), 0},                                  /* 31 map's tags */
+        {ROW, ITEMS, 0}, {IG, ITEM(ITEMS, 1), 0},                                  /* 33 map's raw */
+        {TK, 2, 0}, {BF, 0, 0},                                                    /* 35 blob */
+    };
+    static const W views[] = {{"all", W_OF | 2 << 16 | (ITEMS + 1) << 8, 0, 0, 0}, {"long", W_OF | 2 << 16 | (ITEMS + 1) << 8, 0, 18, 5},
+                              {"computed", W_OF | 2 << 16, 0, 23, 8}, {"map", 2, 0, ITEMS, 0},
+                              {"tags", W_LIST | 1 << 16, MAP + 1, 31, 2}, {"raw", W_BYTES, MAP + 1, 33, 2},
+                              {"blob", W_BYTES, 0, 35, 2}};
+    H handler = {1, 0, 18};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, code, LEN(code), NULL, 0, others, LEN(others), constants,
+                 LEN(constants), NULL, 0, records, 2, views, LEN(views)};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "list views: %s\n", error); abort(); }
+    const PureModule *m = &module_a;
+    int name = pure_module_column(m, ALL, "name"), raw = pure_module_column(m, ALL, "raw"), tags = pure_module_column(m, ALL, "tags");
+    int long_name = pure_module_column(m, LONG, "name"), long_tags = pure_module_column(m, LONG, "tags");
+    int made_name = pure_module_column(m, COMPUTED, "name"), made_tags = pure_module_column(m, COMPUTED, "tags");
+    CHECK(name >= (int)LEN(views) && raw > name && tags > raw && long_tags > long_name && made_tags > made_name);
+    CHECK(m->view_type[name] == PURE_VIEW_TEXT && m->view_type[raw] == PURE_VIEW_BYTES && m->view_type[tags] == PURE_VIEW_LIST &&
+          m->view_record[tags] == 1 && m->view_type[COMPUTED] == PURE_VIEW_LIST && m->view_record[COMPUTED] == 2);
+    PureApp app;
+    CHECK(pure_app_start(&app, m, (PureData){0}) == PURE_OK);
+    CHECK(pure_app_rows(&app, ALL) == 0 && pure_app_rows(&app, COMPUTED) == 1);
+    CHECK(press(&app, 0) == PURE_OK && app.values[0].num == 2);
+    static const int64_t two[] = {7, 9}, three[] = {7, 9, 11}, five[] = {5};
+    CHECK(pure_app_rows(&app, ALL) == 2 && !strcmp(cell_text(&app, (uint32_t)name, 1), "bb") &&
+          !strcmp(cell_text(&app, (uint32_t)raw, 0), "zz") && tags_are(&app, (uint32_t)tags, 0, two, 2) &&
+          tags_are(&app, (uint32_t)tags, 1, three, 3));
+    CHECK(pure_app_rows(&app, LONG) == 1 && !strcmp(cell_text(&app, (uint32_t)long_name, 0), "bb") &&
+          tags_are(&app, (uint32_t)long_tags, 0, three, 3));
+    CHECK(pure_app_rows(&app, COMPUTED) == 1 && !strcmp(view_text(&app, BLOB), "zz") && /* another evaluation between */
+          !strcmp(cell_text(&app, (uint32_t)made_name, 0), "a") && tags_are(&app, (uint32_t)made_tags, 0, five, 1));
+    CHECK(pure_app_rows(&app, MAP) == 2 && tags_are(&app, MAP_TAGS, 0, two, 2) && tags_are(&app, MAP_TAGS, 1, three, 3) &&
+          !strcmp(cell_text(&app, MAP_RAW, 0), "zz") && !strcmp(cell_text(&app, MAP_RAW, 1), ""));
+    double number;
+    CHECK(!pure_app_cell(&app, (uint32_t)name, 0, &number) && !pure_app_cell(&app, (uint32_t)name, 2, &number));
+    CHECK(press(&app, 0) == PURE_OK && pure_app_rows(&app, ALL) == 4 && pure_app_rows(&app, LONG) == 2 &&
+          pure_app_rows(&app, COMPUTED) == 1);
+    size_t item;
+    CHECK(pure_app_row_item(&app, LONG, 1, &item) && item == 3 && pure_app_row_item(&app, COMPUTED, 0, &item) && item == 0 &&
+          !pure_app_row_item(&app, COMPUTED, 1, &item));
+    pure_app_stop(&app);
+    static const W no_block[] = {{"x", W_OF | 2 << 16, 0, 0, 0}}, not_its_record[] = {{"x", W_OF | 1 << 16 | (ITEMS + 1) << 8, 0, 0, 0}},
+                   made_column[] = {{"all", W_OF | 2 << 16 | (ITEMS + 1) << 8, 0, 0, 0}, {"c", 0, ALL + 1, 18, 2}},
+                   unrecorded[] = {{"map", 2, 0, ITEMS, 0}, {"tags", W_LIST, 1, 31, 2}},
+                   another_record[] = {{"x", W_OF | 1 << 16, 0, 23, 8}},
+                   pointed[] = {{"computed", W_OF | 2 << 16, 0, 23, 8}};
+    static const I pointing_at[] = {KEY("go", "KeyG"), {"computed.point", "0", POINT_INPUT, NULL, 0}};
+    const struct { const W *w; size_t nw; const I *in; size_t ni; const char *why; } refused[] = {
+        {no_block, 1, inputs, 1, "list view's list"},
+        {not_its_record, 1, inputs, 1, "list view's list"},
+        {made_column, 2, inputs, 1, "view type"},
+        {unrecorded, 2, inputs, 1, "view type"},
+        {another_record, 1, inputs, 1, "view must leave one value of its type"},
+        {pointed, 1, pointing_at, 2, "pointing's table"},
+    };
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        Spec bad = spec;
+        bad.w = refused[k].w, bad.nw = refused[k].nw, bad.in = refused[k].in, bad.ni = refused[k].ni;
+        if (load(bad, &module_b) == PURE_OK || !strstr(error, refused[k].why)) {
+            fprintf(stderr, "list views: refused %zu: %s\n", k, error);
+            abort();
+        }
+    }
+    printf("{\"list_views\":{\"views\":%zu,\"refused\":%zu}}\n", LEN(views), LEN(refused));
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -7095,6 +7212,7 @@ int main(void) {
     nested_rows();
     bytes_fields();
     anchors();
+    list_views();
     memory_budget();
     work_budget();
     fold_mutations();

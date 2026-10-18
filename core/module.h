@@ -283,13 +283,19 @@ enum { PURE_CURSOR_STAYS = 1, PURE_LIST_ROWS = 256, PURE_LIST_BOUND = 512 };
  * value (docs/design/018). A stored cursor or index is of a stored text or
  * list. */
 enum { PURE_STATE_TRANSIENT = 256 };
-/* A table view has one row per item of a list, or per item its filter
- * keeps; its columns are number, bool, i64 or text views evaluated for one
- * row at a time. A view outside a table may compute (docs/design/018): its
- * code may hold LOOP, EACH, BREAK and locals, and change an event's lists,
- * but no state; each evaluation begins with its locals 0 and those lists
- * empty (a reader's own: readers of one snapshot compute apart). */
-typedef enum { PURE_VIEW_NUM = 0, PURE_VIEW_TEXT = 1, PURE_VIEW_TABLE = 2, PURE_VIEW_BOOL = 3, PURE_VIEW_I64 = 4 } PureViewType;
+/* A view's type is a record field's (027's 4e). A list view's rows are a
+ * list's items: a list state's (its filter's, when it has one), or those of
+ * the list its code leaves (computed once a change, kept for its rows and
+ * cells until the next). Its columns are its record's fields, read from the
+ * items as they are, or for a list state's map (a view of no record) the
+ * views that follow it, each evaluated for one row at a time. A list cell
+ * is lent in its items' stored form (pure_app_cell_items). A view outside
+ * a list may compute (docs/design/018): its code may hold LOOP, EACH, BREAK
+ * and locals, and change an event's lists, but no state; each evaluation
+ * begins with its locals 0 and those lists empty (a reader's own: readers
+ * of one snapshot compute apart). */
+typedef enum { PURE_VIEW_NUM = PURE_RECORD_NUMBER, PURE_VIEW_TEXT = PURE_RECORD_TEXT, PURE_VIEW_BOOL = PURE_RECORD_BOOL,
+               PURE_VIEW_I64 = PURE_RECORD_I64, PURE_VIEW_LIST = PURE_RECORD_LIST, PURE_VIEW_BYTES = PURE_RECORD_BYTES } PureViewType;
 typedef enum { PURE_UNIT_CHAR = 0, PURE_UNIT_LINE = 1 } PureUnit;
 /* EXISTS: an item with that key is already in the keyed list (the event
  * reports PURE_CONFLICT). MEMORY: the event would leave the states holding
@@ -389,8 +395,11 @@ typedef struct {
     PureField field[PURE_MODULE_FIELDS];
     PureValue initial[PURE_MODULE_STATES];
     uint8_t view_type[PURE_MODULE_VIEWS];
-    uint16_t view_table[PURE_MODULE_VIEWS]; /* a column's table view + 1, or 0 */
-    uint16_t view_list[PURE_MODULE_VIEWS];  /* the list of a table or column */
+    uint16_t view_table[PURE_MODULE_VIEWS]; /* a column's list view + 1, or 0 */
+    uint16_t view_list[PURE_MODULE_VIEWS];  /* the list state of a list view over one, or its column's */
+    uint16_t view_record[PURE_MODULE_VIEWS]; /* a list view's or a list column's items' record + 1 (a map's: 0) */
+    uint8_t view_field[PURE_MODULE_VIEWS];   /* a column the load made: its item's field + 1 (read as it is), or 0 */
+    bool view_computed[PURE_MODULE_VIEWS];   /* a list view whose code leaves its list (a column's: its view's) */
     PureBlock view_code[PURE_MODULE_VIEWS];
     uint8_t view_plan[PURE_MODULE_VIEWS]; /* a table's filter runs a leaf of its list at once (as a fold may) */
     uint8_t view_arguments[PURE_MODULE_VIEWS]; /* the input of a view's arguments + 1 (a column's: its table's), or 0 */
@@ -542,7 +551,8 @@ typedef struct {
      * sets it, so a script can replay any time; views never see it. */
     double now;
     uint64_t changes; /* counts every change of states, never back: what a filter's rows are fresh for */
-    struct PureRows { uint32_t table; uint64_t changes, given; size_t *items, count, capacity; PureFault fault; } *rows; /* a filtered table's items */
+    /* A filtered list view's items, or a computed one's list (kept: its lists in stored form). */
+    struct PureRows { uint32_t table; uint64_t changes, given; size_t *items, count, capacity; PureFault fault; PureList *list; } *rows;
     unsigned row_tables;
     /* Current message or text event, kept until pure_app_finish. */
     PureSpan payload;
@@ -625,10 +635,11 @@ bool pure_app_view(PureApp *, uint32_t view, double *out);
 /* An i64 view, and an i64 column's cell; false for any other or a failed evaluation. */
 bool pure_app_view_i64(PureApp *, uint32_t view, int64_t *out);
 bool pure_app_cell_i64(PureApp *, uint32_t column, size_t row, int64_t *out);
-/* A text view, lent in order until the next view evaluation. */
+/* A text or bytes view, lent in order until the next view evaluation. */
 PureResult pure_app_view_text(PureApp *, uint32_t view, bool (*visit)(void *, PureSpan), void *context);
-/* The rows of a table view (its list's items, or those its filter keeps),
- * or 0 for another view. A host evaluates only the cells it shows. */
+/* The rows of a list view (its list's items, those its filter keeps, or
+ * the items of the list its code leaves), or 0 for another view. A host
+ * evaluates only the cells it shows. */
 size_t pure_app_rows(PureApp *, uint32_t table);
 /* A view that takes arguments (a column: its table's): the input whose
  * fields they are, or -1. */
@@ -641,13 +652,23 @@ int pure_module_arguments(const PureModule *, uint32_t view);
 PureResult pure_app_arguments(PureApp *, uint32_t view, PureSpan payload, const uint32_t *placed);
 /* How many passes the app keeps, made to answer shaped folds in columns. */
 unsigned pure_app_passes(const PureApp *);
-/* The item a row of a table shows, and the row that shows an item (false:
- * its filter leaves the item out). Without a filter both are the identity. */
+/* The item a row of a list view shows, and the row that shows an item
+ * (false: its filter leaves the item out). Without a filter both are the
+ * identity. */
 bool pure_app_row_item(PureApp *, uint32_t table, size_t row, size_t *item);
 bool pure_app_item_row(PureApp *, uint32_t table, size_t item, size_t *row);
-/* A number or bool column's cell (as pure_app_view), or a text column's. */
+/* A number or bool column's cell (as pure_app_view), or a text or bytes column's. */
 bool pure_app_cell(PureApp *, uint32_t column, size_t row, double *out);
 PureResult pure_app_cell_text(PureApp *, uint32_t column, size_t row, bool (*visit)(void *, PureSpan), void *context);
+/* A list column's cell: its items in their stored form (027's stage 3), of
+ * the column's record (view_record - 1), lent until the next view
+ * evaluation or change; pure_items_next reads them. */
+PureResult pure_app_cell_items(PureApp *, uint32_t column, size_t row, PureSpan *items);
+/* The next item of items (of record's, in stored form) at *at: its cells
+ * (a text's, a bytes' and a list's in items' bytes, a list's in this form
+ * again), *at moved past it; false at the end or where the bytes are not
+ * that form. */
+bool pure_items_next(const PureModule *, uint32_t record, PureSpan items, size_t *at, PureCell *cells);
 /* Switch to another verified module. States keep their value by name (text
  * states keep their content, cursors their position in that text); new states
  * start at their initial value. The module must outlive the app. */
