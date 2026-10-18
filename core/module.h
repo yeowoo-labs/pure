@@ -367,18 +367,22 @@ _Static_assert(PURE_MODULE_STATES <= 32, "a state is a bit of PureApp.counted");
 typedef struct {
     uint16_t states, inputs, views, handlers, fields, constants, records, record_fields;
     uint32_t code_count;
-    char state_names[PURE_MODULE_STATES][PURE_MODULE_NAME];
-    char input_names[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
-    char view_names[PURE_MODULE_VIEWS][PURE_MODULE_NAME];
-    char input_keys[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
-    uint8_t state_type[PURE_MODULE_STATES];
-    uint16_t state_ref[PURE_MODULE_STATES]; /* text: constant; cursor: text; list: record; index: list */
-    uint8_t state_flags[PURE_MODULE_STATES]; /* cursor: PURE_CURSOR_STAYS; list: PURE_LIST_ROWS >> 8 */
+    /* Its tables (027's 4f-1), each sized to it in one block (tables) that load takes and pure_module_release gives
+     * back: a state's, an input's, a message field's, a view's (the columns the load makes among them), a handler's, a
+     * record's, a record field's, a function's and a signature item's entries. */
+    void *tables;
+    char (*state_names)[PURE_MODULE_NAME];
+    char (*input_names)[PURE_MODULE_NAME];
+    char (*view_names)[PURE_MODULE_NAME];
+    char (*input_keys)[PURE_MODULE_NAME];
+    uint8_t *state_type;
+    uint16_t *state_ref; /* text: constant; cursor: text; list: record; index: list */
+    uint8_t *state_flags; /* cursor: PURE_CURSOR_STAYS; list: PURE_LIST_ROWS >> 8 */
     uint32_t transient; /* a bit per transient state */
     /* A keyed list: its key field + 1 (0: none). Its items stay in key order
      * (numbers by value, texts by bytes), each key once, and keys do not change. */
-    uint8_t state_key[PURE_MODULE_STATES];
-    bool state_indexed[PURE_MODULE_STATES]; /* list: an index state refers to it (set at load) */
+    uint8_t *state_key;
+    bool *state_indexed; /* list: an index state refers to it (set at load) */
     uint8_t *height;    /* the operand stack's height at each instruction, from its block's start (the verifier's) */
     /* In a batch's block (module-batch.c), a value computed again by the same code as an earlier one whose operands
      * nothing changed between: at its code's first instruction, the earlier root + 1 and its code's length (reuse_from,
@@ -391,45 +395,45 @@ typedef struct {
     bool batches;        /* a loop of it is planned to run in batches (module-batch.c, docs/design/024) */
     uint8_t runner;      /* which executor runs its blocks: 0 run's own steps, 1 with batches, 2 with calls (module.c) */
     bool held;           /* it holds bytes or texts by name (BYTES_STORE): events and views empty them as they begin */
-    PureInputShape input[PURE_MODULE_INPUTS];
-    PureField field[PURE_MODULE_FIELDS];
-    PureValue initial[PURE_MODULE_STATES];
-    uint8_t view_type[PURE_MODULE_VIEWS];
-    uint16_t view_table[PURE_MODULE_VIEWS]; /* a column's list view + 1, or 0 */
-    uint16_t view_list[PURE_MODULE_VIEWS];  /* the list state of a list view over one, or its column's */
-    uint16_t view_record[PURE_MODULE_VIEWS]; /* a list view's or a list column's items' record + 1 (a map's: 0) */
-    uint8_t view_field[PURE_MODULE_VIEWS];   /* a column the load made: its item's field + 1 (read as it is), or 0 */
-    bool view_computed[PURE_MODULE_VIEWS];   /* a list view whose code leaves its list (a column's: its view's) */
-    PureBlock view_code[PURE_MODULE_VIEWS];
-    uint8_t view_plan[PURE_MODULE_VIEWS]; /* a table's filter runs a leaf of its list at once (as a fold may) */
-    uint8_t view_arguments[PURE_MODULE_VIEWS]; /* the input of a view's arguments + 1 (a column's: its table's), or 0 */
+    PureInputShape *input;
+    PureField *field;
+    PureValue *initial;
+    uint8_t *view_type;
+    uint16_t *view_table; /* a column's list view + 1, or 0 */
+    uint16_t *view_list;  /* the list state of a list view over one, or its column's */
+    uint16_t *view_record; /* a list view's or a list column's items' record + 1 (a map's: 0) */
+    uint8_t *view_field;   /* a column the load made: its item's field + 1 (read as it is), or 0 */
+    bool *view_computed;   /* a list view whose code leaves its list (a column's: its view's) */
+    PureBlock *view_code;
+    uint8_t *view_plan; /* a table's filter runs a leaf of its list at once (as a fold may) */
+    uint8_t *view_arguments; /* the input of a view's arguments + 1 (a column's: its table's), or 0 */
     /* Set at load: a view's code computes (its locals and loops: a body), and the event's lists it changes, a bit each. */
-    bool view_body[PURE_MODULE_VIEWS];
-    uint32_t view_lists[PURE_MODULE_VIEWS];
+    bool *view_body;
+    uint32_t *view_lists;
     PureShape shape[PURE_MODULE_SHAPES];
     uint8_t shapes;
     PureRange range[PURE_MODULE_RANGES];
     uint8_t ranges;
-    uint8_t view_range[PURE_MODULE_VIEWS]; /* a table's filter's PureRange + 1, or 0 */
-    PureHandler handler[PURE_MODULE_HANDLERS];
+    uint8_t *view_range; /* a table's filter's PureRange + 1, or 0 */
+    PureHandler *handler;
     /* The code and the text constants, sized to the module in one block
      * (storage) that load takes and pure_module_release gives back. */
     PureOp *code;
     uint32_t *constant_offset, *constant_length;
     unsigned char *constant_data;
     void *storage;
-    char record_names[PURE_MODULE_RECORDS][PURE_MODULE_NAME];
-    PureRecord record[PURE_MODULE_RECORDS];
-    char record_field_names[PURE_MODULE_RECORD_FIELDS][PURE_MODULE_NAME];
-    uint8_t record_field_type[PURE_MODULE_RECORD_FIELDS]; /* PureRecordType */
-    PureValue record_field_default[PURE_MODULE_RECORD_FIELDS]; /* a number (a bool's 0 or 1), an i64, a text constant's index
-                                                                  * or a list's record (LIST, its i64) */
-    bool record_nested[PURE_MODULE_RECORDS]; /* a record with a LIST field (set at load) */
-    uint16_t record_held[PURE_MODULE_RECORDS]; /* its fields held as bytes are (pure_record_bytes), a bit each (set at load) */
+    char (*record_names)[PURE_MODULE_NAME];
+    PureRecord *record;
+    char (*record_field_names)[PURE_MODULE_NAME];
+    uint8_t *record_field_type; /* PureRecordType */
+    PureValue *record_field_default; /* a number (a bool's 0 or 1), an i64, a text constant's index or a list's record
+                                      * (LIST, its i64) */
+    bool *record_nested; /* a record with a LIST field (set at load) */
+    uint16_t *record_held; /* its fields held as bytes are (pure_record_bytes), a bit each (set at load) */
     uint16_t functions;
-    PureFunction function[PURE_MODULE_FUNCTIONS];
-    uint8_t signature_type[PURE_MODULE_SIGNATURES];
-    uint16_t signature_record[PURE_MODULE_SIGNATURES];
+    PureFunction *function;
+    uint8_t *signature_type;
+    uint16_t *signature_record;
     bool calls; /* it has functions: its blocks run in the executor that calls (module.c) */
 } PureModule;
 

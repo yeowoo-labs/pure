@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
         n += (size_t)sprintf(doc + n, "%s{\"key%d\": [1.5e3, true, null, \"text \\u00e9 %d\"]}", k ? "," : "", k, k);
     doc[n++] = ']';
     doc[n] = 0;
-    PureModule module;
+    PureModule module = {0};
     char error[160];
     if (pure_module_read(argv[1], &module, error, sizeof(error)) != PURE_OK) { fprintf(stderr, "%s\n", error); return 1; }
     PureApp app;

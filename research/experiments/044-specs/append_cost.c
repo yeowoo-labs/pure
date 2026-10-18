@@ -9,7 +9,7 @@
 #include <time.h>
 static double now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e9 + t.tv_nsec; }
 int main(int argc, char **argv) {
-    PureModule m; char error[160];
+    PureModule m = {0}; char error[160];
     if (pure_module_read(argv[1], &m, error, sizeof(error)) != PURE_OK) { fprintf(stderr, "%s\n", error); return 1; }
     PureApp app;
     if (pure_app_start(&app, &m, (PureData){0}) != PURE_OK) return 1;

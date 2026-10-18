@@ -3483,7 +3483,7 @@ static void lane_folds(void) {
             module_b.code[i].plan = module_b.code[i].shape = 0;
         }
         planned += module_a.view_plan[VIEWS];
-        memset(module_b.view_plan, 0, sizeof(module_b.view_plan));
+        memset(module_b.view_plan, 0, module_b.views * sizeof(*module_b.view_plan));
         pure_jit_free(module_b.jit); /* its code changed: compiled again (021) */
         module_b.jit = pure_jit_make(&module_b);
         PureApp a, b;
@@ -4079,7 +4079,7 @@ static void ranges(void) {
           !module_a.code[45].range && module_a.view_range[6] && module_a.code[78].range && !module_a.code[102].range &&
           !module_a.code[118].range && module_a.code[118].plan);
     for (uint32_t i = 0; i < module_b.code_count; ++i) module_b.code[i].range = 0;
-    memset(module_b.view_range, 0, sizeof(module_b.view_range));
+    memset(module_b.view_range, 0, module_b.views * sizeof(*module_b.view_range));
     pure_jit_free(module_b.jit); /* its code changed: compiled again (021) */
     module_b.jit = pure_jit_make(&module_b);
     uint32_t seed = 0x7a45e11u;
@@ -5426,7 +5426,7 @@ static void output_meaning(void) {
                 NULL, 0};
     Spec none = {nums, 1, none_inputs, 1, NULL, 0, none_handlers, 1, none_code, 2, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
                  NULL, 0, NULL, 0};
-    PureModule without;
+    PureModule without = {0};
     CHECK(load(was, &module_a) == PURE_OK && load(now, &module_b) == PURE_OK && load(none, &without) == PURE_OK);
     CHECK(pure_module_shape(&module_a, 1) != pure_module_shape(&module_b, 1));
     char *path = new_store();

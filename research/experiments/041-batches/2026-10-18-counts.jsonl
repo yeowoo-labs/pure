@@ -128,3 +128,13 @@
 {"version":"b37","way":"rounds","work":"matmul","instructions":21259969629,"cycles":6204053361}
 {"version":"b37","way":"batches","work":"bfs","instructions":3347488616,"cycles":1663777730}
 {"version":"b37","way":"rounds","work":"bfs","instructions":4709044317,"cycles":2143909347}
+{"version":"b38","way":"batches","work":"roots","instructions":157248661,"cycles":109895799}
+{"version":"b38","way":"rounds","work":"roots","instructions":2719817740,"cycles":1102038842}
+{"version":"b38","way":"batches","work":"knapsack","instructions":348023990,"cycles":106312579}
+{"version":"b38","way":"rounds","work":"knapsack","instructions":22053584918,"cycles":8200983416}
+{"version":"b38","way":"batches","work":"join","instructions":1783615210,"cycles":1338885351}
+{"version":"b38","way":"rounds","work":"join","instructions":7705975089,"cycles":4071828568}
+{"version":"b38","way":"batches","work":"matmul","instructions":702228751,"cycles":227165183}
+{"version":"b38","way":"rounds","work":"matmul","instructions":21163848735,"cycles":7467484636}
+{"version":"b38","way":"batches","work":"bfs","instructions":3339436314,"cycles":1648001735}
+{"version":"b38","way":"rounds","work":"bfs","instructions":4697444852,"cycles":2103018632}

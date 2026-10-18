@@ -83,7 +83,7 @@ int main(int argc, char **argv) {
     uint32_t seed = 140;
     for (size_t i = 0; i < size; ++i) seed = seed * 1664525u + 1013904223u, data[i] = (unsigned char)(seed >> 24);
 
-    PureModule module;
+    PureModule module = {0};
     char error[160];
     if (pure_module_read(argv[1], &module, error, sizeof(error)) != PURE_OK) { fprintf(stderr, "%s\n", error); return 1; }
     PureApp app;

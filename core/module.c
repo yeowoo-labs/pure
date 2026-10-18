@@ -1563,7 +1563,59 @@ PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *e
     return result;
 }
 
+#ifdef __SANITIZE_ADDRESS__
+#include <sanitizer/asan_interface.h>
+enum { TABLE_GAP = 16 }; /* poisoned between tables: reading past one is caught */
+#else
+enum { TABLE_GAP = 0 };
+#endif
+
+/* The module's tables laid out from base (027's 4f-1), each a run of its entries aligned to 8; the bytes they take. */
+static size_t lay_tables(PureModule *m, uintptr_t base, size_t views, size_t signatures) {
+    size_t at = 0;
+#define LAY(member, count) \
+    (m->member = (void *)(base + at), at += (((size_t)(count) * sizeof(*m->member) + 7) & ~(size_t)7) + TABLE_GAP)
+    LAY(state_names, m->states), LAY(state_type, m->states), LAY(state_ref, m->states), LAY(state_flags, m->states);
+    LAY(state_key, m->states), LAY(state_indexed, m->states), LAY(initial, m->states);
+    LAY(input_names, m->inputs), LAY(input_keys, m->inputs), LAY(input, m->inputs), LAY(field, m->fields);
+    LAY(view_names, views), LAY(view_type, views), LAY(view_table, views), LAY(view_list, views), LAY(view_record, views);
+    LAY(view_field, views), LAY(view_computed, views), LAY(view_code, views), LAY(view_plan, views);
+    LAY(view_arguments, views), LAY(view_body, views), LAY(view_lists, views), LAY(view_range, views);
+    LAY(handler, m->handlers);
+    LAY(record_names, m->records), LAY(record, m->records), LAY(record_nested, m->records), LAY(record_held, m->records);
+    LAY(record_field_names, m->record_fields), LAY(record_field_type, m->record_fields);
+    LAY(record_field_default, m->record_fields);
+    LAY(function, m->functions), LAY(signature_type, signatures), LAY(signature_record, signatures);
+#undef LAY
+    return at;
+}
+
+static bool make_tables(PureModule *m, size_t views, size_t signatures) {
+    size_t size = lay_tables(m, 0, views, signatures);
+    unsigned char *base = calloc(1, size ? size : 1);
+    if (!base) return false;
+    m->tables = base;
+    lay_tables(m, (uintptr_t)base, views, signatures);
+#ifdef __SANITIZE_ADDRESS__
+    for (size_t at = 0; at + TABLE_GAP <= size;) { /* each run's gap, found again as it was laid out */
+        unsigned char *next = base + size;
+#define GAP(member) if ((unsigned char *)m->member > base + at && (unsigned char *)m->member < next) next = (unsigned char *)m->member;
+        GAP(state_type) GAP(state_ref) GAP(state_flags) GAP(state_key) GAP(state_indexed) GAP(initial) GAP(input_names)
+        GAP(input_keys) GAP(input) GAP(field) GAP(view_names) GAP(view_type) GAP(view_table) GAP(view_list) GAP(view_record)
+        GAP(view_field) GAP(view_computed) GAP(view_code) GAP(view_plan) GAP(view_arguments) GAP(view_body) GAP(view_lists)
+        GAP(view_range) GAP(handler) GAP(record_names) GAP(record) GAP(record_nested) GAP(record_held) GAP(record_field_names)
+        GAP(record_field_type) GAP(record_field_default) GAP(function) GAP(signature_type) GAP(signature_record)
+#undef GAP
+        ASAN_POISON_MEMORY_REGION(next - TABLE_GAP, TABLE_GAP);
+        at = (size_t)(next - base);
+    }
+#endif
+    return true;
+}
+
 void pure_module_release(PureModule *m) {
+    free(m->tables);
+    m->tables = NULL;
     pure_jit_free(m->jit);
     m->jit = NULL;
     m->batches = m->calls = false;
@@ -1664,6 +1716,23 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     out->constant_offset = (uint32_t *)(out->code + out->code_count);
     out->constant_length = out->constant_offset + out->constants;
     out->constant_data = (unsigned char *)(out->constant_length + out->constants);
+    /* Its tables, the columns the load makes among the views (027's 4e: a record's fields for each list view of a
+     * record), counted from the bytes first. */
+    size_t records_at = functions_at - (size_t)out->views * VIEW_BYTES - (size_t)out->handlers * HANDLER_BYTES -
+                        (size_t)out->record_fields * RECORD_FIELD_BYTES - (size_t)out->records * RECORD_BYTES;
+    size_t made = 0, views_at = records_at + (size_t)out->records * RECORD_BYTES + (size_t)out->record_fields * RECORD_FIELD_BYTES;
+    for (uint32_t i = 0; i < out->views; ++i) {
+        const unsigned char *v = p + views_at + (size_t)i * VIEW_BYTES;
+        uint32_t record = read16(v + 8);
+        if (v[4] == PURE_VIEW_LIST && !read16(v + 6) && record && record <= out->records)
+            made += read16(p + records_at + (size_t)(record - 1) * RECORD_BYTES + 6);
+    }
+    if (out->views + made > PURE_MODULE_VIEWS) REFUSE("views and their columns", out->views);
+    size_t capacity = out->views + made;
+    if (!make_tables(out, capacity, signatures)) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
     const unsigned char *at = p + PURE_MODULE_HEADER;
     const unsigned char *text = p + size - constant_bytes - strings;
     if (constant_bytes) memcpy(out->constant_data, p + size - constant_bytes, constant_bytes);
@@ -1879,7 +1948,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if (!list_view(out, i) || !out->view_record[i]) continue;
         const PureRecord *r = &out->record[out->view_record[i] - 1];
         for (unsigned f = 0; f < r->count; ++f) {
-            if (out->views == PURE_MODULE_VIEWS) REFUSE("views and their columns", i);
+            if (out->views == capacity) REFUSE("views and their columns", i);
             uint32_t c = out->views++, field = r->first + f;
             memcpy(out->view_names[c], out->record_field_names[field], PURE_MODULE_NAME);
             out->view_type[c] = out->record_field_type[field];
@@ -2130,7 +2199,7 @@ refused:
 #undef REFUSE
 }
 
-static int find(const char (*names)[PURE_MODULE_NAME], unsigned count, const char *name) {
+static int find(char (*names)[PURE_MODULE_NAME], unsigned count, const char *name) {
     for (unsigned i = 0; i < count; ++i)
         if (!strcmp(names[i], name)) return (int)i;
     return -1;
