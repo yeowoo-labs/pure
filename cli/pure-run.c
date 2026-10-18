@@ -16,8 +16,8 @@
  * (type gives a text input its bytes, message a message input its payload, laid out as the module says;
  * message NAME @PATH gives it the bytes of the file at PATH, of any size.)
  * Text states and text views print as JSON strings; cursors as byte positions;
- * lists as arrays of objects; indices as positions; a table view as an array
- * with an object of its columns per row. A failed view or cell is null. */
+ * lists as arrays of objects (a bytes field as a string of its hex digits); indices as positions; a table view as an
+ * array with an object of its columns per row. A failed view or cell is null. */
 /* time MS sets the time events see (milliseconds since 1970); tick NAME is a timer's tick. */
 
 static bool load(const char *path, PureModule *module) {
@@ -62,7 +62,7 @@ static void show_value_items(const PureModule *m, uint32_t record, const unsigne
         for (unsigned f = 0; f < r->count && at <= size; ++f) {
             uint8_t type = m->record_field_type[r->first + f];
             PureCell cell = {0};
-            if (type == PURE_RECORD_TEXT || type == PURE_RECORD_LIST) {
+            if (pure_record_bytes(type) || type == PURE_RECORD_LIST) {
                 cell.size = size - at >= 4 ? le32(bytes + at) : 0;
                 cell.text = (unsigned char *)bytes + at + 4;
                 at += 4 + cell.size;
@@ -85,7 +85,11 @@ static void show_cell(const PureModule *m, uint32_t field, PureCell cell, bool k
     else if (type == PURE_RECORD_NUMBER) printf("%.17g", cell.num);
     else if (type == PURE_RECORD_LIST && kept) show_value_items(m, (uint32_t)m->record_field_default[field].i64, cell.text, cell.size);
     else if (type == PURE_RECORD_LIST) printf("%" PRId64, cell.i64); /* an event's list: its number among the event's */
-    else {
+    else if (type == PURE_RECORD_BYTES) {
+        putchar('"');
+        for (size_t i = 0; i < cell.size; ++i) printf("%02x", cell.text[i]);
+        putchar('"');
+    } else {
         putchar('"');
         json_span(NULL, (PureSpan){cell.text, cell.size});
         putchar('"');

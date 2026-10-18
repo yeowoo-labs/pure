@@ -65,7 +65,7 @@ bool pure_cell_fits(uint8_t kind, PureCell cell);
  * replaced, a stored value read by another module, a waiting send recast):
  * true with *cell made the other when it fits (a bool from 0 or 1, either
  * zero false; a number from an integer within 2^53; an integer from a
- * whole number in its range), else false. Texts only as themselves. */
+ * whole number in its range), else false. Texts as themselves and as bytes, bytes as themselves. */
 bool pure_cell_as(uint8_t from, uint8_t to, PureCell *cell);
 PureList *pure_list_new(unsigned fields, const uint8_t *kinds);
 void pure_list_free(PureList *);

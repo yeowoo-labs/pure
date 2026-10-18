@@ -341,7 +341,7 @@ static const char *items_of(PureJsonMessage *b, unsigned char *json, size_t size
             if (given[k]) return "json_field";
             given[k] = true;
             uint8_t type = m->record_field_type[record->first + k];
-            bool text = type == PURE_RECORD_TEXT, truth;
+            bool text = pure_record_bytes(type), truth; /* a string: a text's, or bytes' (as its UTF-8) */
             if (type == PURE_RECORD_LIST) {
                 size_t from = b->rows_size;
                 const char *why = items_of(b, json, size, at, (uint32_t)m->record_field_default[record->first + k].i64,
@@ -366,7 +366,7 @@ static const char *items_of(PureJsonMessage *b, unsigned char *json, size_t size
                 unsigned char *value = json + *at + 1;
                 if (!memchr(value, '\\', end - 1)) written = end - 1;
                 else if (!json_unescape(value, end - 1, value, &written)) return "json";
-                if (!pure_utf8_valid((PureSpan){value, written})) return "json";
+                if (type == PURE_RECORD_TEXT && !pure_utf8_valid((PureSpan){value, written})) return "json";
                 texts[k] = (PureSpan){value, written};
                 *at = pure_json_space(json, *at + 1 + end, size);
                 continue;
@@ -386,10 +386,10 @@ static const char *items_of(PureJsonMessage *b, unsigned char *json, size_t size
         for (unsigned k = 0; k < record->count; ++k) {
             uint32_t at_field = record->first + k;
             uint8_t type = m->record_field_type[at_field];
-            if (type == PURE_RECORD_TEXT || type == PURE_RECORD_LIST) {
+            if (pure_record_bytes(type) || type == PURE_RECORD_LIST) {
                 PureSpan text = {0};
                 size_t length = type == PURE_RECORD_LIST ? (given[k] ? lists[k][1] : 0) : 0;
-                if (type == PURE_RECORD_TEXT) {
+                if (type != PURE_RECORD_LIST) {
                     uint32_t constant = (uint32_t)m->record_field_default[at_field].num;
                     text = given[k] ? texts[k]
                                     : (PureSpan){m->constant_data + m->constant_offset[constant], m->constant_length[constant]};

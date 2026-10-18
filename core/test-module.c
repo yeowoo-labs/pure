@@ -56,7 +56,8 @@ typedef struct { const char *name; uint32_t type, ref; } T; /* type: the state t
 #define TR (1u << 24) /* in a T's type: a transient state */
 /* A record field: a number and its default, text (text = 1) whose default
  * is the constant numbered initial, a bool (text = 2) or an i64 (text = 3)
- * and its default. */
+ * and its default, a list (4, initial its record) or bytes (5, its default
+ * a constant as a text's). */
 typedef struct { const char *name; uint32_t text; double initial; } RF;
 typedef struct { const char *name; const RF *fields; size_t nfields; } R;
 /* A further view: a table (type 2, start = list state) or a column of the
@@ -185,7 +186,7 @@ static size_t build(unsigned char *out, Spec spec) {
             const RF *field = &spec.r[i].fields[f];
             p = put32(p, offset[++n]);
             p = put32(p, field->text);
-            if (field->text == 1) { p = put32(p, (uint32_t)field->initial); p = put32(p, 0); }
+            if (field->text == 1 || field->text == 5) { p = put32(p, (uint32_t)field->initial); p = put32(p, 0); }
             else if (field->text == 3 || field->text == 4) { /* an i64's default, a list's record */
                 int64_t initial = (int64_t)field->initial;
                 p = put32(p, (uint32_t)(uint64_t)initial);
@@ -6686,6 +6687,61 @@ static void nested_rows(void) {
     printf("{\"nested_rows\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(cuts) + 1);
 }
 
+/* 027's 4b: a record field holding bytes. A message's bytes (any, UTF-8 or not) go into a list's item and come back
+ * as they were; a text goes where bytes go only as bytes (BYTES_FROM), and bytes never where a text goes. Replaced, a
+ * text field becomes a bytes field keeping its value, and a new bytes field takes its constant. */
+static void bytes_fields(void) {
+    enum { BF = PURE_OP_BYTES_FROM, TC = PURE_OP_TEXT_CONST, XL_ = PURE_OP_INDEX_LAST, ITEMS = 1, BLOB = 2 };
+    static const S nums[] = {{"n", 0}};
+    static const char *const constants[] = {"", "zz"};
+    static const RF text_fields[] = {{"t", 1, 0}};
+    static const RF bytes_fields_[] = {{"t", 5, 0}, {"b", 5, 1}};
+    static const R before[] = {{"Item", text_fields, 1}}, after[] = {{"Item", bytes_fields_, 2}};
+    static const T others[] = {{"items", 3, 0}, {"blob", PURE_STATE_TEXT, 0}};
+    static const F text_in[] = {{"t", PURE_FIELD_TEXT}}, bytes_in[] = {{"b", PURE_FIELD_BYTES}};
+    static const I inputs_a[] = {{"put", NULL, PURE_KIND_MESSAGE, false, text_in, 1}};
+    static const I inputs_b[] = {{"put", NULL, PURE_KIND_MESSAGE, false, bytes_in, 1}};
+    /* A: items.append(Item { t: put.t }); n = items.count */
+    static const O code_a[] = {{FIELD, 0, 0}, {LA, ITEMS, 0}, {LC, ITEMS, 0}, {ST, 0, 0}};
+    /* B: items.append(Item { t: put.b, b: bytes("zz") + put.b }); n = items.last.b's length */
+    static const O code_b[] = {{FIELD, 0, 0}, {TC, 1, 0}, {BF, 0, 0}, {FIELD, 0, 0}, {CAT, 1, 0}, {LA, ITEMS, 0},
+                               {XL_, ITEMS, 0}, {IG, ITEM(ITEMS, 1), 0}, {PURE_OP_LEN, 0, 0}, {ST, 0, 0}};
+    H ha = {1, 0, LEN(code_a)}, hb = {1, 0, LEN(code_b)};
+    Spec a = {nums, 1, inputs_a, 1, NULL, 0, &ha, 1, code_a, LEN(code_a), NULL, 0, others, LEN(others), constants, LEN(constants),
+              NULL, 0, before, 1, NULL, 0};
+    Spec b = {nums, 1, inputs_b, 1, NULL, 0, &hb, 1, code_b, LEN(code_b), NULL, 0, others, LEN(others), constants, LEN(constants),
+              NULL, 0, after, 1, NULL, 0};
+    if (load(a, &module_a) != PURE_OK || load(b, &module_b) != PURE_OK) { fprintf(stderr, "bytes fields: %s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){(const unsigned char *)"héllo", 6}) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
+    PureCell t = pure_list_get(app.lists[ITEMS], 0, 0), zz = pure_list_get(app.lists[ITEMS], 0, 1);
+    CHECK(t.size == 6 && !memcmp(t.text, "héllo", 6) && zz.size == 2 && !memcmp(zz.text, "zz", 2));
+    static const unsigned char raw[] = {0xFF, 0x00, 0xC3, 0x28, 0x80}; /* no UTF-8 */
+    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){raw, sizeof(raw)}) == PURE_OK && app.values[0].num == 2 + sizeof(raw));
+    PureCell back = pure_list_get(app.lists[ITEMS], 1, 0), joined = pure_list_get(app.lists[ITEMS], 1, 1);
+    CHECK(back.size == sizeof(raw) && !memcmp(back.text, raw, sizeof(raw)) && joined.size == 2 + sizeof(raw) &&
+          !memcmp(joined.text, "zz", 2) && !memcmp(joined.text + 2, raw, sizeof(raw)));
+    pure_app_stop(&app);
+    /* Refused: a text where bytes go, bytes where a text goes (the field read into a text state). */
+    static const O text_in_bytes[] = {{TC, 0, 0}, {TC, 1, 0}, {LA, ITEMS, 0}, {C, 0, 0}, {ST, 0, 0}};
+    static const O bytes_as_text[] = {{XL_, ITEMS, 0}, {IG, ITEM(ITEMS, 0), 0}, {PURE_OP_TEXT_SET, BLOB, 0}, {C, 0, 0}, {ST, 0, 0}};
+    const O *refused[] = {text_in_bytes, bytes_as_text};
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        H one = {1, 0, 5};
+        Spec bad = {nums, 1, inputs_b, 1, NULL, 0, &one, 1, refused[k], 5, NULL, 0, others, LEN(others), constants, LEN(constants),
+                    NULL, 0, after, 1, NULL, 0};
+        CHECK(load(bad, &module_a) != PURE_OK && strstr(error, "operand type"));
+    }
+    static const T keyed[] = {{"items", 3 | 1u << 8, 0}, {"blob", PURE_STATE_TEXT, 0}}; /* keyed by t, bytes */
+    H one = {1, 0, LEN(code_b)};
+    Spec by_bytes = {nums, 1, inputs_b, 1, NULL, 0, &one, 1, code_b, LEN(code_b), NULL, 0, keyed, LEN(keyed), constants,
+                     LEN(constants), NULL, 0, after, 1, NULL, 0};
+    CHECK(load(by_bytes, &module_a) != PURE_OK && strstr(error, "bytes as a key"));
+    printf("{\"bytes_fields\":{\"items\":2,\"refused\":%zu}}\n", LEN(refused) + 1);
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -7066,6 +7122,7 @@ int main(void) {
     nested_crashes();
     nested_replace();
     nested_rows();
+    bytes_fields();
     memory_budget();
     work_budget();
     fold_mutations();

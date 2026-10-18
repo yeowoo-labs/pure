@@ -3640,6 +3640,7 @@ def server_rows(aup, pure, work):
 TREES = '''
 record Node {
   name: text
+  tag: bytes = "-"
   n = 0
   kids: list of Node
 }
@@ -3655,7 +3656,7 @@ input tree = message {
 fn walk(x, depth) {
   nodes = nodes + 1
   total = total + x.n
-  name_bytes = name_bytes + x.name.bytes
+  name_bytes = name_bytes + x.name.bytes + x.tag.bytes
   if depth > deepest { deepest = depth }
   for k in x.kids { walk(k, depth + 1) }
 }
@@ -3675,7 +3676,8 @@ view named = name_bytes
 def server_trees(aup, pure, work):
     """A message's rows whose records hold lists (027's 4a): a JSON forest
     read straight into the event's lists, nested to any depth up to 64, and
-    walked by a function that calls itself. Random forests (names with
+    walked by a function that calls itself, a field of bytes among them
+    (027's 4b). Random forests (names with
     escapes and characters past ASCII, fields left out taking their
     defaults) against a model walking them in the same order; a require
     refusing one leaves everything as it was; malformed trees (a list field
@@ -3707,6 +3709,8 @@ def server_trees(aup, pure, work):
         roots = []
         for _ in range(rng.randrange(4 if depth < 6 else 1)):
             node = {'name': rng.choice(names)}
+            if rng.random() < 0.5:
+                node['tag'] = rng.choice(names)  # bytes, from a JSON string
             if rng.random() < 0.8:
                 node['n'] = rng.randrange(-1000, 1000) / 8
             kids = forest(depth + 1)
@@ -3721,7 +3725,7 @@ def server_trees(aup, pure, work):
         into[0] += 1
         into[1] += node.get('n', 0)
         into[2] = max(into[2], depth)
-        into[3] += len(node['name'].encode())
+        into[3] += len(node['name'].encode()) + len(node.get('tag', '-').encode())
         for k in node.get('kids', []):
             walk(k, depth + 1, into)
 

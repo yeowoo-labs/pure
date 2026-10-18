@@ -221,7 +221,7 @@ static bool read_fields(const unsigned char *bytes, size_t size, size_t *at, uns
     for (unsigned f = 0; f < count; ++f) {
         if (!named(bytes, size, at, 0, &l->record[k].kinds[f], l->record[k].names[f])) return false;
         uint8_t kind = l->record[k].kinds[f];
-        if (kind > PURE_CELL_LIST || kind == PURE_CELL_BYTES) return false;
+        if (kind > PURE_CELL_LIST) return false;
         for (unsigned g = 0; g < f; ++g) if (!strcmp(l->record[k].names[g], l->record[k].names[f])) return false;
         l->record[k].items[f] = 0;
         if (kind != PURE_CELL_LIST) continue;
@@ -497,8 +497,8 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         if (result == PURE_OK && pure_draft_revision(*legacy) && pure_draft_size(*legacy))
             result = read_whole(*legacy, &bytes, &size);
     }
-    /* The stored record graph: its fields' kinds (PURE_CELL_...: a record's, no runtime bytes) and names, and the
-     * records of the lists in its fields (an image's alone, 027's stage 3). */
+    /* The stored record graph: its fields' kinds (PURE_CELL_...: a record's, its lists' PURE_CELL_LIST) and names, and
+     * the records of the lists in its fields (an image's alone, 027's stage 3). */
     PureLayout stored_layout = {.records = 1};
     unsigned count = 0;
     size_t at = 0, items = 0;

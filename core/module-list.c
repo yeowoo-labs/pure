@@ -2072,7 +2072,7 @@ bool pure_cell_fits(uint8_t kind, PureCell cell) {
 }
 
 bool pure_cell_as(uint8_t from, uint8_t to, PureCell *cell) {
-    if (from == to) return true;
+    if (from == to || (from == PURE_CELL_TEXT && to == PURE_CELL_BYTES)) return true; /* a text is bytes */
     if (pure_cell_text(from) || pure_cell_text(to)) return false;
     if (to == PURE_CELL_INTEGER) { /* a whole number in range: -2^63 is, 2^63 is not */
         double v = cell->num;

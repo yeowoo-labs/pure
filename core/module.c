@@ -352,10 +352,14 @@ static bool state_of(const PureModule *m, uint32_t state, uint8_t type) {
 
 /* The list an item operation names: its low 16 bits (the field is above). */
 
+/* The stack type of a record field's type (PureRecordType), and of a record field (the module's numbering). */
+static unsigned char record_type_of(uint8_t type) {
+    static const unsigned char types[] = {[PURE_RECORD_NUMBER] = T_NUM, [PURE_RECORD_TEXT] = T_TEXT, [PURE_RECORD_BOOL] = T_BOOL,
+                                          [PURE_RECORD_I64] = T_I64, [PURE_RECORD_LIST] = T_LIST, [PURE_RECORD_BYTES] = T_BYTES};
+    return types[type];
+}
 static unsigned char field_type(const PureModule *m, uint32_t list, uint32_t field) {
-    static const unsigned char types[] = {[PURE_RECORD_NUMBER] = T_NUM, [PURE_RECORD_TEXT] = T_TEXT,
-                                          [PURE_RECORD_BOOL] = T_BOOL, [PURE_RECORD_I64] = T_I64, [PURE_RECORD_LIST] = T_LIST};
-    return types[m->record_field_type[m->record[m->state_ref[list]].first + field]];
+    return record_type_of(m->record_field_type[m->record[m->state_ref[list]].first + field]);
 }
 
 /* The record of the lists a LIST field of a record holds (field: the module's numbering), or UINT32_MAX. */
@@ -378,18 +382,10 @@ static bool bound_list(const PureModule *m, uint32_t list) {
     return event_list_state(m, list) && m->state_flags[list] & PURE_LIST_BOUND >> 8;
 }
 
-/* The stack type of a record field's type (PureRecordType), and of a record field (the module's numbering). */
-static unsigned char record_type_of(uint8_t type) {
-    static const unsigned char types[] = {[PURE_RECORD_NUMBER] = T_NUM, [PURE_RECORD_TEXT] = T_TEXT,
-                                          [PURE_RECORD_BOOL] = T_BOOL, [PURE_RECORD_I64] = T_I64, [PURE_RECORD_LIST] = T_LIST};
-    return types[type];
-}
 static unsigned char record_type(const PureModule *m, uint32_t field) { return record_type_of(m->record_field_type[field]); }
 
-/* The stack type of a function's signature item (a record field's type, or PURE_SIGNATURE_BYTES). */
-static unsigned char signature_stack_type(const PureModule *m, uint32_t item) {
-    return m->signature_type[item] == PURE_SIGNATURE_BYTES ? T_BYTES : record_type_of(m->signature_type[item]);
-}
+/* The stack type of a function's signature item (a record field's type). */
+static unsigned char signature_stack_type(const PureModule *m, uint32_t item) { return record_type_of(m->signature_type[item]); }
 
 /* The record of the list value an instruction takes as its operand k (bottom 0). */
 static unsigned list_wanted(const PureModule *m, const PureOp *op, unsigned k) {
@@ -419,15 +415,15 @@ static unsigned char state_type(const PureModule *m, uint32_t state) {
     return m->state_type[state] == PURE_STATE_BOOL ? T_BOOL : m->state_type[state] == PURE_STATE_I64 ? T_I64 : T_NUM;
 }
 
-/* Whether a list's record field is a text. */
+/* Whether a list's record field is held as bytes are: a text or bytes. */
 static bool text_field(const PureModule *m, uint32_t list, uint32_t field) {
-    return m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_TEXT;
+    return pure_record_bytes(m->record_field_type[m->record[m->state_ref[list]].first + field]);
 }
 
-/* Whether its cells are bytes: a text, or a list in a list kept past an event (027's stage 3). */
+/* Whether its cells are bytes: a text, bytes, or a list in a list kept past an event (027's stage 3). */
 static bool bytes_field(const PureModule *m, uint32_t list, uint32_t field) {
     uint8_t type = m->record_field_type[m->record[m->state_ref[list]].first + field];
-    return type == PURE_RECORD_TEXT || (type == PURE_RECORD_LIST && !(m->state_flags[list] & PURE_LIST_ROWS >> 8));
+    return pure_record_bytes(type) || (type == PURE_RECORD_LIST && !(m->state_flags[list] & PURE_LIST_ROWS >> 8));
 }
 
 /* What a local holds (its argument's bits 8-15): a number, an index, a bool, an i64 or a list (027's 2c). */
@@ -1793,21 +1789,22 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             const unsigned char *entry = fields_at + (size_t)f * RECORD_FIELD_BYTES;
             uint32_t type = read32(entry + 4); /* PureRecordType */
             out->record_field_type[f] = (uint8_t)type;
-            if (!name_at(text, strings, read32(entry), NAME_PATH, out->record_field_names[f]) || type > PURE_RECORD_LIST)
+            if (!name_at(text, strings, read32(entry), NAME_PATH, out->record_field_names[f]) || type > PURE_RECORD_BYTES)
                 REFUSE("record field", f);
             for (uint32_t k = record->first; k < f; ++k)
                 if (!strcmp(out->record_field_names[k], out->record_field_names[f])) REFUSE("duplicate record field", f);
-            /* A default: a text's constant, an i64's 8 bytes, a number (a bool's +0 or 1). */
-            if (type == PURE_RECORD_TEXT) out->record_field_default[f].num = read32(entry + 8);
+            /* A default: a text's or bytes' constant, an i64's 8 bytes, a number (a bool's +0 or 1). */
+            if (pure_record_bytes((uint8_t)type)) out->record_field_default[f].num = read32(entry + 8);
             else if (type == PURE_RECORD_I64 || type == PURE_RECORD_LIST) /* a LIST's: the record of its items */
                 out->record_field_default[f].i64 = (int64_t)(read32(entry + 8) | (uint64_t)read32(entry + 12) << 32);
             else out->record_field_default[f].num = read_double(entry + 8);
             double given = out->record_field_default[f].num;
-            if (type == PURE_RECORD_TEXT ? read32(entry + 12) || read32(entry + 8) >= out->constants
+            if (pure_record_bytes((uint8_t)type) ? read32(entry + 12) || read32(entry + 8) >= out->constants
                 : type == PURE_RECORD_LIST ? (uint64_t)out->record_field_default[f].i64 >= out->records
                 : type != PURE_RECORD_I64 && (!isfinite(given) || (type == PURE_RECORD_BOOL && !canonical_bool(given))))
                 REFUSE("record field default", f);
             if (type == PURE_RECORD_LIST) out->record_nested[i] = true;
+            if (pure_record_bytes((uint8_t)type)) out->record_held[i] |= (uint16_t)(1u << (f - record->first));
         }
         next_record_field += record->count;
     }
@@ -1822,11 +1819,12 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_BOOL))) ||
             (out->state_type[i] == PURE_STATE_INDEX && !state_of(out, out->state_ref[i], PURE_STATE_LIST)))
             REFUSE("state reference", i);
-    /* No list is keyed by a list in its records; a register is no message's rows. */
+    /* No list is keyed by a list or bytes in its records (a key is a number or a text); a register is no message's rows. */
     for (uint32_t i = 0; i < out->states; ++i) {
-        if (out->state_type[i] != PURE_STATE_LIST) continue;
-        if (out->state_key[i] && out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_LIST)
-            REFUSE("list in a record as a key", i);
+        if (out->state_type[i] != PURE_STATE_LIST || !out->state_key[i]) continue;
+        uint8_t key = out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u];
+        if (key == PURE_RECORD_LIST) REFUSE("list in a record as a key", i);
+        if (key == PURE_RECORD_BYTES) REFUSE("bytes as a key", i);
     }
     for (uint32_t f = 0; f < out->fields; ++f)
         if (out->field[f].type == PURE_FIELD_ROWS && out->state_flags[out->field[f].rows] & PURE_LIST_BOUND >> 8)
@@ -1885,7 +1883,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t k = 0; k < signatures; ++k, at += SIGNATURE_BYTES) {
         out->signature_type[k] = at[0];
         out->signature_record[k] = (uint16_t)read16(at + 2);
-        if (at[1] || at[0] > PURE_SIGNATURE_BYTES ||
+        if (at[1] || at[0] > PURE_RECORD_BYTES ||
             (at[0] == PURE_RECORD_LIST ? out->signature_record[k] >= out->records : out->signature_record[k] != 0))
             REFUSE("function signature", k);
     }
@@ -2486,7 +2484,7 @@ static size_t value_size(const PureApp *app, uint32_t record, uint64_t list) {
         for (unsigned f = 0; f < r->count; ++f) {
             uint8_t type = m->record_field_type[r->first + f];
             PureCell cell = pure_list_get(items, at, f);
-            size += type == PURE_RECORD_TEXT ? 4 + cell.size :
+            size += pure_record_bytes(type) ? 4 + cell.size :
                     type == PURE_RECORD_LIST ? 4 + value_size(app, nested_record(m, r->first + f), (uint64_t)cell.i64) : 8;
         }
     return size;
@@ -2500,7 +2498,7 @@ static unsigned char *value_put(const PureApp *app, uint32_t record, uint64_t li
         for (unsigned f = 0; f < r->count; ++f) {
             uint8_t type = m->record_field_type[r->first + f];
             PureCell cell = pure_list_get(items, at, f);
-            if (type == PURE_RECORD_TEXT) {
+            if (pure_record_bytes(type)) {
                 write32(out, (uint32_t)cell.size);
                 if (cell.size) memcpy(out + 4, cell.text, cell.size);
                 out += 4 + cell.size;
@@ -2532,7 +2530,7 @@ static uint64_t value_take(PureApp *app, uint32_t record, const unsigned char *b
         for (unsigned f = 0; f < r->count; ++f) {
             uint32_t field = r->first + f;
             uint8_t type = m->record_field_type[field];
-            if (type == PURE_RECORD_TEXT || type == PURE_RECORD_LIST) {
+            if (pure_record_bytes(type) || type == PURE_RECORD_LIST) {
                 if (size - at < 4) return *bad = true, *made = false, 0;
                 uint32_t length = read32(bytes + at);
                 if (length > size - at - 4 || (type == PURE_RECORD_TEXT && !pure_utf8_valid((PureSpan){bytes + at + 4, length})))
@@ -2580,7 +2578,7 @@ static __attribute__((cold, noinline)) PureResult kept_cells(PureApp *app, PureA
     for (unsigned f = 0; f < r->count; ++f) {
         uint8_t type = m->record_field_type[r->first + f];
         total += type == PURE_RECORD_LIST ? value_size(app, nested_record(m, r->first + f), (uint64_t)values[f].i64) :
-                 type == PURE_RECORD_TEXT ? (size_t)values[f].bytes.length : 0;
+                 pure_record_bytes(type) ? (size_t)values[f].bytes.length : 0;
     }
     if (!reserve(arena, total)) return PURE_ALLOCATION;
     for (unsigned f = 0; f < r->count; ++f) {
@@ -2588,7 +2586,7 @@ static __attribute__((cold, noinline)) PureResult kept_cells(PureApp *app, PureA
         PureSpan span = {0};
         PureResult status = PURE_OK;
         if (type == PURE_RECORD_LIST) status = value_cell(app, arena, nested_record(m, r->first + f), (uint64_t)values[f].i64, &cells[f]);
-        else if (type == PURE_RECORD_TEXT && (status = contiguous(app, arena, values[f].bytes, &span)) == PURE_OK)
+        else if (pure_record_bytes(type) && (status = contiguous(app, arena, values[f].bytes, &span)) == PURE_OK)
             cells[f] = (PureCell){.text = (unsigned char *)span.data, .size = span.size};
         else cells[f] = (PureCell){.i64 = values[f].i64};
         if (status != PURE_OK) return status;
@@ -2627,12 +2625,12 @@ static __attribute__((cold, noinline)) int append_kept(PureApp *app, PureArena *
     if (!own) return *status = PURE_ALLOCATION, 3;
     size_t mark = arena->used, total = 0;
     for (unsigned f = 0; f < record->count; ++f)
-        if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT) total += (size_t)values[f].bytes.length;
+        if (pure_record_bytes(m->record_field_type[record->first + f])) total += (size_t)values[f].bytes.length;
     if (!reserve(arena, total)) return *status = PURE_ALLOCATION, 3;
     PureCell cells[PURE_RECORD_FIELDS];
     for (unsigned f = 0; f < record->count; ++f) {
         PureSpan span = {0};
-        if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT &&
+        if (pure_record_bytes(m->record_field_type[record->first + f]) &&
             (*status = contiguous(app, arena, values[f].bytes, &span)) != PURE_OK)
             return 3;
         cells[f] = (PureCell){.i64 = values[f].i64, .text = (unsigned char *)span.data, .size = span.size};
@@ -3901,15 +3899,16 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
             kind = PURE_FAULT_NOT_FOUND;
             FAILED;
         }
-        /* Room for every text first, so no span moves while the next is copied. */
+        /* Room for every text and bytes first, so no span moves while the next is copied. */
         size_t mark = arena->used, total = 0;
+        uint32_t held = m->record_held[m->state_ref[arg]];
         for (unsigned f = 0; f < record->count; ++f)
-            if (text_field(m, arg, f)) total += (size_t)stack[base + f].bytes.length;
+            if (held >> f & 1) total += (size_t)stack[base + f].bytes.length;
         if (!reserve(arena, total)) STOPPED(PURE_ALLOCATION);
         PureCell cells[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < record->count; ++f) {
             PureSpan span = {0};
-            if (text_field(m, arg, f) && (status = contiguous(app, arena, stack[base + f].bytes, &span)) != PURE_OK)
+            if (held >> f & 1 && (status = contiguous(app, arena, stack[base + f].bytes, &span)) != PURE_OK)
                 STOPPED(status);
             cells[f] = (PureCell){.i64 = stack[base + f].i64, .text = (unsigned char *)span.data, .size = span.size};
         }
@@ -4244,12 +4243,12 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         PureList *in = app->nested.list[into - 1];
         size_t mark = arena->used, total = 0;
         for (unsigned f = 0; f < record->count; ++f)
-            if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT) total += (size_t)stack[base + f].bytes.length;
+            if (pure_record_bytes(m->record_field_type[record->first + f])) total += (size_t)stack[base + f].bytes.length;
         if (!reserve(arena, total)) STOPPED(PURE_ALLOCATION);
         PureCell cells[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < record->count; ++f) {
             PureSpan span = {0};
-            if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT &&
+            if (pure_record_bytes(m->record_field_type[record->first + f]) &&
                 (status = contiguous(app, arena, stack[base + f].bytes, &span)) != PURE_OK)
                 STOPPED(status);
             cells[f] = (PureCell){.i64 = stack[base + f].i64, .text = (unsigned char *)span.data, .size = span.size};
@@ -4550,7 +4549,7 @@ static Call *give_back(PureApp *app, Call *call, Event *ev) {
 
 /* A bytes or text value a call would lose (held by name in a slot the callee has its own of): a copy in the arena. */
 static bool kept_apart(PureApp *app, PureArena *arena, const PureFunction *f, uint8_t type, PureBytes *v) {
-    if ((type != PURE_RECORD_TEXT && type != PURE_SIGNATURE_BYTES) || v->source != FROM_HELD || !(f->held >> v->owner & 1))
+    if (!pure_record_bytes(type) || v->source != FROM_HELD || !(f->held >> v->owner & 1))
         return true;
     size_t start = arena->used;
     if (append_value(app, arena, *v) != PURE_OK) return false;
@@ -5778,7 +5777,7 @@ void pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
 uint8_t pure_record_kind(const PureModule *m, uint32_t field) {
     static const uint8_t kinds[] = {[PURE_RECORD_NUMBER] = PURE_CELL_NUMBER, [PURE_RECORD_TEXT] = PURE_CELL_TEXT,
                                     [PURE_RECORD_BOOL] = PURE_CELL_BOOL, [PURE_RECORD_I64] = PURE_CELL_INTEGER,
-                                    [PURE_RECORD_LIST] = PURE_CELL_LIST};
+                                    [PURE_RECORD_LIST] = PURE_CELL_LIST, [PURE_RECORD_BYTES] = PURE_CELL_BYTES};
     return kinds[m->record_field_type[field]];
 }
 
@@ -5825,9 +5824,10 @@ PURE_COLD bool pure_layout_same(const PureLayout *a, const PureLayout *b) {
     return true;
 }
 
-/* A number, a bool and an i64 carry over each other (when the value fits); texts only to texts, lists to lists. */
+/* A number, a bool and an i64 carry over each other (when the value fits); texts to texts and bytes, bytes to bytes, lists
+ * to lists. */
 static bool kinds_carry(uint8_t from, uint8_t to) {
-    return from == to || (!stored_bytes(from) && !stored_bytes(to));
+    return from == to || (from == PURE_CELL_TEXT && to == PURE_CELL_BYTES) || (!stored_bytes(from) && !stored_bytes(to));
 }
 
 /* Bytes made for a list value's stored form as it moves (a growing buffer). */
@@ -5938,7 +5938,7 @@ PURE_COLD PureResult pure_list_migrate(PureList **out, const PureList *from, con
             } else if (m->record_field_type[field] == PURE_RECORD_LIST) cells[f] = (PureCell){.i64 = 0}; /* an event's: none */
             else if (source[f] >= 0 && pure_cell_as(from_layout->record[0].kinds[source[f]], pure_record_kind(m, field), &given))
                 cells[f] = given;
-            else if (m->record_field_type[field] == PURE_RECORD_TEXT)
+            else if (pure_record_bytes(m->record_field_type[field]))
                 cells[f] = (PureCell){.text = (unsigned char *)m->constant_data + m->constant_offset[constant],
                                       .size = m->constant_length[constant]};
             else cells[f] = (PureCell){.i64 = m->record_field_default[field].i64}; /* a number's, a bool's or an i64's bits */

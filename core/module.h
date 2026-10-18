@@ -137,7 +137,7 @@ enum { PURE_FORMAT_WIDTH = 8, PURE_FORMAT_ZEROS = 1 << 16, PURE_FORMAT_FORM = 17
  * point), failing as LIMIT where no character begins there; CHAR makes the
  * text of a code point, failing as LIMIT outside 0-0x10FFFF and as ENCODING
  * for a surrogate. */
-enum { PURE_MODULE_FUNCTIONS = 64, PURE_MODULE_SIGNATURES = 1024, PURE_SIGNATURE_BYTES = 5 };
+enum { PURE_MODULE_FUNCTIONS = 64, PURE_MODULE_SIGNATURES = 1024 };
 /* What a call's frame counts in the event's room: a table, as gas is, not the implementation's sizes (each at least
  * what it stands for), so a module's calls fail at the same depth wherever and on whatever build they run: so much a
  * frame, a value of its stack's height, a local, a loop it nests, a list of its own, a held value and a register. */
@@ -237,8 +237,12 @@ static inline uint8_t pure_value_kind(uint8_t state_type) {
     return state_type == PURE_STATE_NUM ? PURE_CELL_NUMBER : state_type == PURE_STATE_BOOL ? PURE_CELL_BOOL :
            state_type == PURE_STATE_I64 ? PURE_CELL_INTEGER : 0xFF;
 }
-/* A record field: a number, a text (its default a constant), a bool or an i64. */
-typedef enum { PURE_RECORD_NUMBER = 0, PURE_RECORD_TEXT = 1, PURE_RECORD_BOOL = 2, PURE_RECORD_I64 = 3, PURE_RECORD_LIST = 4 } PureRecordType;
+/* A record field: a number, a text (its default a constant), a bool, an i64, a list (027's 2b) or bytes (4b: its
+ * default a constant too, held as a text is but for UTF-8). */
+typedef enum { PURE_RECORD_NUMBER = 0, PURE_RECORD_TEXT = 1, PURE_RECORD_BOOL = 2, PURE_RECORD_I64 = 3, PURE_RECORD_LIST = 4,
+               PURE_RECORD_BYTES = 5 } PureRecordType;
+/* A field held as bytes are: a text or bytes. */
+static inline bool pure_record_bytes(uint8_t type) { return type == PURE_RECORD_TEXT || type == PURE_RECORD_BYTES; }
 /* A value's 8 bytes: a number (a bool's 0 or 1, a cursor's or an index's
  * position too), or an integer. What a value is its state's or field's type
  * says, and the verifier keeps to it: moves copy the bytes, and only what
@@ -291,7 +295,7 @@ typedef struct { union { double value; int64_t integer; }; uint32_t arg; uint8_t
 typedef struct { uint32_t start, length; } PureBlock;
 typedef struct { uint32_t event; PureBlock code; } PureHandler;
 /* A function's block and its parameters' and results' types, from first among the module's signature items: a record
- * field's type (PureRecordType: a list's with its record) or PURE_SIGNATURE_BYTES. Set at load: the event's lists,
+ * field's type (PureRecordType: a list's with its record, bytes as PURE_RECORD_BYTES). Set at load: the event's lists,
  * registers and held values each call has its own of (a bit each), the lists not an event's it changes (or a function
  * it calls does), and its frame: its stack's height at most, its locals and its loops. */
 typedef struct {
@@ -393,6 +397,7 @@ typedef struct {
     PureValue record_field_default[PURE_MODULE_RECORD_FIELDS]; /* a number (a bool's 0 or 1), an i64, a text constant's index
                                                                   * or a list's record (LIST, its i64) */
     bool record_nested[PURE_MODULE_RECORDS]; /* a record with a LIST field (set at load) */
+    uint16_t record_held[PURE_MODULE_RECORDS]; /* its fields held as bytes are (pure_record_bytes), a bit each (set at load) */
     uint16_t functions;
     PureFunction function[PURE_MODULE_FUNCTIONS];
     uint8_t signature_type[PURE_MODULE_SIGNATURES];
