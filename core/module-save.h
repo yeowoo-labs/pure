@@ -74,12 +74,27 @@ uint32_t pure_fields_lay_out(PureField *fields, uint32_t count);
 PureResult pure_send_recast(const PureField *from, uint32_t from_count, const PureField *to, uint32_t to_count,
                             PureSpan payload, unsigned char **out, size_t *size);
 
-/* A record field's kind in a list, as a stored list names it too (PURE_CELL_...). */
+/* A record field's kind in a list kept past an event, as a stored list names it too (PURE_CELL_...: a list field's
+ * PURE_CELL_LIST; an event's list holds one of the event's lists' numbers there instead, an integer). */
 uint8_t pure_record_kind(const PureModule *, uint32_t field);
-/* A list with record's fields, taking from `from` (its fields' names and
- * kinds) each field of the same name and kind, or a number, a bool and an
- * i64 from each other when the value fits (pure_cell_as), and giving the
- * others their defaults (module.c). */
-PureResult pure_list_migrate(PureList **out, const PureList *from, const char *const *names,
-                             const uint8_t *kinds, unsigned count, const PureModule *m, uint32_t record);
+/* A record graph as a list kept past an event names it (027's stage 3): its records, from the list's own (0) on in the
+ * order its list fields first meet them, each its fields' kinds (PURE_CELL_...) and names, and a list field's items'
+ * record by its number here. A module's graph knows each record's number in the module too. */
+typedef struct {
+    unsigned records;
+    struct {
+        unsigned count;
+        uint8_t kinds[PURE_RECORD_FIELDS], items[PURE_RECORD_FIELDS];
+        char names[PURE_RECORD_FIELDS][PURE_MODULE_NAME];
+    } record[PURE_MODULE_RECORDS];
+    uint16_t module_record[PURE_MODULE_RECORDS];
+} PureLayout;
+void pure_layout_of(const PureModule *, uint32_t record, PureLayout *out);
+bool pure_layout_same(const PureLayout *, const PureLayout *);
+/* A list with record's fields, taking from `from` (laid out as from_layout's record 0) each field of the same name and
+ * kind, or a number, a bool and an i64 from each other when the value fits (pure_cell_as), and giving the others their
+ * defaults (module.c); a list field's values move so too, item by item (kept: a list kept past an event, holding
+ * them in their stored form, else an event's, holding none yet). */
+PureResult pure_list_migrate(PureList **out, const PureList *from, const PureLayout *from_layout, const PureModule *m,
+                             uint32_t record, bool kept);
 #endif

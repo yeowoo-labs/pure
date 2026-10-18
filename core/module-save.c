@@ -157,7 +157,7 @@ PURE_COLD PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint
 /* ---- Lists: images and the log */
 
 enum { OUTPUTS_NAMED = 1 + PURE_MODULE_INPUTS * (2 + PURE_MODULE_NAME) + PURE_MODULE_FIELDS * (2 + PURE_MODULE_NAME),
-       IMAGE_HEADER = 5 + PURE_RECORD_FIELDS * (2 + PURE_MODULE_NAME) + 8 + OUTPUTS_NAMED };
+       IMAGE_HEADER = 6 + PURE_MODULE_RECORDS * (1 + PURE_RECORD_FIELDS * (3 + PURE_MODULE_NAME)) + 8 + OUTPUTS_NAMED };
 
 static size_t header_of(unsigned count, const uint8_t *text, const char (*names)[PURE_MODULE_NAME], uint64_t seq,
                         unsigned char *out) {
@@ -174,11 +174,62 @@ static size_t header_of(unsigned count, const uint8_t *text, const char (*names)
     return (size_t)(put_le(out + at, seq, 8) - out);
 }
 
+/* A list record's fields as header_of writes them, a list field's with the number of its items' record after its name,
+ * and, once any field is a list's (027's stage 3), the graph's other records after them: a u8 count, each record a u8
+ * count of fields and its fields so (PureLayout). */
+static unsigned char *layout_fields(const PureLayout *l, unsigned at, unsigned char *out) {
+    for (unsigned f = 0; f < l->record[at].count; ++f) {
+        size_t length = strlen(l->record[at].names[f]);
+        *out++ = l->record[at].kinds[f];
+        *out++ = (unsigned char)length;
+        memcpy(out, l->record[at].names[f], length);
+        out += length;
+        if (l->record[at].kinds[f] == PURE_CELL_LIST) *out++ = l->record[at].items[f];
+    }
+    return out;
+}
+
 static size_t image_header(const PureModule *m, uint32_t record, uint64_t seq, unsigned char *out) {
-    const PureRecord *r = &m->record[record];
-    uint8_t kinds[PURE_RECORD_FIELDS];
-    for (unsigned f = 0; f < r->count; ++f) kinds[f] = pure_record_kind(m, r->first + f);
-    return header_of(r->count, kinds, m->record_field_names + r->first, seq, out);
+    PureLayout l;
+    pure_layout_of(m, record, &l);
+    memcpy(out, image_magic, 4);
+    out[4] = (unsigned char)l.record[0].count;
+    unsigned char *at = layout_fields(&l, 0, out + 5);
+    bool lists = m->record_nested[record];
+    if (lists) *at++ = (unsigned char)(l.records - 1);
+    for (unsigned k = 1; lists && k < l.records; ++k) {
+        *at++ = (unsigned char)l.record[k].count;
+        at = layout_fields(&l, k, at);
+    }
+    return (size_t)(put_le(at, seq, 8) - out);
+}
+
+/* Past a record's count fields as layout_fields wrote them (from at; read_fields checked them): where they end. */
+static size_t skip_fields(const unsigned char *bytes, size_t size, size_t at, unsigned count) {
+    for (unsigned f = 0; f < count && at + 2 <= size; ++f) {
+        uint8_t kind = bytes[at];
+        at += 2 + bytes[at + 1] + (kind == PURE_CELL_LIST);
+    }
+    return at <= size ? at : 0;
+}
+
+/* A record's fields as layout_fields wrote them (at, moved past them), into l's record k: false when not well formed
+ * (no field twice, kinds a record's, a list's items' record among the graph's: below records). */
+static bool read_fields(const unsigned char *bytes, size_t size, size_t *at, unsigned count, PureLayout *l, unsigned k,
+                        unsigned records, bool *lists) {
+    l->record[k].count = count;
+    for (unsigned f = 0; f < count; ++f) {
+        if (!named(bytes, size, at, 0, &l->record[k].kinds[f], l->record[k].names[f])) return false;
+        uint8_t kind = l->record[k].kinds[f];
+        if (kind > PURE_CELL_LIST || kind == PURE_CELL_BYTES) return false;
+        for (unsigned g = 0; g < f; ++g) if (!strcmp(l->record[k].names[g], l->record[k].names[f])) return false;
+        l->record[k].items[f] = 0;
+        if (kind != PURE_CELL_LIST) continue;
+        if (*at >= size || bytes[*at] >= records) return false;
+        l->record[k].items[f] = bytes[(*at)++];
+        *lists = true;
+    }
+    return true;
 }
 
 PureList *pure_runtime_list_new(uint32_t place) {
@@ -446,21 +497,27 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         if (result == PURE_OK && pure_draft_revision(*legacy) && pure_draft_size(*legacy))
             result = read_whole(*legacy, &bytes, &size);
     }
-    /* The stored record: its fields' kinds (PURE_CELL_...: a record's, no runtime bytes) and names. */
-    char names[PURE_RECORD_FIELDS][PURE_MODULE_NAME] = {{0}};
-    uint8_t kinds[PURE_RECORD_FIELDS] = {0};
+    /* The stored record graph: its fields' kinds (PURE_CELL_...: a record's, no runtime bytes) and names, and the
+     * records of the lists in its fields (an image's alone, 027's stage 3). */
+    PureLayout stored_layout = {.records = 1};
     unsigned count = 0;
     size_t at = 0, items = 0;
     uint64_t holds = 0;
     bool stored = result == PURE_OK && bytes, first = stored && !image && size >= 4 && !memcmp(bytes, list_magic_1, 4);
     if (stored) {
         const unsigned char *magic = image ? image_magic : first ? list_magic_1 : list_magic;
-        bool ok = size >= 5 && !memcmp(bytes, magic, 4) && bytes[4] <= PURE_RECORD_FIELDS;
+        bool ok = size >= 5 && !memcmp(bytes, magic, 4) && bytes[4] <= PURE_RECORD_FIELDS, lists = false;
         count = ok ? bytes[4] : 0;
         at = 5;
-        for (unsigned f = 0; ok && f < count; ++f) {
-            ok = named(bytes, size, &at, 0, &kinds[f], names[f]) && kinds[f] <= PURE_CELL_INTEGER && kinds[f] != PURE_CELL_BYTES;
-            for (unsigned k = 0; k < f; ++k) ok = ok && strcmp(names[k], names[f]);
+        ok = ok && read_fields(bytes, size, &at, count, &stored_layout, 0, 256, &lists) && (image || !lists);
+        if (ok && lists) { /* the graph's other records */
+            ok = at < size && bytes[at] < PURE_MODULE_RECORDS;
+            stored_layout.records = ok ? 1u + bytes[at++] : 1;
+            for (unsigned k = 1; ok && k < stored_layout.records; ++k)
+                ok = at < size && bytes[at] <= PURE_RECORD_FIELDS &&
+                     read_fields(bytes, size, &(size_t){at + 1}, bytes[at], &stored_layout, k, stored_layout.records, &lists) &&
+                     (at = skip_fields(bytes, size, at + 1, bytes[at])) != 0;
+            for (unsigned f = 0; ok && f < count; ++f) ok = stored_layout.record[0].items[f] < stored_layout.records;
         }
         if (ok && image) { /* the save it holds, then its items */
             ok = size - at >= 8;
@@ -475,7 +532,7 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     }
     PureList *from = NULL;
     if (result == PURE_OK && stored) {
-        from = pure_list_new(count, kinds);
+        from = pure_list_new(count, stored_layout.record[0].kinds);
         result = from ? pure_list_read(from, bytes + at, items) : PURE_ALLOCATION;
         if (result == PURE_OK && !image) result = pure_list_replay(from, bytes + at + items, size - at - items);
     }
@@ -492,9 +549,9 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
             saved->logged += change->records.size;
         }
     }
-    bool same = stored && count == r->count;
-    for (unsigned f = 0; same && f < count; ++f)
-        same = kinds[f] == pure_record_kind(m, r->first + f) && !strcmp(names[f], m->record_field_names[r->first + f]);
+    PureLayout layout;
+    pure_layout_of(m, record, &layout);
+    bool same = stored && pure_layout_same(&stored_layout, &layout);
     if (result == PURE_OK && same && image) {
         *out = from;
         saved->image = holds;
@@ -503,12 +560,10 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     if (result == PURE_OK) {
         /* New, stored before images, or stored with another record (its items
          * move by field name): its image is written before anything else of it. */
-        const char *field_names[PURE_RECORD_FIELDS];
-        for (unsigned f = 0; f < count; ++f) field_names[f] = names[f];
         if (same) {
             *out = from;
             from = NULL;
-        } else if (from) result = pure_list_migrate(out, from, field_names, kinds, count, m, record);
+        } else if (from) result = pure_list_migrate(out, from, &stored_layout, m, record, true);
         else {
             uint8_t own[PURE_RECORD_FIELDS];
             for (unsigned f = 0; f < r->count; ++f) own[f] = pure_record_kind(m, r->first + f);

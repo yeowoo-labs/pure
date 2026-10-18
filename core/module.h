@@ -93,13 +93,18 @@ typedef enum { PURE_BITS_AND, PURE_BITS_OR, PURE_BITS_XOR, PURE_BITS_LEFT, PURE_
  * number (else LIMIT), in its base with a sign; FIXED takes a number. */
 enum { PURE_MODULE_HELD = 32, PURE_HELD_TEXT = 16, PURE_HELD_APPEND = 1 << 8 };
 /* 027's stage 2b: lists in records. A record field of type LIST holds a list
- * of the record its default names (an event's alone: an event's lists, and
- * the lists in their items, are the only ones that may hold one). The value
- * is the list's number among the event's lists made so (0: an empty one),
- * an i64 in its cell, so moves and reads (ITEM_GET) are an integer's; such
- * lists go as the event or a view's body ends. A list is a value: storing
- * one in a second cell shares it, and a list shared or bound is copied
- * before it changes (so no other value sees the change).
+ * of the record its default names. In an event's list (and the lists in its
+ * items) the value is the list's number among the event's lists made so (0:
+ * an empty one), an i64 in its cell, so moves and reads (ITEM_GET) are an
+ * integer's; such lists go as the event or a view's body ends. A list is a
+ * value: storing one in a second cell shares it, and a list shared or bound
+ * is copied before it changes (so no other value sees the change). Since
+ * stage 3 a stored or a transient list's records may hold lists too (a
+ * message's rows not, nor as a key): there the cell holds the value in its
+ * items' stored form (PURE_CELL_LIST), read into one of the event's lists
+ * as ITEM_GET reads it and written from one as it is set (LIST_APPEND,
+ * LIST_INSERT, ITEM_SET; APPEND_IN reads, appends and writes back), so
+ * saving, undoing and sharing with readers hold it as a text's bytes.
  * LIST_VALUE pushes the value of an event's list state (the argument): a
  * copy of its items. LIST_BIND gives the bound list state (a register: an
  * event's list flagged PURE_LIST_BOUND, read and walked, never changed by

@@ -6337,8 +6337,8 @@ static void lists_in_records(void) {
     static const O nothing[] = {{C, 0, 0}, {ST, 0, 0}};
     H two = {1, 0, 2};
     Spec kept = {nums, 1, inputs, 1, NULL, 0, &two, 1, nothing, 2, NULL, 0, stored, 1, NULL, 0, NULL, 0, records, 2, NULL, 0};
-    CHECK(load(kept, &module_b) != PURE_OK);
-    printf("{\"lists_in_records\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(refused) + 1);
+    CHECK(load(kept, &module_b) == PURE_OK); /* a stored list's records hold lists too since 027's stage 3 */
+    printf("{\"lists_in_records\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(refused));
 }
 
 /* Functions and characters (027's 2c): a function calls itself; each call has its own locals, lists, registers and
@@ -6501,6 +6501,131 @@ static void functions_and_characters(void) {
                    LEN(constants), NULL, 0, records, 2, NULL, 0};
     CHECK(load(looped, &module_a) != PURE_OK && strstr(error, "loop above values"));
     printf("{\"functions_and_characters\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(refused) + 3);
+}
+
+/* 027's stage 3: an event changes a number and the list in a stored list's item's field (APPEND_IN: read in, appended,
+ * written back); the process dies at each commit stage, or the commit fails. Starting again finds both as before or
+ * both as after. */
+enum { NESTED_BOARDS = 1, NESTED_NONE = 2 };
+static unsigned nested_consistent(const PureApp *app) {
+    unsigned n = (unsigned)app->values[0].num;
+    CHECK(app->values[0].num == n && pure_list_count(app->lists[NESTED_BOARDS]) == (n > 0));
+    if (!n) return 0;
+    PureCell items = pure_list_get(app->lists[NESTED_BOARDS], 0, 1); /* the leaves' stored form: an i64 each */
+    CHECK(items.size == 8u * n);
+    for (unsigned k = 0; k < n; ++k) {
+        int64_t v;
+        memcpy(&v, items.text + 8 * k, 8);
+        CHECK(v == (int64_t)k + 1);
+    }
+    return n;
+}
+
+static void nested_crashes(void) {
+    enum { LC_ = PURE_OP_LIST_COUNT, LV_ = PURE_OP_LIST_VALUE, AIN_ = PURE_OP_APPEND_IN, EQ_ = PURE_OP_EQ };
+    static const S nums[] = {{"n", 0}};
+    static const T states[] = {{"boards", 3, 1}, {"let.none", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}};
+    static const RF leaf_fields[] = {{"v", 3, 0}};
+    static const RF board_fields[] = {{"id", 3, 0}, {"items", 4, 0}};
+    static const R records[] = {{"Leaf", leaf_fields, 1}, {"Board", board_fields, 2}};
+    static const I inputs[] = {KEY("go", "KeyG")};
+    const O code[] = {
+        {LC_, NESTED_BOARDS, 0}, {C, 0, 0}, {EQ_, 0, 0}, {JZ, 7, 0}, IC(0), {LV_, NESTED_NONE, 0}, {LA, NESTED_BOARDS, 0},
+        {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},                                      /* n = n + 1 */
+        {XF, NESTED_BOARDS, 0}, {L, 0, 0}, {PURE_OP_I64_FROM, 0, 0}, {AIN_, ITEM(NESTED_BOARDS, 1), 0}, /* items += n */
+    };
+    H handler = {1, 0, LEN(code)};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, code, LEN(code), NULL, 0, states, LEN(states), NULL, 0, NULL, 0,
+                 records, 2, NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "nested crashes: %s\n", error); abort(); }
+    char *path = new_store();
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(nested_consistent(&app) == 2);
+    pure_app_stop(&app);
+    unsigned expected = 2;
+    for (int stage = PURE_AFTER_HEADER; stage <= PURE_BEFORE_DIR_SYNC + 2; ++stage) { /* the tree's stages, then the log's */
+        int at = stage <= PURE_BEFORE_DIR_SYNC ? stage : PURE_LOG_BEFORE_WRITE + (stage - PURE_BEFORE_DIR_SYNC - 1);
+        pid_t child = fork();
+        CHECK(child >= 0);
+        if (!child) {
+            PureApp doomed;
+            if (pure_app_start(&doomed, &module_a, pure_tree_data(path)) != PURE_OK) _exit(1);
+            crash = 1;
+            fail_stage = at;
+            pure_app_input(&doomed, 0, PURE_EDGE_DOWN);
+            _exit(0);
+        }
+        int status;
+        CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 77);
+        if (at == PURE_BEFORE_DIR_SYNC) ++expected; /* the head was written */
+        CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && nested_consistent(&app) == expected);
+        pure_app_stop(&app);
+    }
+    crash = 0;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    for (fail_stage = PURE_AFTER_HEADER; fail_stage <= PURE_BEFORE_RENAME; ++fail_stage) /* a failed commit: nothing */
+        CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_STORE_ERROR && nested_consistent(&app) == expected);
+    fail_stage = PURE_LOG_BEFORE_WRITE;
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_STORE_ERROR && nested_consistent(&app) == expected);
+    fail_stage = -1;
+    CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK && nested_consistent(&app) == expected + 1);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && nested_consistent(&app) == expected + 1);
+    pure_app_stop(&app);
+    remove_store(path);
+    printf("{\"nested_crashes\":{\"stages\":%d,\"kept\":%u}}\n", PURE_BEFORE_DIR_SYNC + 3 - PURE_AFTER_HEADER, expected + 1);
+}
+
+/* 027's stage 3: a module replaced while the app runs moves a stored and a transient list's items, and the items of the
+ * lists in their fields, by field name: a field the items' record gains takes its default, a field it moves keeps its
+ * values. */
+static void nested_replace(void) {
+    enum { LC_ = PURE_OP_LIST_COUNT, LV_ = PURE_OP_LIST_VALUE, AIN_ = PURE_OP_APPEND_IN, EQ_ = PURE_OP_EQ };
+    static const S nums[] = {{"n", 0}};
+    static const T states[] = {{"boards", 3, 1}, {"let.none", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}, {"cache", 3 | TR, 1}};
+    static const RF leaf_fields[] = {{"v", 3, 0}};
+    static const RF board_fields[] = {{"id", 3, 0}, {"items", 4, 0}};
+    static const R records[] = {{"Leaf", leaf_fields, 1}, {"Board", board_fields, 2}};
+    static const I inputs[] = {KEY("go", "KeyG")};
+    const O code[] = {
+        {LC_, 1, 0}, {C, 0, 0}, {EQ_, 0, 0}, {JZ, 10, 0}, IC(9), {LV_, 2, 0}, {LA, 1, 0}, IC(8), {LV_, 2, 0}, {LA, 3, 0},
+        {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},
+        {XF, 1, 0}, {L, 0, 0}, {PURE_OP_I64_FROM, 0, 0}, {AIN_, ITEM(1, 1), 0}, /* boards.first.items += n */
+        {XF, 3, 0}, {L, 0, 0}, {C, 0, 10}, {MUL, 0, 0}, {PURE_OP_I64_FROM, 0, 0}, {AIN_, ITEM(3, 1), 0}, /* cache's += 10n */
+    };
+    H handler = {1, 0, LEN(code)};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, code, LEN(code), NULL, 0, states, LEN(states), NULL, 0, NULL, 0,
+                 records, 2, NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "nested replace: %s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    for (int k = 0; k < 3; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    /* The leaves gain w (7 by default) and the boards' fields swap places. */
+    static const RF leaf_wider[] = {{"v", 3, 0}, {"w", 0, 7}};
+    static const RF board_swapped[] = {{"items", 4, 0}, {"id", 3, 0}};
+    static const R wider[] = {{"Leaf", leaf_wider, 2}, {"Board", board_swapped, 2}};
+    static const O nothing[] = {{C, 0, 0}, {ST, 0, 0}};
+    H two = {1, 0, 2};
+    Spec next = {nums, 1, inputs, 1, NULL, 0, &two, 1, nothing, 2, NULL, 0, states, LEN(states), NULL, 0, NULL, 0, wider, 2,
+                 NULL, 0};
+    CHECK(load(next, &module_b) == PURE_OK);
+    CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
+    for (unsigned list = 1; list <= 3; list += 2) { /* boards, then cache */
+        CHECK(pure_list_count(app.lists[list]) == 1 && pure_list_get(app.lists[list], 0, 1).i64 == (list == 1 ? 9 : 8));
+        PureCell items = pure_list_get(app.lists[list], 0, 0);
+        CHECK(items.size == 3 * 16);
+        for (unsigned k = 0; k < 3; ++k) {
+            int64_t v;
+            double w;
+            memcpy(&v, items.text + 16 * k, 8);
+            memcpy(&w, items.text + 16 * k + 8, 8);
+            CHECK(v == (int64_t)(k + 1) * (list == 1 ? 1 : 10) && w == 7);
+        }
+    }
+    pure_app_stop(&app);
+    printf("{\"nested_replace\":{\"lists\":2,\"items\":3}}\n");
 }
 
 /* A timer's tick sees the time the host set; floor and a floored modulo
@@ -6880,6 +7005,8 @@ int main(void) {
     formats_and_held();
     lists_in_records();
     functions_and_characters();
+    nested_crashes();
+    nested_replace();
     memory_budget();
     work_budget();
     fold_mutations();

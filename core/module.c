@@ -412,9 +412,10 @@ static unsigned char state_type(const PureModule *m, uint32_t state) {
     return m->state_type[state] == PURE_STATE_BOOL ? T_BOOL : m->state_type[state] == PURE_STATE_I64 ? T_I64 : T_NUM;
 }
 
-/* Whether a list's record field is a text. */
+/* Whether a list's record field's cells are bytes: a text, or a list in a list kept past an event (027's stage 3). */
 static bool text_field(const PureModule *m, uint32_t list, uint32_t field) {
-    return m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_TEXT;
+    uint8_t type = m->record_field_type[m->record[m->state_ref[list]].first + field];
+    return type == PURE_RECORD_TEXT || (type == PURE_RECORD_LIST && !(m->state_flags[list] & PURE_LIST_ROWS >> 8));
 }
 
 /* What a local holds (its argument's bits 8-15): a number, an index, a bool, an i64 or a list (027's 2c). */
@@ -592,13 +593,12 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             REFUSE("change of a bound list");
         if (op->op == PURE_OP_LIST_VALUE && !event_list_state(m, arg)) REFUSE("value of a list not an event's");
         if (op->op == PURE_OP_LIST_BIND && !bound_list(m, arg)) REFUSE("list bound to a list not bound");
-        if (op->op == PURE_OP_APPEND_IN &&
-            (!event_list_state(m, list_of(arg)) || field_type(m, list_of(arg), item_field(arg)) != T_LIST))
-            REFUSE("append into a field not an event's list's list");
+        if (op->op == PURE_OP_APPEND_IN && field_type(m, list_of(arg), item_field(arg)) != T_LIST)
+            REFUSE("append into a field not a list");
         /* A view's body changes an event's lists alone: its states are a snapshot's. */
         if (body && (op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT || op->op == PURE_OP_LIST_REMOVE ||
-                     op->op == PURE_OP_ITEM_SET) &&
-            !(m->state_flags[op->op == PURE_OP_ITEM_SET ? list_of(arg) : arg] & PURE_LIST_ROWS >> 8))
+                     op->op == PURE_OP_ITEM_SET || op->op == PURE_OP_APPEND_IN) &&
+            !(m->state_flags[op->op == PURE_OP_ITEM_SET || op->op == PURE_OP_APPEND_IN ? list_of(arg) : arg] & PURE_LIST_ROWS >> 8))
             REFUSE("view changes a state");
         /* PICK copies the value arg below the top; SLIDE drops arg values under the top. */
         if (kind == A_DEPTH) {
@@ -1814,10 +1814,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
      * list is keyed by one; a register is no message's rows. */
     for (uint32_t i = 0; i < out->states; ++i) {
         if (out->state_type[i] != PURE_STATE_LIST) continue;
-        bool nested = out->record_nested[out->state_ref[i]];
-        if ((nested && !(out->state_flags[i] & PURE_LIST_ROWS >> 8)) ||
-            (out->state_key[i] && out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_LIST))
-            REFUSE("list in a record outside an event's list", i);
+        if (out->state_key[i] && out->record_field_type[out->record[out->state_ref[i]].first + out->state_key[i] - 1u] == PURE_RECORD_LIST)
+            REFUSE("list in a record as a key", i);
     }
     for (uint32_t f = 0; f < out->fields; ++f)
         if (out->field[f].type == PURE_FIELD_ROWS &&
@@ -1989,7 +1987,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if (out->code[pc].op == PURE_OP_JZ || out->code[pc].op == PURE_OP_JMP) landed[out->code[pc].arg] = true;
     for (uint32_t pc = 0; pc + 1 < out->code_count; ++pc) {
         PureOp *op = &out->code[pc], *next = op + 1;
-        if (op->op == PURE_OP_LIST_FIND && next->op == PURE_OP_ITEM_GET && list_of(next->arg) == op->arg && !landed[pc + 1])
+        if (op->op == PURE_OP_LIST_FIND && next->op == PURE_OP_ITEM_GET && list_of(next->arg) == op->arg && !landed[pc + 1] &&
+            out->record_field_type[out->record[out->state_ref[op->arg]].first + item_field(next->arg)] != PURE_RECORD_LIST)
             op->plan |= PLAN_JOINED;
     }
     /* A FIND whose index waits on the stack for an ITEM_SET of its list,
@@ -2404,7 +2403,8 @@ static int hold_copy(PureApp *app, PureArena *arena, unsigned slot, PureBytes v,
 
 /* ---- Lists in records (027's 2b): the event's lists made for LIST fields, numbered from 1 */
 
-PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record);
+PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record, bool kept);
+static uint8_t cell_kind(const PureModule *m, uint32_t field, bool kept);
 
 /* The values that share each list in the LIST fields of cells (an item's, just stored). */
 static void share_cells(PureApp *app, const PureModule *m, uint32_t record, const PureCell *cells) {
@@ -2425,7 +2425,7 @@ static uint64_t nest(PureApp *app, uint32_t record, const PureList *from) {
         app->nested.shared = shared;
         app->nested.capacity = capacity;
     }
-    PureList *list = new_list(m, record);
+    PureList *list = new_list(m, record, false);
     if (!list) return 0;
     const PureRecord *r = &m->record[record];
     for (size_t at = 0, count = from ? pure_list_count(from) : 0; at < count; ++at) {
@@ -2447,6 +2447,183 @@ static void unbind(PureApp *app) {
 static void drop_nested(PureApp *app) {
     for (size_t i = 0; i < app->nested.count; ++i) pure_list_free(app->nested.list[i]);
     app->nested.count = 0;
+}
+
+/* ---- Lists kept past an event (027's stage 3): a stored or transient list holds a list field's value in its items'
+ * stored form (PURE_CELL_LIST: each item's fields in order, a number's, a bool's and an i64's 8 bytes little-endian, a
+ * text's and a list's u32le length and bytes, a list's in this form again). Read, it becomes one of the event's lists;
+ * set, it is written from one. */
+static bool kept_list(const PureModule *m, uint32_t list) { return !(m->state_flags[list] & PURE_LIST_ROWS >> 8); }
+
+/* The stored form's bytes of the event's list number list (0: an empty one) of record's items. */
+static size_t value_size(const PureApp *app, uint32_t record, uint64_t list) {
+    const PureModule *m = app->module;
+    const PureRecord *r = &m->record[record];
+    const PureList *items = list ? app->nested.list[list - 1] : NULL;
+    size_t size = 0;
+    for (size_t at = 0, count = items ? pure_list_count(items) : 0; at < count; ++at)
+        for (unsigned f = 0; f < r->count; ++f) {
+            uint8_t type = m->record_field_type[r->first + f];
+            PureCell cell = pure_list_get(items, at, f);
+            size += type == PURE_RECORD_TEXT ? 4 + cell.size :
+                    type == PURE_RECORD_LIST ? 4 + value_size(app, nested_record(m, r->first + f), (uint64_t)cell.i64) : 8;
+        }
+    return size;
+}
+
+static unsigned char *value_put(const PureApp *app, uint32_t record, uint64_t list, unsigned char *out) {
+    const PureModule *m = app->module;
+    const PureRecord *r = &m->record[record];
+    const PureList *items = list ? app->nested.list[list - 1] : NULL;
+    for (size_t at = 0, count = items ? pure_list_count(items) : 0; at < count; ++at)
+        for (unsigned f = 0; f < r->count; ++f) {
+            uint8_t type = m->record_field_type[r->first + f];
+            PureCell cell = pure_list_get(items, at, f);
+            if (type == PURE_RECORD_TEXT) {
+                write32(out, (uint32_t)cell.size);
+                if (cell.size) memcpy(out + 4, cell.text, cell.size);
+                out += 4 + cell.size;
+            } else if (type == PURE_RECORD_LIST) {
+                unsigned char *end = value_put(app, nested_record(m, r->first + f), (uint64_t)cell.i64, out + 4);
+                write32(out, (uint32_t)(end - out - 4));
+                out = end;
+            } else {
+                write_i64(out, cell.i64);
+                out += 8;
+            }
+        }
+    return out;
+}
+
+/* A list value's stored form (bytes) read into a new one of the event's lists of record's items, its lists in fields
+ * too: its number (0: none), or 0 with *made false where the bytes are not that form or memory ran out (*bad: they are
+ * not). */
+static uint64_t value_take(PureApp *app, uint32_t record, const unsigned char *bytes, size_t size, bool *made, bool *bad) {
+    const PureModule *m = app->module;
+    const PureRecord *r = &m->record[record];
+    *made = true;
+    if (!size) return 0;
+    uint64_t list = nest(app, record, NULL);
+    if (!list) return *made = false, 0;
+    for (size_t at = 0; at < size;) {
+        PureCell cells[PURE_RECORD_FIELDS];
+        for (unsigned f = 0; f < r->count; ++f) {
+            uint32_t field = r->first + f;
+            uint8_t type = m->record_field_type[field];
+            if (type == PURE_RECORD_TEXT || type == PURE_RECORD_LIST) {
+                uint32_t length = size - at >= 4 ? read32(bytes + at) : UINT32_MAX;
+                if (length > size - at - 4 || (type == PURE_RECORD_TEXT && !pure_utf8_valid((PureSpan){bytes + at + 4, length})))
+                    return *bad = true, *made = false, 0;
+                cells[f] = (PureCell){.text = (unsigned char *)bytes + at + 4, .size = length};
+                if (type == PURE_RECORD_LIST) {
+                    cells[f] = (PureCell){.i64 = (int64_t)value_take(app, nested_record(m, field), bytes + at + 4, length, made, bad)};
+                    if (!*made) return 0;
+                }
+                at += 4 + length;
+            } else {
+                if (size - at < 8) return *bad = true, *made = false, 0;
+                cells[f] = (PureCell){.i64 = read_i64(bytes + at)};
+                at += 8;
+                if (!pure_cell_fits(pure_record_kind(m, field), cells[f])) return *bad = true, *made = false, 0;
+            }
+        }
+        PureList *items = app->nested.list[list - 1]; /* (the lists in its fields may have moved the table) */
+        if (pure_list_insert(items, pure_list_count(items), cells, NULL) != PURE_OK) return *made = false, 0;
+        if (m->record_nested[record]) share_cells(app, m, record, cells);
+    }
+    return list;
+}
+
+/* An event's list's value as a kept list's cell holds it: its stored form in the arena (room reserved first). */
+static __attribute__((cold, noinline)) PureResult value_cell(PureApp *app, PureArena *arena, uint32_t record, uint64_t list,
+                                                             PureCell *out) {
+    size_t size = value_size(app, record, list);
+    if (!reserve(arena, size)) return PURE_ALLOCATION;
+    unsigned char *at = arena->bytes + arena->used;
+    value_put(app, record, list, at);
+    arena->used += size;
+    *out = (PureCell){.text = at, .size = size};
+    return PURE_OK;
+}
+
+/* An item's cells for a kept list of record's items whose fields hold lists, from the stack (base on): its texts and
+ * its lists' stored forms in the arena, all the room reserved first (no span moves while the next is made). */
+static __attribute__((cold, noinline)) PureResult kept_cells(PureApp *app, PureArena *arena, uint32_t record, const Slot *values,
+                                                             PureCell *cells) {
+    const PureModule *m = app->module;
+    const PureRecord *r = &m->record[record];
+    size_t total = 0;
+    for (unsigned f = 0; f < r->count; ++f) {
+        uint8_t type = m->record_field_type[r->first + f];
+        total += type == PURE_RECORD_LIST ? value_size(app, nested_record(m, r->first + f), (uint64_t)values[f].i64) :
+                 type == PURE_RECORD_TEXT ? (size_t)values[f].bytes.length : 0;
+    }
+    if (!reserve(arena, total)) return PURE_ALLOCATION;
+    for (unsigned f = 0; f < r->count; ++f) {
+        uint8_t type = m->record_field_type[r->first + f];
+        PureSpan span = {0};
+        PureResult status = PURE_OK;
+        if (type == PURE_RECORD_LIST) status = value_cell(app, arena, nested_record(m, r->first + f), (uint64_t)values[f].i64, &cells[f]);
+        else if (type == PURE_RECORD_TEXT && (status = contiguous(app, arena, values[f].bytes, &span)) == PURE_OK)
+            cells[f] = (PureCell){.text = (unsigned char *)span.data, .size = span.size};
+        else cells[f] = (PureCell){.i64 = values[f].i64};
+        if (status != PURE_OK) return status;
+    }
+    return PURE_OK;
+}
+
+static PureUndo *undo_for(PureApp *app, uint32_t list);
+
+/* A kept list's list value (a cell's stored form) read into one of the event's lists, counted in the event's room: its
+ * number in *out; BUDGET past the room. */
+static __attribute__((cold, noinline)) PureResult kept_value(PureApp *app, uint32_t list, uint32_t field, PureCell cell,
+                                                             int64_t *out) {
+    const PureModule *m = app->module;
+    bool made, bad = false;
+    uint64_t value = value_take(app, nested_record(m, m->record[m->state_ref[list]].first + field), cell.text, cell.size, &made, &bad);
+    if (!made) return bad ? PURE_STORE_ERROR : PURE_ALLOCATION;
+    if (!grows(app, (Held){0, 0}, (Held){0, cell.size})) return PURE_BUDGET;
+    *out = (int64_t)value;
+    return PURE_OK;
+}
+
+/* APPEND_IN into a kept list's item (at): the list in its field read in, the item (its fields from values) appended,
+ * the list written back (undone with the event). 0 done; 1 a fault (*fault); 2 refused and 3 stopped (*status). */
+static __attribute__((cold, noinline)) int append_kept(PureApp *app, PureArena *arena, uint32_t list, uint32_t field, size_t at,
+                                                       const Slot *values, PureFault *fault, PureResult *status) {
+    const PureModule *m = app->module;
+    uint32_t inner = nested_record(m, m->record[m->state_ref[list]].first + field);
+    const PureRecord *record = &m->record[inner];
+    int64_t value = 0;
+    if ((*status = kept_value(app, list, field, pure_list_get(app->lists[list], at, field), &value)) != PURE_OK)
+        return *status == PURE_BUDGET ? (*fault = PURE_FAULT_MEMORY, 1) : 3;
+    uint64_t own = value ? (uint64_t)value : nest(app, inner, NULL);
+    if (!own) return *status = PURE_ALLOCATION, 3;
+    size_t mark = arena->used, total = 0;
+    for (unsigned f = 0; f < record->count; ++f)
+        if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT) total += (size_t)values[f].bytes.length;
+    if (!reserve(arena, total)) return *status = PURE_ALLOCATION, 3;
+    PureCell cells[PURE_RECORD_FIELDS];
+    for (unsigned f = 0; f < record->count; ++f) {
+        PureSpan span = {0};
+        if (m->record_field_type[record->first + f] == PURE_RECORD_TEXT &&
+            (*status = contiguous(app, arena, values[f].bytes, &span)) != PURE_OK)
+            return 3;
+        cells[f] = (PureCell){.i64 = values[f].i64, .text = (unsigned char *)span.data, .size = span.size};
+    }
+    PureList *in = app->nested.list[own - 1];
+    *status = pure_list_insert(in, pure_list_count(in), cells, NULL);
+    arena->used = mark;
+    if (*status != PURE_OK) return 2;
+    if (m->record_nested[inner]) share_cells(app, m, inner, cells);
+    PureCell cell;
+    Held before = list_held(app, app->lists[list]);
+    if ((*status = value_cell(app, arena, inner, own, &cell)) != PURE_OK) return 3;
+    *status = pure_list_set(app->lists[list], at, field, cell, undo_for(app, list));
+    arena->used = mark;
+    if (*status != PURE_OK) return 2;
+    if (!grows(app, before, list_held(app, app->lists[list]))) return *fault = PURE_FAULT_MEMORY, 1;
+    return 0;
 }
 
 /* NUM_TEXT's text of v in a format (the argument past its type, PureFormat): false where an integer's form meets a
@@ -3618,11 +3795,13 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         }
         /* Room for every text first, so no span moves while the next is copied. */
         size_t mark = arena->used, total = 0;
-        for (unsigned f = 0; f < record->count; ++f)
+        bool kept = m->record_nested[m->state_ref[arg]] && kept_list(m, arg); /* its lists in their stored form (027's 3) */
+        PureCell cells[PURE_RECORD_FIELDS];
+        if (kept && (status = kept_cells(app, arena, m->state_ref[arg], stack + base, cells)) != PURE_OK) STOPPED(status);
+        for (unsigned f = 0; !kept && f < record->count; ++f)
             if (text_field(m, arg, f)) total += (size_t)stack[base + f].bytes.length;
         if (!reserve(arena, total)) STOPPED(PURE_ALLOCATION);
-        PureCell cells[PURE_RECORD_FIELDS];
-        for (unsigned f = 0; f < record->count; ++f) {
+        for (unsigned f = 0; !kept && f < record->count; ++f) {
             PureSpan span = {0};
             if (text_field(m, arg, f) && (status = contiguous(app, arena, stack[base + f].bytes, &span)) != PURE_OK)
                 STOPPED(status);
@@ -3643,7 +3822,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (status == PURE_INVALID) status = pure_list_insert(list, at, cells, undo_for(app, arg));
         arena->used = mark;
         if (status != PURE_OK) REFUSED;
-        if (m->record_nested[m->state_ref[arg]]) share_cells(app, m, m->state_ref[arg], cells);
+        if (m->record_nested[m->state_ref[arg]] && !kept) share_cells(app, m, m->state_ref[arg], cells);
         if (m->state_indexed[arg]) move_indices(m, values, arg, pure_list_count(list), at, true);
         if (!grows(app, before, list_held(app, list))) { kind = PURE_FAULT_MEMORY; FAILED; }
         NEXT;
@@ -3669,7 +3848,13 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         PureCell cell = pure_list_get(app->lists[list], at, field);
         /* A text is copied: the item may change or go before the value is used. */
         if (!(op->plan & PLAN_TEXT)) top->i64 = cell.i64; /* the bits: a number's, a bool's or an i64's (else a text) */
-        else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) STOPPED(status);
+        else if (m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_LIST) {
+            if ((status = kept_value(app, list, field, cell, &top->i64)) != PURE_OK) { /* a kept list's list: read in */
+                if (status != PURE_BUDGET) STOPPED(status);
+                kind = PURE_FAULT_MEMORY;
+                FAILED;
+            }
+        } else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) STOPPED(status);
         NEXT;
     }
     case PURE_OP_ITEM_SET: {
@@ -3678,9 +3863,12 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         size_t at = (size_t)stack[--sp].num, mark = arena->used;
         Held before = list_held(app, app->lists[list]);
         PureSpan span = {0};
-        status = op->plan & PLAN_TEXT ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
-        PureCell cell = {.i64 = value.i64, .text = (unsigned char *)span.data, .size = span.size};
         bool nested = m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_LIST;
+        bool kept = nested && op->plan & PLAN_TEXT; /* a kept list's list: its stored form (027's stage 3) */
+        status = kept ? PURE_OK : op->plan & PLAN_TEXT ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
+        PureCell cell = {.i64 = value.i64, .text = (unsigned char *)span.data, .size = span.size};
+        if (kept) status = value_cell(app, arena, nested_record(m, m->record[m->state_ref[list]].first + field), (uint64_t)value.i64, &cell);
+        nested = nested && !kept;
         uint64_t was = nested && status == PURE_OK && at < pure_list_count(app->lists[list]) ?
                        (uint64_t)pure_list_get(app->lists[list], at, field).i64 : 0;
         if (status == PURE_OK) /* where its FIND found it (PLAN_ROW: a HASHED list's slot), else its position */
@@ -3947,6 +4135,13 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         size_t base = sp - record->count, at = (size_t)stack[base - 1].num;
         sp = base - 1;
         if (at >= pure_list_count(app->lists[list])) { kind = PURE_FAULT_NOT_FOUND; FAILED; }
+        if (kept_list(m, list)) { /* a kept list's (027's stage 3): its list read in, the item appended, written back */
+            int how = append_kept(app, arena, list, field, at, stack + base, &kind, &status);
+            if (how == 1) FAILED;
+            if (how == 2) REFUSED;
+            if (how == 3) STOPPED(status);
+            NEXT;
+        }
         uint64_t into = (uint64_t)pure_list_get(app->lists[list], at, field).i64;
         if (!into || app->nested.shared[into - 1] > 1) {
             uint64_t own = nest(app, inner, into ? app->nested.list[into - 1] : NULL);
@@ -4193,7 +4388,7 @@ static void *frame_room(PureApp *app, size_t bytes, unsigned *block, size_t *use
 /* An empty list of an event's list state for a call: one a call let go, or a new one (NULL: out of memory). */
 static PureList *spare_list(PureApp *app, uint32_t state) {
     __typeof__(app->spare[0]) *spare = &app->spare[state];
-    return spare->count ? spare->lists[--spare->count] : new_list(app->module, app->module->state_ref[state]);
+    return spare->count ? spare->lists[--spare->count] : new_list(app->module, app->module->state_ref[state], false);
 }
 
 /* A call's list let go: emptied (what it held no longer counted) and kept for the next calls, unless what it keeps
@@ -4469,10 +4664,12 @@ static PureDraft *text_copy(const PureDraft *from) {
     return copy;
 }
 
-PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record) {
+/* A list of record's items: one kept past an event holds a list field's value in its stored form, an event's the number
+ * of one of the event's lists (027's 2b and 3). */
+PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record, bool kept) {
     const PureRecord *r = &m->record[record];
     uint8_t kinds[PURE_RECORD_FIELDS];
-    for (unsigned f = 0; f < r->count; ++f) kinds[f] = pure_record_kind(m, r->first + f);
+    for (unsigned f = 0; f < r->count; ++f) kinds[f] = cell_kind(m, r->first + f, kept);
     return pure_list_new(r->count, kinds);
 }
 
@@ -5147,7 +5344,7 @@ static bool own_lists(PureApp *app, uint32_t lists) {
     for (uint32_t left = lists; app->reading && left; left &= left - 1) {
         unsigned i = (unsigned)__builtin_ctz(left);
         if (!app->own[i]) {
-            if (!(app->own[i] = new_list(m, m->state_ref[i]))) return false;
+            if (!(app->own[i] = new_list(m, m->state_ref[i], false))) return false;
             (void)pure_list_keyed(app->own[i], m->state_key[i] ? (int)m->state_key[i] - 1 : -1);
             if (m->state_key[i]) (void)pure_list_hashed(app->own[i]);
             (void)pure_list_arrays(app->own[i]); /* in arrays, not a tree, while it can (021) */
@@ -5164,6 +5361,7 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     app->view_arena.used = 0;
     Event ev = {.app = app, .arena = &app->view_arena, .row = row};
     if (!argue(app, view, &ev)) return PURE_INVALID;
+    if (app->nested.count) unbind(app), drop_nested(app); /* a kept list's lists another view read in (027's stage 3) */
     if (m->view_body[view]) { /* a body computes: its locals from 0, its lists its own, its additions counted */
         memset(locals, 0, sizeof(locals));
         ev.locals = locals;
@@ -5466,60 +5664,182 @@ void pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
 uint8_t pure_record_kind(const PureModule *m, uint32_t field) {
     static const uint8_t kinds[] = {[PURE_RECORD_NUMBER] = PURE_CELL_NUMBER, [PURE_RECORD_TEXT] = PURE_CELL_TEXT,
                                     [PURE_RECORD_BOOL] = PURE_CELL_BOOL, [PURE_RECORD_I64] = PURE_CELL_INTEGER,
-                                    [PURE_RECORD_LIST] = PURE_CELL_INTEGER}; /* a list in a record: its number */
+                                    [PURE_RECORD_LIST] = PURE_CELL_LIST};
     return kinds[m->record_field_type[field]];
 }
 
-/* A number, a bool and an i64 carry over each other (when the value fits); texts only to texts. */
+/* A field's kind in a list (kept: past an event; else an event's, which holds one of the event's lists' numbers). */
+static uint8_t cell_kind(const PureModule *m, uint32_t field, bool kept) {
+    uint8_t kind = pure_record_kind(m, field);
+    return kind == PURE_CELL_LIST && !kept ? PURE_CELL_INTEGER : kind;
+}
+
+PURE_COLD void pure_layout_of(const PureModule *m, uint32_t record, PureLayout *out) {
+    out->records = 1;
+    out->module_record[0] = (uint16_t)record;
+    for (unsigned at = 0; at < out->records; ++at) { /* breadth first: each record once, numbered as first met */
+        const PureRecord *r = &m->record[out->module_record[at]];
+        out->record[at].count = r->count;
+        for (unsigned f = 0; f < r->count; ++f) {
+            uint32_t field = r->first + f;
+            out->record[at].kinds[f] = pure_record_kind(m, field);
+            snprintf(out->record[at].names[f], PURE_MODULE_NAME, "%s", m->record_field_names[field]);
+            out->record[at].items[f] = 0;
+            if (m->record_field_type[field] != PURE_RECORD_LIST) continue;
+            uint32_t items = nested_record(m, field);
+            unsigned k = 0;
+            while (k < out->records && out->module_record[k] != items) ++k;
+            if (k == out->records) out->module_record[out->records++] = (uint16_t)items;
+            out->record[at].items[f] = (uint8_t)k;
+        }
+    }
+}
+
+PURE_COLD bool pure_layout_same(const PureLayout *a, const PureLayout *b) {
+    if (a->records != b->records) return false;
+    for (unsigned at = 0; at < a->records; ++at) {
+        if (a->record[at].count != b->record[at].count) return false;
+        for (unsigned f = 0; f < a->record[at].count; ++f)
+            if (a->record[at].kinds[f] != b->record[at].kinds[f] || strcmp(a->record[at].names[f], b->record[at].names[f]) ||
+                (a->record[at].kinds[f] == PURE_CELL_LIST && a->record[at].items[f] != b->record[at].items[f]))
+                return false;
+    }
+    return true;
+}
+
+/* A number, a bool and an i64 carry over each other (when the value fits); texts only to texts, lists to lists. */
 static bool kinds_carry(uint8_t from, uint8_t to) {
     return from == to || (!pure_cell_text(from) && !pure_cell_text(to));
 }
 
+/* Bytes made for a list value's stored form as it moves (a growing buffer). */
+typedef struct { unsigned char *bytes; size_t used, capacity; bool full; } Grown;
+static unsigned char *grown_room(Grown *g, size_t more) {
+    if (g->full) return NULL;
+    if (more > g->capacity - g->used) {
+        size_t capacity = g->capacity ? g->capacity : 256;
+        while (capacity - g->used < more) capacity *= 2;
+        unsigned char *bytes = realloc(g->bytes, capacity);
+        if (!bytes) { g->full = true; return NULL; }
+        g->bytes = bytes, g->capacity = capacity;
+    }
+    g->used += more;
+    return g->bytes + g->used - more;
+}
+
+/* For field f of record to's (in m), the field of from's record that gives it (the same name, a kind that carries
+ * over), or -1. */
+static int source_field(const PureLayout *from, unsigned at, const PureModule *m, uint32_t field) {
+    for (unsigned k = 0; k < from->record[at].count; ++k)
+        if (!strcmp(from->record[at].names[k], m->record_field_names[field]) &&
+            kinds_carry(from->record[at].kinds[k], pure_record_kind(m, field)))
+            return (int)k;
+    return -1;
+}
+
+/* A field's value, the source's or its default, as the stored form writes it (a list's moved itself). */
+static bool moved_cell(const PureLayout *from, unsigned at, int k, PureCell given, const PureModule *m, uint32_t field,
+                       Grown *out);
+
+/* A list value's stored form (bytes, of from's record at) moved to record's of m by field name, item by item, into
+ * out; false on bytes not of that form (or out of memory: out->full). */
+static bool value_migrate(const PureLayout *from, unsigned at, const PureModule *m, uint32_t record, const unsigned char *bytes,
+                          size_t size, Grown *out) {
+    const PureRecord *r = &m->record[record];
+    for (size_t k = 0; k < size;) {
+        PureCell cells[PURE_RECORD_FIELDS];
+        for (unsigned f = 0; f < from->record[at].count; ++f) { /* the item as from's record has it */
+            if (pure_cell_text(from->record[at].kinds[f])) {
+                if (size - k < 4 || read32(bytes + k) > size - k - 4) return false;
+                cells[f] = (PureCell){.text = (unsigned char *)bytes + k + 4, .size = read32(bytes + k)};
+                k += 4 + cells[f].size;
+            } else {
+                if (size - k < 8) return false;
+                cells[f] = (PureCell){.i64 = read_i64(bytes + k)};
+                k += 8;
+            }
+        }
+        for (unsigned f = 0; f < r->count; ++f) {
+            int source = source_field(from, at, m, r->first + f);
+            if (!moved_cell(from, at, source, source >= 0 ? cells[source] : (PureCell){0}, m, r->first + f, out)) return false;
+        }
+    }
+    return !out->full;
+}
+
+static bool moved_cell(const PureLayout *from, unsigned at, int k, PureCell given, const PureModule *m, uint32_t field,
+                       Grown *out) {
+    uint8_t kind = pure_record_kind(m, field);
+    if (kind == PURE_CELL_LIST) { /* the list moved item by item, or none */
+        unsigned char *length = grown_room(out, 4);
+        size_t was = out->used;
+        if (!length) return false;
+        if (k >= 0 && !value_migrate(from, from->record[at].items[k], m, nested_record(m, field), given.text, given.size, out))
+            return false;
+        write32(out->bytes + was - 4, (uint32_t)(out->used - was));
+        return true;
+    }
+    if (k < 0 || !pure_cell_as(from->record[at].kinds[k], kind, &given)) { /* its default */
+        uint32_t constant = (uint32_t)m->record_field_default[field].num;
+        given = kind == PURE_CELL_TEXT ? (PureCell){.text = (unsigned char *)m->constant_data + m->constant_offset[constant],
+                                                    .size = m->constant_length[constant]}
+                                       : (PureCell){.i64 = m->record_field_default[field].i64};
+    }
+    unsigned char *put = grown_room(out, pure_cell_text(kind) ? 4 + given.size : 8);
+    if (!put) return false;
+    if (!pure_cell_text(kind)) write_i64(put, given.i64);
+    else {
+        write32(put, (uint32_t)given.size);
+        if (given.size) memcpy(put + 4, given.text, given.size);
+    }
+    return true;
+}
+
 /* A list with record's fields: each takes the field of `from` with the same
- * name and a kind it carries over from, or its default. */
-PURE_COLD PureResult pure_list_migrate(PureList **out, const PureList *from, const char *const *names,
-                             const uint8_t *kinds, unsigned count, const PureModule *m, uint32_t record) {
+ * name and a kind it carries over from, or its default; a list field's value
+ * moves item by item (027's stage 3). */
+PURE_COLD PureResult pure_list_migrate(PureList **out, const PureList *from, const PureLayout *from_layout, const PureModule *m,
+                                       uint32_t record, bool kept) {
     const PureRecord *r = &m->record[record];
     int source[PURE_RECORD_FIELDS];
-    for (unsigned f = 0; f < r->count; ++f) {
-        source[f] = -1;
-        for (unsigned k = 0; k < count; ++k)
-            if (!strcmp(m->record_field_names[r->first + f], names[k]) && kinds_carry(kinds[k], pure_record_kind(m, r->first + f)))
-                source[f] = (int)k;
-    }
-    if (!(*out = new_list(m, record))) return PURE_ALLOCATION;
+    for (unsigned f = 0; f < r->count; ++f) source[f] = source_field(from_layout, 0, m, r->first + f);
+    if (!(*out = new_list(m, record, kept))) return PURE_ALLOCATION;
     PureResult result = PURE_OK;
+    Grown moved[PURE_RECORD_FIELDS] = {{0}};
     for (size_t at = 0; result == PURE_OK && at < pure_list_count(from); ++at) {
         PureCell cells[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < r->count; ++f) {
             uint32_t field = r->first + f, constant = (uint32_t)m->record_field_default[field].num;
             PureCell given = source[f] >= 0 ? pure_list_get(from, at, (unsigned)source[f]) : (PureCell){0};
-            if (source[f] >= 0 && pure_cell_as(kinds[source[f]], pure_record_kind(m, field), &given)) cells[f] = given;
+            if (m->record_field_type[field] == PURE_RECORD_LIST && kept) { /* its items moved, or none */
+                moved[f].used = 0;
+                if (source[f] >= 0 && !value_migrate(from_layout, from_layout->record[0].items[source[f]], m, nested_record(m, field),
+                                                     given.text, given.size, &moved[f]))
+                    result = moved[f].full ? PURE_ALLOCATION : PURE_STORE_ERROR;
+                cells[f] = (PureCell){.text = moved[f].bytes, .size = moved[f].used};
+            } else if (m->record_field_type[field] == PURE_RECORD_LIST) cells[f] = (PureCell){.i64 = 0}; /* an event's: none */
+            else if (source[f] >= 0 && pure_cell_as(from_layout->record[0].kinds[source[f]], pure_record_kind(m, field), &given))
+                cells[f] = given;
             else if (m->record_field_type[field] == PURE_RECORD_TEXT)
                 cells[f] = (PureCell){.text = (unsigned char *)m->constant_data + m->constant_offset[constant],
                                       .size = m->constant_length[constant]};
             else cells[f] = (PureCell){.i64 = m->record_field_default[field].i64}; /* a number's, a bool's or an i64's bits */
         }
-        result = pure_list_insert(*out, at, cells, NULL);
+        if (result == PURE_OK) result = pure_list_insert(*out, at, cells, NULL);
     }
+    for (unsigned f = 0; f < r->count; ++f) free(moved[f].bytes);
     if (result != PURE_OK) { pure_list_free(*out); *out = NULL; }
     return result;
 }
 
-/* A kept list keeps its items; with the same record it is the same list. */
+/* A kept list keeps its items; with the same record (laid out the same) it is the same list. */
 PURE_COLD static PureResult keep_list(PureList **out, PureList *from, const PureModule *old, uint32_t old_record,
-                            const PureModule *m, uint32_t record) {
-    const PureRecord *r = &m->record[record], *o = &old->record[old_record];
-    const char *names[PURE_RECORD_FIELDS];
-    uint8_t kinds[PURE_RECORD_FIELDS];
-    bool same = r->count == o->count;
-    for (unsigned k = 0; k < o->count; ++k) {
-        names[k] = old->record_field_names[o->first + k];
-        kinds[k] = pure_record_kind(old, o->first + k);
-        same = same && !strcmp(names[k], m->record_field_names[r->first + k]) && kinds[k] == pure_record_kind(m, r->first + k);
-    }
-    if (same) { *out = from; return PURE_OK; }
-    return pure_list_migrate(out, from, names, kinds, o->count, m, record);
+                            const PureModule *m, uint32_t record, bool kept) {
+    PureLayout was, now;
+    pure_layout_of(old, old_record, &was);
+    pure_layout_of(m, record, &now);
+    if (pure_layout_same(&was, &now)) { *out = from; return PURE_OK; }
+    return pure_list_migrate(out, from, &was, m, record, kept);
 }
 
 /* Open a module in an app. States keep their values by name and kind (texts
@@ -5681,7 +6001,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
             bool saving = lists_stored && !rows && !transient;
             if (kept[i] >= 0) {
                 result = keep_list(&lists[i], app->lists[kept[i]], old, old->state_ref[kept[i]], module,
-                                   module->state_ref[i]);
+                                   module->state_ref[i], !rows);
                 list_drafts[i] = app->list_drafts[kept[i]];
                 if (!transient && !was_transient)
                     listed[i] = (PureSaved){app->image_seq[kept[i]], app->logged_since[kept[i]], app->logged[kept[i]], false};
@@ -5690,7 +6010,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
             } else if (saving) {
                 result = pure_save_open_list(app, module, i, &lists[i], &list_drafts[i], &listed[i]);
                 rewrite[i] = result == PURE_OK && listed[i].rewrite;
-            } else if (!(lists[i] = new_list(module, module->state_ref[i]))) result = PURE_ALLOCATION;
+            } else if (!(lists[i] = new_list(module, module->state_ref[i], !rows))) result = PURE_ALLOCATION;
         } else if (kept[i] >= 0 && valued) {
             PureCell cell = {.i64 = app->values[kept[i]].i64};
             values[i] = pure_cell_as(pure_value_kind(was), pure_value_kind(now), &cell) ? (PureValue){.i64 = cell.i64}

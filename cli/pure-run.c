@@ -49,22 +49,56 @@ static bool collect(void *context, PureSpan span) {
     return true;
 }
 
-static void show_list(const PureModule *m, const PureList *list, const PureRecord *record) {
+static uint32_t le32(const unsigned char *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+static void show_cell(const PureModule *m, uint32_t field, PureCell cell, bool kept);
+
+/* A list kept past an event holds a list field's value in its items' stored form (Pure 027's stage 3): its items. */
+static void show_value_items(const PureModule *m, uint32_t record, const unsigned char *bytes, size_t size) {
+    const PureRecord *r = &m->record[record];
+    putchar('[');
+    for (size_t at = 0, item = 0; at < size; ++item) {
+        printf("%s{", item ? "," : "");
+        for (unsigned f = 0; f < r->count && at <= size; ++f) {
+            uint8_t type = m->record_field_type[r->first + f];
+            PureCell cell = {0};
+            if (type == PURE_RECORD_TEXT || type == PURE_RECORD_LIST) {
+                cell.size = size - at >= 4 ? le32(bytes + at) : 0;
+                cell.text = (unsigned char *)bytes + at + 4;
+                at += 4 + cell.size;
+            } else {
+                memcpy(&cell.i64, bytes + at, 8);
+                at += 8;
+            }
+            printf("%s\"%s\":", f ? "," : "", m->record_field_names[r->first + f]);
+            show_cell(m, r->first + f, cell, true);
+        }
+        putchar('}');
+    }
+    putchar(']');
+}
+
+static void show_cell(const PureModule *m, uint32_t field, PureCell cell, bool kept) {
+    uint8_t type = m->record_field_type[field];
+    if (type == PURE_RECORD_BOOL) printf("%s", cell.num ? "true" : "false");
+    else if (type == PURE_RECORD_I64) printf("%" PRId64, cell.i64);
+    else if (type == PURE_RECORD_NUMBER) printf("%.17g", cell.num);
+    else if (type == PURE_RECORD_LIST && kept) show_value_items(m, (uint32_t)m->record_field_default[field].i64, cell.text, cell.size);
+    else if (type == PURE_RECORD_LIST) printf("%" PRId64, cell.i64); /* an event's list: its number among the event's */
+    else {
+        putchar('"');
+        json_span(NULL, (PureSpan){cell.text, cell.size});
+        putchar('"');
+    }
+}
+
+static void show_list(const PureModule *m, const PureList *list, const PureRecord *record, bool kept) {
     putchar('[');
     for (size_t at = 0; at < pure_list_count(list); ++at) {
         printf("%s{", at ? "," : "");
         for (unsigned f = 0; f < record->count; ++f) {
-            PureCell cell = pure_list_get(list, at, f);
             printf("%s\"%s\":", f ? "," : "", m->record_field_names[record->first + f]);
-            uint8_t type = m->record_field_type[record->first + f];
-            if (type == PURE_RECORD_BOOL) printf("%s", cell.num ? "true" : "false");
-            else if (type == PURE_RECORD_I64) printf("%" PRId64, cell.i64);
-            else if (type == PURE_RECORD_NUMBER) printf("%.17g", cell.num);
-            else {
-                putchar('"');
-                json_span(NULL, (PureSpan){cell.text, cell.size});
-                putchar('"');
-            }
+            show_cell(m, record->first + f, pure_list_get(list, at, f), kept);
         }
         putchar('}');
     }
@@ -106,7 +140,8 @@ static void show(PureApp *app, const char *failure) {
             putchar('"');
             pure_draft_read(app->texts[i], 0, pure_draft_size(app->texts[i]), json_span, NULL);
             putchar('"');
-        } else if (m->state_type[i] == PURE_STATE_LIST) show_list(m, app->lists[i], &m->record[m->state_ref[i]]);
+        } else if (m->state_type[i] == PURE_STATE_LIST)
+            show_list(m, app->lists[i], &m->record[m->state_ref[i]], !(m->state_flags[i] & PURE_LIST_ROWS >> 8));
         else if (m->state_type[i] == PURE_STATE_BOOL) printf("%s", app->values[i].num ? "true" : "false");
         else if (m->state_type[i] == PURE_STATE_I64) printf("%" PRId64, app->values[i].i64);
         else printf("%.17g", app->values[i].num);
