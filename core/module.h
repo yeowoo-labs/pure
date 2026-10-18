@@ -131,6 +131,11 @@ enum { PURE_FORMAT_WIDTH = 8, PURE_FORMAT_ZEROS = 1 << 16, PURE_FORMAT_FORM = 17
  * text of a code point, failing as LIMIT outside 0-0x10FFFF and as ENCODING
  * for a surrogate. */
 enum { PURE_MODULE_FUNCTIONS = 64, PURE_MODULE_SIGNATURES = 1024, PURE_SIGNATURE_BYTES = 5 };
+/* What a call's frame counts in the event's room: a table, as gas is, not the implementation's sizes (each at least
+ * what it stands for), so a module's calls fail at the same depth wherever and on whatever build they run: so much a
+ * frame, a value of its stack's height, a local, a loop it nests, a list of its own, a held value and a register. */
+enum { PURE_CALL_BYTES = 256, PURE_CALL_VALUE = 64, PURE_CALL_LOCAL = 8, PURE_CALL_LOOP = 128, PURE_CALL_LIST = 1024,
+       PURE_CALL_HELD = 128, PURE_CALL_REGISTER = 16 };
 /* A local: one of an event's PURE_MODULE_LOCALS slots, 0 when the event
  * begins and never saved. LOCAL_LOAD and LOCAL_STORE name the slot (bits
  * 0-7), what it holds (bits 8-15: 0 a number, 1 an index, 2 a bool, 3 an i64,

@@ -1580,6 +1580,8 @@ static bool logged(PureList *list, const PureUndo *undo) {
 
 /* ---- The list */
 
+_Static_assert(sizeof(PureList) <= PURE_CALL_LIST, "a call's list counts at least its own bytes (module.h)");
+
 PureList *pure_list_new(unsigned fields, const uint8_t *kinds) {
     if (fields > 16) return NULL;
     PureList *list = calloc(1, sizeof(*list));

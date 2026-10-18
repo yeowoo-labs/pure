@@ -4157,6 +4157,9 @@ typedef struct Call {
     Walk *walk;
 } Call;
 typedef __typeof__(((PureApp *)0)->held[0]) Kept;
+_Static_assert(sizeof(Call) <= PURE_CALL_BYTES && sizeof(Slot) <= PURE_CALL_VALUE && sizeof(PureValue) <= PURE_CALL_LOCAL &&
+               sizeof(Loop) <= PURE_CALL_LOOP && sizeof(Kept) <= PURE_CALL_HELD && sizeof(PureList *) <= PURE_CALL_REGISTER,
+               "a frame counts at least what it holds");
 
 /* Room for a frame of bytes among the app's blocks: where they stood before it, or NULL out of memory. */
 static void *frame_room(PureApp *app, size_t bytes, unsigned *block, size_t *used) {
@@ -4193,12 +4196,14 @@ static PureList *spare_list(PureApp *app, uint32_t state) {
     return spare->count ? spare->lists[--spare->count] : new_list(app->module, app->module->state_ref[state]);
 }
 
-/* A call's list let go: emptied (what it held no longer counted) and kept for the next calls. */
+/* A call's list let go: emptied (what it held no longer counted) and kept for the next calls, unless what it keeps
+ * when empty passes what a frame counts for it. */
 static void let_list_go(PureApp *app, uint32_t state, PureList *list) {
     Held before = list_held(app, list);
     pure_list_clear(list);
     (void)grows(app, before, list_held(app, list));
     __typeof__(app->spare[0]) *spare = &app->spare[state];
+    if (pure_list_extra(list) > PURE_CALL_LIST) { pure_list_free(list); return; }
     if (spare->count == spare->capacity) {
         unsigned capacity = spare->capacity ? 2 * spare->capacity : 4;
         PureList **lists = realloc(spare->lists, capacity * sizeof(*lists));
@@ -4268,9 +4273,12 @@ static __attribute__((noinline, cold)) int enter_call(Frame *frame, Call **top, 
     unsigned keeps = (unsigned)__builtin_popcount(f->lists | f->registers), holds = (unsigned)__builtin_popcount(f->held);
     size_t bytes = (sizeof(Call) + keeps * sizeof(PureList *) + holds * sizeof(Kept) + f->height * sizeof(Slot) +
                     f->locals * sizeof(PureValue) + f->nesting * sizeof(Loop) + 15) & ~(size_t)15;
+    size_t counted = PURE_CALL_BYTES + (size_t)f->height * PURE_CALL_VALUE + (size_t)f->locals * PURE_CALL_LOCAL +
+                     (size_t)f->nesting * PURE_CALL_LOOP + (size_t)__builtin_popcount(f->lists) * PURE_CALL_LIST +
+                     (size_t)holds * PURE_CALL_HELD + (size_t)__builtin_popcount(f->registers) * PURE_CALL_REGISTER;
     frame->fault_pc = *pc - 1;
     if (!charge(app, f->code.length)) { frame->kind = PURE_FAULT_WORK; return STEP_FAULT; }
-    if (!grows(app, (Held){0, 0}, (Held){0, bytes})) { frame->kind = PURE_FAULT_MEMORY; return STEP_FAULT; }
+    if (!grows(app, (Held){0, 0}, (Held){0, counted})) { frame->kind = PURE_FAULT_MEMORY; return STEP_FAULT; }
     unsigned block;
     size_t used, base = frame->sp - f->params;
     Call *call = frame_room(app, bytes, &block, &used);
@@ -4308,7 +4316,7 @@ static __attribute__((noinline, cold)) int enter_call(Frame *frame, Call **top, 
         *h = (Kept){0};
     }
     *call = (Call){.below = *top, .back = *pc, .end = frame->end, .function = function, .depth = frame->depth, .block = block,
-                   .sp = base, .used = used, .bytes = bytes, .row = ev->row, .stack = frame->stack, .loops = frame->loops,
+                   .sp = base, .used = used, .bytes = counted, .row = ev->row, .stack = frame->stack, .loops = frame->loops,
                    .locals = ev->locals, .walk = ev->walk};
     if (f->locals) memset(locals, 0, f->locals * sizeof(*locals));
     frame->stack = stack, frame->sp = f->params, frame->loops = (Loop *)(locals + f->locals), frame->depth = 0;
