@@ -532,7 +532,10 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
     }
     PureList *from = NULL;
     if (result == PURE_OK && stored) {
-        from = pure_list_new(count, stored_layout.record[0].kinds);
+        uint8_t held[PURE_RECORD_FIELDS]; /* a list field's value held as bytes */
+        for (unsigned f = 0; f < count; ++f)
+            held[f] = stored_layout.record[0].kinds[f] == PURE_CELL_LIST ? PURE_CELL_BYTES : stored_layout.record[0].kinds[f];
+        from = pure_list_new(count, held);
         result = from ? pure_list_read(from, bytes + at, items) : PURE_ALLOCATION;
         if (result == PURE_OK && !image) result = pure_list_replay(from, bytes + at + items, size - at - items);
     }
@@ -566,7 +569,8 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
         } else if (from) result = pure_list_migrate(out, from, &stored_layout, m, record, true);
         else {
             uint8_t own[PURE_RECORD_FIELDS];
-            for (unsigned f = 0; f < r->count; ++f) own[f] = pure_record_kind(m, r->first + f);
+            for (unsigned f = 0; f < r->count; ++f)
+                own[f] = pure_record_kind(m, r->first + f) == PURE_CELL_LIST ? PURE_CELL_BYTES : pure_record_kind(m, r->first + f);
             if (!(*out = pure_list_new(r->count, own))) result = PURE_ALLOCATION;
         }
     }

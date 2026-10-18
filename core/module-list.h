@@ -51,12 +51,13 @@ typedef struct {
 enum { PURE_LIST_ITEMS = 1 << 24, PURE_LIST_RUN = 32 };
 
 /* A field's kind: a number, a text (UTF-8, checked when read), bytes (any: a
- * runtime list's), a bool (a number 0 or 1, kept as a number is), an
- * integer (an int64_t, ordered as one) or a list (027's stage 3: a list
- * value in a list kept past an event, in its items' stored form, held as
- * bytes are). A stored list's header names its fields by these kinds. */
+ * runtime list's), a bool (a number 0 or 1, kept as a number is) or an
+ * integer (an int64_t, ordered as one). A stored list's header names its
+ * fields by these kinds, and by PURE_CELL_LIST a list field of a list kept
+ * past an event (027's stage 3), which the list itself holds as bytes: its
+ * value in its items' stored form. */
 enum { PURE_CELL_NUMBER = 0, PURE_CELL_TEXT = 1, PURE_CELL_BYTES = 2, PURE_CELL_BOOL = 3, PURE_CELL_INTEGER = 4, PURE_CELL_LIST = 5 };
-static inline bool pure_cell_text(uint8_t kind) { return kind == PURE_CELL_TEXT || kind == PURE_CELL_BYTES || kind == PURE_CELL_LIST; }
+static inline bool pure_cell_text(uint8_t kind) { return kind == PURE_CELL_TEXT || kind == PURE_CELL_BYTES; }
 /* Whether a number, bool or integer cell holds what its kind may: a finite
  * number, a bool 0 or 1 (either zero), any integer. */
 bool pure_cell_fits(uint8_t kind, PureCell cell);

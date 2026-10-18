@@ -363,6 +363,13 @@ static uint32_t nested_record(const PureModule *m, uint32_t field) {
     return m->record_field_type[field] == PURE_RECORD_LIST ? (uint32_t)m->record_field_default[field].i64 : UINT32_MAX;
 }
 
+/* A list kept past an event: stored or transient, not an event's (027's stage 3). */
+static bool kept_list(const PureModule *m, uint32_t list) { return !(m->state_flags[list] & PURE_LIST_ROWS >> 8); }
+/* The steps of a kept list's lists, apart from the instructions' own (027's stage 3): the load gives ITEM_GET and
+ * ITEM_SET of a kept list's list field, and LIST_APPEND, LIST_INSERT and APPEND_IN of a kept list whose record holds
+ * lists, these numbers past the module's, so the others' steps stay as they were. */
+enum { OP_KEPT_GET = PURE_OP_COUNT, OP_KEPT_SET, OP_KEPT_APPEND, OP_KEPT_INSERT, OP_KEPT_APPEND_IN };
+
 /* An event's list, and one bound by LIST_BIND (a register: never changed by code). */
 static bool event_list_state(const PureModule *m, uint32_t list) {
     return list < m->states && m->state_type[list] == PURE_STATE_LIST && m->state_flags[list] & PURE_LIST_ROWS >> 8;
@@ -412,8 +419,13 @@ static unsigned char state_type(const PureModule *m, uint32_t state) {
     return m->state_type[state] == PURE_STATE_BOOL ? T_BOOL : m->state_type[state] == PURE_STATE_I64 ? T_I64 : T_NUM;
 }
 
-/* Whether a list's record field's cells are bytes: a text, or a list in a list kept past an event (027's stage 3). */
+/* Whether a list's record field is a text. */
 static bool text_field(const PureModule *m, uint32_t list, uint32_t field) {
+    return m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_TEXT;
+}
+
+/* Whether its cells are bytes: a text, or a list in a list kept past an event (027's stage 3). */
+static bool bytes_field(const PureModule *m, uint32_t list, uint32_t field) {
     uint8_t type = m->record_field_type[m->record[m->state_ref[list]].first + field];
     return type == PURE_RECORD_TEXT || (type == PURE_RECORD_LIST && !(m->state_flags[list] & PURE_LIST_ROWS >> 8));
 }
@@ -1971,7 +1983,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     /* What a cell is, read once here: an item's field, or a keyed list's key, a text (PLAN_TEXT) or not. */
     for (uint32_t pc = 0; pc < out->code_count; ++pc) {
         PureOp *op = &out->code[pc];
-        if (op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET) op->plan = text_field(out, list_of(op->arg), item_field(op->arg));
+        if (op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET) op->plan = bytes_field(out, list_of(op->arg), item_field(op->arg));
         else if (op->op == PURE_OP_LIST_FIND || op->op == PURE_OP_LIST_HAS)
             op->plan = (op->plan & PLAN_FILTER) | text_field(out, op->arg, out->state_key[op->arg] - 1u);
     }
@@ -2041,6 +2053,19 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     if (out->batches && !pure_batch_plans(out)) {
         result = PURE_ALLOCATION;
         REFUSE("out of memory", 0);
+    }
+    for (uint32_t pc = 0; pc < out->code_count; ++pc) { /* a kept list's lists: their own steps (027's stage 3) */
+        PureOp *op = &out->code[pc];
+        bool item = op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET || op->op == PURE_OP_APPEND_IN;
+        uint32_t list = item ? list_of(op->arg) : op->arg;
+        if ((!item && op->op != PURE_OP_LIST_APPEND && op->op != PURE_OP_LIST_INSERT) || !kept_list(out, list) ||
+            !out->record_nested[out->state_ref[list]] ||
+            ((op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET) &&
+             out->record_field_type[out->record[out->state_ref[list]].first + item_field(op->arg)] != PURE_RECORD_LIST))
+            continue;
+        op->op = (uint8_t)(op->op == PURE_OP_ITEM_GET ? OP_KEPT_GET : op->op == PURE_OP_ITEM_SET ? OP_KEPT_SET :
+                           op->op == PURE_OP_LIST_APPEND ? OP_KEPT_APPEND : op->op == PURE_OP_LIST_INSERT ? OP_KEPT_INSERT :
+                           OP_KEPT_APPEND_IN);
     }
     out->runner = out->calls ? 2 : out->batches ? 1 : 0;
     out->jit = pure_jit_make(out); /* none: the executor runs it all */
@@ -2453,8 +2478,6 @@ static void drop_nested(PureApp *app) {
  * stored form (PURE_CELL_LIST: each item's fields in order, a number's, a bool's and an i64's 8 bytes little-endian, a
  * text's and a list's u32le length and bytes, a list's in this form again). Read, it becomes one of the event's lists;
  * set, it is written from one. */
-static bool kept_list(const PureModule *m, uint32_t list) { return !(m->state_flags[list] & PURE_LIST_ROWS >> 8); }
-
 /* The stored form's bytes of the event's list number list (0: an empty one) of record's items. */
 static size_t value_size(const PureApp *app, uint32_t record, uint64_t list) {
     const PureModule *m = app->module;
@@ -2573,6 +2596,7 @@ static __attribute__((cold, noinline)) PureResult kept_cells(PureApp *app, PureA
 }
 
 static PureUndo *undo_for(PureApp *app, uint32_t list);
+static void move_indices(const PureModule *m, PureValue *values, uint32_t list, size_t count, size_t at, bool inserted);
 
 /* A kept list's list value (a cell's stored form) read into one of the event's lists, counted in the event's room: its
  * number in *out; BUDGET past the room. */
@@ -2624,6 +2648,88 @@ static __attribute__((cold, noinline)) int append_kept(PureApp *app, PureArena *
     if (*status != PURE_OK) return 2;
     if (!grows(app, before, list_held(app, app->lists[list]))) return *fault = PURE_FAULT_MEMORY, 1;
     return 0;
+}
+
+/* How many values a kept step takes off the stack (net: KEPT_GET's value takes its index's place). */
+static size_t kept_pops(const PureModule *m, const PureOp *op) {
+    switch (op->op) {
+    case OP_KEPT_GET: return 0;
+    case OP_KEPT_SET: return 2;
+    case OP_KEPT_APPEND: case OP_KEPT_INSERT: return m->record[m->state_ref[op->arg]].count + (op->op == OP_KEPT_INSERT);
+    default: return m->record[nested_record(m, m->record[m->state_ref[list_of(op->arg)]].first + item_field(op->arg))].count + 1u;
+    }
+}
+
+/* A kept step on the stack below sp: 0 done, else how it stopped and why: 1 a fault, 2 refused, 3 stopped (a result),
+ * the fault or the result in the bits above. */
+static __attribute__((cold, noinline)) int kept_step(PureApp *app, PureArena *arena, PureValue *values, const PureOp *op, Slot *stack,
+                                                     size_t sp) {
+#define KEPT_FAULT(f) return (int)(f) << 2 | 1
+#define KEPT_REFUSED(r) return (int)(r) << 2 | 2
+#define KEPT_STOPPED(r) return (int)(r) << 2 | 3
+    const PureModule *m = app->module;
+    uint32_t arg = op->arg, list = op->op == OP_KEPT_APPEND || op->op == OP_KEPT_INSERT ? arg : list_of(arg), field = item_field(arg);
+    PureList *items = app->lists[list];
+    size_t mark = arena->used;
+    PureResult status;
+    switch (op->op) {
+    case OP_KEPT_GET: { /* the list in an item's field, read into one of the event's lists */
+        size_t at = (size_t)stack[sp - 1].num;
+        if (at >= pure_list_count(items)) KEPT_FAULT(PURE_FAULT_NOT_FOUND);
+        if ((status = kept_value(app, list, field, pure_list_get(items, at, field), &stack[sp - 1].i64)) == PURE_BUDGET)
+            KEPT_FAULT(PURE_FAULT_MEMORY);
+        if (status != PURE_OK) KEPT_STOPPED(status);
+        return 0;
+    }
+    case OP_KEPT_SET: { /* an item's field given a list, written in its stored form */
+        size_t at = (size_t)stack[sp - 2].num;
+        Held before = list_held(app, items);
+        PureCell cell;
+        if ((status = value_cell(app, arena, nested_record(m, m->record[m->state_ref[list]].first + field), (uint64_t)stack[sp - 1].i64,
+                                 &cell)) != PURE_OK)
+            KEPT_STOPPED(status);
+        status = op->plan & PLAN_ROW ? pure_list_set_row(items, at, field, cell, undo_for(app, list))
+                                     : pure_list_set(items, at, field, cell, undo_for(app, list));
+        arena->used = mark;
+        if (status != PURE_OK) KEPT_REFUSED(status);
+        if (!grows(app, before, list_held(app, items))) KEPT_FAULT(PURE_FAULT_MEMORY);
+        return 0;
+    }
+    case OP_KEPT_APPEND: case OP_KEPT_INSERT: { /* an item whose lists go in their stored form */
+        const PureRecord *record = &m->record[m->state_ref[list]];
+        size_t base = sp - record->count, count = pure_list_count(items), at = count;
+        if (op->op == OP_KEPT_INSERT && (at = (size_t)stack[base - 1].num) > count) KEPT_FAULT(PURE_FAULT_NOT_FOUND);
+        PureCell cells[PURE_RECORD_FIELDS];
+        if ((status = kept_cells(app, arena, m->state_ref[list], stack + base, cells)) != PURE_OK) KEPT_STOPPED(status);
+        Held before = list_held(app, items);
+        status = PURE_INVALID;
+        if (m->state_key[list]) { /* a keyed list places the item by its key */
+            bool found;
+            if ((status = pure_list_add(items, cells, undo_for(app, list), m->state_indexed[list] ? &at : NULL, &found)) == PURE_INVALID)
+                at = pure_list_seek(items, m->state_key[list] - 1u, cells[m->state_key[list] - 1u], &found);
+            if (found) { arena->used = mark; KEPT_FAULT(PURE_FAULT_EXISTS); }
+        }
+        if (status == PURE_INVALID) status = pure_list_insert(items, at, cells, undo_for(app, list));
+        arena->used = mark;
+        if (status != PURE_OK) KEPT_REFUSED(status);
+        if (m->state_indexed[list]) move_indices(m, values, list, pure_list_count(items), at, true);
+        if (!grows(app, before, list_held(app, items))) KEPT_FAULT(PURE_FAULT_MEMORY);
+        return 0;
+    }
+    default: { /* APPEND_IN: an item into the list in an item's field */
+        size_t base = sp - (kept_pops(m, op) - 1), at = (size_t)stack[base - 1].num;
+        if (at >= pure_list_count(items)) KEPT_FAULT(PURE_FAULT_NOT_FOUND);
+        PureFault fault = PURE_FAULT_NONE;
+        int how = append_kept(app, arena, list, field, at, stack + base, &fault, &status);
+        if (how == 1) KEPT_FAULT(fault);
+        if (how == 2) KEPT_REFUSED(status);
+        if (how == 3) KEPT_STOPPED(status);
+        return 0;
+    }
+    }
+#undef KEPT_FAULT
+#undef KEPT_REFUSED
+#undef KEPT_STOPPED
 }
 
 /* NUM_TEXT's text of v in a format (the argument past its type, PureFormat): false where an integer's form meets a
@@ -3795,13 +3901,11 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         }
         /* Room for every text first, so no span moves while the next is copied. */
         size_t mark = arena->used, total = 0;
-        bool kept = m->record_nested[m->state_ref[arg]] && kept_list(m, arg); /* its lists in their stored form (027's 3) */
-        PureCell cells[PURE_RECORD_FIELDS];
-        if (kept && (status = kept_cells(app, arena, m->state_ref[arg], stack + base, cells)) != PURE_OK) STOPPED(status);
-        for (unsigned f = 0; !kept && f < record->count; ++f)
+        for (unsigned f = 0; f < record->count; ++f)
             if (text_field(m, arg, f)) total += (size_t)stack[base + f].bytes.length;
         if (!reserve(arena, total)) STOPPED(PURE_ALLOCATION);
-        for (unsigned f = 0; !kept && f < record->count; ++f) {
+        PureCell cells[PURE_RECORD_FIELDS];
+        for (unsigned f = 0; f < record->count; ++f) {
             PureSpan span = {0};
             if (text_field(m, arg, f) && (status = contiguous(app, arena, stack[base + f].bytes, &span)) != PURE_OK)
                 STOPPED(status);
@@ -3822,7 +3926,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (status == PURE_INVALID) status = pure_list_insert(list, at, cells, undo_for(app, arg));
         arena->used = mark;
         if (status != PURE_OK) REFUSED;
-        if (m->record_nested[m->state_ref[arg]] && !kept) share_cells(app, m, m->state_ref[arg], cells);
+        if (m->record_nested[m->state_ref[arg]]) share_cells(app, m, m->state_ref[arg], cells);
         if (m->state_indexed[arg]) move_indices(m, values, arg, pure_list_count(list), at, true);
         if (!grows(app, before, list_held(app, list))) { kind = PURE_FAULT_MEMORY; FAILED; }
         NEXT;
@@ -3848,13 +3952,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         PureCell cell = pure_list_get(app->lists[list], at, field);
         /* A text is copied: the item may change or go before the value is used. */
         if (!(op->plan & PLAN_TEXT)) top->i64 = cell.i64; /* the bits: a number's, a bool's or an i64's (else a text) */
-        else if (m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_LIST) {
-            if ((status = kept_value(app, list, field, cell, &top->i64)) != PURE_OK) { /* a kept list's list: read in */
-                if (status != PURE_BUDGET) STOPPED(status);
-                kind = PURE_FAULT_MEMORY;
-                FAILED;
-            }
-        } else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) STOPPED(status);
+        else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) STOPPED(status);
         NEXT;
     }
     case PURE_OP_ITEM_SET: {
@@ -3863,12 +3961,9 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         size_t at = (size_t)stack[--sp].num, mark = arena->used;
         Held before = list_held(app, app->lists[list]);
         PureSpan span = {0};
-        bool nested = m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_LIST;
-        bool kept = nested && op->plan & PLAN_TEXT; /* a kept list's list: its stored form (027's stage 3) */
-        status = kept ? PURE_OK : op->plan & PLAN_TEXT ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
+        status = op->plan & PLAN_TEXT ? contiguous(app, arena, value.bytes, &span) : PURE_OK;
         PureCell cell = {.i64 = value.i64, .text = (unsigned char *)span.data, .size = span.size};
-        if (kept) status = value_cell(app, arena, nested_record(m, m->record[m->state_ref[list]].first + field), (uint64_t)value.i64, &cell);
-        nested = nested && !kept;
+        bool nested = m->record_field_type[m->record[m->state_ref[list]].first + field] == PURE_RECORD_LIST;
         uint64_t was = nested && status == PURE_OK && at < pure_list_count(app->lists[list]) ?
                        (uint64_t)pure_list_get(app->lists[list], at, field).i64 : 0;
         if (status == PURE_OK) /* where its FIND found it (PLAN_ROW: a HASHED list's slot), else its position */
@@ -4135,13 +4230,6 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         size_t base = sp - record->count, at = (size_t)stack[base - 1].num;
         sp = base - 1;
         if (at >= pure_list_count(app->lists[list])) { kind = PURE_FAULT_NOT_FOUND; FAILED; }
-        if (kept_list(m, list)) { /* a kept list's (027's stage 3): its list read in, the item appended, written back */
-            int how = append_kept(app, arena, list, field, at, stack + base, &kind, &status);
-            if (how == 1) FAILED;
-            if (how == 2) REFUSED;
-            if (how == 3) STOPPED(status);
-            NEXT;
-        }
         uint64_t into = (uint64_t)pure_list_get(app->lists[list], at, field).i64;
         if (!into || app->nested.shared[into - 1] > 1) {
             uint64_t own = nest(app, inner, into ? app->nested.list[into - 1] : NULL);
@@ -4170,6 +4258,17 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (status != PURE_OK) REFUSED;
         if (m->record_nested[inner]) share_cells(app, m, inner, cells);
         if (!grows(app, before, (Held){0, pure_list_size(in)})) { kind = PURE_FAULT_MEMORY; FAILED; }
+        NEXT;
+    }
+    case OP_KEPT_GET: case OP_KEPT_SET: case OP_KEPT_APPEND: case OP_KEPT_INSERT: case OP_KEPT_APPEND_IN: {
+        int how = kept_step(app, arena, values, op, stack, sp); /* a kept list's lists (027's stage 3): out of the way */
+        sp -= kept_pops(m, op);
+        if (how & 3) {
+            if ((how & 3) == 1) { kind = (PureFault)(how >> 2); FAILED; }
+            status = (PureResult)(how >> 2);
+            if ((how & 3) == 2) REFUSED;
+            STOPPED(status);
+        }
         NEXT;
     }
     case PURE_OP_CALL: case PURE_OP_RETURN: /* run_calls' (the frames are its): no other run meets one */
@@ -5668,11 +5767,15 @@ uint8_t pure_record_kind(const PureModule *m, uint32_t field) {
     return kinds[m->record_field_type[field]];
 }
 
-/* A field's kind in a list (kept: past an event; else an event's, which holds one of the event's lists' numbers). */
+/* A field's kind in a list (kept: past an event, holding a list's stored form as bytes; else an event's, which holds
+ * one of the event's lists' numbers). */
 static uint8_t cell_kind(const PureModule *m, uint32_t field, bool kept) {
     uint8_t kind = pure_record_kind(m, field);
-    return kind == PURE_CELL_LIST && !kept ? PURE_CELL_INTEGER : kind;
+    return kind != PURE_CELL_LIST ? kind : kept ? PURE_CELL_BYTES : PURE_CELL_INTEGER;
 }
+
+/* Whether a stored kind's cell is bytes in the stored form: a text's, or a list's. */
+static bool stored_bytes(uint8_t kind) { return pure_cell_text(kind) || kind == PURE_CELL_LIST; }
 
 PURE_COLD void pure_layout_of(const PureModule *m, uint32_t record, PureLayout *out) {
     out->records = 1;
@@ -5709,7 +5812,7 @@ PURE_COLD bool pure_layout_same(const PureLayout *a, const PureLayout *b) {
 
 /* A number, a bool and an i64 carry over each other (when the value fits); texts only to texts, lists to lists. */
 static bool kinds_carry(uint8_t from, uint8_t to) {
-    return from == to || (!pure_cell_text(from) && !pure_cell_text(to));
+    return from == to || (!stored_bytes(from) && !stored_bytes(to));
 }
 
 /* Bytes made for a list value's stored form as it moves (a growing buffer). */
@@ -5749,7 +5852,7 @@ static bool value_migrate(const PureLayout *from, unsigned at, const PureModule 
     for (size_t k = 0; k < size;) {
         PureCell cells[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < from->record[at].count; ++f) { /* the item as from's record has it */
-            if (pure_cell_text(from->record[at].kinds[f])) {
+            if (stored_bytes(from->record[at].kinds[f])) {
                 if (size - k < 4 || read32(bytes + k) > size - k - 4) return false;
                 cells[f] = (PureCell){.text = (unsigned char *)bytes + k + 4, .size = read32(bytes + k)};
                 k += 4 + cells[f].size;
