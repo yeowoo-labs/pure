@@ -1,0 +1,6 @@
+{"size":103781,"jit":"0","batch":"","c_ns_per_byte":13.050,"pure_ns_per_byte":599.753,"ratio":46.0,"instructions":25733137,"instructions_per_byte":248.0}
+{"size":103781,"python_ns_per_byte":367.8,"python_json_module_ns_per_byte":54.0}
+{"size":103781,"jit":"0","batch":"","c_ns_per_byte":13.814,"pure_ns_per_byte":600.877,"ratio":43.5,"instructions":25733137,"instructions_per_byte":248.0}
+{"size":103781,"python_ns_per_byte":365.5,"python_json_module_ns_per_byte":53.8}
+{"size":103781,"jit":"0","batch":"","c_ns_per_byte":13.141,"pure_ns_per_byte":598.454,"ratio":45.5,"instructions":25733137,"instructions_per_byte":248.0}
+{"size":103781,"python_ns_per_byte":369.3,"python_json_module_ns_per_byte":54.8}

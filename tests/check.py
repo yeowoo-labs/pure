@@ -1738,17 +1738,17 @@ def module_specs(aup, pure, work):
         assert accepted == (name[0] == 'y') or name[0] == 'i', (name, accepted)
         taken[name[0]] += accepted
     runs['json'] = {'cases': len(cases), 'taken': taken}
-    # A JSON text read into a tree of values (its examples/json_tree.aup, 027's 2b: a variant, lists in records, match),
-    # walked breadth first for a digest, against Python's reading walked so: JSONTestSuite's cases and random documents.
+    # A JSON text read into a tree of values by recursive descent (its examples/json_tree.aup, 027's 2b and 2c: a
+    # variant, lists in records, match, fns that call themselves), walked depth first for a digest, against Python's
+    # reading walked so: JSONTestSuite's cases and random documents.
     class Pairs(list):
         pass
 
     def digest(data):
         doc = json.loads(data.decode('utf-8'), object_pairs_hook=Pairs)
         d = dict(nulls=0, trues=0, falses=0, numbers=0, strings=0, arrays=0, objects=0, sum=0.0, text_bytes=0, key_bytes=0)
-        q, at = [doc], 0
-        while at < len(q):
-            x = q[at]
+
+        def walk(x):
             if x is None: d['nulls'] += 1
             elif x is True: d['trues'] += 1
             elif x is False: d['falses'] += 1
@@ -1756,9 +1756,11 @@ def module_specs(aup, pure, work):
             elif isinstance(x, str): d['strings'] += 1; d['text_bytes'] += len(x.encode('utf-8'))
             elif isinstance(x, Pairs):
                 d['objects'] += 1
-                for k, v in x: d['key_bytes'] += len(k.encode('utf-8')); q.append(v)
-            else: d['arrays'] += 1; q.extend(x)
-            at += 1
+                for k, v in x: d['key_bytes'] += len(k.encode('utf-8')); walk(v)
+            else:
+                d['arrays'] += 1
+                for y in x: walk(y)
+        walk(doc)
         return d
 
     def value(depth):
