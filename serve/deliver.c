@@ -56,7 +56,7 @@ struct PureWire {
     int answer_input; /* the input answers become events of, or -1 */
     Answer *answers;  /* made, for the owner to take in order */
     size_t answer_head, answer_count, answer_capacity;
-    uint32_t placed[2 * PURE_MODULE_FIELDS];
+    uint32_t placed[2 * PURE_MESSAGE_FIELDS];
     /* Sealed sends: to peer's key, authenticated by the node's own key when
      * it has one (its public half is from), in one session made at the first
      * seal (and again after one fails); enc opens it. */

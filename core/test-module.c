@@ -570,6 +570,26 @@ static void rejections(void) {
     CHECK(pure_app_start(&wide, &module_a, (PureData){0}) == PURE_OK && press(&wide, 0) == PURE_OK && press(&wide, 0) == PURE_OK &&
           wide.values[MANY - 1].num == 2 && wide.values[0].num == 0);
     pure_app_stop(&wide);
+    /* Nor of inputs, views or handlers (027's 4f-3a): 40 messages (the last counted), 70 views (the last its count). */
+    enum { INPUTS = 40, VIEWS = 70 };
+    static I messages[INPUTS];
+    static V views[VIEWS];
+    static char message_names[INPUTS][8], view_names[VIEWS][8];
+    for (unsigned i = 0; i < INPUTS; ++i) {
+        snprintf(message_names[i], 8, "m%u", i);
+        messages[i] = (I){message_names[i], NULL, PURE_KIND_MESSAGE, NULL, 0};
+    }
+    for (unsigned i = 0; i < VIEWS; ++i) snprintf(view_names[i], 8, "v%u", i), views[i] = (V){view_names[i], 4, 1};
+    static const O counted[] = {{L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, {L, 0, 0}};
+    static const H last[] = {{1 + 2 * (INPUTS - 1), 0, 4}};
+    CHECK(load((Spec){s1, 1, messages, INPUTS, views, VIEWS, last, 1, counted, 5, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
+                      NULL, 0}, &module_a) == PURE_OK && module_a.inputs == INPUTS && module_a.views == VIEWS);
+    CHECK(pure_app_start(&wide, &module_a, (PureData){0}) == PURE_OK);
+    CHECK(pure_app_message(&wide, INPUTS - 1, (PureSpan){0}) == PURE_OK && pure_app_message(&wide, 0, (PureSpan){0}) == PURE_OK &&
+          pure_app_view(&wide, VIEWS - 1, &(double){0}));
+    double shown;
+    CHECK(pure_app_view(&wide, VIEWS - 1, &shown) && shown == 1);
+    pure_app_stop(&wide);
     static unsigned char bytes[65536];
     size_t size = build(bytes, (Spec){s1, 1, i1, 0, clash, 0, none, 0, load_a, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0});
     CHECK(pure_module_load(bytes, size - 1, &module_a, error, sizeof(error)) == PURE_INVALID);

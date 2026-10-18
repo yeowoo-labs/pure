@@ -156,8 +156,17 @@ PURE_COLD PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint
 
 /* ---- Lists: images and the log */
 
-enum { OUTPUTS_NAMED = 1 + PURE_MODULE_INPUTS * (2 + PURE_MODULE_NAME) + PURE_MODULE_FIELDS * (2 + PURE_MODULE_NAME),
-       IMAGE_HEADER = 6 + PURE_MODULE_RECORDS * (1 + PURE_RECORD_FIELDS * (3 + PURE_MODULE_NAME)) + 8 + OUTPUTS_NAMED };
+/* A runtime list's image header at most (its three fields at most); and what any of m's takes at most (027's 4f-3a): a
+ * record graph's, or the outbox's naming m's outputs. */
+enum { RUNTIME_HEADER = 4 + 1 + 3 * (2 + PURE_MODULE_NAME) + 8 };
+static size_t header_room(const PureModule *m) {
+    size_t records = 6 + 8 + 1, outbox = RUNTIME_HEADER + 1;
+    for (uint32_t r = 0; r < m->records; ++r) records += 1 + (size_t)m->record[r].count * (3 + PURE_MODULE_NAME);
+    for (uint32_t i = 0; i < m->inputs; ++i)
+        if (m->input[i].kind == PURE_KIND_OUTPUT)
+            outbox += 2 + PURE_MODULE_NAME + (size_t)m->input[i].field_count * (2 + PURE_MODULE_NAME);
+    return records > outbox ? records : outbox;
+}
 
 static size_t header_of(unsigned count, const uint8_t *text, const char (*names)[PURE_MODULE_NAME], uint64_t seq,
                         unsigned char *out) {
@@ -270,7 +279,7 @@ static size_t outbox_header(const PureModule *m, uint64_t seq, unsigned char *ou
 
 /* What an output's sends were laid out with, as a store names it: its
  * fields (laid out), or their types alone (named false: links before PLK4). */
-typedef struct { char name[PURE_MODULE_NAME]; PureField fields[PURE_MODULE_FIELDS]; uint32_t count; bool named; } SentShape;
+typedef struct { char name[PURE_MODULE_NAME]; PureField fields[PURE_MESSAGE_FIELDS]; uint32_t count; bool named; } SentShape;
 
 /* The outputs an outbox image names (at, size bytes): how many, or -1 when
  * they are not well formed; shapes (when not NULL) takes them. */
@@ -282,7 +291,7 @@ static int read_outputs(const unsigned char *at, size_t size, SentShape *shapes,
         size_t length = k < size ? at[k] : 0;
         if (!length || length >= PURE_MODULE_NAME || size - k < 2 + length) return -1;
         unsigned fields = at[k + 1 + length];
-        if (fields > PURE_MODULE_FIELDS) return -1;
+        if (fields > PURE_MESSAGE_FIELDS) return -1;
         if (shapes) {
             memcpy(shapes[t].name, at + k + 1, length);
             shapes[t].name[length] = 0;
@@ -473,9 +482,12 @@ static PureResult write_image(const char *directory, const char *name, const uns
 }
 
 PureResult pure_save_image(PureApp *app, const PureModule *m, uint32_t state, const PureList *list) {
-    unsigned char header[IMAGE_HEADER];
+    unsigned char *header = malloc(header_room(m));
+    if (!header) return PURE_ALLOCATION;
     size_t header_size = image_header(m, m->state_ref[state], app->seq, header);
-    return write_image(directory_of(app), m->state_names[state], header, header_size, list);
+    PureResult result = write_image(directory_of(app), m->state_names[state], header, header_size, list);
+    free(header);
+    return result;
 }
 
 PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint32_t state, PureList **out,
@@ -597,7 +609,7 @@ PURE_COLD PureResult pure_save_open_runtime(PureApp *app, uint32_t place, PureLi
     *saved = (PureSaved){0};
     *out = NULL;
     if (!directory_of(app)) return PURE_STORE_ERROR;
-    unsigned char *bytes = NULL, header[IMAGE_HEADER];
+    unsigned char *bytes = NULL, header[RUNTIME_HEADER];
     size_t size = 0, length = runtime_header(place, 0, header) - 8, at = length + 8;
     PureResult result = pure_image_read(directory_of(app), name, &bytes, &size);
     bool image = result == PURE_OK;
@@ -648,11 +660,14 @@ PURE_COLD PureResult pure_save_open_runtime(PureApp *app, uint32_t place, PureLi
 }
 
 PureResult pure_save_runtime_image(PureApp *app, const PureModule *m, uint32_t place, const PureList *list) {
-    unsigned char header[IMAGE_HEADER];
+    unsigned char *header = malloc(header_room(m));
+    if (!header) return PURE_ALLOCATION;
     size_t header_size = place == PURE_LIST_OUTBOX ? outbox_header(m, app->seq, header) :
                                                      runtime_header(place, app->seq, header);
-    return write_image(directory_of(app), runtime_lists[place - PURE_LIST_HEARD].name, header, header_size,
-                       list ? list : stored_list(app, place));
+    PureResult result = write_image(directory_of(app), runtime_lists[place - PURE_LIST_HEARD].name, header, header_size,
+                                    list ? list : stored_list(app, place));
+    free(header);
+    return result;
 }
 
 /* ---- Checkpoints */
@@ -661,7 +676,7 @@ struct PureCheckpoint {
     PureSnapshot *snapshot;
     uint32_t state;
     char name[PURE_MODULE_NAME], *directory;
-    unsigned char header[IMAGE_HEADER];
+    unsigned char *header; /* header_room's */
     size_t header_size, logged;
     uint64_t seq, since;
 };
@@ -690,8 +705,10 @@ PureCheckpoint *pure_app_checkpoint(PureApp *app) {
     const char *directory = directory_of(app);
     size_t length = strlen(directory) + 1;
     if (c && (c->directory = malloc(length))) memcpy(c->directory, directory, length);
-    if (!c || !c->directory || !(c->snapshot = pure_save_snapshot(app, pick >= PURE_LIST_HEARD ? pick : UINT32_MAX))) {
-        if (c) free(c->directory);
+    if (c) c->header = malloc(header_room(m));
+    if (!c || !c->directory || !c->header ||
+        !(c->snapshot = pure_save_snapshot(app, pick >= PURE_LIST_HEARD ? pick : UINT32_MAX))) {
+        if (c) free(c->directory), free(c->header);
         free(c);
         return NULL;
     }
@@ -727,7 +744,7 @@ void pure_app_checkpointed(PureApp *app, PureCheckpoint *c, PureResult result) {
     }
     if (app->checkpoint == c) app->checkpoint = NULL;
     pure_snapshot_release(c->snapshot);
-    free(c->directory);
+    free(c->directory), free(c->header);
     free(c);
 }
 
@@ -819,11 +836,10 @@ static bool same_version(PureVersion a, PureVersion b) { return a.ref == b.ref &
 static unsigned char *encode_links(const PureApp *app, size_t *size) {
     const PureModule *m = app->module;
     unsigned outputs = 0;
-    uint8_t table[PURE_MODULE_INPUTS];
     size_t total = 4 + 1;
     for (uint32_t i = 0; i < m->inputs; ++i)
         if (m->input[i].kind == PURE_KIND_OUTPUT) {
-            table[i] = (uint8_t)outputs++;
+            ++outputs;
             total += 2 + strlen(m->input_names[i]) + 8;
             for (uint32_t f = 0; f < m->input[i].field_count; ++f)
                 total += 2 + strlen(m->field[m->input[i].field_start + f].name);
@@ -859,7 +875,6 @@ static unsigned char *encode_links(const PureApp *app, size_t *size) {
         *at++ = 0;
         at = put_le(at, app->carried[c].last, 8);
     }
-    (void)table;
     *size = (size_t)(at - bytes);
     return bytes;
 }
@@ -938,7 +953,7 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, boo
         memcpy(linked[t].name, name, length + 1);
         linked[t].count = fields;
         linked[t].named = named;
-        if (fields > PURE_MODULE_FIELDS) result = PURE_STORE_ERROR;
+        if (fields > PURE_MESSAGE_FIELDS) result = PURE_STORE_ERROR;
         for (unsigned f = 0; f < fields && result == PURE_OK; ++f) { /* its type, then (PLK4) its name */
             size_t named_length = named && size - at >= 2 ? bytes[at + 1] : 0;
             if (size - at < (named ? 2 + named_length : 1) || named_length >= PURE_MODULE_NAME) {
@@ -1035,7 +1050,7 @@ PURE_COLD PureResult pure_save_open_links(PureApp *app, const PureModule *m, boo
     free(linked);
     free(bytes);
     app->sent_saved = pure_list_count(app->outbox);
-    memcpy(app->saved_sent, app->last_sent, sizeof(app->saved_sent));
+    memcpy(app->saved_sent, app->last_sent, m->inputs * sizeof(*app->saved_sent));
     return result;
 }
 

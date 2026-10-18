@@ -106,7 +106,10 @@ static struct RetiredTokens { Tokens *tokens; struct RetiredTokens *next; } *ret
  * each by the key it seals with (--sender NAME=KEY). */
 static PureSealKey *seal_key;
 static bool sealed_only;
-static struct Sender { char name[PURE_SOURCE + 1]; unsigned char key[PURE_SEAL_KEY]; } senders[PURE_MODULE_INPUTS];
+/* The sends a host wires for an app (and their seals and replies), and the senders it knows by name, at most: a host's
+ * own count, not a module's (027's 4f-3a). */
+enum { OUTLETS = 32 };
+static struct Sender { char name[PURE_SOURCE + 1]; unsigned char key[PURE_SEAL_KEY]; } senders[OUTLETS];
 static unsigned sender_count;
 static size_t memory_budget; /* --memory: the app's budget of what its states hold (0: none) */
 static uint64_t work_budget;  /* --work: what an event or a view's evaluation may run (0: none) */
@@ -148,9 +151,9 @@ typedef struct Connection {
      * Its ingress is [u32le payload size][payload]; with JSON it is [u32le
      * payload size | PLACED][u32le start and size of each field][payload: the
      * prefix, then the JSON as it came], its strings read where they are. */
-    unsigned char fields[8 * PURE_MODULE_FIELDS];
+    unsigned char fields[8 * PURE_MESSAGE_FIELDS];
     size_t field_bytes;
-    bool given[PURE_MODULE_FIELDS], json;
+    bool given[PURE_MESSAGE_FIELDS], json;
     uint32_t input;
     unsigned char *ingress;
     /* Its request's token (Authorization: Bearer), and the digest of the
@@ -230,7 +233,8 @@ typedef struct {
     bool wrote;       /* the last round saved an event or an edit */
     uint64_t save_waited; /* ns the last save waited for the device (a sync), not working */
     bool reads_first; /* the owner's: a round's reads before its writes */
-    uint64_t next[PURE_MODULE_INPUTS]; /* when each timer ticks next (monotonic clock, ms; 0: not yet begun) */
+    uint64_t *next; /* when each input's timer ticks next (monotonic clock, ms; 0: not yet begun), timers of them */
+    uint32_t timers;
     uint64_t ticks;
     uint64_t memory_refused; /* events refused for the app's memory budget */
     bool answers_wait; /* an answer the app had no room for: tried again after ANSWER_WAIT_MS */
@@ -241,25 +245,25 @@ typedef struct {
     const PureModule *published_module;
     struct PureSurfaceHost *surface; /* told of each snapshot published */
     /* The owner's: outputs wired to HTTP receivers, and how far each was trimmed. */
-    PureWire *wires[PURE_MODULE_INPUTS];
+    PureWire *wires[OUTLETS];
     unsigned wire_count;
-    uint64_t trimmed[PURE_MODULE_INPUTS], answers;
-    bool held[PURE_MODULE_INPUTS]; /* an answer failed to apply: the wire's sends stay until a restart */
+    uint64_t trimmed[OUTLETS], answers;
+    bool held[OUTLETS]; /* an answer failed to apply: the wire's sends stay until a restart */
     /* The owner's: outputs linked to Pure receivers (pure://), which output
      * each is, and how far each was trimmed. */
-    PureLink *links[PURE_MODULE_INPUTS];
+    PureLink *links[OUTLETS];
     unsigned link_count;
-    uint32_t link_output[PURE_MODULE_INPUTS];
-    uint64_t link_trimmed[PURE_MODULE_INPUTS];
+    uint32_t link_output[OUTLETS];
+    uint64_t link_trimmed[OUTLETS];
     /* The owner's: outputs handed to other apps of the host (send=OUTPUT=APP/INPUT), and how far each was trimmed. */
-    struct Local *locals[PURE_MODULE_INPUTS];
+    struct Local *locals[OUTLETS];
     unsigned local_count;
-    uint64_t local_trimmed[PURE_MODULE_INPUTS], handed;
+    uint64_t local_trimmed[OUTLETS], handed;
     /* Each outlet's place in the outbox, wires first, then links, then
      * locals: its sends before it are queued (feed_outlets); and the app's
      * sends_gone when they were last moved back. How often an outlet's
      * window was full. */
-    size_t outlet_from[3 * PURE_MODULE_INPUTS];
+    size_t outlet_from[3 * OUTLETS];
     uint64_t gone_seen, windows_full;
     struct Writer *writer; /* the thread writing the app's checkpoints, once one was due */
     uint64_t checkpoints;  /* images it wrote */
@@ -427,7 +431,7 @@ struct App {
     char why[256];
     unsigned home;  /* the connection thread its connections move to (a host of apps) */
     /* Its wiring in --apps (send=, seal=, reply=), as --send, --seal and --reply give the one app's. */
-    const char *sends[PURE_MODULE_INPUTS], *seals[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
+    const char *sends[OUTLETS], *seals[OUTLETS], *replies[OUTLETS];
     unsigned send_count, seal_count, reply_count;
     Counts past; /* its runs' before the present one */
     Owner owner;
@@ -1463,8 +1467,8 @@ static unsigned char *arguments_payload(const PureModule *m, int input, const ch
     size_t length = given ? strlen(given) : 0;
     char *copy = malloc(length + 1);
     unsigned char *payload = malloc(shape->prefix + length + 1);
-    const char *values[PURE_MODULE_FIELDS] = {0};
-    long lengths[PURE_MODULE_FIELDS] = {0};
+    const char *values[PURE_MESSAGE_FIELDS] = {0};
+    long lengths[PURE_MESSAGE_FIELDS] = {0};
     bool ok = copy && payload;
     if (ok) {
         memcpy(copy, given ? given : "", length + 1);
@@ -1565,10 +1569,14 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
         size_t rows = pure_app_rows(app, view), from = route->from < rows ? route->from : rows;
         if (pure_app_view_fault(app) == PURE_FAULT_WORK) status = PURE_LIMIT, rows = from = 0; /* its filter's */
         size_t end = from + (route->count < rows - from ? route->count : rows - from);
-        /* Each column's key, ,"name": (the first row's first without the comma), made once. */
-        struct { uint32_t view; size_t length; char key[PURE_MODULE_NAME + 4]; } columns[PURE_MODULE_VIEWS];
+        /* Each column's key, ,"name": (the first row's first without the comma), made once; a few on the stack. */
+        typedef struct { uint32_t view; size_t length; char key[PURE_MODULE_NAME + 4]; } Column;
+        Column few[64], *columns = few;
         unsigned count = 0;
-        for (uint32_t column = 0; column < m->views; ++column)
+        for (uint32_t column = 0; column < m->views; ++column) count += m->view_table[column] == view + 1;
+        if (count > 64 && !(columns = malloc(count * sizeof(*columns)))) o.failed = true, count = 0;
+        count = 0;
+        for (uint32_t column = 0; columns && column < m->views; ++column)
             if (m->view_table[column] == view + 1) {
                 columns[count].view = column;
                 columns[count].length = (size_t)snprintf(columns[count].key, sizeof(columns[count].key), ",\"%s\":",
@@ -1613,6 +1621,7 @@ static PureResult show_given(PureApp *app, const Route *route, size_t available,
             put_bytes(&o, "}", 1);
         }
         put_bytes(&o, "]}", 2);
+        if (columns != few) free(columns);
     }
     if (status != PURE_OK && pure_app_view_fault(app) == PURE_FAULT_WORK) { /* past the work budget: 422 work */
         answer->fault = PURE_FAULT_WORK;
@@ -1692,7 +1701,7 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
             if (m->input[i].binding == PURE_BIND_RELEASE && !strcmp(m->input_keys[i], m->input_keys[route->target]))
                 status = pure_app_message(app, i, (PureSpan){0});
     } else {
-        uint32_t placed[2 * PURE_MODULE_FIELDS];
+        uint32_t placed[2 * PURE_MESSAGE_FIELDS];
         for (size_t i = 0; table && i < 2 * (size_t)shape->field_count; ++i)
             placed[i] = get_u32(effect->value.data + lead + 4 * i);
         if (header & DELIVERED) {
@@ -2164,6 +2173,12 @@ static long run_timers(Executor *ex) {
     bool changes = m->states > 0;
     for (uint32_t i = 0; i < m->inputs && !changes; ++i) changes = m->input[i].kind == PURE_KIND_OUTPUT;
     if (!changes) return -1;
+    if (ex->timers < m->inputs) { /* as many as the module's inputs (its module may change) */
+        uint64_t *grown = realloc(ex->next, m->inputs * sizeof(*grown));
+        if (!grown) return -1; /* none ticks until there is room */
+        memset(grown + ex->timers, 0, (m->inputs - ex->timers) * sizeof(*grown));
+        ex->next = grown, ex->timers = m->inputs;
+    }
     uint64_t now = now_ms(), soonest = UINT64_MAX;
     bool ticked = false;
     for (uint32_t i = 0; i < m->inputs; ++i) {
@@ -3479,6 +3494,8 @@ static void stop_executor(Executor *ex) {
     pure_app_stop(&ex->app);
     pure_store_close(ex->store);
     free(ex->applied);
+    free(ex->next);
+    ex->next = NULL, ex->timers = 0;
 }
 
 /* One connection thread: its own listener on the shared port, epoll set,
@@ -4000,7 +4017,7 @@ typedef struct {
     uint64_t digest, tokens_digest; /* of the module's file, and the tokens', when they were read (0: they could not be) */
     size_t memory, queue;
     uint64_t work;
-    char *sends[PURE_MODULE_INPUTS], *seals[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
+    char *sends[OUTLETS], *seals[OUTLETS], *replies[OUTLETS];
     unsigned send_count, seal_count, reply_count;
     bool kept;        /* its app runs as the line says: a reading leaves it be */
     bool tokens_only; /* and so but for its tokens: they are put in place, and it runs on */
@@ -4044,7 +4061,7 @@ static bool parse_apps(const char *path, Line **out, unsigned *count, char *erro
     bool ok = true;
     while (ok && fgets(text, sizeof(text), file)) {
         ++at;
-        char *hash = strchr(text, '#'), *words[3 + 3 + 3 * PURE_MODULE_INPUTS], *rest = NULL;
+        char *hash = strchr(text, '#'), *words[3 + 3 + 3 * OUTLETS], *rest = NULL;
         if (hash) *hash = 0;
         unsigned found = 0;
         for (char *word = strtok_r(text, " \t\r\n", &rest); word && found < sizeof(words) / sizeof(*words);
@@ -4082,11 +4099,11 @@ static bool parse_apps(const char *path, Line **out, unsigned *count, char *erro
             if (value && !strcmp(words[w], "memory") && number(value, SIZE_MAX, &number_given)) line->memory = (size_t)number_given;
             else if (value && !strcmp(words[w], "work") && number(value, UINT64_MAX, &number_given)) line->work = number_given;
             else if (value && !strcmp(words[w], "queue") && number(value, SIZE_MAX, &number_given)) line->queue = (size_t)number_given;
-            else if (value && !strcmp(words[w], "send") && line->send_count < PURE_MODULE_INPUTS)
+            else if (value && !strcmp(words[w], "send") && line->send_count < OUTLETS)
                 ok = (line->sends[line->send_count++] = strdup(value)) != NULL;
-            else if (value && !strcmp(words[w], "seal") && line->seal_count < PURE_MODULE_INPUTS)
+            else if (value && !strcmp(words[w], "seal") && line->seal_count < OUTLETS)
                 ok = (line->seals[line->seal_count++] = strdup(value)) != NULL;
-            else if (value && !strcmp(words[w], "reply") && line->reply_count < PURE_MODULE_INPUTS)
+            else if (value && !strcmp(words[w], "reply") && line->reply_count < OUTLETS)
                 ok = (line->replies[line->reply_count++] = strdup(value)) != NULL;
             else if (value && !strcmp(words[w], "tokens") && !line->tokens && *value)
                 ok = (line->tokens = strdup(value)) != NULL;
@@ -4483,7 +4500,7 @@ static bool change_app(App *app) {
         return false;
     }
     ex->module = app->module;
-    memset(ex->next, 0, sizeof(ex->next));
+    if (ex->next) memset(ex->next, 0, ex->timers * sizeof(*ex->next));
     memset(ex->trimmed, 0, sizeof(ex->trimmed));
     memset(ex->held, 0, sizeof(ex->held));
     memset(ex->link_output, 0, sizeof(ex->link_output));
@@ -4663,8 +4680,8 @@ int main(int argc, char **argv) {
             options = i;
             break;
         }
-    const char *surface_path = NULL, *module_path = NULL, *store = NULL, *name = NULL, *sends[PURE_MODULE_INPUTS], *replies[PURE_MODULE_INPUTS];
-    const char *seals[PURE_MODULE_INPUTS], *named[PURE_MODULE_INPUTS], *key_path = NULL, *senders_path = NULL, *apps_path = NULL;
+    const char *surface_path = NULL, *module_path = NULL, *store = NULL, *name = NULL, *sends[OUTLETS], *replies[OUTLETS];
+    const char *seals[OUTLETS], *named[OUTLETS], *key_path = NULL, *senders_path = NULL, *apps_path = NULL;
     const char *tokens_path = NULL;
     if (argc == 3 && !strcmp(argv[1], "--make-token")) return make_token(argv[2]);
     unsigned send_count = 0, reply_count = 0, seal_count = 0, named_count = 0;
@@ -4680,13 +4697,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--tokens")) tokens_path = argv[i + 1];
         else if (!strcmp(argv[i], "--surface")) surface_path = argv[i + 1];
         else if (!strcmp(argv[i], "--key")) key_path = argv[i + 1];
-        else if (!strcmp(argv[i], "--seal") && seal_count < PURE_MODULE_INPUTS) seals[seal_count++] = argv[i + 1];
+        else if (!strcmp(argv[i], "--seal") && seal_count < OUTLETS) seals[seal_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--store")) store = argv[i + 1];
-        else if (!strcmp(argv[i], "--send") && send_count < PURE_MODULE_INPUTS) sends[send_count++] = argv[i + 1];
+        else if (!strcmp(argv[i], "--send") && send_count < OUTLETS) sends[send_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--name")) name = argv[i + 1];
         else if (!strcmp(argv[i], "--send-ca")) pure_wire_trust(argv[i + 1]);
-        else if (!strcmp(argv[i], "--reply") && reply_count < PURE_MODULE_INPUTS) replies[reply_count++] = argv[i + 1];
-        else if (!strcmp(argv[i], "--sender") && named_count < PURE_MODULE_INPUTS) named[named_count++] = argv[i + 1];
+        else if (!strcmp(argv[i], "--reply") && reply_count < OUTLETS) replies[reply_count++] = argv[i + 1];
+        else if (!strcmp(argv[i], "--sender") && named_count < OUTLETS) named[named_count++] = argv[i + 1];
         else if (!strcmp(argv[i], "--port") && number(argv[i + 1], 65535, &value)) port = (unsigned)value;
         else if (!strcmp(argv[i], "--link-port") && number(argv[i + 1], 65535, &value) && value) link_port = (unsigned)value;
         else if (!strcmp(argv[i], "--senders")) senders_path = argv[i + 1];

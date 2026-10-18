@@ -14,10 +14,10 @@
  * belongs to), stack heights and the stack at every join, forward-only
  * branches, names, records, tables, constants and effects. */
 enum {
-    PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 64,
-    PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 65535, PURE_MODULE_STACK = 64,
+    PURE_MODULE_CODE = 65535, PURE_MODULE_STACK = 64,
     PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 38,
-    PURE_MODULE_FIELDS = 64, PURE_MODULE_CONSTANTS = 4096,
+    /* A message's fields at most: a send pushes them all (the stack's), a width of the stored sends too (027's 4f-3a). */
+    PURE_MESSAGE_FIELDS = PURE_MODULE_STACK, PURE_MODULE_CONSTANTS = 4096,
     PURE_MODULE_CONSTANT_BYTES = 1 << 20, PURE_MODULE_RECORDS = 16, PURE_MODULE_RECORD_FIELDS = 128,
     PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8
 };
@@ -403,11 +403,11 @@ typedef struct {
     uint16_t *view_table; /* a column's list view + 1, or 0 */
     uint16_t *view_list;  /* the list state of a list view over one, or its column's */
     uint16_t *view_record; /* a list view's or a list column's items' record + 1 (a map's: 0) */
-    uint8_t *view_field;   /* a column the load made: its item's field + 1 (read as it is), or 0 */
+    uint16_t *view_field;  /* a column the load made: its item's field + 1 (read as it is), or 0 */
     bool *view_computed;   /* a list view whose code leaves its list (a column's: its view's) */
     PureBlock *view_code;
     uint8_t *view_plan; /* a table's filter runs a leaf of its list at once (as a fold may) */
-    uint8_t *view_arguments; /* the input of a view's arguments + 1 (a column's: its table's), or 0 */
+    uint32_t *view_arguments; /* the input of a view's arguments + 1 (a column's: its table's), or 0 */
     /* Set at load: a view's code computes (its locals and loops: a body), and the event's lists it changes (a set of
      * states, state_words for each view). */
     bool *view_body;
@@ -469,7 +469,7 @@ uint32_t pure_module_shape(const PureModule *, uint32_t input);
 /* An input's (or output's) fields as a sender names them to a receiver: u8
  * count, each field's {u8 type, u8 name length, name}. Its size (at most
  * PURE_FIELDS_NAMED), written to out. */
-enum { PURE_FIELDS_NAMED = 1 + PURE_MODULE_FIELDS * (2 + PURE_MODULE_NAME) };
+enum { PURE_FIELDS_NAMED = 1 + PURE_MESSAGE_FIELDS * (2 + PURE_MODULE_NAME) };
 size_t pure_module_fields(const PureModule *, uint32_t input, unsigned char out[PURE_FIELDS_NAMED]);
 /* Whether input takes messages laid out with the fields named (as
  * pure_module_fields names them): it has every one by name, of the same type
@@ -585,7 +585,7 @@ typedef struct {
     PureList *outbox;
     size_t sent_saved, durable_sent_saved, durable_outbox;
     uint64_t sends_gone; /* how many ever left it: a host's places in it move back at most that many */
-    uint64_t last_sent[PURE_MODULE_INPUTS], saved_sent[PURE_MODULE_INPUTS];
+    uint64_t *last_sent, *saved_sent; /* each input's (by_input), an output's numbers */
     struct PureCarried { char name[PURE_MODULE_NAME]; uint64_t last; } *carried;
     unsigned carried_count;
     /* The last number delivered from each source: a list of {source (text),
@@ -602,7 +602,7 @@ typedef struct {
      * none), where their fields are, and a count of the times they were given. */
     unsigned argued;
     PureSpan arguments;
-    uint32_t argument_spans[PURE_MODULE_FIELDS][2];
+    uint32_t argument_spans[PURE_MESSAGE_FIELDS][2];
     uint64_t arguments_given;
     /* Passes over lists that answer shaped folds, by the list's version. */
     struct PurePass *passes;
@@ -622,8 +622,12 @@ typedef struct {
     struct { unsigned char **blocks; size_t *sizes; unsigned count, at; size_t used; } calls;
     struct PureSpare { PureList **lists; unsigned count, capacity; } *spare;
     PureValue *pending; /* the values an event works on until it ends */
-    PureVersion *marked_texts; /* where the event running began: each text's version, each stored list's journal */
+    PureVersion *marked_texts; /* where the event running began: each text's version, each stored list's journal, */
     size_t *marked_lists;
+    /* Each input's: its last number sent and as saved, and where the event running began; one block (by_input) for
+     * the inputs of the module it was laid out for (027's 4f-3a). */
+    uint64_t *marked_sent;
+    void *by_input;
 } PureApp;
 
 PureResult pure_app_start(PureApp *, const PureModule *, PureData data);

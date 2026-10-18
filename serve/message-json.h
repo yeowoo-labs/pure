@@ -13,7 +13,7 @@ typedef struct {
     unsigned char *table;   /* for each field, its start and size (u32le each) */
     const bool *given;      /* fields given elsewhere (a request's query), or NULL */
     bool lenient;           /* a member naming no field is skipped, value and all (an API's answer) */
-    bool seen[PURE_MODULE_FIELDS];
+    bool seen[PURE_MESSAGE_FIELDS];
     /* A rows field's array of objects is encoded in the stored form of its
      * list into rows (grown with malloc: the caller frees it), which the
      * caller places from rows_base on in the payload, as the table says. A
