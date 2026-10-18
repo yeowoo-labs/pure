@@ -238,5 +238,5 @@ static bool count_span(void *context, PureSpan span) {
 size_t pure_text_count(const PureDraft *draft, PureVersion version, size_t position, unsigned unit) {
     Count c = {0, unit};
     if (position) pure_draft_read_version(draft, version, 0, position, count_span, &c);
-    return c.count + (unit ? 1 : 0);
+    return c.count;
 }

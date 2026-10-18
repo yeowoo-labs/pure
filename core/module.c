@@ -37,7 +37,7 @@ enum { READ = IN_VIEW | IN_HANDLER };
  * what a position is (A_POSITION: 0 a number, 1 an i64), what CONCAT joins
  * (A_JOINED: 0 texts, 1 bytes), how NUM_TEXT writes (A_FORMAT) or the value
  * held by name (A_HELD), or a function (A_FUNCTION: CALL's, and RETURN's own). */
-enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_CONSTANT, A_UNIT,
+enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_CONSTANT, A_IN_TEXT, A_IN_LIST,
        A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL, A_VALUE, A_TYPE,
        A_LOOP, A_BITS, A_POSITION, A_JOINED, A_FORMAT, A_HELD, A_FUNCTION };
 /* A fold's block is verified as a column that leaves one bool (count, first)
@@ -51,11 +51,11 @@ enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_CONSTA
  * blocks in it are a handler's code. */
 enum { FOLD_ONE = 100, FOLD_TWO, FOLD_I64, FILTER, WALK, STEPS, STEPS_WALK, FUNCTION };
 /* The text or list an opcode works on: its cursor and index operands belong
- * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_OPERAND:
- * it pushes a position in its operand's text or list. O_ARG: the argument.
- * O_REF: the text or list of the argument's cursor or index state. O_LIST:
- * the list of an item argument. */
-enum { O_ANY, O_OPERAND, O_ARG, O_REF, O_LIST };
+ * to it, and so does a cursor or index it pushes. O_ANY: no rule. O_ARG: the
+ * argument. O_REF: the text or list of the argument's cursor or index state.
+ * O_LIST: the argument's bits 0-15 (an item argument's list, an anchor
+ * instruction's text or list). */
+enum { O_ANY, O_ARG, O_REF, O_LIST };
 static const unsigned char magic[8] = {'P','U','R','E','M','O','D','7'};
 
 /* Operand types popped (bottom to top), the type pushed, where allowed, what
@@ -65,7 +65,7 @@ static const unsigned char magic[8] = {'P','U','R','E','M','O','D','7'};
 #define LOGIC(pops) {pops, {T_BOOL, T_BOOL}, T_BOOL, READ, A_NONE, O_ANY}
 #define I64S(pops) {pops, {T_I64, T_I64}, T_I64, READ, A_NONE, O_ANY}
 #define STATE(type) A_STATE + PURE_STATE_##type
-static const struct { unsigned char pops, in[3], out; unsigned short where; unsigned char arg, of; } signature[PURE_OP_COUNT] = {
+static const struct { unsigned char pops, in[3], out; unsigned short where; unsigned char arg, of; } signature[PURE_OP_KEPT_GET] = {
     [PURE_OP_CONST] = {0, {0}, T_NUM, READ, A_TYPE, O_ANY}, [PURE_OP_ADD] = NUMS(2), [PURE_OP_SUB] = NUMS(2),
     [PURE_OP_MUL] = NUMS(2), [PURE_OP_DIV] = NUMS(2), [PURE_OP_NEG] = NUMS(1), [PURE_OP_LT] = COMPARE,
     [PURE_OP_LE] = COMPARE, [PURE_OP_GT] = COMPARE, [PURE_OP_GE] = COMPARE, [PURE_OP_EQ] = COMPARE,
@@ -91,7 +91,7 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_CUR_LOAD] = {0, {0}, T_CURSOR, READ, STATE(CURSOR), O_REF},
     [PURE_OP_CUR_START] = {0, {0}, T_CURSOR, READ, STATE(TEXT), O_ARG},
     [PURE_OP_CUR_END] = {0, {0}, T_CURSOR, READ, STATE(TEXT), O_ARG},
-    [PURE_OP_CUR_MOVE] = {2, {T_CURSOR, T_NUM}, T_CURSOR, READ, A_UNIT, O_OPERAND},
+    [PURE_OP_CUR_MOVE] = {2, {T_CURSOR, T_NUM}, T_CURSOR, READ, A_IN_TEXT, O_LIST},
     [PURE_OP_CUR_STORE] = {1, {T_CURSOR}, 0, IN_HANDLER, STATE(CURSOR), O_REF},
     [PURE_OP_TEXT_INSERT] = {2, {T_CURSOR, T_TEXT}, 0, IN_HANDLER, STATE(TEXT), O_ARG},
     [PURE_OP_TEXT_REMOVE] = {2, {T_CURSOR, T_CURSOR}, 0, IN_HANDLER, STATE(TEXT), O_ARG},
@@ -99,7 +99,8 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_TEXT_SET] = {1, {T_TEXT}, 0, IN_HANDLER, STATE(TEXT), O_ANY},
     [PURE_OP_TEXT_FROM] = {1, {T_BYTES}, T_TEXT, READ, A_NONE, O_ANY},
     [PURE_OP_BYTES_FROM] = {1, {T_TEXT}, T_BYTES, READ, A_NONE, O_ANY},
-    [PURE_OP_CUR_COUNT] = {1, {T_CURSOR}, T_NUM, READ, A_UNIT, O_ANY},
+    [PURE_OP_CUR_COUNT] = {1, {T_CURSOR}, T_NUM, READ, A_IN_TEXT, O_LIST},
+    [PURE_OP_CUR_AT] = {1, {T_NUM}, T_CURSOR, READ, A_IN_TEXT, O_LIST},
     /* Record operations also take as many values as the list's record has fields. */
     [PURE_OP_LIST_COUNT] = {0, {0}, T_NUM, READ, STATE(LIST), O_ANY},
     [PURE_OP_LIST_APPEND] = {0, {0}, 0, IN_HANDLER | IN_COMPUTE, STATE(LIST), O_ANY},
@@ -109,10 +110,10 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_ITEM_SET] = {1, {T_INDEX}, 0, IN_HANDLER | IN_COMPUTE, A_ITEM, O_LIST},
     [PURE_OP_INDEX_LOAD] = {0, {0}, T_INDEX, READ, STATE(INDEX), O_REF},
     [PURE_OP_INDEX_STORE] = {1, {T_INDEX}, 0, IN_HANDLER, STATE(INDEX), O_REF},
-    [PURE_OP_INDEX_MOVE] = {2, {T_INDEX, T_NUM}, T_INDEX, READ, A_NONE, O_OPERAND},
+    [PURE_OP_INDEX_MOVE] = {2, {T_INDEX, T_NUM}, T_INDEX, READ, A_IN_LIST, O_LIST},
     [PURE_OP_INDEX_FIRST] = {0, {0}, T_INDEX, READ, STATE(LIST), O_ARG},
     [PURE_OP_INDEX_LAST] = {0, {0}, T_INDEX, READ, STATE(LIST), O_ARG},
-    [PURE_OP_INDEX_NUM] = {1, {T_INDEX}, T_NUM, READ, A_NONE, O_ANY},
+    [PURE_OP_INDEX_NUM] = {1, {T_INDEX}, T_NUM, READ, A_IN_LIST, O_LIST},
     [PURE_OP_ROW] = {0, {0}, T_INDEX, IN_ROW, A_ROW, O_ARG},
     /* In a fold that runs in a column, the column's row (the fold's own item is ROW's). */
     [PURE_OP_OUTER_ROW] = {0, {0}, T_INDEX, IN_OUTER, A_OUTER, O_ARG},
@@ -356,8 +357,7 @@ static uint32_t nested_record(const PureModule *m, uint32_t field) {
 static bool kept_list(const PureModule *m, uint32_t list) { return !(m->state_flags[list] & PURE_LIST_ROWS >> 8); }
 /* The steps of a kept list's lists, apart from the instructions' own (027's stage 3): the load gives ITEM_GET and
  * ITEM_SET of a kept list's list field, and LIST_APPEND, LIST_INSERT and APPEND_IN of a kept list whose record holds
- * lists, these numbers past the module's, so the others' steps stay as they were. */
-enum { OP_KEPT_GET = PURE_OP_COUNT, OP_KEPT_SET, OP_KEPT_APPEND, OP_KEPT_INSERT, OP_KEPT_APPEND_IN };
+ * lists, the runtime's own instructions (PURE_OP_KEPT_*, module-run.h), so the others' steps stay as they were. */
 
 /* An event's list, and one bound by LIST_BIND (a register: never changed by code). */
 static bool event_list_state(const PureModule *m, uint32_t list) {
@@ -424,7 +424,9 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
         return state_of(m, list_of(arg), PURE_STATE_LIST) && item_field(arg) < m->record[m->state_ref[list_of(arg)]].count;
     case A_FIELD: return arg < shape->field_count && m->field[shape->field_start + arg].type != PURE_FIELD_ROWS;
     case A_CONSTANT: return arg < m->constants;
-    case A_UNIT: return arg <= PURE_UNIT_LINE;
+    case A_IN_TEXT: /* 027's 4c: the text an anchor is in, and a unit */
+        return state_of(m, arg & 0xFFFF, PURE_STATE_TEXT) && arg >> PURE_ANCHOR_UNIT <= PURE_UNIT_LINE;
+    case A_IN_LIST: return state_of(m, arg, PURE_STATE_LIST); /* the list, its unit an item (0) */
     case A_ROW: return (int)arg == row;
     case A_OUTER: return outer >= 0 && (int)arg == outer;
     case A_FOLD: case A_EACH: { /* a slice's list is keyed by a number */
@@ -541,7 +543,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (!reachable) REFUSE("unreachable instruction");
         if (m->height) m->height[pc] = (uint8_t)height; /* the compiled code's slots (021) */
         const PureOp *op = &m->code[pc];
-        if (op->op >= PURE_OP_COUNT) REFUSE("unknown opcode");
+        if (op->op >= PURE_OP_KEPT_GET) REFUSE("unknown opcode"); /* (a module's own were refused as it loaded) */
         unsigned allowed = signature[op->op].where, kind = signature[op->op].arg, of = signature[op->op].of;
         if (!(allowed & where)) {
             if (allowed & IN_FUNCTION) REFUSE("return outside a function");
@@ -726,7 +728,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             }
         if (out) {
             if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
-            owners[height] = (unsigned char)(out != T_CURSOR && out != T_INDEX ? 0 : of == O_OPERAND ? owners[height] : owner);
+            owners[height] = (unsigned char)(out != T_CURSOR && out != T_INDEX ? 0 : owner);
             if (out == T_LIST) /* the record of its items */
                 owners[height] = (unsigned char)(op->op == PURE_OP_LIST_VALUE ? m->state_ref[arg] : op->op == PURE_OP_LOCAL_LOAD ? arg >> 16 :
                                                  nested_record(m, m->record[m->state_ref[list_of(arg)]].first + item_field(arg)));
@@ -1575,6 +1577,26 @@ void pure_module_release(PureModule *m) {
     m->constant_data = NULL;
 }
 
+/* A module's instruction as the runtime holds it: an anchor instruction (027's 4c) is a cursor's when its anchor is in
+ * a text and an index's when in a list (the state's, or the text or list it names), else a cursor's that the verifier
+ * refuses (what it names is no text); any other is itself. */
+static uint8_t anchor_step(const PureModule *m, uint8_t op, uint32_t arg) {
+    if (op == PURE_OP_ANCHOR_LOAD || op == PURE_OP_ANCHOR_STORE) {
+        bool index = arg < m->states && m->state_type[arg] == PURE_STATE_INDEX;
+        return (uint8_t)(op == PURE_OP_ANCHOR_LOAD ? (index ? PURE_OP_INDEX_LOAD : PURE_OP_CUR_LOAD)
+                                                   : (index ? PURE_OP_INDEX_STORE : PURE_OP_CUR_STORE));
+    }
+    bool list = (arg & 0xFFFF) < m->states && m->state_type[arg & 0xFFFF] == PURE_STATE_LIST;
+    switch (op) {
+    case PURE_OP_ANCHOR_START: return list ? PURE_OP_INDEX_FIRST : PURE_OP_CUR_START;
+    case PURE_OP_ANCHOR_END: return list ? PURE_OP_INDEX_LAST : PURE_OP_CUR_END;
+    case PURE_OP_ANCHOR_MOVE: return list ? PURE_OP_INDEX_MOVE : PURE_OP_CUR_MOVE;
+    case PURE_OP_ANCHOR_COUNT: return list ? PURE_OP_INDEX_NUM : PURE_OP_CUR_COUNT;
+    case PURE_OP_ANCHOR_AT: return list ? PURE_OP_INDEX_AT : PURE_OP_CUR_AT;
+    default: return op;
+    }
+}
+
 PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
                             char *error, size_t error_size) {
     const unsigned char *p = bytes;
@@ -1641,10 +1663,16 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     const unsigned char *at = p + PURE_MODULE_HEADER;
     const unsigned char *text = p + size - constant_bytes - strings;
     if (constant_bytes) memcpy(out->constant_data, p + size - constant_bytes, constant_bytes);
+    /* A module's state types as the runtime holds them: an anchor (027's 4c) a cursor here, an index once it is found to
+     * be in a list (below). */
+    static const uint8_t held_as[] = {[PURE_MODULE_NUM] = PURE_STATE_NUM, [PURE_MODULE_TEXT] = PURE_STATE_TEXT,
+                                      [PURE_MODULE_ANCHOR] = PURE_STATE_CURSOR, [PURE_MODULE_LIST] = PURE_STATE_LIST,
+                                      [PURE_MODULE_BOOL] = PURE_STATE_BOOL, [PURE_MODULE_I64] = PURE_STATE_I64};
+    const unsigned char *states_at = at;
     for (uint32_t i = 0; i < out->states; ++i, at += STATE_BYTES) {
         uint32_t type = read32(at + 4);
-        out->state_type[i] = (uint8_t)type;
-        if ((type & ~(uint32_t)PURE_STATE_TRANSIENT) > PURE_STATE_I64) REFUSE("state type", i);
+        if ((type & ~(uint32_t)PURE_STATE_TRANSIENT) > PURE_MODULE_I64) REFUSE("state type", i);
+        out->state_type[i] = held_as[type & 0xFF];
         if (type & PURE_STATE_TRANSIENT) out->transient |= UINT32_C(1) << i;
         /* A number's, a bool's or an i64's value is its 8 bytes; others have flags:
          * a mark (cursor), a keyed list's key field + 1, or a list of a message's rows. */
@@ -1674,6 +1702,14 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             out->state_flags[i] = cursor ? (uint8_t)flags : (uint8_t)((rows ? PURE_LIST_ROWS >> 8 : 0) | (bound ? PURE_LIST_BOUND >> 8 : 0));
             out->state_key[i] = (uint8_t)key;
         }
+    }
+    /* An anchor in a list is an index (a mark is a text's alone). */
+    for (uint32_t i = 0; i < out->states; ++i) {
+        uint32_t ref = out->state_ref[i];
+        if (out->state_type[i] != PURE_STATE_CURSOR || ref >= out->states ||
+            (read32(states_at + (size_t)ref * STATE_BYTES + 4) & 0xFF) != PURE_MODULE_LIST) continue;
+        if (out->state_flags[i]) REFUSE("state reference", i);
+        out->state_type[i] = PURE_STATE_INDEX;
     }
     uint32_t next_field = 0;
     const unsigned char *fields = at + (size_t)out->inputs * INPUT_BYTES;
@@ -1864,7 +1900,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     out->calls = out->functions > 0;
     for (uint32_t i = 0; i < out->code_count; ++i, at += OP_BYTES) {
         if (at[1] || at[2] || at[3]) REFUSE("instruction padding", i);
-        out->code[i] = (PureOp){.op = at[0], .arg = read32(at + 4), .value = read_double(at + 8)};
+        if (at[0] >= PURE_OP_COUNT) REFUSE("unknown opcode", i);
+        out->code[i] = (PureOp){.op = anchor_step(out, at[0], read32(at + 4)), .arg = read32(at + 4), .value = read_double(at + 8)};
     }
     /* States, records, inputs and views share one namespace. */
     const char *names[PURE_MODULE_STATES + PURE_MODULE_RECORDS + PURE_MODULE_INPUTS + PURE_MODULE_VIEWS];
@@ -2045,9 +2082,9 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             ((op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET) &&
              out->record_field_type[out->record[out->state_ref[list]].first + item_field(op->arg)] != PURE_RECORD_LIST))
             continue;
-        op->op = (uint8_t)(op->op == PURE_OP_ITEM_GET ? OP_KEPT_GET : op->op == PURE_OP_ITEM_SET ? OP_KEPT_SET :
-                           op->op == PURE_OP_LIST_APPEND ? OP_KEPT_APPEND : op->op == PURE_OP_LIST_INSERT ? OP_KEPT_INSERT :
-                           OP_KEPT_APPEND_IN);
+        op->op = (uint8_t)(op->op == PURE_OP_ITEM_GET ? PURE_OP_KEPT_GET : op->op == PURE_OP_ITEM_SET ? PURE_OP_KEPT_SET :
+                           op->op == PURE_OP_LIST_APPEND ? PURE_OP_KEPT_APPEND : op->op == PURE_OP_LIST_INSERT ? PURE_OP_KEPT_INSERT :
+                           PURE_OP_KEPT_APPEND_IN);
     }
     out->runner = out->calls ? 2 : out->batches ? 1 : 0;
     out->jit = pure_jit_make(out); /* none: the executor runs it all */
@@ -2335,6 +2372,19 @@ static void move_indices(const PureModule *m, PureValue *values, uint32_t list, 
 }
 
 
+
+/* The cursor count units (arg's: a character or a line) from the start of the text arg names, in *at; false past the
+ * text (027's 4c, AT). */
+static __attribute__((cold, noinline)) bool cursor_at(const PureApp *app, uint32_t arg, double count, double *at) {
+    PureDraft *text = app->texts[arg & 0xFFFF];
+    PureVersion version = pure_draft_version(text);
+    unsigned unit = arg >> PURE_ANCHOR_UNIT;
+    if (count < 0) return false;
+    size_t position = unit == PURE_UNIT_CHAR ? pure_text_step(text, version, 0, count) : pure_text_line_step(text, version, 0, count);
+    if ((double)pure_text_count(text, version, position, unit) != count) return false;
+    *at = (double)position;
+    return true;
+}
 
 /* x / 2^n rounded down, whatever the sign (027's RIGHT). */
 static inline int64_t floor_shift(int64_t x, unsigned n) { return x >= 0 ? x >> n : ~(~x >> n); }
@@ -2636,9 +2686,9 @@ static __attribute__((cold, noinline)) int append_kept(PureApp *app, PureArena *
 /* How many values a kept step takes off the stack (net: KEPT_GET's value takes its index's place). */
 static size_t kept_pops(const PureModule *m, const PureOp *op) {
     switch (op->op) {
-    case OP_KEPT_GET: return 0;
-    case OP_KEPT_SET: return 2;
-    case OP_KEPT_APPEND: case OP_KEPT_INSERT: return m->record[m->state_ref[op->arg]].count + (op->op == OP_KEPT_INSERT);
+    case PURE_OP_KEPT_GET: return 0;
+    case PURE_OP_KEPT_SET: return 2;
+    case PURE_OP_KEPT_APPEND: case PURE_OP_KEPT_INSERT: return m->record[m->state_ref[op->arg]].count + (op->op == PURE_OP_KEPT_INSERT);
     default: return m->record[nested_record(m, m->record[m->state_ref[list_of(op->arg)]].first + item_field(op->arg))].count + 1u;
     }
 }
@@ -2651,12 +2701,12 @@ static __attribute__((cold, noinline)) int kept_step(PureApp *app, PureArena *ar
 #define KEPT_REFUSED(r) return (int)(r) << 2 | 2
 #define KEPT_STOPPED(r) return (int)(r) << 2 | 3
     const PureModule *m = app->module;
-    uint32_t arg = op->arg, list = op->op == OP_KEPT_APPEND || op->op == OP_KEPT_INSERT ? arg : list_of(arg), field = item_field(arg);
+    uint32_t arg = op->arg, list = op->op == PURE_OP_KEPT_APPEND || op->op == PURE_OP_KEPT_INSERT ? arg : list_of(arg), field = item_field(arg);
     PureList *items = app->lists[list];
     size_t mark = arena->used;
     PureResult status;
     switch (op->op) {
-    case OP_KEPT_GET: { /* the list in an item's field, read into one of the event's lists */
+    case PURE_OP_KEPT_GET: { /* the list in an item's field, read into one of the event's lists */
         size_t at = (size_t)stack[sp - 1].num;
         if (at >= pure_list_count(items)) KEPT_FAULT(PURE_FAULT_NOT_FOUND);
         if ((status = kept_value(app, list, field, pure_list_get(items, at, field), &stack[sp - 1].i64)) == PURE_BUDGET)
@@ -2664,7 +2714,7 @@ static __attribute__((cold, noinline)) int kept_step(PureApp *app, PureArena *ar
         if (status != PURE_OK) KEPT_STOPPED(status);
         return 0;
     }
-    case OP_KEPT_SET: { /* an item's field given a list, written in its stored form */
+    case PURE_OP_KEPT_SET: { /* an item's field given a list, written in its stored form */
         size_t at = (size_t)stack[sp - 2].num;
         Held before = list_held(app, items);
         PureCell cell;
@@ -2678,10 +2728,10 @@ static __attribute__((cold, noinline)) int kept_step(PureApp *app, PureArena *ar
         if (!grows(app, before, list_held(app, items))) KEPT_FAULT(PURE_FAULT_MEMORY);
         return 0;
     }
-    case OP_KEPT_APPEND: case OP_KEPT_INSERT: { /* an item whose lists go in their stored form */
+    case PURE_OP_KEPT_APPEND: case PURE_OP_KEPT_INSERT: { /* an item whose lists go in their stored form */
         const PureRecord *record = &m->record[m->state_ref[list]];
         size_t base = sp - record->count, count = pure_list_count(items), at = count;
-        if (op->op == OP_KEPT_INSERT && (at = (size_t)stack[base - 1].num) > count) KEPT_FAULT(PURE_FAULT_NOT_FOUND);
+        if (op->op == PURE_OP_KEPT_INSERT && (at = (size_t)stack[base - 1].num) > count) KEPT_FAULT(PURE_FAULT_NOT_FOUND);
         PureCell cells[PURE_RECORD_FIELDS];
         if ((status = kept_cells(app, arena, m->state_ref[list], stack + base, cells)) != PURE_OK) KEPT_STOPPED(status);
         Held before = list_held(app, items);
@@ -3785,13 +3835,20 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         }
         PureDraft *text = app->texts[at->bytes.owner];
         PureVersion version = pure_draft_version(text);
-        at->num = (double)(arg == PURE_UNIT_CHAR ? pure_text_step(text, version, (size_t)at->num, count)
-                                                 : pure_text_line_step(text, version, (size_t)at->num, count));
+        at->num = (double)(arg >> PURE_ANCHOR_UNIT == PURE_UNIT_CHAR ? pure_text_step(text, version, (size_t)at->num, count)
+                                                                     : pure_text_line_step(text, version, (size_t)at->num, count));
         NEXT;
     }
     case PURE_OP_CUR_COUNT: {
         PureDraft *text = app->texts[top->bytes.owner];
-        top->num = (double)pure_text_count(text, pure_draft_version(text), (size_t)top->num, arg);
+        top->num = (double)pure_text_count(text, pure_draft_version(text), (size_t)top->num, arg >> PURE_ANCHOR_UNIT);
+        NEXT;
+    }
+    case PURE_OP_CUR_AT: {
+        double count = top->num;
+        if (count != floor(count)) { kind = PURE_FAULT_LIMIT; FAILED; }
+        if (!cursor_at(app, arg, count, &top->num)) { kind = PURE_FAULT_NOT_FOUND; FAILED; }
+        top->bytes.owner = (uint16_t)(arg & 0xFFFF);
         NEXT;
     }
     case PURE_OP_TEXT_INSERT: case PURE_OP_TEXT_SET: {
@@ -4220,7 +4277,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (!grows(app, before, (Held){0, pure_list_size(in)})) { kind = PURE_FAULT_MEMORY; FAILED; }
         NEXT;
     }
-    case OP_KEPT_GET: case OP_KEPT_SET: case OP_KEPT_APPEND: case OP_KEPT_INSERT: case OP_KEPT_APPEND_IN: {
+    case PURE_OP_KEPT_GET: case PURE_OP_KEPT_SET: case PURE_OP_KEPT_APPEND: case PURE_OP_KEPT_INSERT: case PURE_OP_KEPT_APPEND_IN: {
         int how = kept_step(app, arena, values, op, stack, sp); /* a kept list's lists (027's stage 3): out of the way */
         sp -= kept_pops(m, op);
         if (how & 3) {

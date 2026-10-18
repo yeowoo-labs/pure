@@ -33,6 +33,6 @@ size_t pure_text_step(const PureDraft *, PureVersion, size_t position, double co
 size_t pure_text_line_step(const PureDraft *, PureVersion, size_t position, double count);
 size_t pure_text_line_start(const PureDraft *, PureVersion, size_t position);
 size_t pure_text_line_end(const PureDraft *, PureVersion, size_t position);
-/* Scalars (unit 0) or line number counting from 1 (unit 1) before position. */
+/* Scalars (unit 0) or line breaks (unit 1: the line, counting from 0) before position. */
 size_t pure_text_count(const PureDraft *, PureVersion, size_t position, unsigned unit);
 #endif

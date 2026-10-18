@@ -7,6 +7,18 @@
 #include <math.h>
 #include <string.h>
 
+/* The runtime's own instructions, past a module's (no module holds one): what the load makes of a module's anchor
+ * instructions by what their anchor is in (027's 4c: a cursor's in a text, an index's in a list; the same arguments),
+ * and a kept list's lists' steps (027's stage 3). */
+enum {
+    PURE_OP_CUR_LOAD = PURE_OP_COUNT, PURE_OP_CUR_START, PURE_OP_CUR_END, PURE_OP_CUR_MOVE, PURE_OP_CUR_STORE,
+    PURE_OP_CUR_COUNT, PURE_OP_CUR_AT, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE, PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST,
+    PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_INDEX_AT,
+    PURE_OP_KEPT_GET, PURE_OP_KEPT_SET, PURE_OP_KEPT_APPEND, PURE_OP_KEPT_INSERT, PURE_OP_KEPT_APPEND_IN,
+    PURE_OP_STEPS
+};
+_Static_assert(PURE_OP_STEPS <= 256, "an instruction's op is a byte");
+
 /* Read from a message's bytes (little-endian). */
 static inline uint32_t read32(const unsigned char *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;

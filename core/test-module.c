@@ -89,6 +89,30 @@ static unsigned char *put_double(unsigned char *p, double value) {
 }
 
 /* Test-side encoder for format v6; the toolchain has its own. */
+/* The tests write states and code as the runtime holds them (a cursor, an index, the steps of each: module-run.h); a
+ * module has their anchor (027's 4c), its type 2, and its instructions, which name the text or list (bits 0-15 of a
+ * MOVE's and a COUNT's argument: IN), so a test gives that where a step does not name it. */
+#define IN(target, unit) ((uint32_t)(target) | (uint32_t)(unit) << PURE_ANCHOR_UNIT)
+static uint32_t module_type(uint32_t type) {
+    static const uint8_t types[] = {[PURE_STATE_NUM] = PURE_MODULE_NUM, [PURE_STATE_TEXT] = PURE_MODULE_TEXT,
+                                    [PURE_STATE_CURSOR] = PURE_MODULE_ANCHOR, [PURE_STATE_LIST] = PURE_MODULE_LIST,
+                                    [PURE_STATE_INDEX] = PURE_MODULE_ANCHOR, [PURE_STATE_BOOL] = PURE_MODULE_BOOL,
+                                    [PURE_STATE_I64] = PURE_MODULE_I64};
+    return type < sizeof(types) ? types[type] : type;
+}
+static uint8_t module_op(uint8_t op) {
+    switch (op) {
+    case PURE_OP_CUR_LOAD: case PURE_OP_INDEX_LOAD: return PURE_OP_ANCHOR_LOAD;
+    case PURE_OP_CUR_STORE: case PURE_OP_INDEX_STORE: return PURE_OP_ANCHOR_STORE;
+    case PURE_OP_CUR_START: case PURE_OP_INDEX_FIRST: return PURE_OP_ANCHOR_START;
+    case PURE_OP_CUR_END: case PURE_OP_INDEX_LAST: return PURE_OP_ANCHOR_END;
+    case PURE_OP_CUR_MOVE: case PURE_OP_INDEX_MOVE: return PURE_OP_ANCHOR_MOVE;
+    case PURE_OP_CUR_COUNT: case PURE_OP_INDEX_NUM: return PURE_OP_ANCHOR_COUNT;
+    case PURE_OP_CUR_AT: case PURE_OP_INDEX_AT: return PURE_OP_ANCHOR_AT;
+    default: return op;
+    }
+}
+
 static size_t build(unsigned char *out, Spec spec) {
     unsigned char strings[4096], blob[4096];
     size_t used = 0, blob_used = 0;
@@ -139,7 +163,7 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.ns; ++i) { p = put32(p, offset[n++]); p = put32(p, 0); p = put_double(p, spec.s[i].initial); }
     for (size_t i = 0; i < spec.nt; ++i) {
         p = put32(p, offset[n++]);
-        p = put32(p, (spec.t[i].type & 0xFF) | (spec.t[i].type & TR ? PURE_STATE_TRANSIENT : 0));
+        p = put32(p, module_type((spec.t[i].type & 0xFF)) | (spec.t[i].type & TR ? PURE_STATE_TRANSIENT : 0));
         if ((spec.t[i].type & 0xFF) == PURE_STATE_BOOL) { p = put_double(p, spec.t[i].ref); continue; }
         if ((spec.t[i].type & 0xFF) == PURE_STATE_I64) {
             int64_t initial = (int32_t)spec.t[i].ref;
@@ -220,7 +244,7 @@ static size_t build(unsigned char *out, Spec spec) {
             *p++ = (unsigned char)spec_fn[i].records[k]; *p++ = (unsigned char)(spec_fn[i].records[k] >> 8);
         }
     for (size_t i = 0; i < spec.no; ++i) {
-        *p++ = spec.o[i].op; *p++ = 0; *p++ = 0; *p++ = 0;
+        *p++ = module_op(spec.o[i].op); *p++ = 0; *p++ = 0; *p++ = 0;
         p = put32(p, spec.o[i].arg);
         p = put_double(p, spec.o[i].value);
     }
@@ -368,7 +392,7 @@ static void rejections(void) {
     static const O nan_const[] = {{C, 0, NAN}, {ST, 0, 0}};
     static const O noncanon[] = {{C, 0, 1}, {NEG, 1, 0}, {ST, 0, 0}};
     static const O unreachable[] = {{JMP, 2, 0}, {C, 0, 1}, {C, 0, 1}, {ST, 0, 0}};
-    static const O bad_op[] = {{PURE_OP_COUNT, 0, 0}, {ST, 0, 0}}; /* past the last opcode */
+    static const O bad_op[] = {{PURE_OP_KEPT_GET, 0, 0}, {ST, 0, 0}}; /* past a module's opcodes: the runtime's own */
     static const H h_all[] = {{0, 0, 1}};
     static const H h_two[] = {{0, 0, 2}};
     static const H h_five[] = {{0, 0, 5}};
@@ -659,16 +683,16 @@ static void texts(void) {
     };
     static const O code[] = {
         {CUL, 2, 0}, {TI, 0, 0}, {TINS, 1, 0}, {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},  /* 0 typed */
-        {CUL, 2, 0}, {C, 0, -1}, {CM, 0, 0}, {CS, 2, 0},                                     /* 7 left */
-        {CUL, 2, 0}, {C, 0, 1}, {CM, 0, 0}, {CS, 2, 0},                                      /* 11 right */
-        {CUL, 2, 0}, {C, 0, -1}, {CM, 1, 0}, {CS, 2, 0},                                     /* 15 up */
-        {CUL, 2, 0}, {C, 0, 1}, {CM, 1, 0}, {CS, 2, 0},                                      /* 19 down */
-        {CUL, 2, 0}, {C, 0, -1}, {CM, 0, 0}, {CUL, 2, 0}, {TREM, 1, 0},                       /* 23 back */
+        {CUL, 2, 0}, {C, 0, -1}, {CM, IN(1, 0), 0}, {CS, 2, 0},                              /* 7 left */
+        {CUL, 2, 0}, {C, 0, 1}, {CM, IN(1, 0), 0}, {CS, 2, 0},                               /* 11 right */
+        {CUL, 2, 0}, {C, 0, -1}, {CM, IN(1, 1), 0}, {CS, 2, 0},                              /* 15 up */
+        {CUL, 2, 0}, {C, 0, 1}, {CM, IN(1, 1), 0}, {CS, 2, 0},                               /* 19 down */
+        {CUL, 2, 0}, {C, 0, -1}, {CM, IN(1, 0), 0}, {CUL, 2, 0}, {TREM, 1, 0},                /* 23 back */
         {CST, 1, 0}, {CS, 2, 0},                                                            /* 28 home */
         {CUL, 2, 0}, {TK, 2, 0}, {TINS, 1, 0}, {C, 0, 1}, {C, 0, 0}, {DIV, 0, 0}, {ST, 0, 0}, /* 30 bad */
         {TL, 1, 0}, {CHR, 0, 0},                                                            /* 37 view chars */
-        {CUL, 2, 0}, {CC, 0, 0},                                                             /* 39 view offset */
-        {CUL, 2, 0}, {CC, 1, 0},                                                             /* 41 view line_no */
+        {CUL, 2, 0}, {CC, IN(1, 0), 0},                                                      /* 39 view offset */
+        {CUL, 2, 0}, {CC, IN(1, 1), 0},                                                      /* 41 view line_no */
         {CUL, 2, 0}, {TLN, 1, 0},                                                            /* 43 view line */
         {TL, 3, 0}, {TK, 3, 0}, {CAT, 0, 0}, {TL, 1, 0}, {CHR, 0, 0}, {NT, 0, 0}, {CAT, 0, 0},
         {TK, 4, 0}, {CAT, 0, 0},                                                            /* 45 view header */
@@ -687,7 +711,7 @@ static void texts(void) {
     CHECK(!strcmp(state_text(&app, 1), "\xea\xb0\x80" "a\nbc") && app.values[2].num == 0);
     for (int i = 0; i < 6; ++i) CHECK(pure_app_input(&app, 2, PURE_EDGE_DOWN) == PURE_OK);
     CHECK(app.values[2].num == 7);                               /* stops at the end */
-    CHECK(number_view(&app, 0) == 5 && number_view(&app, 2) == 2 && !strcmp(view_text(&app, 3), "bc"));
+    CHECK(number_view(&app, 0) == 5 && number_view(&app, 2) == 1 && !strcmp(view_text(&app, 3), "bc"));
     CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK && app.values[2].num == 4);   /* up keeps column 2 */
     const char *han = "\xed\x95\x9c";
     CHECK(pure_app_text(&app, 0, (PureSpan){(const unsigned char *)han, 3}) == PURE_OK);
@@ -1973,14 +1997,14 @@ static void lists(void) {
         {TI, 0, 0}, {C, 1, 0}, {LA, 1, 0}, {XE, 1, 0}, {XS, 2, 0}, {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, /* 0 typed */
         {XL, 2, 0}, {TK, 1, 0}, {C, 1, 0}, {LI, 1, 0},                                           /* 9 ins */
         {XL, 2, 0}, {LR, 1, 0},                                                                  /* 13 del */
-        {XL, 2, 0}, {C, 0, -1}, {XM, 0, 0}, {XS, 2, 0},                                          /* 15 up */
-        {XL, 2, 0}, {C, 0, 1}, {XM, 0, 0}, {XS, 2, 0},                                           /* 19 down */
+        {XL, 2, 0}, {C, 0, -1}, {XM, 1, 0}, {XS, 2, 0},                                          /* 15 up */
+        {XL, 2, 0}, {C, 0, 1}, {XM, 1, 0}, {XS, 2, 0},                                           /* 19 down */
         {XL, 2, 0}, {XL, 2, 0}, {IG, DONE, 0}, {NOT, 0, 0}, {IS, DONE, 0},                         /* 23 toggle */
         {XL, 2, 0}, {XL, 2, 0}, {IG, TITLE, 0}, {TK, 2, 0}, {CAT, 0, 0}, {IS, TITLE, 0},           /* 28 rename */
         {XL, 2, 0}, {TK, 2, 0}, {IS, TITLE, 0}, {XL, 2, 0}, {LR, 1, 0}, {TK, 1, 0}, {C, 1, 0},     /* 34 bad */
         {LA, 1, 0}, {C, 0, 1}, {C, 0, 0}, {DIV, 0, 0}, {ST, 0, 0},
         {LC, 1, 0},                                                                              /* 46 view count */
-        {XL, 2, 0}, {XN, 0, 0},                                                                  /* 47 view position */
+        {XL, 2, 0}, {XN, 1, 0},                                                                  /* 47 view position */
         {XL, 2, 0}, {IG, DONE, 0},                                                               /* 49 view done */
         {XL, 2, 0}, {IG, TITLE, 0},                                                              /* 51 view current */
     };
@@ -2182,8 +2206,8 @@ static void tables(void) {
         {TK, 3, 0},                                                                          /* 10 current */
         {ROW, 1, 0}, {IG, TITLE, 0},                                                         /* 18 title */
         {ROW, 1, 0}, {IG, DONE, 0}, {JZ, 25, 0}, {TK, 1, 0}, {JMP, 26, 0}, {TK, 2, 0},         /* 20 mark */
-        {ROW, 1, 0}, {XN, 0, 0},                                                             /* 26 pos */
-        {ROW, 1, 0}, {XN, 0, 0}, {XL, 2, 0}, {XN, 0, 0}, {EQ, 0, 0},                           /* 28 here */
+        {ROW, 1, 0}, {XN, 1, 0},                                                             /* 26 pos */
+        {ROW, 1, 0}, {XN, 1, 0}, {XL, 2, 0}, {XN, 1, 0}, {EQ, 0, 0},                           /* 28 here */
     };
     static const H handlers[] = {{1, 0, 5}, {3, 5, 5}};
     static const V text_views[] = {{"current", 10, 8}};
@@ -2236,7 +2260,7 @@ static void tables(void) {
     static const W over_number[] = {{"board", 2, 0, 0, 0}};
     bad = spec; bad.w = over_number; bad.nw = 1;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "table list"));
-    static const O other_row[] = {{ROW, 2, 0}, {XN, 0, 0}};
+    static const O other_row[] = {{ROW, 2, 0}, {XN, 2, 0}};
     static const W other_row_column[] = {{"board", 2, 0, 1, 0}, {"pos", 0, 1, 0, 2}};
     bad = spec; bad.o = other_row; bad.no = 2; bad.h = NULL; bad.nh = 0; bad.tv = NULL; bad.ntv = 0;
     bad.w = other_row_column; bad.nw = 2;
@@ -3119,7 +3143,7 @@ static void gen_index(Gen *g, int list, int depth) {
     } else if (choice == 5) {
         gen_index(g, list, depth - 1);
         gen_num(g, depth - 1);
-        put_op(g, PURE_OP_INDEX_MOVE, 0, 0);
+        put_op(g, PURE_OP_INDEX_MOVE, (uint32_t)list, 0);
     } else
         put_op(g, roll(g, 2) ? PURE_OP_INDEX_FIRST : PURE_OP_INDEX_LAST, (uint32_t)list, 0);
 }
@@ -3145,10 +3169,12 @@ static void gen_num(Gen *g, int depth) {
     case 1: put_op(g, L, LANE_K, 0); return;
     case 2: case 3: gen_field(g, depth, false); return;
     case 4: put_op(g, PURE_OP_LIST_COUNT, roll(g, 2) ? LANE_L : LANE_M, 0); return;
-    case 5:
-        gen_index(g, roll(g, 2) ? LANE_L : LANE_M, depth - 1);
-        put_op(g, PURE_OP_INDEX_NUM, 0, 0);
+    case 5: {
+        int list = roll(g, 2) ? LANE_L : LANE_M;
+        gen_index(g, list, depth - 1);
+        put_op(g, PURE_OP_INDEX_NUM, (uint32_t)list, 0);
         return;
+    }
     case 6: gen_num(g, depth - 1); put_op(g, unary[roll(g, LEN(unary))], 0, 0); return;
     case 7: gen_num(g, depth - 1); gen_num(g, depth - 1); gen_num(g, depth - 1); put_op(g, CL, 0, 0); return;
     case 8: gen_num(g, depth - 1); put_op(g, PURE_OP_PICK, 0, 0); put_op(g, binary[roll(g, LEN(binary))], 0, 0); return;
@@ -3255,7 +3281,7 @@ static void gen_shaped(Gen *g, int list) {
     }
     g->fold_list = fold_list, g->outer = fold_outer, g->tree = false;
     g->code[at].arg = FOLDING(how, list, g->count - at - 1);
-    if (how == PURE_FOLD_FIRST) put_op(g, PURE_OP_INDEX_NUM, 0, 0);
+    if (how == PURE_FOLD_FIRST) put_op(g, PURE_OP_INDEX_NUM, (uint32_t)list, 0);
 }
 
 /* A fold over list leaving a number (first's index as one), in a column of L (outer) or not. */
@@ -3269,7 +3295,7 @@ static void gen_fold(Gen *g, int list, int outer) {
     gen_bool(g, 3);
     g->fold_list = fold_list, g->outer = fold_outer;
     g->code[at].arg = FOLDING(how, list, g->count - at - 1);
-    if (how == PURE_FOLD_FIRST) put_op(g, PURE_OP_INDEX_NUM, 0, 0);
+    if (how == PURE_FOLD_FIRST) put_op(g, PURE_OP_INDEX_NUM, (uint32_t)list, 0);
 }
 
 static bool same_number(bool a_ok, double a, bool b_ok, double b) {
@@ -3872,7 +3898,7 @@ static const O range_code[] = {
     {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {GT, 0, 0}, {ROW, R_L, 0}, KEYED(0), {L, R_HI, 0}, {PURE_OP_LE, 0, 0},
     {PURE_OP_AND, 0, 0}, {ROW, R_L, 0}, KEYED(2), {C, 0, 0}, {GT, 0, 0}, {PURE_OP_AND, 0, 0},
     /* 27 v2 = first(x in l where x.key == lo).position */
-    {FOLD, FOLDING(PURE_FOLD_FIRST, R_L, 4), 0}, {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {EQ, 0, 0}, {XN, 0, 0},
+    {FOLD, FOLDING(PURE_FOLD_FIRST, R_L, 4), 0}, {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {EQ, 0, 0}, {XN, R_L, 0},
     /* 33 v3 = min(x.b for x in l where hi > x.key && x.key >= lo) */
     {FOLD, FOLDING(PURE_FOLD_MIN, R_L, 11), 0}, {ROW, R_L, 0}, KEYED(2),
     {L, R_HI, 0}, {ROW, R_L, 0}, KEYED(0), {GT, 0, 0}, {ROW, R_L, 0}, KEYED(0), {L, R_LO, 0}, {PURE_OP_GE, 0, 0},
@@ -4083,7 +4109,7 @@ static const O keyed_code[] = {
     {C, 0, 2}, {LA, SCORES, 0}, {C, 0, 0}, {LA, SCORES, 0}, {C, 0, -0.0}, {LA, SCORES, 0},       /* 20 two, zero, minus_zero */
     {TI, 0, 0}, {C, 0, 0}, {LA, PEOPLE, 0}, {TI, 0, 0}, {C, 0, 0}, {LA, PEOPLE, 0},              /* 26 twice: always exists */
     {LC, PEOPLE, 0},                                                                            /* 32 view count */
-    {XL, K_AT, 0}, {XN, 0, 0},                                                                  /* 33 view position */
+    {XL, K_AT, 0}, {XN, PEOPLE, 0},                                                             /* 33 view position */
     {XL, K_AT, 0}, {IG, PEOPLE | K_NAME, 0}, {TK, 1, 0}, {TCMP, PURE_EQUAL, 0},                  /* 35 view is_bob */
     {XL, K_AT, 0}, {IG, PEOPLE | K_NAME, 0}, {TK, 2, 0}, {TCMP, PURE_LESS, 0},                   /* 39 view before_m */
     {LC, SCORES, 0},                                                                            /* 43 view scores */
@@ -6499,6 +6525,64 @@ static void bytes_fields(void) {
     printf("{\"bytes_fields\":{\"items\":2,\"refused\":%zu}}\n", LEN(refused) + 1);
 }
 
+/* 027's 4c: an anchor's instructions name what it is in. AT finds the place so many characters or lines from a text's
+ * start, or the item so many from a list's (past the end: NOT_FOUND, not whole: LIMIT); COUNT gives it back. Refused:
+ * an instruction naming a list on a cursor and a text on an index, a list's unit other than an item, a mark in a list. */
+static void anchors(void) {
+    enum { CAT_ = PURE_OP_CUR_AT, XAT_ = PURE_OP_INDEX_AT, NOTE = 0, TASKS = 1, AT = 2, CARET = 3 };
+    static const char *const constants[] = {"ab\ncd\nef"};
+    static const T states[] = {{"note", PURE_STATE_TEXT, 0}, {"tasks", PURE_STATE_LIST, 0}, {"at", PURE_STATE_INDEX, 1},
+                               {"caret", PURE_STATE_CURSOR, 0}};
+    static const RF fields[] = {{"v", 0, 0}};
+    static const R records[] = {{"Task", fields, 1}};
+    static const I inputs[] = {KEY("add", "KeyA")};
+    static const O code[] = {
+        {C, 0, 7}, {LA, TASKS, 0},                                                       /* 0 add: a task */
+        {C, 0, 4}, {CAT_, IN(NOTE, 0), 0}, {CC, IN(NOTE, 0), 0},                        /* 2 view chars: 4 */
+        {C, 0, 2}, {CAT_, IN(NOTE, 1), 0}, {CC, IN(NOTE, 0), 0},                        /* 5 view line_at: 6 */
+        {C, 0, 2}, {CAT_, IN(NOTE, 1), 0}, {CC, IN(NOTE, 1), 0},                        /* 8 view line: 2 */
+        {C, 0, 9}, {CAT_, IN(NOTE, 0), 0}, {CC, IN(NOTE, 0), 0},                        /* 11 view past: none */
+        {C, 0, 1.5}, {CAT_, IN(NOTE, 0), 0}, {CC, IN(NOTE, 0), 0},                      /* 14 view half: none */
+        {C, 0, 1}, {XAT_, TASKS, 0}, {XN, TASKS, 0},                                    /* 17 view second: 1 */
+    };
+    static const H handlers[] = {{1, 0, 2}};
+    static const V views[] = {{"chars", 2, 3}, {"line_at", 5, 3}, {"line", 8, 3}, {"past", 11, 3}, {"half", 14, 3},
+                              {"second", 17, 3}};
+    Spec spec = {NULL, 0, inputs, 1, views, LEN(views), handlers, 1, code, LEN(code), NULL, 0, states, LEN(states), constants,
+                 LEN(constants), NULL, 0, records, 1, NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "anchors: %s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    double value;
+    CHECK(number_view(&app, 0) == 4 && number_view(&app, 1) == 6 && number_view(&app, 2) == 2);
+    CHECK(!pure_app_view(&app, 3, &value) && pure_app_view_fault(&app) == PURE_FAULT_NOT_FOUND);
+    CHECK(!pure_app_view(&app, 4, &value) && pure_app_view_fault(&app) == PURE_FAULT_LIMIT);
+    CHECK(!pure_app_view(&app, 5, &value) && pure_app_view_fault(&app) == PURE_FAULT_NOT_FOUND);
+    for (int k = 0; k < 2; ++k) CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
+    CHECK(number_view(&app, 5) == 1);
+    pure_app_stop(&app);
+    const struct { O code[4]; uint32_t count; const char *why; } refused[] = {
+        {{{CUL, CARET, 0}, {C, 0, 1}, {XM, TASKS, 0}, {XN, TASKS, 0}}, 4, "operand type"}, /* a list's move of a cursor */
+        {{{XL, AT, 0}, {CC, IN(NOTE, 0), 0}}, 2, "operand type"},                          /* a text's count of an index */
+        {{{C, 0, 0}, {XAT_, IN(TASKS, 1), 0}, {XN, TASKS, 0}}, 3, "no such state"},        /* a list's unit not an item */
+    };
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        V one[] = {{"v", 0, refused[k].count}};
+        Spec bad = {NULL, 0, inputs, 1, one, 1, NULL, 0, refused[k].code, refused[k].count, NULL, 0, states, LEN(states),
+                    constants, LEN(constants), NULL, 0, records, 1, NULL, 0};
+        if (load(bad, &module_b) == PURE_OK || !strstr(error, refused[k].why)) {
+            fprintf(stderr, "anchors: refused %zu: %s\n", k, error);
+            abort();
+        }
+    }
+    static const T marked[] = {{"note", PURE_STATE_TEXT, 0}, {"tasks", PURE_STATE_LIST, 0},
+                               {"at", PURE_STATE_INDEX | PURE_CURSOR_STAYS << 8, 1}, {"caret", PURE_STATE_CURSOR, 0}};
+    Spec mark = spec;
+    mark.t = marked;
+    CHECK(load(mark, &module_b) != PURE_OK && strstr(error, "state reference"));
+    printf("{\"anchors\":{\"views\":6,\"refused\":%zu}}\n", LEN(refused) + 1);
+}
+
 /* A timer's tick sees the time the host set; floor and a floored modulo
  * take it apart. now is for handlers only. */
 enum { NOW = PURE_OP_NOW, FLOOR = PURE_OP_FLOOR, MOD = PURE_OP_MOD };
@@ -6764,7 +6848,7 @@ static void view_bodies(void) {
         {L, N, 0}, {C, 0, 7}, {MOD_, 0, 0}, {LA, XS, 0}, {L, N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, N, 0},
         /* total at 8: s = 0; for i in 0 .. xs.count { s = s + (xs.first + i).value }; s (13) */
         {C, 0, 0}, {LS, 1, 0}, {C, 0, 0}, {LC, XS, 0}, {LOOP, 0 | 7u << 16, 0},
-        {LL, 1, 0}, {XF, XS, 0}, {LL, 0, 0}, {XM, 0, 0}, {IG, XS, 0}, {ADD, 0, 0}, {LS, 1, 0}, {LL, 1, 0},
+        {LL, 1, 0}, {XF, XS, 0}, {LL, 0, 0}, {XM, XS, 0}, {IG, XS, 0}, {ADD, 0, 0}, {LS, 1, 0}, {LL, 1, 0},
         /* distinct at 21: for x in xs { if !seen.has(x.value) { seen.add(row { x.value }) } }; seen.count (10) */
         {EACH_, WALKING(XS, 8), 0}, {ROW, XS, 0}, {IG, XS, 0}, {HAS_, SEEN, 0}, {NOT, 0, 0}, {JZ, 30, 0}, {ROW, XS, 0},
         {IG, XS, 0}, {LA, SEEN, 0}, {LC, SEEN, 0},
@@ -6880,6 +6964,7 @@ int main(void) {
     nested_replace();
     nested_rows();
     bytes_fields();
+    anchors();
     memory_budget();
     work_budget();
     fold_mutations();

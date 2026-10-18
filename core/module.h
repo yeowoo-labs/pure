@@ -31,24 +31,34 @@ typedef enum {
     PURE_OP_REPLY, PURE_OP_REQUIRE,
     PURE_OP_TEXT_CONST, PURE_OP_TEXT_LOAD, PURE_OP_TEXT_INPUT, PURE_OP_NUM_TEXT,
     PURE_OP_CONCAT, PURE_OP_CHARS, PURE_OP_LINES, PURE_OP_TEXT_BYTES,
-    PURE_OP_CUR_LOAD, PURE_OP_CUR_START, PURE_OP_CUR_END, PURE_OP_CUR_MOVE,
-    PURE_OP_CUR_STORE, PURE_OP_TEXT_INSERT, PURE_OP_TEXT_REMOVE, PURE_OP_TEXT_LINE,
-    PURE_OP_TEXT_SET, PURE_OP_TEXT_FROM, PURE_OP_BYTES_FROM, PURE_OP_CUR_COUNT,
+    PURE_OP_ANCHOR_LOAD, PURE_OP_ANCHOR_START, PURE_OP_ANCHOR_END, PURE_OP_ANCHOR_MOVE,
+    PURE_OP_ANCHOR_STORE, PURE_OP_TEXT_INSERT, PURE_OP_TEXT_REMOVE, PURE_OP_TEXT_LINE,
+    PURE_OP_TEXT_SET, PURE_OP_TEXT_FROM, PURE_OP_BYTES_FROM, PURE_OP_ANCHOR_COUNT,
     PURE_OP_LIST_COUNT, PURE_OP_LIST_APPEND, PURE_OP_LIST_INSERT, PURE_OP_LIST_REMOVE,
-    PURE_OP_ITEM_GET, PURE_OP_ITEM_SET, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE,
-    PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST, PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_ROW,
+    PURE_OP_ITEM_GET, PURE_OP_ITEM_SET, PURE_OP_ROW,
     PURE_OP_PICK, PURE_OP_SLIDE, PURE_OP_FOLD, PURE_OP_TEXT_COMPARE, PURE_OP_LIST_FIND, PURE_OP_LIST_HAS,
     PURE_OP_NOW, PURE_OP_FLOOR, PURE_OP_MOD, PURE_OP_SEND, PURE_OP_OUTER_ROW, PURE_OP_EACH,
     PURE_OP_LOCAL_LOAD, PURE_OP_LOCAL_STORE,
     PURE_OP_I64_ADD, PURE_OP_I64_SUB, PURE_OP_I64_MUL, PURE_OP_I64_DIV, PURE_OP_I64_MOD, PURE_OP_I64_NEG,
     PURE_OP_I64_COMPARE, PURE_OP_I64_MIN, PURE_OP_I64_MAX, PURE_OP_I64_FROM, PURE_OP_NUM_FROM,
     PURE_OP_LOOP, PURE_OP_BREAK,
-    PURE_OP_I64_BITS, PURE_OP_BYTE_AT, PURE_OP_BYTES_OF, PURE_OP_INDEX_AT,
+    PURE_OP_I64_BITS, PURE_OP_BYTE_AT, PURE_OP_BYTES_OF, PURE_OP_ANCHOR_AT,
     PURE_OP_BYTES_SLICE, PURE_OP_BYTE, PURE_OP_BYTES_LOAD, PURE_OP_BYTES_STORE,
     PURE_OP_LIST_VALUE, PURE_OP_LIST_BIND, PURE_OP_APPEND_IN, PURE_OP_NUM_PARSE,
     PURE_OP_CALL, PURE_OP_RETURN, PURE_OP_CHAR_AT, PURE_OP_CHAR,
     PURE_OP_COUNT
 } PureOpcode;
+/* 027's 4c: an anchor is a place in a text or a list that follows its edits. A text's (a cursor) is a gap between
+ * characters: what is inserted at it goes before it (a mark: after it), and in a removed range it goes to the range's
+ * start. A list's (an index) is the gap before an item, naming it: what is inserted at it goes before it (it follows its
+ * item); it names the next item when its item goes, the last one past the end (0 in an empty list). The instructions
+ * name what their anchor is in: LOAD and STORE an anchor state; START and END a text (its start and end) or a list (its
+ * first and last item); MOVE, COUNT and AT the text or list in bits 0-15 and a unit in bits 16-23 (a text's: 0 a
+ * character, 1 a line; a list's: 0, an item). MOVE moves by a whole number of units (else LIMIT), stopping at the ends;
+ * COUNT gives the units before it (lines from 0); AT gives the anchor a whole number of units from the start (else
+ * LIMIT), NOT_FOUND past the end. The load holds each as the runtime's own instruction for a cursor or an index
+ * (module-run.h). */
+enum { PURE_ANCHOR_UNIT = 16 };
 /* A bool is its own type (docs/design/016-bool-and-i64.md), held as a
  * number 0 or 1 while it runs: comparisons (LT to NE, TEXT_COMPARE) and
  * LIST_HAS push one, AND, OR and NOT work on them, JZ and REQUIRE take one,
@@ -227,10 +237,14 @@ static inline bool pure_field_fixed(uint8_t type) {
 static inline uint32_t pure_field_size(uint8_t type) {
     return type == PURE_FIELD_NUMBER || type == PURE_FIELD_I64 ? 8 : type == PURE_FIELD_BOOL ? 1 : 4;
 }
+/* A loaded module's states: a module's anchor state (027's 4c: PURE_MODULE_ANCHOR, type 2) is a cursor when it is in a
+ * text and an index when it is in a list; the rest are the module's types, a bool's and an i64's 4 and 5 in a module. */
 typedef enum {
     PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4,
     PURE_STATE_BOOL = 5, PURE_STATE_I64 = 6
 } PureStateType;
+/* A state's type in a module: a number, a text, an anchor, a list, a bool or an i64. */
+enum { PURE_MODULE_NUM, PURE_MODULE_TEXT, PURE_MODULE_ANCHOR, PURE_MODULE_LIST, PURE_MODULE_BOOL, PURE_MODULE_I64 };
 /* A number's, a bool's or an i64's state as a list cell's kind (PURE_CELL_...,
  * for pure_cell_as), or 0xFF for any other state. */
 static inline uint8_t pure_value_kind(uint8_t state_type) {
