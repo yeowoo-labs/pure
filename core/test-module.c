@@ -37,10 +37,10 @@ typedef struct { const char *name; double initial; } S;
 typedef struct { const char *name; uint32_t type; } F;
 /* kind 0 is a key input; otherwise PURE_KIND_MESSAGE with fields. Arguments
  * name their view by its number in key. */
-typedef struct { const char *name, *key; int kind; bool keyed; const F *fields; size_t nfields; } I;
-#define KEY(name, key) {name, key, 0, false, NULL, 0}
+typedef struct { const char *name, *key; int kind; const F *fields; size_t nfields; } I;
+#define KEY(name, key) {name, key, 0, NULL, 0}
 /* A timer's period (milliseconds) rides in nfields. */
-#define TIMER(name, period) {name, NULL, PURE_KIND_TIMER, false, NULL, period}
+#define TIMER(name, period) {name, NULL, PURE_KIND_TIMER, NULL, period}
 /* A number view, or a bool (i64) view when its length carries BOOL_VIEW (I64_VIEW). */
 typedef struct { const char *name; uint32_t start, length; } V;
 #define BOOL_VIEW (1u << 31)
@@ -97,7 +97,6 @@ static size_t build(unsigned char *out, Spec spec) {
     size_t names = 0;
     for (size_t i = 0; i < spec.ns; ++i) text[names++] = spec.s[i].name;
     for (size_t i = 0; i < spec.nt; ++i) text[names++] = spec.t[i].name;
-    for (size_t i = 0; i < spec.nc; ++i) text[names++] = spec.c[i];
     for (size_t i = 0; i < spec.ni; ++i) {
         text[names++] = spec.in[i].name;
         if (!spec.in[i].kind) text[names++] = spec.in[i].key;
@@ -124,17 +123,18 @@ static size_t build(unsigned char *out, Spec spec) {
     for (size_t i = 0; i < spec.ni; ++i) fields += spec.in[i].kind == PURE_KIND_TIMER ? 0 : spec.in[i].nfields;
     for (size_t i = 0; i < spec.nk; ++i) { memcpy(blob + blob_used, spec.k[i], strlen(spec.k[i])); blob_used += strlen(spec.k[i]); }
     unsigned char *p = out;
-    memset(p, 0, 40);
-    memcpy(p, "PUREMOD6", 8);
+    CHECK(!spec.nc); /* (collections are gone: 027's 4b) */
+    memset(p, 0, 38);
+    memcpy(p, "PUREMOD7", 8);
     size_t states = spec.ns + spec.nt, views = spec.nv + spec.ntv + spec.nw;
     p[8] = (unsigned char)states; p[9] = (unsigned char)(states >> 8);
     p[10] = (unsigned char)spec.ni; p[12] = (unsigned char)views; p[14] = (unsigned char)spec.nh;
     put32(p + 16, (uint32_t)spec.no);
     put32(p + 20, (uint32_t)used);
-    p[24] = (unsigned char)fields; p[26] = (unsigned char)spec.nc; p[28] = (unsigned char)spec.nk;
-    p[30] = (unsigned char)spec.nr; p[36] = (unsigned char)record_fields; p[38] = (unsigned char)spec_nfn;
-    put32(p + 32, (uint32_t)blob_used);
-    p += 40;
+    p[24] = (unsigned char)fields; p[26] = (unsigned char)spec.nk; p[28] = (unsigned char)spec.nr;
+    p[34] = (unsigned char)record_fields; p[36] = (unsigned char)spec_nfn;
+    put32(p + 30, (uint32_t)blob_used);
+    p += 38;
     size_t n = 0;
     for (size_t i = 0; i < spec.ns; ++i) { p = put32(p, offset[n++]); p = put32(p, 0); p = put_double(p, spec.s[i].initial); }
     for (size_t i = 0; i < spec.nt; ++i) {
@@ -150,13 +150,12 @@ static size_t build(unsigned char *out, Spec spec) {
         p = put32(p, spec.t[i].ref);
         p = put32(p, (spec.t[i].type & ~TR) >> 8);
     }
-    for (size_t i = 0; i < spec.nc; ++i) { p = put32(p, offset[n++]); p = put32(p, 1); p = put32(p, 1); }
     uint32_t field_offsets[64], field_start = 0;
     size_t nf = 0;
     for (size_t i = 0; i < spec.ni; ++i) {
         const I *in = &spec.in[i];
         p = put32(p, offset[n++]);
-        *p++ = (unsigned char)(in->kind ? in->kind : 1); *p++ = in->keyed; *p++ = 0; *p++ = 0;
+        *p++ = (unsigned char)(in->kind ? in->kind : 1); *p++ = 0; *p++ = 0; *p++ = 0;
         bool timer = in->kind == PURE_KIND_TIMER;
         p = put32(p, timer ? (uint32_t)in->nfields : in->kind == PURE_KIND_ARGUMENTS ? (uint32_t)strtoul(in->key, NULL, 10) :
                      in->kind ? 0 : offset[n++]);
@@ -454,118 +453,7 @@ static void mutations(void) {
     printf("{\"module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
 }
 
-static Spec editor_spec;
-
-/* An in-memory data host: every splice makes a new immutable version. */
-typedef struct { char key[65]; unsigned char *bytes; size_t size; int64_t revision; } Stored;
-typedef struct {
-    Stored docs[8];
-    size_t count, limit;
-    bool busy;
-    unsigned opened, closed;
-} Memory;
-typedef struct {
-    Memory *memory;
-    int index; /* -1 for an absent key */
-    int64_t base;
-    unsigned char *versions[64];
-    size_t sizes[64], count;
-} Doc;
-
-static Stored *stored(Memory *m, const char *key) {
-    for (size_t i = 0; i < m->count; ++i) if (!strcmp(m->docs[i].key, key)) return &m->docs[i];
-    return NULL;
-}
-
-static PureResult fake_open(void *context, uint32_t collection, const char *key, void **out, int64_t *revision) {
-    Memory *m = context;
-    CHECK(collection == 0);
-    Doc *d = calloc(1, sizeof(*d));
-    Stored *s = stored(m, key);
-    d->memory = m;
-    d->index = s ? (int)(s - m->docs) : -1;
-    if (!s) {
-        CHECK(m->count < 8);
-        d->index = (int)m->count;
-        snprintf(m->docs[m->count++].key, 65, "%s", key);
-        s = &m->docs[d->index];
-    }
-    d->base = s->revision;
-    d->versions[0] = malloc(s->size + 1);
-    memcpy(d->versions[0], s->bytes ? s->bytes : (unsigned char *)"", s->size);
-    d->sizes[0] = s->size;
-    d->count = 1;
-    ++m->opened;
-    *out = d;
-    *revision = s->revision;
-    return PURE_OK;
-}
-
-static PureVersion fake_version(void *context, void *document) {
-    (void)context;
-    Doc *d = document;
-    return (PureVersion){d->count - 1, d->sizes[d->count - 1]};
-}
-
-/* Two spans per read, so replies arrive in pieces. */
-static PureResult fake_read(void *context, void *document, PureVersion at, size_t offset, size_t length,
-                            bool (*visit)(void *, PureSpan), void *visit_context) {
-    (void)context;
-    Doc *d = document;
-    CHECK(at.ref < d->count && at.bytes == d->sizes[at.ref] && offset + length <= at.bytes);
-    size_t half = length / 2;
-    if (half && !visit(visit_context, (PureSpan){d->versions[at.ref] + offset, half})) return PURE_OK;
-    if (length - half) visit(visit_context, (PureSpan){d->versions[at.ref] + offset + half, length - half});
-    return PURE_OK;
-}
-
-static PureResult fake_splice(void *context, void *document, size_t offset, size_t remove, PureSpan insert) {
-    Memory *m = context;
-    Doc *d = document;
-    size_t size = d->sizes[d->count - 1], next = size - remove + insert.size;
-    if (next > m->limit) return PURE_LIMIT;
-    CHECK(d->count < 64);
-    unsigned char *bytes = malloc(next + 1);
-    memcpy(bytes, d->versions[d->count - 1], offset);
-    if (insert.size) memcpy(bytes + offset, insert.data, insert.size);
-    memcpy(bytes + offset + insert.size, d->versions[d->count - 1] + offset + remove, size - offset - remove);
-    d->versions[d->count] = bytes;
-    d->sizes[d->count++] = next;
-    return PURE_OK;
-}
-
-static PureResult fake_commit(void *context, void *document, int64_t *revision) {
-    Memory *m = context;
-    Doc *d = document;
-    Stored *s = &m->docs[d->index];
-    *revision = s->revision;
-    if (m->busy) return PURE_BUSY;
-    if (s->revision != d->base) return PURE_CONFLICT;
-    free(s->bytes);
-    s->size = d->sizes[d->count - 1];
-    s->bytes = malloc(s->size + 1);
-    memcpy(s->bytes, d->versions[d->count - 1], s->size);
-    *revision = ++s->revision;
-    /* Like a tree draft, a commit rebases: earlier versions are gone. */
-    for (size_t i = 0; i + 1 < d->count; ++i) { free(d->versions[i]); d->versions[i] = NULL; d->sizes[i] = 0; }
-    d->versions[0] = d->versions[d->count - 1];
-    d->sizes[0] = d->sizes[d->count - 1];
-    d->count = 1;
-    d->base = s->revision;
-    return PURE_OK;
-}
-
-static void fake_close(void *context, void *document) {
-    Memory *m = context;
-    Doc *d = document;
-    for (size_t i = 0; i < d->count; ++i) free(d->versions[i]);
-    free(d);
-    ++m->closed;
-}
-
-static PureData fake_data(Memory *m) {
-    return (PureData){m, fake_open, fake_version, fake_read, fake_splice, fake_commit, fake_close, NULL, NULL, NULL};
-}
+static Spec message_spec;
 
 typedef struct { unsigned char bytes[256]; size_t size, spans; } Collected;
 
@@ -596,113 +484,69 @@ static PureSpan edit_payload(unsigned char *buffer, uint32_t start, uint32_t rem
     return (PureSpan){buffer, 8 + strlen(insert)};
 }
 
-enum { FIELD = PURE_OP_FIELD, DOC = PURE_OP_DOC, SIZE = PURE_OP_DOC_SIZE, LEN_ = PURE_OP_LEN,
-       REPL = PURE_OP_REPLACE, REPLY = PURE_OP_REPLY, REQ = PURE_OP_REQUIRE, LE = PURE_OP_LE };
+enum { FIELD = PURE_OP_FIELD, LEN_ = PURE_OP_LEN, REPLY = PURE_OP_REPLY, REQ = PURE_OP_REQUIRE, LE = PURE_OP_LE };
 
-/* The document editor as a module: show replies the document, edit splices
- * start .. start + remove with insert, replies insert and counts edits. A
- * keep message replies the document read before its own edit; guarded edits
- * require the final size to stay within 8 bytes. */
+/* Messages: echo replies its insert; edit adds start + remove to sum, counts itself and replies its insert; guarded
+ * counts itself if its insert holds 8 bytes at most. A payload that does not hold the fields fails as limit, a failed
+ * require changes nothing, and a key input takes no message. */
 static void messages(void) {
     static const F edit_fields[] = {{"start", 1}, {"remove", 1}, {"insert", 2}};
     static const I inputs[] = {
-        {"show", NULL, PURE_KIND_MESSAGE, true, NULL, 0},
-        {"edit", NULL, PURE_KIND_MESSAGE, true, edit_fields, 3},
-        {"keep", NULL, PURE_KIND_MESSAGE, true, edit_fields + 2, 1},
-        {"guarded", NULL, PURE_KIND_MESSAGE, true, edit_fields, 3},
+        {"echo", NULL, PURE_KIND_MESSAGE, edit_fields + 2, 1},
+        {"edit", NULL, PURE_KIND_MESSAGE, edit_fields, 3},
+        {"guarded", NULL, PURE_KIND_MESSAGE, edit_fields, 3},
         KEY("tick", "Space"),
     };
-    static const S states[] = {{"edits", 0}};
-    static const char *const collections[] = {"documents"};
+    static const S states[] = {{"edits", 0}, {"sum", 0}};
     static const O code[] = {
-        {DOC, 0, 0}, {REPLY, 0, 0},                                                      /* 0 show */
-        {FIELD, 0, 0}, {FIELD, 0, 0}, {FIELD, 1, 0}, {ADD, 0, 0}, {FIELD, 2, 0},       /* 2 edit */
-        {REPL, 0, 0}, {FIELD, 2, 0}, {REPLY, 0, 0}, {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},
-        {DOC, 0, 0}, {REPLY, 0, 0}, {C, 0, 0}, {C, 0, 0}, {FIELD, 0, 0}, {REPL, 0, 0},  /* 14 keep: prepend */
-        {FIELD, 0, 0}, {FIELD, 0, 0}, {FIELD, 1, 0}, {ADD, 0, 0}, {FIELD, 2, 0},       /* 20 guarded */
-        {REPL, 0, 0}, {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},
-        {SIZE, 0, 0}, {C, 0, 8}, {LE, 0, 0}, {REQ, 0, 0},
+        {FIELD, 0, 0}, {REPLY, 0, 0},                                                  /* 0 echo */
+        {FIELD, 0, 0}, {FIELD, 1, 0}, {ADD, 0, 0}, {L, 1, 0}, {ADD, 0, 0}, {ST, 1, 0}, /* 2 edit */
+        {FIELD, 2, 0}, {REPLY, 0, 0}, {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},
+        {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},                                 /* 14 guarded */
+        {FIELD, 2, 0}, {LEN_, 0, 0}, {C, 0, 8}, {LE, 0, 0}, {REQ, 0, 0},
     };
-    static const H handlers[] = {{1, 0, 2}, {3, 2, 12}, {5, 14, 6}, {7, 20, 14}};
+    static const H handlers[] = {{1, 0, 2}, {3, 2, 12}, {5, 14, 9}};
     static const V views[] = {{"count", 0, 0}};
-    Spec spec = {states, 1, inputs, 5, views, 0, handlers, 4, code, LEN(code), collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
-    editor_spec = spec;
+    Spec spec = {states, 2, inputs, 4, views, 0, handlers, 3, code, LEN(code), NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
+    message_spec = spec;
     PureResult loaded = load(spec, &module_a);
     if (loaded != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
-    Memory memory = {.limit = 100};
     PureApp app;
-    CHECK(pure_app_start(&app, &module_a, fake_data(&memory)) == PURE_OK);
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     unsigned char buffer[64];
-
-    CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_NOT_FOUND && app.revision == 0);
-    CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 0, 0, "hello")) == PURE_OK);
-    CHECK(app.revision == 1 && replied(&app, "hello") && app.values[0].num == 1);
-    CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_OK && app.revision == 1 && replied(&app, "hello"));
-    /* stale base conflicts before bounds; bounds fail as limit; nothing changes */
-    CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 99, 0, "x")) == PURE_CONFLICT && app.revision == 1);
-    CHECK(pure_app_message(&app, 1, "doc", 1, edit_payload(buffer, 99, 0, "x")) == PURE_LIMIT && app.revision == 1);
-    CHECK(pure_app_message(&app, 1, "doc", 1, edit_payload(buffer, 2, 9, "x")) == PURE_LIMIT);
-    CHECK(pure_app_message(&app, 1, "doc", 1, (PureSpan){buffer, 7}) == PURE_LIMIT && app.revision == 0);
-    CHECK(pure_app_message(&app, 1, "doc", -1, edit_payload(buffer, 0, 0, "x")) == PURE_INVALID);
-    CHECK(pure_app_message(&app, 1, "bad/key", 1, edit_payload(buffer, 0, 0, "x")) == PURE_INVALID);
-    CHECK(pure_app_message(&app, 4, "doc", 1, (PureSpan){0}) == PURE_INVALID);
-    CHECK(memory.docs[0].revision == 1 && memory.docs[0].size == 5 && app.values[0].num == 1);
-    /* A busy commit changes neither the document nor the states. */
-    memory.busy = true;
-    CHECK(pure_app_message(&app, 1, "doc", 1, edit_payload(buffer, 5, 0, "!")) == PURE_BUSY);
-    memory.busy = false;
-    CHECK(memory.docs[0].size == 5 && app.values[0].num == 1 && app.events == 2);
-    /* The size limit of the data host fails as limit. */
-    memory.limit = 6;
-    CHECK(pure_app_message(&app, 1, "doc", 1, edit_payload(buffer, 5, 0, "!!")) == PURE_LIMIT);
-    memory.limit = 100;
-    /* A reply read before the event's own edit keeps its content after commit. */
-    CHECK(pure_app_message(&app, 2, "doc", 1, (PureSpan){(const unsigned char *)">> ", 3}) == PURE_OK);
-    CHECK(app.revision == 2 && replied(&app, "hello"));
-    CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_OK && replied(&app, ">> hello"));
-    /* require: an edit that would exceed 8 bytes changes nothing */
-    CHECK(pure_app_message(&app, 3, "doc", 2, edit_payload(buffer, 8, 0, "!")) == PURE_LIMIT);
-    CHECK(memory.docs[0].size == 8 && app.values[0].num == 1);
-    CHECK(pure_app_message(&app, 3, "doc", 2, edit_payload(buffer, 0, 3, "")) == PURE_OK && app.revision == 3);
-    CHECK(app.values[0].num == 2);
-    /* Another key is its own document. */
-    CHECK(pure_app_message(&app, 1, "other", 0, edit_payload(buffer, 0, 0, "abc")) == PURE_OK && app.revision == 1);
+    CHECK(pure_app_message(&app, 0, (PureSpan){(const unsigned char *)"hello", 5}) == PURE_OK && replied(&app, "hello"));
+    CHECK(pure_app_message(&app, 1, edit_payload(buffer, 2, 3, "xy")) == PURE_OK && replied(&app, "xy"));
+    CHECK(app.values[0].num == 1 && app.values[1].num == 5);
+    CHECK(pure_app_message(&app, 1, (PureSpan){buffer, 7}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
+    CHECK(pure_app_message(&app, 2, edit_payload(buffer, 0, 0, "123456789")) == PURE_LIMIT);
+    CHECK(app.values[0].num == 1 && app.values[1].num == 5);
+    CHECK(pure_app_message(&app, 2, edit_payload(buffer, 0, 0, "12345678")) == PURE_OK && app.values[0].num == 2);
+    CHECK(pure_app_message(&app, 3, (PureSpan){0}) == PURE_INVALID && app.values[0].num == 2 && app.events == 3);
     pure_app_stop(&app);
-    CHECK(memory.opened == memory.closed);
-    for (size_t i = 0; i < memory.count; ++i) free(memory.docs[i].bytes);
 
     /* Verifier rules for typed operations. */
     static const O field_in_key[] = {{FIELD, 0, 0}, {ST, 0, 0}};
-    static const H key_handler[] = {{9, 0, 2}};
+    static const H key_handler[] = {{7, 0, 2}};
     Spec bad = spec;
     bad.o = field_in_key; bad.no = 2; bad.h = key_handler; bad.nh = 1;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "message operation outside"));
-    static const O num_insert[] = {{C, 0, 0}, {C, 0, 0}, {C, 0, 1}, {REPL, 0, 0}};
-    static const H edit_handler[] = {{3, 0, 4}};
-    bad.o = num_insert; bad.no = 4; bad.h = edit_handler;
-    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
     static const O bytes_state[] = {{FIELD, 2, 0}, {ST, 0, 0}};
-    static const H edit_handler2[] = {{3, 0, 2}};
-    bad.o = bytes_state; bad.no = 2; bad.h = edit_handler2;
+    static const H edit_handler[] = {{3, 0, 2}};
+    bad.o = bytes_state; bad.no = 2; bad.h = edit_handler;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "operand type"));
     static const O far_field[] = {{FIELD, 3, 0}, {REPLY, 0, 0}};
-    bad.o = far_field; bad.h = edit_handler2;
+    bad.o = far_field; bad.h = edit_handler;
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "no such state, field"));
-    static const I unkeyed[] = {{"note", NULL, PURE_KIND_MESSAGE, false, NULL, 0}};
-    static const O doc_read[] = {{DOC, 0, 0}, {REPLY, 0, 0}};
-    static const H note_handler[] = {{1, 0, 2}};
-    bad = (Spec){states, 1, unkeyed, 1, views, 0, note_handler, 1, doc_read, 2, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
-    CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "document operation outside"));
     static const F unknown_type[] = {{"insert", 8}, {"start", 1}};
-    static const I misplaced[] = {{"edit", NULL, PURE_KIND_MESSAGE, true, unknown_type, 2}};
-    bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
+    static const I misplaced[] = {{"edit", NULL, PURE_KIND_MESSAGE, unknown_type, 2}};
+    bad = (Spec){states, 1, misplaced, 1, views, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "message field"));
     static const H even[] = {{2, 0, 0}};
-    bad = (Spec){states, 1, inputs, 1, views, 0, even, 1, NULL, 0, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
+    bad = (Spec){states, 1, inputs, 1, views, 0, even, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "handler event"));
     static const V field_view[] = {{"v", 0, 1}};
     static const O field_only[] = {{FIELD, 0, 0}};
-    bad = (Spec){states, 1, inputs, 2, field_view, 1, NULL, 0, field_only, 1, collections, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
+    bad = (Spec){states, 1, inputs, 2, field_view, 1, NULL, 0, field_only, 1, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0};
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view with an effect"));
     /* A value may cross a join when every path brings the same stack. */
     static const O branch_value[] = {{C, 0, 1}, {C, 1, 1}, {JZ, 3, 0}, {ST, 0, 0}};
@@ -718,7 +562,7 @@ static void messages(void) {
 /* Damaged message modules either fail to load or run messages safely. */
 static void message_mutations(void) {
     static unsigned char valid[65536], bytes[65536];
-    size_t size = build(valid, editor_spec);
+    size_t size = build(valid, message_spec);
     uint32_t state = 0x9e3779b9u;
     unsigned accepted = 0;
     for (unsigned round = 0; round < 20000; ++round) {
@@ -728,19 +572,17 @@ static void message_mutations(void) {
             bytes[next_random(&state) % size] ^= (unsigned char)(1u << (next_random(&state) % 8));
         if (pure_module_load(bytes, size, &module_b, error, sizeof(error)) != PURE_OK) continue;
         ++accepted;
-        Memory memory = {.limit = 64};
         PureApp app;
-        CHECK(pure_app_start(&app, &module_b, fake_data(&memory)) == PURE_OK);
+        CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
         unsigned char payload[32];
         for (unsigned e = 0; e < 12; ++e) {
             for (size_t k = 0; k < sizeof(payload); ++k) payload[k] = (unsigned char)next_random(&state);
             put32(payload, next_random(&state) % 12);
             put32(payload + 4, next_random(&state) % 4);
             PureSpan span = {payload, next_random(&state) % sizeof(payload)};
-            uint32_t input = next_random(&state) % 5;
+            uint32_t input = next_random(&state) % module_b.inputs;
             if (module_b.input[input].kind == PURE_KIND_MESSAGE) {
-                int64_t base = (int64_t)(next_random(&state) % 4) - 1;
-                if (pure_app_message(&app, input, "doc", base, span) == PURE_OK) {
+                if (pure_app_message(&app, input, span) == PURE_OK) {
                     size_t reply = 0;
                     CHECK(pure_app_reply(&app, count_bytes, &reply) == PURE_OK && reply <= 256);
                 }
@@ -749,8 +591,6 @@ static void message_mutations(void) {
             for (uint32_t s = 0; s < module_b.states; ++s) CHECK(isfinite(app.values[s].num));
         }
         pure_app_stop(&app);
-        CHECK(memory.opened == memory.closed);
-        for (size_t i = 0; i < memory.count; ++i) free(memory.docs[i].bytes);
     }
     printf("{\"message_module_mutations\":20000,\"accepted_after_damage\":%u}\n", accepted);
 }
@@ -814,7 +654,7 @@ static void texts(void) {
                                             "\xeb\xa9\x94\xeb\xaa\xa8", "XYZ",
                                             " \xc2\xb7 ", "\xec\x9e\x90"};
     static const I inputs[] = {
-        {"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("left", "ArrowLeft"), KEY("right", "ArrowRight"),
+        {"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("left", "ArrowLeft"), KEY("right", "ArrowRight"),
         KEY("up", "ArrowUp"), KEY("down", "ArrowDown"), KEY("back", "Backspace"), KEY("home", "Home"), KEY("bad", "KeyB"),
     };
     static const O code[] = {
@@ -2126,7 +1966,7 @@ static void lists(void) {
     static const R records[] = {{"task", task_fields, 2}};
     static const char *const constants[] = {"", "new", "x"};
     static const I inputs[] = {
-        {"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("ins", "KeyI"), KEY("del", "Delete"),
+        {"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("ins", "KeyI"), KEY("del", "Delete"),
         KEY("up", "ArrowUp"), KEY("down", "ArrowDown"), KEY("toggle", "Space"), KEY("rename", "KeyR"), KEY("bad", "KeyB"),
     };
     static const O code[] = {
@@ -2334,7 +2174,7 @@ static void tables(void) {
     static const RF task_fields[] = {{"title", 1, 0}, {"done", 2, 0}};
     static const R records[] = {{"task", task_fields, 2}};
     static const char *const constants[] = {"", "x", " ", "empty"};
-    static const I inputs[] = {{"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("toggle", "Space")};
+    static const I inputs[] = {{"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("toggle", "Space")};
     static const O code[] = {
         {TI, 0, 0}, {C, 1, 0}, {LA, 1, 0}, {XE, 1, 0}, {XS, 2, 0},                          /* 0 typed */
         {XL, 2, 0}, {XL, 2, 0}, {IG, DONE, 0}, {NOT, 0, 0}, {IS, DONE, 0},                     /* 5 toggle */
@@ -2745,32 +2585,19 @@ static void stored_frames(void) {
     remove_store(path);
 }
 
-static bool list_keys(void *context, const char *key) {
-    strcat(context, key);
-    strcat(context, ",");
-    return true;
-}
-
-/* A message's document and the states its handlers change commit together. */
+/* A message's changes are stored with its event, and one that fails stores nothing. */
 static void stored_messages(void) {
     char *path = new_store();
-    CHECK(load(editor_spec, &module_a) == PURE_OK);
+    CHECK(load(message_spec, &module_a) == PURE_OK);
     PureApp app;
     unsigned char buffer[64];
     CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
-    CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 0, 0, "hello")) == PURE_OK && app.revision == 1);
-    CHECK(app.values[0].num == 1);
-    CHECK(pure_app_message(&app, 1, "doc", 0, edit_payload(buffer, 0, 0, "x")) == PURE_CONFLICT && app.values[0].num == 1);
-    /* An edit past the size guard fails: neither the document nor the count moves. */
-    CHECK(pure_app_message(&app, 3, "doc", 1, edit_payload(buffer, 5, 0, "-world")) == PURE_LIMIT && app.values[0].num == 1);
-    CHECK(pure_app_message(&app, 3, "doc", 1, edit_payload(buffer, 5, 0, "!")) == PURE_OK && app.values[0].num == 2);
+    CHECK(pure_app_message(&app, 1, edit_payload(buffer, 2, 3, "hello")) == PURE_OK && replied(&app, "hello"));
+    CHECK(pure_app_message(&app, 2, edit_payload(buffer, 0, 0, "-world, long")) == PURE_LIMIT && app.values[0].num == 1);
+    CHECK(pure_app_message(&app, 2, edit_payload(buffer, 0, 0, "!")) == PURE_OK && app.values[0].num == 2);
     pure_app_stop(&app);
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 2);
-    CHECK(pure_app_message(&app, 0, "doc", -1, (PureSpan){0}) == PURE_OK && app.revision == 2 && replied(&app, "hello!"));
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 2 && app.values[1].num == 5);
     pure_app_stop(&app);
-    /* Documents stay documents: the app's states are not among the keys. */
-    char seen[256] = "";
-    CHECK(pure_store_keys(path, list_keys, seen) == PURE_OK && !strcmp(seen, "doc,"));
     remove_store(path);
 }
 
@@ -3051,82 +2878,12 @@ static void deferred_bursts(void) {
     remove_store(path);
 }
 
-/* Messages in a burst: documents of different keys commit together with the
- * states, each moving one revision; a second message for a key saves the
- * burst first, and so does a full burst. */
-static void deferred_messages(void) {
-    char *path = new_store();
-    CHECK(load(editor_spec, &module_a) == PURE_OK);
-    PureApp app;
-    unsigned char buffer[64];
-    char key[16];
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&app, true));
-    for (int i = 0; i < 3; ++i) {
-        snprintf(key, sizeof(key), "k%d", i);
-        CHECK(pure_app_message(&app, 1, key, 0, edit_payload(buffer, 0, 0, "ab")) == PURE_OK && app.revision == 1);
-    }
-    CHECK(app.values[0].num == 3 && app.pending_count == 3 && app.open);
-    /* The same key again: the burst is saved first, then this edit joins a new one. */
-    CHECK(pure_app_message(&app, 1, "k0", 1, edit_payload(buffer, 2, 0, "c")) == PURE_OK && app.revision == 2);
-    CHECK(app.pending_count == 1 && app.values[0].num == 4);
-    CHECK(pure_app_message(&app, 1, "k1", 0, edit_payload(buffer, 0, 0, "x")) == PURE_CONFLICT);
-    CHECK(pure_app_save(&app) == PURE_OK && !app.open && !app.pending_count);
-    for (int i = 0; i < PURE_APP_PENDING + 1; ++i) {
-        snprintf(key, sizeof(key), "m%d", i);
-        CHECK(pure_app_message(&app, 1, key, 0, edit_payload(buffer, 0, 0, "y")) == PURE_OK);
-        CHECK(app.pending_count == (i < PURE_APP_PENDING ? (unsigned)i + 1 : 1)); /* full: saved on the way */
-    }
-    pure_app_stop(&app);           /* the last edit was never saved */
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 4 + PURE_APP_PENDING);
-    CHECK(pure_app_message(&app, 0, "k0", -1, (PureSpan){0}) == PURE_OK && app.revision == 2 && replied(&app, "abc"));
-    snprintf(key, sizeof(key), "m%d", PURE_APP_PENDING);
-    CHECK(pure_app_message(&app, 0, key, -1, (PureSpan){0}) == PURE_NOT_FOUND);
-    snprintf(key, sizeof(key), "m%d", PURE_APP_PENDING - 1);
-    CHECK(pure_app_message(&app, 0, key, -1, (PureSpan){0}) == PURE_OK && replied(&app, "y"));
-    pure_app_stop(&app);
-    remove_store(path);
-}
-
-/* The burst's keys are found in one look (an index over their hashes, most
- * slots shared at 200 keys): every pending key and no other, reads as well
- * as edits, and a message for one of them saves the burst first. */
-static void pending_keys(void) {
-    char *path = new_store();
-    CHECK(load(editor_spec, &module_a) == PURE_OK);
-    PureApp app;
-    unsigned char buffer[64];
-    char key[16];
-    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && pure_app_defer(&app, true));
-    for (int i = 0; i < 200; ++i) {
-        snprintf(key, sizeof(key), "p%d", i);
-        CHECK(!pure_app_pending(&app, key));
-        CHECK(pure_app_message(&app, 1, key, 0, edit_payload(buffer, 0, 0, "q")) == PURE_OK);
-    }
-    CHECK(pure_app_save(&app) == PURE_OK && !pure_app_pending(&app, "p0"));
-    for (int i = 0; i < 200; ++i) {
-        snprintf(key, sizeof(key), "p%d", i);
-        CHECK((i % 2 ? pure_app_message(&app, 0, key, -1, (PureSpan){0})
-                     : pure_app_message(&app, 1, key, 1, edit_payload(buffer, 1, 0, "r"))) == PURE_OK);
-    }
-    for (int i = 0; i < 210; ++i) {
-        snprintf(key, sizeof(key), "p%d", i);
-        CHECK(pure_app_pending(&app, key) == (i < 200));
-    }
-    CHECK(!pure_app_pending(&app, "p") && !pure_app_pending(&app, "p1000") && app.pending_count == 200);
-    CHECK(pure_app_message(&app, 0, "p150", -1, (PureSpan){0}) == PURE_OK && app.pending_count == 1);
-    CHECK(pure_app_pending(&app, "p150") && !pure_app_pending(&app, "p151"));
-    pure_app_stop(&app);
-    remove_store(path);
-}
-
 static void deferred(void) {
     static const char *const list_words[] = {"a", "\xea\xb0\x80", "", "\n", "\xf0\x9f\x98\x80"};
     static const char *const text_words[] = {"a", "\xea\xb0\x80", "\n", "\xf0\x9f\x98\x80", "xy\nz", ""};
     deferred_equivalence(list_spec, list_words, LEN(list_words), 0x2545f491u);
     deferred_equivalence(text_spec, text_words, LEN(text_words), 0x1b873593u);
     deferred_bursts();
-    deferred_messages();
-    pending_keys();
 }
 
 /* Text inserted at a cursor goes before it; at a mark (a cursor that stays),
@@ -3135,7 +2892,7 @@ static void marks(void) {
     enum { MARK = 2 | PURE_CURSOR_STAYS << 8 };
     static const T textual[] = {{"note", 1, 0}, {"at", 2, 0}, {"mark", MARK, 0}};
     static const char *const constants[] = {"ab"};
-    static const I inputs[] = {{"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("keep", "KeyK"), KEY("back", "Backspace")};
+    static const I inputs[] = {{"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("keep", "KeyK"), KEY("back", "Backspace")};
     static const O code[] = {
         {CUL, 1, 0}, {TI, 0, 0}, {TINS, 0, 0},                                  /* 0 typed: at the cursor */
         {CUL, 1, 0}, {CS, 2, 0},                                                /* 3 keep: mark = at */
@@ -3174,7 +2931,7 @@ static const RF fold_fields[] = {{"title", 1, 0}, {"done", 2, 0}, {"points", 0, 
 static const R fold_records[] = {{"task", fold_fields, 3}};
 static const T fold_states[] = {{"tasks", 3, 0}, {"at", 4, 0}};
 static const char *const fold_constants[] = {""};
-static const I fold_inputs[] = {{"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("toggle", "KeyT")};
+static const I fold_inputs[] = {{"typed", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("toggle", "KeyT")};
 enum { F_TITLE = 0, F_DONE = 1u << 16, F_POINTS = 2u << 16 };
 static const O fold_code[] = {
     {TI, 0, 0}, {C, 1, 0}, {TI, 0, 0}, {CHR, 0, 0}, {LA, 0, 0}, {XE, 0, 0}, {XS, 1, 0},     /* 0 typed */
@@ -3656,8 +3413,8 @@ static const RF stock_fields[] = {{"item", 0, 0}, {"left", 0, 0}}, line_fields[]
                 entry_fields[] = {{"item", 0, 0}, {"qty", 0, 0}};
 static const R walk_records[] = {{"Stock", stock_fields, 2}, {"Line", line_fields, 2}, {"Entry", entry_fields, 2}};
 static const F order_fields[] = {{"lines", PURE_FIELD_ROWS | W_LINES << 8}}, restock_fields[] = {{"item", 1}, {"left", 1}};
-static const I walk_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, order_fields, 1}, KEY("clean", "KeyC"),
-                                {"restock", NULL, PURE_KIND_MESSAGE, false, restock_fields, 2}};
+static const I walk_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, order_fields, 1}, KEY("clean", "KeyC"),
+                                {"restock", NULL, PURE_KIND_MESSAGE, restock_fields, 2}};
 static const O walk_code[] = {
     /* 0 order: for l in order.lines { stock[l.item].left -= l.qty (not below 0); log.append(l) } */
     {EACH, WALKING(W_LINES, 20), 0},
@@ -3730,7 +3487,7 @@ static void walks(void) {
             unsigned char payload[8];
             put32(payload, (uint32_t)item);
             put32(payload + 4, (uint32_t)left);
-            result = pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8});
+            result = pure_app_message(&app, 2, (PureSpan){payload, 8});
             size_t at = 0;
             while (at < shop.stocked && shop.stock[at].item < item) ++at;
             if (at < shop.stocked && shop.stock[at].item == item) ok = false;
@@ -3756,7 +3513,7 @@ static void walks(void) {
             }
             for (size_t k = 0; !ok && k < lines; ++k) /* the rest of the rows, for the payload */
                 if (size < (k + 1) * 16) size += put_row(payload + size, (double)(next_random(&seed) % 13), 1);
-            result = pure_app_message(&app, 0, NULL, -1, (PureSpan){size ? payload : NULL, size});
+            result = pure_app_message(&app, 0, (PureSpan){size ? payload : NULL, size});
             if (ok) {
                 shop.n += 1;
                 shop.sum += qty_total;
@@ -3804,13 +3561,13 @@ static void walks(void) {
     unsigned char short_row[12] = {0}, not_finite[16];
     put_double(not_finite, 1);
     put_double(not_finite + 8, NAN);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){short_row, 12}) == PURE_LIMIT && same_shop(&app, &before));
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){not_finite, 16}) == PURE_LIMIT && same_shop(&app, &before));
+    CHECK(pure_app_message(&app, 0, (PureSpan){short_row, 12}) == PURE_LIMIT && same_shop(&app, &before));
+    CHECK(pure_app_message(&app, 0, (PureSpan){not_finite, 16}) == PURE_LIMIT && same_shop(&app, &before));
     pure_app_stop(&app);
 
     /* What a walk and a rows field may not be. */
     static const F note_fields[] = {{"lines", PURE_FIELD_ROWS | W_LINES << 8}, {"text", 4}};
-    static const I note_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, note_fields, 2}};
+    static const I note_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, note_fields, 2}};
     static const O into_walked[] = {{EACH, WALKING(W_STOCK, 3), 0}, {C, 0, 1}, {C, 0, 2}, {LA, W_STOCK, 0}};
     static const O nested[] = {{EACH, WALKING(W_STOCK, 4), 0}, {EACH, WALKING(W_LOG, 3), 0}, {C, 0, 1}, {C, 0, 2},
                                {LA, W_STOCK, 0}};
@@ -3824,8 +3581,8 @@ static void walks(void) {
     static const V walk_view[] = {{"v", 0, 4}};
     static const T unnamed[] = {{"stock", 3 | 1 << 8, 0}, {"lines", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1}, {"log", 3, 2}};
     static const F logged_rows[] = {{"lines", PURE_FIELD_ROWS | W_LOG << 8}};
-    static const I logged_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, logged_rows, 1}};
-    static const I sent_rows[] = {{"order", NULL, PURE_KIND_OUTPUT, false, order_fields, 1}};
+    static const I logged_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, logged_rows, 1}};
+    static const I sent_rows[] = {{"order", NULL, PURE_KIND_OUTPUT, order_fields, 1}};
     const struct { Spec spec; const char *reason; } refused[] = {
         {walk_spec(into_walked, LEN(into_walked), note_inputs, 1, first3, 1, walk_lists, NULL, 0), "insert into the list walked"},
         {walk_spec(nested, LEN(nested), note_inputs, 1, first5, 1, walk_lists, NULL, 0), "insert into the list walked"},
@@ -3871,7 +3628,7 @@ static void walk_mutations(void) {
             for (size_t k = 0; k + 16 <= length && next_random(&state) % 2; k += 16)
                 put_row(payload + k, (double)(next_random(&state) % 8), (double)(next_random(&state) % 3));
             if (module_b.input[input].kind == PURE_KIND_MESSAGE)
-                pure_app_message(&app, input, NULL, -1, (PureSpan){payload, length});
+                pure_app_message(&app, input, (PureSpan){payload, length});
             else if (module_b.input[input].kind == PURE_KIND_KEY)
                 pure_app_input(&app, input, PURE_EDGE_DOWN);
             for (uint32_t s_ = 0; s_ < module_b.states; ++s_)
@@ -3897,11 +3654,11 @@ static const R argued_records[] = {{"Account", account_fields, 3}};
 static const F pay_fields[] = {{"b", 1}}, add_fields[] = {{"aid", 1}, {"bid", 1}, {"balance", 3}},
                aid_fields[] = {{"aid", 1}}, min_fields[] = {{"min", 3}}, name_fields[] = {{"name", 4}}, b_fields[] = {{"b", 1}};
 static const I argued_inputs[] = {
-    {"pay", NULL, PURE_KIND_MESSAGE, false, pay_fields, 1}, {"add", NULL, PURE_KIND_MESSAGE, false, add_fields, 3},
-    {"balance.args", "0", PURE_KIND_ARGUMENTS, false, aid_fields, 1},
-    {"rich.args", "1", PURE_KIND_ARGUMENTS, false, min_fields, 1},
-    {"echo.args", "2", PURE_KIND_ARGUMENTS, false, name_fields, 1},
-    {"branch.args", "3", PURE_KIND_ARGUMENTS, false, b_fields, 1}};
+    {"pay", NULL, PURE_KIND_MESSAGE, pay_fields, 1}, {"add", NULL, PURE_KIND_MESSAGE, add_fields, 3},
+    {"balance.args", "0", PURE_KIND_ARGUMENTS, aid_fields, 1},
+    {"rich.args", "1", PURE_KIND_ARGUMENTS, min_fields, 1},
+    {"echo.args", "2", PURE_KIND_ARGUMENTS, name_fields, 1},
+    {"branch.args", "3", PURE_KIND_ARGUMENTS, b_fields, 1}};
 static const O argued_code[] = {
     /* 0 balance(aid) = accounts[aid].balance */
     {FIELD, 0, 0}, {PURE_OP_LIST_FIND, A_ACCOUNTS, 0}, {IG, ITEM(A_ACCOUNTS, 2), 0},
@@ -3949,7 +3706,7 @@ static void view_arguments(void) {
         put32(payload, aid);
         put32(payload + 4, aid % 3);
         put_double(payload + 8, aid * 10.0);
-        CHECK(pure_app_message(&app, 1, NULL, -1, (PureSpan){payload, 16}) == PURE_OK);
+        CHECK(pure_app_message(&app, 1, (PureSpan){payload, 16}) == PURE_OK);
     }
     double value;
     unsigned char four[8];
@@ -3985,17 +3742,17 @@ static void view_arguments(void) {
         }
     }
     put32(four, 2);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){four, 4}) == PURE_OK && app.values[A_N].num == 10);
+    CHECK(pure_app_message(&app, 0, (PureSpan){four, 4}) == PURE_OK && app.values[A_N].num == 10);
     pure_app_stop(&app);
 
     /* What arguments may not be. */
-    static const I on_column[] = {{"pay", NULL, PURE_KIND_MESSAGE, false, pay_fields, 1},
-                                  {"aid.args", "4", PURE_KIND_ARGUMENTS, false, aid_fields, 1}};
-    static const I misnamed[] = {{"pay", NULL, PURE_KIND_MESSAGE, false, pay_fields, 1},
-                                 {"balance.argz", "0", PURE_KIND_ARGUMENTS, false, aid_fields, 1}};
-    static const I twice[] = {{"pay", NULL, PURE_KIND_MESSAGE, false, pay_fields, 1},
-                              {"balance.args", "0", PURE_KIND_ARGUMENTS, false, aid_fields, 1},
-                              {"balance.args", "0", PURE_KIND_ARGUMENTS, false, aid_fields, 1}};
+    static const I on_column[] = {{"pay", NULL, PURE_KIND_MESSAGE, pay_fields, 1},
+                                  {"aid.args", "4", PURE_KIND_ARGUMENTS, aid_fields, 1}};
+    static const I misnamed[] = {{"pay", NULL, PURE_KIND_MESSAGE, pay_fields, 1},
+                                 {"balance.argz", "0", PURE_KIND_ARGUMENTS, aid_fields, 1}};
+    static const I twice[] = {{"pay", NULL, PURE_KIND_MESSAGE, pay_fields, 1},
+                              {"balance.args", "0", PURE_KIND_ARGUMENTS, aid_fields, 1},
+                              {"balance.args", "0", PURE_KIND_ARGUMENTS, aid_fields, 1}};
     static const H handled[] = {{5, 31, 4}};
     const struct { Spec spec; const char *reason; } refused[] = {
         {argued_spec(on_column, 2, NULL, 0), "arguments"},
@@ -4024,7 +3781,7 @@ static const T local_lists[] = {{"xs", 3, 0}};
 static const RF local_fields[] = {{"a", 0, 0}};
 static const R local_records[] = {{"X", local_fields, 1}};
 static const F local_add_fields[] = {{"a", 3}};
-static const I local_inputs[] = {KEY("sum", "KeyS"), {"add", NULL, PURE_KIND_MESSAGE, false, local_add_fields, 1}};
+static const I local_inputs[] = {KEY("sum", "KeyS"), {"add", NULL, PURE_KIND_MESSAGE, local_add_fields, 1}};
 static const O local_code[] = {
     /* 0 on sum: total = total + x.a for each x (total starts at 0); n = count(x in xs where x.a < total);
      *   last = xs.last; m = total + last.a (every event: total is 0 again) */
@@ -4056,7 +3813,7 @@ static void locals(void) {
         unsigned char payload[8];
         items[count] = (double)(next_random(&seed) % 20) - 5;
         put_double(payload, items[count++]);
-        CHECK(pure_app_message(&app, 1, NULL, -1, (PureSpan){payload, 8}) == PURE_OK);
+        CHECK(pure_app_message(&app, 1, (PureSpan){payload, 8}) == PURE_OK);
         CHECK(pure_app_input(&app, 0, PURE_EDGE_DOWN) == PURE_OK);
         double total = 1, below = 0;
         for (size_t i = 0; i < count; ++i) total += items[i];
@@ -4103,7 +3860,7 @@ static const T range_lists[] = {{"l", 3 | 1 << 8, 0}};
 static const RF range_fields[] = {{"key", 0, 0}, {"a", 0, 0}, {"b", 0, 0}};
 static const R range_records[] = {{"K", range_fields, 3}};
 static const F bounds_fields[] = {{"lo", 3}, {"hi", 3}};
-static const I range_inputs[] = {{"bounds", NULL, PURE_KIND_MESSAGE, false, bounds_fields, 2}, KEY("walk", "KeyW"),
+static const I range_inputs[] = {{"bounds", NULL, PURE_KIND_MESSAGE, bounds_fields, 2}, KEY("walk", "KeyW"),
                                  KEY("drift", "KeyD"), KEY("slice", "KeyS")};
 #define KEYED(field) {IG, ITEM(R_L, field), 0}
 static const O range_code[] = {
@@ -4190,8 +3947,8 @@ static void ranges(void) {
             double lo = (double)(next_random(&seed) % 900) - 50, hi = lo + (double)(next_random(&seed) % 400) - 20;
             put_double(payload, lo);
             put_double(payload + 8, hi);
-            CHECK(pure_app_message(&a, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_OK &&
-                  pure_app_message(&b, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_OK);
+            CHECK(pure_app_message(&a, 0, (PureSpan){payload, 16}) == PURE_OK &&
+                  pure_app_message(&b, 0, (PureSpan){payload, 16}) == PURE_OK);
             /* The slice: its items alone, a division by zero among them failing it. */
             size_t sliced = 0;
             bool divided = true;
@@ -4312,9 +4069,9 @@ static const RF score_fields[] = {{"score", 0, 0}}, flag_fields[] = {{"on", 2, 0
 static const R keyed_records[] = {{"person", person_fields, 2}, {"score", score_fields, 1}, {"flag", flag_fields, 1}};
 static const char *const keyed_constants[] = {"", "bob", "m"};
 static const I keyed_inputs[] = {
-    {"typed", NULL, PURE_KIND_TEXT, false, NULL, 0}, {"seek", NULL, PURE_KIND_TEXT, false, NULL, 0},
-    {"has", NULL, PURE_KIND_TEXT, false, NULL, 0}, KEY("drop", "Delete"), KEY("bump", "KeyB"),
-    KEY("two", "KeyN"), KEY("zero", "KeyO"), KEY("minus_zero", "KeyM"), {"twice", NULL, PURE_KIND_TEXT, false, NULL, 0},
+    {"typed", NULL, PURE_KIND_TEXT, NULL, 0}, {"seek", NULL, PURE_KIND_TEXT, NULL, 0},
+    {"has", NULL, PURE_KIND_TEXT, NULL, 0}, KEY("drop", "Delete"), KEY("bump", "KeyB"),
+    KEY("two", "KeyN"), KEY("zero", "KeyO"), KEY("minus_zero", "KeyM"), {"twice", NULL, PURE_KIND_TEXT, NULL, 0},
 };
 static const O keyed_code[] = {
     {TI, 0, 0}, {C, 0, 0}, {LA, PEOPLE, 0}, {TI, 0, 0}, {FIND, PEOPLE, 0}, {XS, K_AT, 0},        /* 0 typed: add, point at it */
@@ -4799,7 +4556,7 @@ static void message_fields(void) {
     static const char *const constants[] = {""};
     static const F fields[] = {{"title", PURE_FIELD_TEXT}, {"points", PURE_FIELD_NUMBER}, {"note", PURE_FIELD_BYTES},
                                {"count", PURE_FIELD_U32}};
-    static const I inputs[] = {{"post", NULL, PURE_KIND_MESSAGE, false, fields, 4}};
+    static const I inputs[] = {{"post", NULL, PURE_KIND_MESSAGE, fields, 4}};
     static const O code[] = {{FIELD, 1, 0}, {FIELD, 3, 0}, {ADD, 0, 0}, {ST, 0, 0}, {FIELD, 0, 0}, {TSET, 1, 0},
                              {FIELD, 2, 0}, {REPLY, 0, 0}};
     static const H handlers[] = {{1, 0, 8}};
@@ -4820,28 +4577,28 @@ static void message_fields(void) {
     memcpy(payload + 12, &count, 4);
     memcpy(payload + 16, "\xea\xb0\x80\xeb\x82\x98" "xyz", 9);
     size = 25;
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, size}) == PURE_OK);
+    CHECK(pure_app_message(&app, 0, (PureSpan){payload, size}) == PURE_OK);
     CHECK(app.values[0].num == 5.5 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\xeb\x82\x98") && replied(&app, "xyz"));
     pure_app_finish(&app);
     /* Empty variable fields. */
     title_size = 0;
     memcpy(payload, &title_size, 4);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_OK && !*state_text(&app, 1) && replied(&app, ""));
+    CHECK(pure_app_message(&app, 0, (PureSpan){payload, 16}) == PURE_OK && !*state_text(&app, 1) && replied(&app, ""));
     pure_app_finish(&app);
     /* A title longer than what is there, a title that is not UTF-8, a number that is not finite, a short prefix. */
     title_size = 10;
     memcpy(payload, &title_size, 4);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 25}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
+    CHECK(pure_app_message(&app, 0, (PureSpan){payload, 25}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
     title_size = 2;
     memcpy(payload, &title_size, 4);
     memcpy(payload + 16, "\xff\xfe", 2);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 18}) == PURE_INVALID && app.fault == PURE_FAULT_ENCODING);
+    CHECK(pure_app_message(&app, 0, (PureSpan){payload, 18}) == PURE_INVALID && app.fault == PURE_FAULT_ENCODING);
     title_size = 0;
     points = NAN;
     memcpy(payload, &title_size, 4);
     memcpy(payload + 4, &points, 8);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 16}) == PURE_INVALID && app.fault == PURE_FAULT_NON_FINITE);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, 15}) == PURE_LIMIT);
+    CHECK(pure_app_message(&app, 0, (PureSpan){payload, 16}) == PURE_INVALID && app.fault == PURE_FAULT_NON_FINITE);
+    CHECK(pure_app_message(&app, 0, (PureSpan){payload, 15}) == PURE_LIMIT);
     CHECK(app.values[0].num == 5.5 && !*state_text(&app, 1)); /* failed messages changed nothing */
     pure_app_stop(&app);
     /* A text field is text and a bytes field bytes. */
@@ -4867,18 +4624,18 @@ static void message_fields(void) {
     memcpy(payload + 16, body, sizeof(body) - 1);
     size = 16 + sizeof(body) - 1;
     uint32_t placed[8] = {16 + 23, 6, 0, 0, 16 + 9, 3, 0, 0};
-    CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_OK);
+    CHECK(pure_app_message_fields(&app, 0, (PureSpan){payload, size}, placed) == PURE_OK);
     CHECK(app.values[0].num == 5.5 && !strcmp(state_text(&app, 1), "\xea\xb0\x80\xeb\x82\x98") && replied(&app, "xyz"));
     pure_app_finish(&app);
     /* A field that starts or ends past the payload, or a title that is not UTF-8 there. */
     placed[0] = (uint32_t)size + 1;
-    CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_LIMIT);
+    CHECK(pure_app_message_fields(&app, 0, (PureSpan){payload, size}, placed) == PURE_LIMIT);
     placed[0] = (uint32_t)size - 2;
     placed[1] = 3;
-    CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_LIMIT);
+    CHECK(pure_app_message_fields(&app, 0, (PureSpan){payload, size}, placed) == PURE_LIMIT);
     placed[0] = 16 + 24;
     placed[1] = 2;
-    CHECK(pure_app_message_fields(&app, 0, NULL, -1, (PureSpan){payload, size}, placed) == PURE_INVALID &&
+    CHECK(pure_app_message_fields(&app, 0, (PureSpan){payload, size}, placed) == PURE_INVALID &&
           app.fault == PURE_FAULT_ENCODING);
     CHECK(app.values[0].num == 5.5);
     pure_app_stop(&app);
@@ -4886,7 +4643,7 @@ static void message_fields(void) {
     /* Fields in groups: a name is a path of identifiers (user.name), and
      * never both a field and a group. */
     static const F grouped[] = {{"user.name", PURE_FIELD_TEXT}, {"user.age", PURE_FIELD_U32}, {"plan", PURE_FIELD_TEXT}};
-    static const I grouped_inputs[] = {{"post", NULL, PURE_KIND_MESSAGE, false, grouped, 3}};
+    static const I grouped_inputs[] = {{"post", NULL, PURE_KIND_MESSAGE, grouped, 3}};
     static const O grouped_code[] = {{FIELD, 1, 0}, {ST, 0, 0}, {FIELD, 0, 0}, {TSET, 1, 0}};
     static const H grouped_handlers[] = {{1, 0, 4}};
     Spec groups = spec;
@@ -4896,12 +4653,12 @@ static void message_fields(void) {
     for (size_t i = 0; i < LEN(refused_paths); ++i) {
         F renamed[3] = {grouped[0], grouped[1], grouped[2]};
         renamed[0].name = refused_paths[i];
-        I renamed_inputs[1] = {{"post", NULL, PURE_KIND_MESSAGE, false, renamed, 3}};
+        I renamed_inputs[1] = {{"post", NULL, PURE_KIND_MESSAGE, renamed, 3}};
         groups.in = renamed_inputs;
         CHECK(load(groups, &module_b) == PURE_INVALID && strstr(error, "message field"));
     }
     F both[3] = {{"user", PURE_FIELD_TEXT}, grouped[1], grouped[2]};
-    I both_inputs[1] = {{"post", NULL, PURE_KIND_MESSAGE, false, both, 3}};
+    I both_inputs[1] = {{"post", NULL, PURE_KIND_MESSAGE, both, 3}};
     groups.in = both_inputs;
     CHECK(load(groups, &module_b) == PURE_INVALID && strstr(error, "field and group"));
 }
@@ -4944,7 +4701,7 @@ static PureResult buy(PureApp *app, uint32_t input, const char *item, uint32_t c
     size_t length = strlen(item);
     memcpy(payload, &count, 4);
     memcpy(payload + 4, item, length);
-    PureResult result = pure_app_message(app, input, NULL, -1, (PureSpan){payload, 4 + length});
+    PureResult result = pure_app_message(app, input, (PureSpan){payload, 4 + length});
     pure_app_finish(app);
     return result;
 }
@@ -4966,9 +4723,9 @@ static void links(void) {
     static const S sender_nums[] = {{"n", 0}};
     static const F order_fields[] = {{"item", PURE_FIELD_TEXT}, {"count", PURE_FIELD_U32}};
     static const F ordered_fields[] = {{"item", PURE_FIELD_TEXT}, {"count", PURE_FIELD_U32}, {"total", PURE_FIELD_NUMBER}};
-    static const I sender_inputs[] = {{"buy", NULL, PURE_KIND_MESSAGE, false, order_fields, 2},
-                                      {"fail", NULL, PURE_KIND_MESSAGE, false, order_fields, 2},
-                                      {"ordered", NULL, PURE_KIND_OUTPUT, false, ordered_fields, 3}};
+    static const I sender_inputs[] = {{"buy", NULL, PURE_KIND_MESSAGE, order_fields, 2},
+                                      {"fail", NULL, PURE_KIND_MESSAGE, order_fields, 2},
+                                      {"ordered", NULL, PURE_KIND_OUTPUT, ordered_fields, 3}};
     static const O sender_code[] = {{L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, {FIELD, 0, 0}, {FIELD, 1, 0},
                                     {L, 0, 0}, {SEND, 2, 0},                                           /* buy */
                                     {FIELD, 0, 0}, {FIELD, 1, 0}, {C, 0, 0}, {SEND, 2, 0}, {C, 1, 0}, {REQ, 0, 0}}; /* fail */
@@ -4978,7 +4735,7 @@ static void links(void) {
     static const S receiver_nums[] = {{"stock", 0}};
     static const T receiver_texts[] = {{"last", 1, 0}};
     static const char *const receiver_constants[] = {""};
-    static const I receiver_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, ordered_fields, 3}};
+    static const I receiver_inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, ordered_fields, 3}};
     static const O receiver_code[] = {{FIELD, 1, 0}, {L, 0, 0}, {ADD, 0, 0}, {ST, 0, 0}, {FIELD, 0, 0}, {TSET, 1, 0},
                                       {FIELD, 1, 0}, {C, 0, 100}, {LT, 0, 0}, {REQ, 0, 0}}; /* refuses 100 or more */
     static const H receiver_handlers[] = {{1, 0, 10}};
@@ -5007,7 +4764,7 @@ static void links(void) {
     /* Bad deliveries change nothing. */
     CHECK(deliver(&b, "", 4, "x", 1) == PURE_INVALID && deliver(&b, "a b", 4, "x", 1) == PURE_INVALID);
     CHECK(deliver(&b, "other", 0, "x", 1) == PURE_INVALID && pure_app_deliver(&a, 2, "s", 1, sent, NULL) == PURE_INVALID);
-    CHECK(pure_app_message(&a, 2, NULL, -1, sent) == PURE_INVALID);
+    CHECK(pure_app_message(&a, 2, sent) == PURE_INVALID);
     /* Trimmed, a send is gone at once for the host and from the store at the next save. */
     pure_app_trim(&a, 2, 1);
     CHECK(outbox_of(&a).count == 0 && pure_app_save(&a) == PURE_OK && pure_list_count(a.outbox) == 0);
@@ -5167,7 +4924,7 @@ static void links(void) {
     /* Replacing: a module without the output is refused while sends are left
      * on it; once they are trimmed it replaces, and the output's number is
      * kept for a module that has it again. */
-    static const I plain_inputs[] = {{"buy", NULL, PURE_KIND_MESSAGE, false, order_fields, 2}};
+    static const I plain_inputs[] = {{"buy", NULL, PURE_KIND_MESSAGE, order_fields, 2}};
     static const O plain_code[] = {{L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}};
     static const H plain_handlers[] = {{1, 0, 4}};
     Spec plain = {sender_nums, 1, plain_inputs, 1, NULL, 0, plain_handlers, 1, plain_code, LEN(plain_code),
@@ -5269,7 +5026,7 @@ static void work_budget(void) {
     unsigned char payload[8];
     for (uint32_t item = 0; item < 5; ++item) {
         put32(put32(payload, item), 2);
-        CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8}) == PURE_OK && app.work == 3);
+        CHECK(pure_app_message(&app, 2, (PureSpan){payload, 8}) == PURE_OK && app.work == 3);
     }
     pure_app_work(&app, 23 + 22 * 5 - 1);
     CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
@@ -5279,10 +5036,10 @@ static void work_budget(void) {
     for (size_t i = 0; i < 5; ++i) CHECK(pure_list_get(app.lists[W_STOCK], i, 1).num == 3);
     pure_app_work(&app, 2);
     put32(put32(payload, 9), 1);
-    CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8}) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
+    CHECK(pure_app_message(&app, 2, (PureSpan){payload, 8}) == PURE_LIMIT && app.fault == PURE_FAULT_WORK);
     CHECK(pure_list_count(app.lists[W_STOCK]) == 5);
     pure_app_work(&app, 0); /* the default */
-    CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){payload, 8}) == PURE_OK && pure_list_count(app.lists[W_STOCK]) == 6);
+    CHECK(pure_app_message(&app, 2, (PureSpan){payload, 8}) == PURE_OK && pure_list_count(app.lists[W_STOCK]) == 6);
     pure_app_stop(&app);
     pure_module_release(&module_a);
 
@@ -5332,9 +5089,9 @@ static void memory_budget(void) {
     static const R records[] = {{"row", fields, 1}};
     static const F value[] = {{"value", PURE_FIELD_NUMBER}};
     static const I inputs[] = {KEY("add", "KeyA"), KEY("drop", "KeyD"), KEY("send", "KeyS"),
-                               {"out", NULL, PURE_KIND_OUTPUT, false, value, 1},
-                               {"take", NULL, PURE_KIND_MESSAGE, false, value, 1},
-                               {"answer", NULL, PURE_KIND_MESSAGE, false, value, 1}};
+                               {"out", NULL, PURE_KIND_OUTPUT, value, 1},
+                               {"take", NULL, PURE_KIND_MESSAGE, value, 1},
+                               {"answer", NULL, PURE_KIND_MESSAGE, value, 1}};
     static const O code[] = {
         {L, 0, 0}, {LA, 1, 0},     /* add: rows.append(row { n }) */
         {XF, 1, 0}, {LR, 1, 0},    /* drop: rows.remove(rows.first) */
@@ -5484,8 +5241,8 @@ static void output_meaning(void) {
     static const S nums[] = {{"n", 0}};
     static const F was_fields[] = {{"debit", PURE_FIELD_NUMBER}, {"credit", PURE_FIELD_NUMBER}};
     static const F now_fields[] = {{"credit", PURE_FIELD_NUMBER}, {"debit", PURE_FIELD_NUMBER}};
-    static const I was_inputs[] = {KEY("tap", "KeyT"), {"pay", NULL, PURE_KIND_OUTPUT, false, was_fields, 2}};
-    static const I now_inputs[] = {KEY("tap", "KeyT"), {"pay", NULL, PURE_KIND_OUTPUT, false, now_fields, 2}};
+    static const I was_inputs[] = {KEY("tap", "KeyT"), {"pay", NULL, PURE_KIND_OUTPUT, was_fields, 2}};
+    static const I now_inputs[] = {KEY("tap", "KeyT"), {"pay", NULL, PURE_KIND_OUTPUT, now_fields, 2}};
     static const I none_inputs[] = {KEY("tap", "KeyT")};
     static const O was_code[] = {{C, 0, 10}, {C, 0, 20}, {SEND, 1, 0}}; /* pay { debit: 10, credit: 20 } */
     static const O now_code[] = {{C, 0, 20}, {C, 0, 10}, {SEND, 1, 0}}; /* the same, fields in the new order */
@@ -5543,8 +5300,8 @@ static const T bool_states[] = {{"on", 5, 1}, {"off", 5, 0}};
 static const F set_fields[] = {{"on", PURE_FIELD_BOOL}, {"n", PURE_FIELD_NUMBER}};
 static const F told_fields[] = {{"on", PURE_FIELD_BOOL}, {"big", PURE_FIELD_BOOL}, {"n", PURE_FIELD_NUMBER}};
 static const I bool_inputs[] = {KEY("flip", "KeyF"), KEY("count", "KeyC"), KEY("check", "KeyK"), KEY("tell", "KeyT"),
-                                {"set", NULL, PURE_KIND_MESSAGE, false, set_fields, 2},
-                                {"told", NULL, PURE_KIND_OUTPUT, false, told_fields, 3}};
+                                {"set", NULL, PURE_KIND_MESSAGE, set_fields, 2},
+                                {"told", NULL, PURE_KIND_OUTPUT, told_fields, 3}};
 static const O bool_code[] = {
     {L, B_ON, 0}, {NOT, 0, 0}, {ST, B_ON, 0},                                           /* 0 flip: on = !on */
     {L, B_ON, 0}, {JZ, 9, 0}, {L, B_N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, B_N, 0},          /* 3 count: if on { n += 1 } */
@@ -5583,12 +5340,12 @@ static void bools(void) {
     unsigned char payload[9] = {1};
     double five = 5;
     memcpy(payload + 1, &five, 8);
-    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 9}) == PURE_OK && app.values[B_ON].num == 1 && app.values[B_N].num == 5);
+    CHECK(pure_app_message(&app, 4, (PureSpan){payload, 9}) == PURE_OK && app.values[B_ON].num == 1 && app.values[B_N].num == 5);
     pure_app_finish(&app);
     payload[0] = 2;
     five = 6;
     memcpy(payload + 1, &five, 8);
-    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 9}) == PURE_LIMIT && app.values[B_N].num == 5);
+    CHECK(pure_app_message(&app, 4, (PureSpan){payload, 9}) == PURE_LIMIT && app.values[B_N].num == 5);
     pure_app_finish(&app);
     /* A send holds its bools as bytes. */
     CHECK(pure_app_input(&app, 3, PURE_EDGE_DOWN) == PURE_OK);
@@ -5800,8 +5557,8 @@ static const R item_i64_records[] = {{"Item", item_i64_fields, 2}};
 static const F put_i64_fields[] = {{"id", PURE_FIELD_I64}, {"qty", PURE_FIELD_NUMBER}};
 static const F echo_i64_fields[] = {{"id", PURE_FIELD_I64}};
 static const I keyed_i64_inputs[] = {KEY("add", "KeyA"), KEY("low", "KeyL"), KEY("drop", "KeyD"), KEY("ask", "KeyK"),
-                                     {"put", NULL, PURE_KIND_MESSAGE, false, put_i64_fields, 2},
-                                     {"echo", NULL, PURE_KIND_OUTPUT, false, echo_i64_fields, 1}};
+                                     {"put", NULL, PURE_KIND_MESSAGE, put_i64_fields, 2},
+                                     {"echo", NULL, PURE_KIND_OUTPUT, echo_i64_fields, 1}};
 
 static Spec keyed_i64_spec(O *code) {
     O made[] = {
@@ -5928,7 +5685,7 @@ static void integers(void) {
     double qty = 2.5;
     memcpy(payload, &least, 8);
     memcpy(payload + 8, &qty, 8);
-    CHECK(pure_app_message(&app, 4, NULL, -1, (PureSpan){payload, 16}) == PURE_OK && i64_view(&app, 2) == INT64_MIN);
+    CHECK(pure_app_message(&app, 4, (PureSpan){payload, 16}) == PURE_OK && i64_view(&app, 2) == INT64_MIN);
     pure_app_finish(&app);
     Outbox o = outbox_of(&app);
     CHECK(o.count == 1 && o.items[0].size == 8 && !memcmp(o.items[0].payload, &least, 8));
@@ -6228,7 +5985,7 @@ static void formats_and_held(void) {
     static const RF byte_fields[] = {{"v", 3, 0}};
     static const R records[] = {{"Byte", byte_fields, 1}};
     static const char *const constants[] = {"Az\xc3\xa9", ""};
-    static const I inputs[] = {KEY("go", "KeyG"), KEY("grow", "KeyH"), {"ask", NULL, PURE_KIND_MESSAGE, false, NULL, 0}};
+    static const I inputs[] = {KEY("go", "KeyG"), KEY("grow", "KeyH"), {"ask", NULL, PURE_KIND_MESSAGE, NULL, 0}};
     static const O code[] = {
         /* 0 go: held5 = held5 + bytes(note); said = text(held5) */
         {HLD, 5, 0}, {TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {CAT, 1, 0}, {HST, 5, 0}, {HLD, 5, 0}, {PURE_OP_TEXT_FROM, 0, 0},
@@ -6250,7 +6007,7 @@ static void formats_and_held(void) {
     CHECK(!strcmp(state_text(&app, 4), "Az\xc3\xa9")); /* held5 began empty again */
     CHECK(pure_app_input(&app, 1, PURE_EDGE_DOWN) == PURE_BUDGET && app.fault == PURE_FAULT_MEMORY);
     CHECK(!strcmp(state_text(&app, 4), "Az\xc3\xa9")); /* nothing changed */
-    CHECK(pure_app_message(&app, 2, NULL, -1, (PureSpan){NULL, 0}) == PURE_OK);
+    CHECK(pure_app_message(&app, 2, (PureSpan){NULL, 0}) == PURE_OK);
     Text replied = {{0}, 0};
     CHECK(pure_app_reply(&app, text_span, &replied) == PURE_OK && !strcmp(replied.text, "Az\xc3\xa9"));
     pure_app_stop(&app);
@@ -6648,7 +6405,7 @@ static void nested_rows(void) {
     static const T others[] = {{"order.nodes", 3 | (uint32_t)PURE_LIST_ROWS << 8, 1},
                                {"let.kids", 3 | (uint32_t)(PURE_LIST_ROWS | PURE_LIST_BOUND) << 8, 0}, {"total", PURE_STATE_I64, 0}};
     static const F fields[] = {{"nodes", PURE_FIELD_ROWS | NODES << 8}};
-    static const I inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, false, fields, 1}};
+    static const I inputs[] = {{"order", NULL, PURE_KIND_MESSAGE, fields, 1}};
     static const O code[] = {
         /* 0: for x in order.nodes { total += sum(k.v for k in x.kids) } */
         {EACH, WALKING(NODES, 10), 0}, {ROW, NODES, 0}, {IG, ITEM(NODES, 1), 0}, {BIND_, KIDS, 0},
@@ -6669,7 +6426,7 @@ static void nested_rows(void) {
     size += put_node(payload + size, 2, second, 1);
     size += put_node(payload + size, 3, NULL, 0);
     for (int round = 1; round <= 3; ++round) { /* each event begins with its lists and theirs empty */
-        CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, size}) == PURE_OK);
+        CHECK(pure_app_message(&app, 0, (PureSpan){payload, size}) == PURE_OK);
         CHECK(app.values[TOTAL].i64 == 21 * round && app.values[0].num == (round == 1 ? 3 : round == 2 ? 33 : 333));
         CHECK(pure_list_count(app.lists[NODES]) == 0 && app.nested.count == 2); /* the third node's kids are none */
     }
@@ -6678,11 +6435,11 @@ static void nested_rows(void) {
     unsigned char broken[64];
     memcpy(broken, payload, size);
     put32(broken + 8, 1000);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){broken, size}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
+    CHECK(pure_app_message(&app, 0, (PureSpan){broken, size}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
     for (size_t k = 0; k < LEN(cuts); ++k)
-        CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, cuts[k]}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
+        CHECK(pure_app_message(&app, 0, (PureSpan){payload, cuts[k]}) == PURE_LIMIT && app.fault == PURE_FAULT_LIMIT);
     CHECK(app.values[TOTAL].i64 == 63 && app.values[0].num == 333 && pure_list_count(app.lists[NODES]) == 0 && !app.nested.count);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){payload, size}) == PURE_OK && app.values[TOTAL].i64 == 84);
+    CHECK(pure_app_message(&app, 0, (PureSpan){payload, size}) == PURE_OK && app.values[TOTAL].i64 == 84);
     pure_app_stop(&app);
     printf("{\"nested_rows\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(cuts) + 1);
 }
@@ -6699,8 +6456,8 @@ static void bytes_fields(void) {
     static const R before[] = {{"Item", text_fields, 1}}, after[] = {{"Item", bytes_fields_, 2}};
     static const T others[] = {{"items", 3, 0}, {"blob", PURE_STATE_TEXT, 0}};
     static const F text_in[] = {{"t", PURE_FIELD_TEXT}}, bytes_in[] = {{"b", PURE_FIELD_BYTES}};
-    static const I inputs_a[] = {{"put", NULL, PURE_KIND_MESSAGE, false, text_in, 1}};
-    static const I inputs_b[] = {{"put", NULL, PURE_KIND_MESSAGE, false, bytes_in, 1}};
+    static const I inputs_a[] = {{"put", NULL, PURE_KIND_MESSAGE, text_in, 1}};
+    static const I inputs_b[] = {{"put", NULL, PURE_KIND_MESSAGE, bytes_in, 1}};
     /* A: items.append(Item { t: put.t }); n = items.count */
     static const O code_a[] = {{FIELD, 0, 0}, {LA, ITEMS, 0}, {LC, ITEMS, 0}, {ST, 0, 0}};
     /* B: items.append(Item { t: put.b, b: bytes("zz") + put.b }); n = items.last.b's length */
@@ -6714,12 +6471,12 @@ static void bytes_fields(void) {
     if (load(a, &module_a) != PURE_OK || load(b, &module_b) != PURE_OK) { fprintf(stderr, "bytes fields: %s\n", error); abort(); }
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){(const unsigned char *)"héllo", 6}) == PURE_OK);
+    CHECK(pure_app_message(&app, 0, (PureSpan){(const unsigned char *)"héllo", 6}) == PURE_OK);
     CHECK(pure_app_replace(&app, &module_b) == PURE_OK);
     PureCell t = pure_list_get(app.lists[ITEMS], 0, 0), zz = pure_list_get(app.lists[ITEMS], 0, 1);
     CHECK(t.size == 6 && !memcmp(t.text, "héllo", 6) && zz.size == 2 && !memcmp(zz.text, "zz", 2));
     static const unsigned char raw[] = {0xFF, 0x00, 0xC3, 0x28, 0x80}; /* no UTF-8 */
-    CHECK(pure_app_message(&app, 0, NULL, -1, (PureSpan){raw, sizeof(raw)}) == PURE_OK && app.values[0].num == 2 + sizeof(raw));
+    CHECK(pure_app_message(&app, 0, (PureSpan){raw, sizeof(raw)}) == PURE_OK && app.values[0].num == 2 + sizeof(raw));
     PureCell back = pure_list_get(app.lists[ITEMS], 1, 0), joined = pure_list_get(app.lists[ITEMS], 1, 1);
     CHECK(back.size == sizeof(raw) && !memcmp(back.text, raw, sizeof(raw)) && joined.size == 2 + sizeof(raw) &&
           !memcmp(joined.text, "zz", 2) && !memcmp(joined.text + 2, raw, sizeof(raw)));
@@ -7133,6 +6890,6 @@ int main(void) {
     stored_states();
     deferred();
     printf("{\"sizeof_module\":%zu,\"sizeof_app\":%zu}\n", sizeof(PureModule), sizeof(PureApp));
-    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-bools-replace-by-name-rejections-mutations-messages-documents-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-key-sets-arrays-text-order-message-fields-timers-now-snapshots-links\"}");
+    puts("{\"module_tests\":\"verified-load-atomic-events-faults-signed-zero-if-else-bools-replace-by-name-rejections-mutations-messages-typed-verification-text-cursors-utf8-views-rollback-replace-lists-indices-undo-migration-joins-tables-columns-pick-slide-stored-equivalence-crashes-frames-messages-migration-deferred-bursts-pointing-marks-folds-filters-keyed-lists-key-sets-arrays-text-order-message-fields-timers-now-snapshots-links\"}");
     return 0;
 }

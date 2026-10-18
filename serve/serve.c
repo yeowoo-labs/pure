@@ -9,10 +9,7 @@
  * its bytes field from the body, and answers what its handler replies, a
  * field of the message). A failed event answers with its fault.
  *
- * A module with keyed messages named show and edit also serves the document
- * contract of server.c (GET and PUT /objects/KEY, If-Match or If-None-Match:
- * *, ETag = revision, X-Pure-Error): GET is its show message and PUT its edit
- * message. HTTP/1.1 connections persist and may pipeline; an epoll thread
+ * HTTP/1.1 connections persist and may pipeline; an epoll thread
  * accepts, reads and writes without blocking. Requests go through the
  * runtime core (a work slot per connection, the payload budget, ingress
  * owned by the core, write replies borrowed from the request). After each
@@ -23,9 +20,8 @@
  *
  * With --threads N each thread has its own listener on the same port
  * (SO_REUSEPORT), epoll set and runtime domain; the kernel spreads
- * connections over them. A module of keyed documents alone runs one app per
- * thread: they share nothing but the store, whose commits take turns and
- * whose revisions settle concurrent edits of a key. States have one owner:
+ * connections over them. A module without states or outputs runs one app
+ * per thread: there is nothing for them to share. States have one owner:
  * for a module with them, one more thread owns the app, and the connection
  * threads hand it their ready requests and answer what it hands back. Its
  * bursts take the requests of every thread, one save each. */
@@ -74,7 +70,7 @@ typedef struct Host Host;
 /* What a request names: a document, a view (a table's rows from, count) or
  * an input. Kept per work slot, so an accepted event runs even if its
  * connection is gone before the burst. */
-typedef enum { ROUTE_NONE, ROUTE_OBJECT, ROUTE_VIEW, ROUTE_INPUT, ROUTE_QUERY } RouteKind;
+typedef enum { ROUTE_NONE, ROUTE_VIEW, ROUTE_INPUT, ROUTE_QUERY } RouteKind;
 /* A view's (or a query's) arguments come as the request's query: argued
  * says so, and given is its text, kept on the request's work slot. */
 typedef struct App App;
@@ -172,7 +168,6 @@ typedef struct Connection {
     Seal seal;
     char aad[PURE_SOURCE + 48];
     size_t opened;
-    int64_t expected;
     size_t body_size, received, in_used;
     unsigned char *body;
     PureTicket ticket;
@@ -195,7 +190,6 @@ typedef struct {
     PureTicket ticket;
     PureInput input;
     PureResult status;
-    int64_t revision;
     PureResource resource;
     PureSpan reply;
     struct iovec *extents;
@@ -221,8 +215,8 @@ typedef struct Published {
     _Atomic unsigned subscribers; /* streams of its views on any thread (docs/design/019): publishing wakes their threads */
 } Published;
 
-/* The app and its store. A connection thread runs it itself (an app of
- * documents only), or one owner thread runs it for all connection threads.
+/* The app and its store. A connection thread runs it itself (an app without
+ * states or outputs), or one owner thread runs it for all connection threads.
  * The owner publishes a snapshot of the states after each save, and the
  * connection threads show views from it themselves: reads never wait for
  * the owner, which may be applying events or waiting for a sync. */
@@ -230,7 +224,6 @@ typedef struct {
     const PureModule *module;
     PureStore *store;
     PureApp app;
-    uint32_t show, edit;
     uint64_t bursts, burst_events;
     Applied *applied; /* a round's requests, grown to fit */
     size_t applied_capacity;
@@ -425,9 +418,7 @@ struct App {
     char *tokens_path;
     uint64_t tokens_digest;
     const char *store;
-    bool documents; /* the module serves /objects: it has show and edit */
     bool owned;     /* an owner runs it (states or outputs, or any of --apps); else the connection threads */
-    uint32_t show, edit;
     _Atomic size_t memory; /* its budgets (0: none): what its states hold (read by its views' readers too), */
     _Atomic uint64_t work; /* what an event or a view's evaluation may run */
     size_t queue;   /* the requests that may wait for its turn, and its views' with the view workers */
@@ -459,7 +450,7 @@ static void subscribe(Connection *c, const Route *route, const char *raw, size_t
 static void wake_pushers(void);
 
 struct Host {
-    Executor local;   /* the one app of the host, when this thread runs it (documents alone) */
+    Executor local;   /* the one app of the host, when this thread runs it (no states nor outputs) */
     PureApp *readers; /* by app: shows its owner's snapshots here */
     PureSnapshot **snapshots; /* by app: the snapshot a round reads views from, once */
     uint64_t round, *read_in, *handed_in; /* by app: the round it was read in, its requests handed in */
@@ -597,8 +588,8 @@ static void put_decimal(Head *h, uint64_t value) {
 
 /* Answer with a body of `count` extents (`size` bytes in all); the ticket
  * keeps them alive. One writev sends as much as the socket takes. */
-static void respond_typed(Connection *c, int status, const char *reason, const char *error, int64_t revision,
-                          const char *type, const struct iovec *extents, size_t count, size_t size) {
+static void respond_typed(Connection *c, int status, const char *reason, const char *error, const char *type,
+                          const struct iovec *extents, size_t count, size_t size) {
     Head h = {c->head, c->head + sizeof(c->head)};
     put_text(&h, "HTTP/1.1 ");
     put_decimal(&h, (uint64_t)status);
@@ -612,11 +603,6 @@ static void respond_typed(Connection *c, int status, const char *reason, const c
     put_text(&h, "\r\nCache-Control: no-store\r\nX-Pure-Error: ");
     put_text(&h, error);
     put_text(&h, status == 401 ? "\r\nWWW-Authenticate: Bearer\r\n" : "\r\n");
-    if (revision > 0) {
-        put_text(&h, "ETag: \"");
-        put_decimal(&h, (uint64_t)revision);
-        put_text(&h, "\"\r\n");
-    }
     /* A delivery's answer tells how many numbered messages one request may carry. */
     if (*c->source) {
         put_text(&h, "X-Pure-Batch: ");
@@ -634,43 +620,37 @@ static void respond_typed(Connection *c, int status, const char *reason, const c
     c->out_at = 0;
 }
 
-static void respond_extents(Connection *c, int status, const char *reason, const char *error, int64_t revision,
-                            const struct iovec *extents, size_t count, size_t size) {
-    respond_typed(c, status, reason, error, revision, "application/octet-stream", extents, count, size);
-}
-
-static void respond(Connection *c, int status, const char *reason, const char *error, int64_t revision,
-                    PureSpan body) {
+static void respond(Connection *c, int status, const char *reason, const char *error, PureSpan body) {
     struct iovec extent = {(void *)body.data, body.size};
-    respond_extents(c, status, reason, error, revision, &extent, body.size ? 1 : 0, body.size);
+    respond_typed(c, status, reason, error, "application/octet-stream", &extent, body.size ? 1 : 0, body.size);
 }
 
 /* A request refused before it has a ticket; a body it came with is not read. */
 static void reject(Connection *c, int status, const char *reason, const char *error) {
     if (c->body_size) c->keep_alive = false;
-    respond(c, status, reason, error, 0, (PureSpan){0});
+    respond(c, status, reason, error, (PureSpan){0});
 }
 
 /* A request the host cannot read further: answer and close. */
 static void refuse(Connection *c, int status, const char *reason, const char *error) {
     release_ticket(c);
     c->keep_alive = false;
-    respond(c, status, reason, error, 0, (PureSpan){0});
+    respond(c, status, reason, error, (PureSpan){0});
 }
 
 static void answer(Connection *c, PureOutcome result) {
     switch (result.status) {
-    case PURE_OK: respond(c, 200, "OK", "none", result.revision, result.body); return;
-    case PURE_CONFLICT: respond(c, 412, "Precondition Failed", "conflict", result.revision, (PureSpan){0}); return;
-    case PURE_NOT_FOUND: respond(c, 404, "Not Found", "not_found", 0, (PureSpan){0}); break;
-    case PURE_BUSY: respond(c, 503, "Service Unavailable", "store_busy", 0, (PureSpan){0}); break;
-    case PURE_BUDGET: respond(c, 503, "Service Unavailable", "payload_budget", 0, (PureSpan){0}); break;
-    case PURE_ALLOCATION: respond(c, 503, "Service Unavailable", "allocation", 0, (PureSpan){0}); break;
-    case PURE_CLOSED: respond(c, 503, "Service Unavailable", "stopped", 0, (PureSpan){0}); break;
-    case PURE_DENIED: respond(c, 403, "Forbidden", "denied", 0, (PureSpan){0}); break;
-    case PURE_LIMIT: respond(c, 413, "Content Too Large", "limit", 0, (PureSpan){0}); break;
-    case PURE_UNCERTAIN: respond(c, 500, "Internal Server Error", "durability_unknown", 0, (PureSpan){0}); break;
-    default: respond(c, 500, "Internal Server Error", "storage", 0, (PureSpan){0}); break;
+    case PURE_OK: respond(c, 200, "OK", "none", result.body); return;
+    case PURE_CONFLICT: respond(c, 409, "Conflict", "conflict", (PureSpan){0}); break;
+    case PURE_NOT_FOUND: respond(c, 404, "Not Found", "not_found", (PureSpan){0}); break;
+    case PURE_BUSY: respond(c, 503, "Service Unavailable", "store_busy", (PureSpan){0}); break;
+    case PURE_BUDGET: respond(c, 503, "Service Unavailable", "payload_budget", (PureSpan){0}); break;
+    case PURE_ALLOCATION: respond(c, 503, "Service Unavailable", "allocation", (PureSpan){0}); break;
+    case PURE_CLOSED: respond(c, 503, "Service Unavailable", "stopped", (PureSpan){0}); break;
+    case PURE_DENIED: respond(c, 403, "Forbidden", "denied", (PureSpan){0}); break;
+    case PURE_LIMIT: respond(c, 413, "Content Too Large", "limit", (PureSpan){0}); break;
+    case PURE_UNCERTAIN: respond(c, 500, "Internal Server Error", "durability_unknown", (PureSpan){0}); break;
+    default: respond(c, 500, "Internal Server Error", "storage", (PureSpan){0}); break;
     }
     /* A failed request carries no body: the payload can go now. */
     if (!result.body.size) release_ticket(c);
@@ -684,18 +664,18 @@ static void answer_app(Connection *c, PureOutcome result, bool view, PureFault f
     const char *named = fault != PURE_FAULT_NONE ? pure_fault_name(fault) : NULL;
     if (result.status == PURE_OK) {
         struct iovec extent = {(void *)result.body.data, result.body.size};
-        respond_typed(c, 200, "OK", "none", 0, type ? type : "application/octet-stream", &extent,
+        respond_typed(c, 200, "OK", "none", type ? type : "application/octet-stream", &extent,
                       result.body.size ? 1 : 0, result.body.size);
     } else if (result.status == PURE_NOT_FOUND) {
-        respond(c, 404, "Not Found", view ? "no_value" : named ? named : "not_found", 0, (PureSpan){0});
+        respond(c, 404, "Not Found", view ? "no_value" : named ? named : "not_found", (PureSpan){0});
     } else if (result.status == PURE_CONFLICT) {
-        respond(c, 409, "Conflict", named ? named : "conflict", 0, (PureSpan){0});
+        respond(c, 409, "Conflict", named ? named : "conflict", (PureSpan){0});
     } else if (fault == PURE_FAULT_MEMORY) {
-        respond(c, 503, "Service Unavailable", named, 0, (PureSpan){0});
+        respond(c, 503, "Service Unavailable", named, (PureSpan){0});
     } else if (named && (result.status == PURE_LIMIT || result.status == PURE_INVALID)) {
-        respond(c, 422, "Unprocessable Content", named, 0, (PureSpan){0});
+        respond(c, 422, "Unprocessable Content", named, (PureSpan){0});
     } else if (result.status == PURE_INVALID) {
-        respond(c, 400, "Bad Request", "invalid", 0, (PureSpan){0}); /* such as a text that is not UTF-8 */
+        respond(c, 400, "Bad Request", "invalid", (PureSpan){0}); /* such as a text that is not UTF-8 */
     } else {
         answer(c, result);
         return;
@@ -765,7 +745,7 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
         if (end) path += 1 + length;
     }
     static const struct { const char *prefix; RouteKind kind; } routes[] = {
-        {"/objects/", ROUTE_OBJECT}, {"/views/", ROUTE_VIEW}, {"/inputs/", ROUTE_INPUT}, {"/queries/", ROUTE_QUERY}};
+        {"/views/", ROUTE_VIEW}, {"/inputs/", ROUTE_INPUT}, {"/queries/", ROUTE_QUERY}};
     const char *key = "";
     c->route = ROUTE_NONE;
     for (size_t i = 0; i < sizeof(routes) / sizeof(*routes) && c->route == ROUTE_NONE; ++i)
@@ -781,12 +761,11 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
             return false;
     }
     memcpy(c->key, key, key_size + 1);
-    /* Each route has its method: documents GET and PUT, views GET, inputs
-     * POST, queries PUT (registered) and GET (shown). */
-    if ((c->route == ROUTE_OBJECT && (c->post || *query)) || (c->route == ROUTE_VIEW && (c->put || c->post)) ||
+    /* Each route has its method: views GET, inputs POST, queries PUT (registered) and GET (shown). */
+    if ((c->route == ROUTE_VIEW && (c->put || c->post)) ||
         (c->route == ROUTE_INPUT && !c->post) || (c->route == ROUTE_QUERY && (c->post || (c->put && *query))))
         return false;
-    bool length_seen = false, condition_seen = false, host_seen = false;
+    bool length_seen = false, host_seen = false;
     c->source[0] = 0;
     c->sequence = 0;
     c->batch = 1;
@@ -796,7 +775,6 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     bool counted = false;
     c->body_size = 0;
     c->json = false;
-    c->expected = -1;
     c->keep_alive = true;
     line = next + 2;
     while (*line) {
@@ -820,16 +798,6 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
         } else if (!strcasecmp(line, "Host")) {
             if (host_seen || !*value) return false;
             host_seen = true;
-        } else if (!strcasecmp(line, "If-Match")) {
-            if (condition_seen || tail - value < 3 || *value != '"' || tail[-1] != '"') return false;
-            tail[-1] = 0;
-            if (!number(value + 1, INT64_MAX, &n) || !n) return false;
-            c->expected = (int64_t)n;
-            condition_seen = true;
-        } else if (!strcasecmp(line, "If-None-Match")) {
-            if (condition_seen || strcmp(value, "*")) return false;
-            c->expected = 0;
-            condition_seen = true;
         } else if (!strcasecmp(line, "Content-Type")) {
             c->json = !strncasecmp(value, "application/json", 16);
         } else if (!strcasecmp(line, "Accept")) {
@@ -865,10 +833,10 @@ static bool parse_head(Connection *c, char *head, size_t size, char **query) {
     }
     if (!*c->source != !c->sequence || (*c->source && c->route != ROUTE_INPUT) || (counted && !*c->source) ||
         c->sequence > UINT64_MAX - c->batch) return false;
-    /* A document's PUT names the revision it was made against; a query's replaces what was registered. */
-    if (c->put) return host_seen && length_seen && condition_seen == (c->route != ROUTE_QUERY);
-    if (c->post) return host_seen && !condition_seen; /* no Content-Length: no body */
-    return host_seen && !condition_seen && c->body_size == 0;
+    /* A query's PUT replaces what was registered. */
+    if (c->put) return host_seen && length_seen;
+    if (c->post) return host_seen; /* no Content-Length: no body */
+    return host_seen && c->body_size == 0;
 }
 
 static void put_u32(unsigned char *p, uint32_t v) { for (unsigned i = 0; i < 4; ++i) p[i] = (unsigned char)(v >> (8 * i)); }
@@ -911,9 +879,7 @@ static const char *resolve(Connection *c, char *query, Route *route, int *status
     }
     route->app = app;
     route->module = c->module = m;
-    if (route->kind == ROUTE_NONE || (route->kind == ROUTE_OBJECT && !m->collections) ||
-        (route->kind == ROUTE_QUERY && !app->owned)) return "route"; /* a query reads an app's states */
-    if (route->kind == ROUTE_OBJECT) return NULL;
+    if (route->kind == ROUTE_NONE || (route->kind == ROUTE_QUERY && !app->owned)) return "route"; /* a query reads states */
     if (route->kind == ROUTE_QUERY) { /* the view is the query module's, found when shown */
         route->from = 0;
         route->count = SIZE_MAX;
@@ -945,7 +911,6 @@ static const char *resolve(Connection *c, char *query, Route *route, int *status
     route->count = SIZE_MAX;
     const PureInputShape *shape = route->kind == ROUTE_INPUT ? &m->input[found] : NULL;
     bool message = shape && shape->kind == PURE_KIND_MESSAGE;
-    if (message && shape->keyed) return "keyed";
     if (*c->source && !message) return "delivery";
     if (!app->owned) c->source[0] = 0; /* an app without states or outputs applies it as a message */
     if (shape) {
@@ -1115,14 +1080,14 @@ static bool open_seal(Connection *c) {
 static void body_done(Connection *c) {
     if (*c->seal.suite && !open_seal(c)) {
         release_ticket(c); /* never made ready: it never runs */
-        respond(c, 400, "Bad Request", "seal", 0, (PureSpan){0});
+        respond(c, 400, "Bad Request", "seal", (PureSpan){0});
         return;
     }
     const char *why = c->route == ROUTE_INPUT && c->json ? convert(c) : NULL;
     if (why) {
         release_ticket(c); /* never made ready: it never runs */
-        if (!strcmp(why, "payload_budget") || !strcmp(why, "memory")) respond(c, 503, "Service Unavailable", why, 0, (PureSpan){0});
-        else respond(c, 400, "Bad Request", why, 0, (PureSpan){0});
+        if (!strcmp(why, "payload_budget") || !strcmp(why, "memory")) respond(c, 503, "Service Unavailable", why, (PureSpan){0});
+        else respond(c, 400, "Bad Request", why, (PureSpan){0});
         return;
     }
     if (!pure_runtime_ready(c->ticket)) abort();
@@ -1205,7 +1170,7 @@ static void start_request(Connection *c, size_t head_size) {
     }
     /* A view's stream (docs/design/019): pushed from snapshots, so an owned app's. */
     if (c->events && route.kind == ROUTE_VIEW && route.app->owned) { subscribe(c, &route, raw, raw_size); return; }
-    /* A document's PUT carries its body; an input's event its payload's size,
+    /* A query's PUT carries its body; an input's event its payload's size,
      * the payload (the fixed fields, then the body), and room for its JSON. */
     bool write = route.kind == ROUTE_INPUT || c->put;
     size_t table = route.kind == ROUTE_INPUT && c->json ? 8 * (size_t)route.module->input[c->input].field_count : 0;
@@ -1213,8 +1178,7 @@ static void start_request(Connection *c, size_t head_size) {
     /* A batch has a table and a prefix for each of its messages. */
     size_t input_size = route.kind == ROUTE_INPUT ? lead + c->batch * (table + c->field_bytes) + c->body_size :
                         write ? c->body_size : 0;
-    PureResult admitted = pure_runtime_accept(&host->runtime, write ? PURE_INPUT_WRITE : PURE_INPUT_READ, c->key,
-                                              route.kind == ROUTE_INPUT || route.kind == ROUTE_QUERY ? 0 : c->expected,
+    PureResult admitted = pure_runtime_accept(&host->runtime, write ? PURE_INPUT_WRITE : PURE_INPUT_READ, c->key, 0,
                                               input_size, &c->ticket);
     if (admitted != PURE_OK) {
         c->ticket = (PureTicket){0};
@@ -1391,13 +1355,6 @@ static bool lend(Applied *out, PureMapping *mapping, Gather *gather, bool read, 
     out->extent_count = gather->count;
     out->resource = (PureResource){.body = {NULL, size}, .allocation = mapping, .allocation_size = size,
                                    .release = release_loan};
-    return true;
-}
-
-static bool copy_reply(void *context, PureSpan span) {
-    Reply *r = context;
-    if (span.size) memcpy(r->bytes + r->size, span.data, span.size);
-    r->size += span.size;
     return true;
 }
 
@@ -1701,8 +1658,8 @@ static PureResult apply_input(PureApp *app, const Route *route, const PureEffect
             }
             if (batch > 1 && app_refused(app)) status = PURE_OK;
         } else
-            status = table ? pure_app_message_fields(app, route->target, NULL, -1, payload, placed) :
-                             pure_app_message(app, route->target, NULL, -1, payload);
+            status = table ? pure_app_message_fields(app, route->target, payload, placed) :
+                             pure_app_message(app, route->target, payload);
         Reply reply = {0};
         if (status == PURE_OK) pure_app_reply(app, measure_reply, &reply);
         out->reply = (PureSpan){reply.size ? reply.first : NULL, reply.size};
@@ -1721,40 +1678,10 @@ static void apply_effect(Executor *ex, const Job *job, Applied *out) {
         out->status = show_view(app, &job->route, effect->available, out);
         return;
     }
-    if (job->route.kind == ROUTE_INPUT) {
-        out->status = apply_input(app, &job->route, effect, out);
-        if (out->status == PURE_OK) ++ex->burst_events;
-        ex->memory_refused += out->fault == PURE_FAULT_MEMORY;
-        return;
-    }
-    bool read = effect->input == PURE_INPUT_READ;
-    out->status = pure_app_message(app, read ? ex->show : ex->edit, effect->key,
-                                   read ? -1 : effect->expected, read ? (PureSpan){0} : effect->value);
-    out->revision = app->revision;
-    if (out->status != PURE_OK) return;
-    ++ex->burst_events;
-    Reply reply = {0};
-    pure_app_reply(app, measure_reply, &reply);
-    if (!read) {
-        /* Checked at start: an edit replies a field of its request. */
-        out->reply = (PureSpan){reply.size ? reply.first : NULL, reply.size};
-        return;
-    }
-    if (reply.size > effect->available) { out->status = PURE_BUDGET; return; }
-    if (!reply.size) return;
-    /* A stored document is lent, extent by extent, not copied. */
-    PureMapping *mapping = app->document ? pure_draft_mapping(app->document) : NULL;
-    if (mapping) {
-        Gather gather = {NULL, 0, 0, mapping, true};
-        bool read = pure_app_reply(app, gather_extents, &gather) == PURE_OK;
-        if (lend(out, mapping, &gather, read, reply.size)) return;
-    }
-    unsigned char *copy = malloc(reply.size);
-    if (!copy) { out->status = PURE_ALLOCATION; return; }
-    reply = (Reply){.bytes = copy};
-    pure_app_reply(app, copy_reply, &reply);
-    out->resource = (PureResource){.body = {copy, reply.size}, .allocation = copy, .allocation_size = reply.size,
-                                   .release = release_copy};
+    /* An input's event (what reaches an app's owner is a view or an input) */
+    out->status = apply_input(app, &job->route, effect, out);
+    if (out->status == PURE_OK) ++ex->burst_events;
+    ex->memory_refused += out->fault == PURE_FAULT_MEMORY;
 }
 
 /* ---- A surface in the node (serve/surface.h): one, run in its own thread,
@@ -1869,7 +1796,7 @@ static bool local_queue(Local *l, uint64_t seq, PureSpan payload) {
  * why in error, when r has none. */
 static bool local_bind(Local *l, const PureModule *r, char *error, size_t size) {
     int input = pure_module_input(r, l->input_name);
-    if (input < 0 || r->input[input].kind != PURE_KIND_MESSAGE || r->input[input].keyed) {
+    if (input < 0 || r->input[input].kind != PURE_KIND_MESSAGE) {
         snprintf(error, size, "no input '%s' taking messages", l->input_name);
         return false;
     }
@@ -2141,10 +2068,8 @@ static void save_burst(Executor *ex, Applied *applied, size_t count) {
         if (applied[i].status == PURE_OK) applied[i].status = saved;
 }
 
-/* Run a round's requests in bursts. A burst ends before a document's key
- * repeats or before its documents would outgrow one save, so every request
- * is stored by its burst's save or fails with it; views and events of the
- * app's states join any burst. Each group of answers goes to finish.
+/* Run a round's requests in a burst: every request is stored by its save or
+ * fails with it. Each group of answers goes to finish.
  *
  * The owner takes a round's reads first and answers them at once: a
  * round's requests come from different connections (each has one request
@@ -2167,20 +2092,9 @@ static void execute(Executor *ex, const Job *jobs, size_t count, void (*finish)(
     for (size_t i = 0; ex->reads_first && i < count; ++i)
         if (jobs[i].effect.input == PURE_INPUT_READ) apply_effect(ex, &jobs[i], &applied[reads++]);
     if (reads) finish(context, applied, reads);
-    size_t n = reads, start = reads, keys = 0;
-    for (size_t i = 0; i < count; ++i) {
-        if (ex->reads_first && jobs[i].effect.input == PURE_INPUT_READ) continue;
-        /* A document joins a burst once (its revision moves once a save). */
-        bool document = jobs[i].route.kind == ROUTE_OBJECT;
-        if (document && (keys == PURE_APP_PENDING || pure_app_pending(&ex->app, jobs[i].effect.key))) {
-            save_burst(ex, applied + start, n - start);
-            finish(context, applied + start, n - start);
-            start = n;
-            keys = 0;
-        }
-        apply_effect(ex, &jobs[i], &applied[n++]);
-        keys += document;
-    }
+    size_t n = reads, start = reads;
+    for (size_t i = 0; i < count; ++i)
+        if (!ex->reads_first || jobs[i].effect.input != PURE_INPUT_READ) apply_effect(ex, &jobs[i], &applied[n++]);
     save_burst(ex, applied + start, n - start);
     finish(context, applied + start, n - start);
     if (pinned) pure_store_pin(ex->store, false);
@@ -2218,20 +2132,19 @@ static long run_timers(Executor *ex) {
  * its connection still waits for it. */
 static void answer_applied(Host *host, Applied *a) {
     if (!pure_runtime_complete(a->ticket, a->status, a->input == PURE_INPUT_READ ? &a->resource : NULL,
-                               a->status == PURE_OK ? a->reply : (PureSpan){0}, a->revision)) abort();
+                               a->status == PURE_OK ? a->reply : (PureSpan){0}, 0)) abort();
     Connection *c = host->by_slot[a->ticket.slot];
     if (c && c->phase == WAITING && c->ticket.generation == a->ticket.generation) {
         PureOutcome result;
         if (!pure_runtime_result(a->ticket, &result)) abort();
         /* A lent answer's body is its extents (the runtime charged them). */
         if (result.status == PURE_OK && a->extents)
-            respond_typed(c, 200, "OK", "none", result.revision, a->type ? a->type : "application/octet-stream",
+            respond_typed(c, 200, "OK", "none", a->type ? a->type : "application/octet-stream",
                           a->extents, a->extent_count, result.body.size);
         else if (a->refused) {
-            respond(c, 503, "Service Unavailable", a->refused, 0, (PureSpan){0});
+            respond(c, 503, "Service Unavailable", a->refused, (PureSpan){0});
             release_ticket(c);
-        } else if (a->route != ROUTE_OBJECT) answer_app(c, result, a->route == ROUTE_VIEW, a->fault, a->type);
-        else answer(c, result);
+        } else answer_app(c, result, a->route == ROUTE_VIEW, a->fault, a->type);
         drive(c); /* most answers fit the socket buffer at once */
     }
     free(a->extents);
@@ -2812,11 +2725,9 @@ static void let_go_query(Held *held) {
 }
 
 /* Whether a's states are laid out as b's: names, kinds, what each refers to,
- * keys, and the records and document collections behind them. */
+ * keys, and the records behind them. */
 static bool same_states(const PureModule *a, const PureModule *b) {
-    if (a->states != b->states || a->records != b->records || a->record_fields != b->record_fields ||
-        a->collections != b->collections)
-        return false;
+    if (a->states != b->states || a->records != b->records || a->record_fields != b->record_fields) return false;
     for (uint32_t i = 0; i < a->states; ++i)
         if (strcmp(a->state_names[i], b->state_names[i]) || a->state_type[i] != b->state_type[i] ||
             a->state_ref[i] != b->state_ref[i] || a->state_flags[i] != b->state_flags[i] || a->state_key[i] != b->state_key[i])
@@ -2828,8 +2739,6 @@ static bool same_states(const PureModule *a, const PureModule *b) {
     for (uint32_t i = 0; i < a->record_fields; ++i)
         if (strcmp(a->record_field_names[i], b->record_field_names[i]) || a->record_field_type[i] != b->record_field_type[i])
             return false;
-    for (uint32_t i = 0; i < a->collections; ++i)
-        if (strcmp(a->collection_names[i], b->collection_names[i])) return false;
     return true;
 }
 
@@ -2919,7 +2828,7 @@ static void serve_bursts(Host *host) {
         while (pure_runtime_take(&host->runtime, &effect) == PURE_TAKE_EFFECT)
             host->jobs[count++] = (Job){host, effect, host->routes[effect.ticket.slot], NULL, NULL};
         if (!count) return;
-        if (!apps[0].owned) { /* the one app of the host, of documents alone: run here */
+        if (!apps[0].owned) { /* the one app of the host, without states or outputs: run here */
             execute(&host->local, host->jobs, count, answer_burst, NULL);
             continue;
         }
@@ -3321,12 +3230,10 @@ static bool replies_borrow(const PureModule *m, uint32_t input) {
 
 /* ---- Main ------------------------------------------------------------- */
 
-/* A module from its file for an app, which serves documents when it keeps
- * a keyed collection; false, with why, when it does not load or cannot be
- * served. The module the app had is kept (see retired_modules). */
+/* A module from its file for an app; false, with why, when it does not load
+ * or cannot be served. The module the app had is kept (see retired_modules). */
 static bool load_module(App *app, const char *path) {
     PureModule *m = calloc(1, sizeof(*m));
-    bool documents;
     char error[160];
     if (!m) {
         snprintf(app->why, sizeof(app->why), "Module: out of memory");
@@ -3337,17 +3244,9 @@ static bool load_module(App *app, const char *path) {
         free(m);
         return false;
     }
-    /* Documents are served when the module keeps a keyed collection: its keyed
-     * messages show and edit read and write one by key. Without one, inputs
-     * named show and edit are messages as any other. */
-    int show = pure_module_input(m, "show"), edit = pure_module_input(m, "edit");
-    documents = m->collections > 0;
-    bool served = !documents || (show >= 0 && edit >= 0 && m->input[show].kind == PURE_KIND_MESSAGE && m->input[show].keyed &&
-                                 m->input[edit].kind == PURE_KIND_MESSAGE && m->input[edit].keyed);
-    if (!served) snprintf(app->why, sizeof(app->why), "Module: documents need keyed messages named show and edit");
+    bool served = true;
     for (uint32_t i = 0; served && i < m->inputs; ++i) {
-        bool replied = (documents && i == (uint32_t)edit) || (m->input[i].kind == PURE_KIND_MESSAGE && !m->input[i].keyed);
-        if (replied && !replies_borrow(m, i)) {
+        if (m->input[i].kind == PURE_KIND_MESSAGE && !replies_borrow(m, i)) {
             snprintf(app->why, sizeof(app->why), "Module: %s may reply only a field of its message", m->input_names[i]);
             served = false;
         }
@@ -3367,9 +3266,6 @@ static bool load_module(App *app, const char *path) {
         retired_modules = kept;
     }
     app->module = m;
-    app->documents = documents;
-    app->show = (uint32_t)(show >= 0 ? show : 0);
-    app->edit = (uint32_t)(edit >= 0 ? edit : 0);
     return true;
 }
 
@@ -3490,8 +3386,6 @@ static void take_moved(Host *host) {
  * when the store does not open or the module does not start on it. */
 static bool start_executor(Executor *ex, App *app) {
     ex->module = app->module;
-    ex->show = app->show;
-    ex->edit = app->edit;
     if (pure_store_open(app->store, &ex->store) != PURE_OK) {
         snprintf(app->why, sizeof(app->why), "Cannot open the store");
         return false;
@@ -3702,8 +3596,7 @@ static void stop_shard(Host *host) {
     free(host->moved);
 }
 
-/* The input a link's stream goes to: one taking messages (not keyed) of the
- * sender's shape, or, named its fields, one that takes them by name
+/* The input a link's stream goes to: one taking messages of the sender's shape, or, named its fields, one that takes them by name
  * (pure_module_takes: each record is laid out anew for it). */
 /* In a host of apps the name is APP/INPUT. What it finds is a binding: the
  * app's place, the module it runs and the input in it, the listener
@@ -3725,7 +3618,7 @@ static int link_input(void *context, const char *name, uint32_t shape, const uns
     }
     const PureModule *m = atomic_load_explicit(&apps[a].live, memory_order_acquire);
     int index = m ? pure_module_input(m, name) : -1;
-    if (index < 0 || m->input[index].kind != PURE_KIND_MESSAGE || m->input[index].keyed) return -PURE_LINK_NO_INPUT;
+    if (index < 0 || m->input[index].kind != PURE_KIND_MESSAGE) return -PURE_LINK_NO_INPUT;
     if (pure_module_shape(m, (uint32_t)index) != shape && !fields) return -PURE_LINK_OTHER_SHAPE;
     if (pure_module_shape(m, (uint32_t)index) != shape && !pure_module_takes(m, (uint32_t)index, fields, size))
         return -PURE_LINK_FIELDS_LACKED;
@@ -4527,7 +4420,6 @@ static bool change_app(App *app) {
         return false;
     }
     ex->module = app->module;
-    ex->show = app->show, ex->edit = app->edit;
     memset(ex->next, 0, sizeof(ex->next));
     memset(ex->trimmed, 0, sizeof(ex->trimmed));
     memset(ex->held, 0, sizeof(ex->held));

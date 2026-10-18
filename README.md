@@ -40,7 +40,7 @@ The source follows the principle below, a small core with the rest selected arou
 | `store/` | the tree store: one file, a commit is one contiguous write and one sync (formats `PURETRE3`, `PUREREC1`) | in `libpure.a` |
 | `link/` | links without connections, the default between Pure nodes: saved sends over UDP, sealed with the two nodes' keys, no handshake ([011](docs/design/011-pure-transport.md), specified in [012](docs/design/012-link-protocol.md)); the crypto they and sealed sends use, OpenSSL's part apart, mapped only by a process that uses one | `build/libpure-link.a`, `build/pure-crypto.so` |
 | `serve/` | `pure-serve`: the HTTP host, outbound delivery, JSON read in place, surfaces for people run in the node ([010](docs/design/010-surfaces.md)) | `build/pure-serve` |
-| `cli/` | command-line hosts | `build/pure-run`, `build/pure-edit-module` |
+| `cli/` | the command-line test host | `build/pure-run` |
 | `prototypes/` | the earlier document runtime (000-077), built against `core/` and `store/` | `make -C prototypes/connections` |
 | `tests/` | the hosts checked end to end, with apps built by aup (the sibling checkout) | `make check` |
 

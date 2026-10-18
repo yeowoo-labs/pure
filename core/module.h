@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Pure module format v6 (docs/design/008-module-format.md). A toolchain such
+/* Pure module format v7 (docs/design/008-module-format.md). A toolchain such
  * as aup produces it; Pure verifies it completely before anything executes:
  * operand types (including which text a cursor and which list an index
  * belongs to), stack heights and the stack at every join, forward-only
@@ -16,10 +16,10 @@
 enum {
     PURE_MODULE_STATES = 32, PURE_MODULE_INPUTS = 32, PURE_MODULE_VIEWS = 64,
     PURE_MODULE_HANDLERS = 64, PURE_MODULE_CODE = 65535, PURE_MODULE_STACK = 64,
-    PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 40,
-    PURE_MODULE_FIELDS = 64, PURE_MODULE_COLLECTIONS = 1, PURE_MODULE_CONSTANTS = 4096,
+    PURE_MODULE_NAME = 32, PURE_MODULE_STRINGS = 32768, PURE_MODULE_HEADER = 38,
+    PURE_MODULE_FIELDS = 64, PURE_MODULE_CONSTANTS = 4096,
     PURE_MODULE_CONSTANT_BYTES = 1 << 20, PURE_MODULE_RECORDS = 16, PURE_MODULE_RECORD_FIELDS = 128,
-    PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8, PURE_APP_PENDING = 256
+    PURE_RECORD_FIELDS = 16, PURE_MODULE_JOINS = 8
 };
 
 typedef enum {
@@ -27,7 +27,7 @@ typedef enum {
     PURE_OP_DIV, PURE_OP_NEG, PURE_OP_LT, PURE_OP_LE, PURE_OP_GT, PURE_OP_GE,
     PURE_OP_EQ, PURE_OP_NE, PURE_OP_AND, PURE_OP_OR, PURE_OP_NOT, PURE_OP_MIN,
     PURE_OP_MAX, PURE_OP_CLAMP, PURE_OP_STORE, PURE_OP_JZ, PURE_OP_JMP,
-    PURE_OP_FIELD, PURE_OP_DOC, PURE_OP_DOC_SIZE, PURE_OP_LEN, PURE_OP_REPLACE,
+    PURE_OP_FIELD, PURE_OP_LEN,
     PURE_OP_REPLY, PURE_OP_REQUIRE,
     PURE_OP_TEXT_CONST, PURE_OP_TEXT_LOAD, PURE_OP_TEXT_INPUT, PURE_OP_NUM_TEXT,
     PURE_OP_CONCAT, PURE_OP_CHARS, PURE_OP_LINES, PURE_OP_TEXT_BYTES,
@@ -126,8 +126,8 @@ enum { PURE_FORMAT_WIDTH = 8, PURE_FORMAT_ZEROS = 1 << 16, PURE_FORMAT_FORM = 17
  * locals (0 as it begins), and its own of what the function's code names:
  * values held by name (empty), an event's lists (empty) and registers (bound
  * to none); the caller's are as they were when the call returns. A function
- * runs as a handler's code does but for a message (no field, document or
- * reply); a handler and the functions run CALL (not a view), and a walk around
+ * runs as a handler's code does but for a message (no field or reply); a
+ * handler and the functions run CALL (not a view), and a walk around
  * a call keeps to what the callee changes as it keeps to its own block's
  * changes. Calls nest as deep as the event's room allows: each counts its
  * frame's bytes there (MEMORY past it) and its block's length as work.
@@ -308,7 +308,6 @@ typedef struct {
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint16_t rows; uint32_t offset; } PureField;
 typedef struct {
     uint8_t kind;
-    bool keyed;
     uint16_t field_start, field_count;
     uint32_t prefix; /* fixed payload bytes before the variable fields */
     uint32_t period; /* a timer's, in milliseconds */
@@ -339,12 +338,11 @@ typedef struct { uint8_t lower_relation, upper_relation; PureBlock lower, upper;
 _Static_assert(PURE_MODULE_STATES <= 32, "a state is a bit of PureApp.counted");
 
 typedef struct {
-    uint16_t states, inputs, views, handlers, fields, collections, constants, records, record_fields;
+    uint16_t states, inputs, views, handlers, fields, constants, records, record_fields;
     uint32_t code_count;
     char state_names[PURE_MODULE_STATES][PURE_MODULE_NAME];
     char input_names[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
     char view_names[PURE_MODULE_VIEWS][PURE_MODULE_NAME];
-    char collection_names[PURE_MODULE_COLLECTIONS][PURE_MODULE_NAME];
     char input_keys[PURE_MODULE_INPUTS][PURE_MODULE_NAME];
     uint8_t state_type[PURE_MODULE_STATES];
     uint16_t state_ref[PURE_MODULE_STATES]; /* text: constant; cursor: text; list: record; index: list */
@@ -449,27 +447,13 @@ int pure_module_position(const PureModule *, uint32_t view);
  * state), or -1: a host may lend its stored extents instead of copying. */
 int pure_module_text_state(const PureModule *, uint32_t view);
 
-/* Keyed collections live in a data host (for example the tree store). One
- * event opens at most one document, the message's key, at its current
- * version; edits stay in that working version until the event commits it.
- * A version's bytes field is the value's size. */
+/* A data host keeps the app's states (for example the tree store); without one (all of it NULL) they live in memory
+ * alone. state opens a runtime-owned value by name as a draft (a missing one is empty at revision 0); save publishes
+ * the given drafts together, all or nothing. */
 typedef struct {
     void *context;
-    PureResult (*open)(void *context, uint32_t collection, const char *key,
-                       void **document, int64_t *revision);
-    PureVersion (*version)(void *context, void *document);
-    PureResult (*read)(void *context, void *document, PureVersion, size_t offset, size_t length,
-                       bool (*visit)(void *, PureSpan), void *visit_context);
-    PureResult (*splice)(void *context, void *document, size_t offset, size_t remove, PureSpan insert);
-    PureResult (*commit)(void *context, void *document, int64_t *revision);
-    void (*close)(void *context, void *document);
-    /* Optional: the host keeps the app's states. state opens a runtime-owned
-     * value by name as a draft (a missing one is empty at revision 0); save
-     * publishes the given documents and state drafts together, all or
-     * nothing, and names each document's new revision. */
     PureResult (*state)(void *context, const char *name, PureDraft **out);
-    PureResult (*save)(void *context, void *const *documents, size_t document_count, PureDraft *const *states,
-                       size_t count, int64_t *revisions);
+    PureResult (*save)(void *context, PureDraft *const *states, size_t count);
     /* Optional, with state and save: the directory where the app's lists are
      * kept, their images and the log of their changes (core/log.h); without
      * one, list states are not stored. */
@@ -477,7 +461,7 @@ typedef struct {
 } PureData;
 
 /* A byte or text value inside one event or view: a range of the payload, a
- * document or text version, a module constant, a copy or the event's arena. */
+ * text version, a module constant, a copy or the event's arena. */
 typedef struct { uint8_t source; uint16_t owner; PureVersion version; uint64_t offset, length; } PureBytes;
 typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
 
@@ -487,13 +471,11 @@ typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
  * (or 0 in an empty list). Every event is atomic: on failure nothing changes.
  *
  * Saving. When the data host keeps states the app starts from the stored
- * ones. A save publishes, in one commit, the documents edited by messages and
- * the states changed since the last save; if it fails, every event since the
- * last save is undone. By default each key, text and message event saves
- * before it returns (a frame waits for the next one). Deferred, events apply
- * at once and a host saves a burst with one commit: an event is durable once
- * a later save succeeds, and each key's document joins a burst once (a second
- * message for it, or one past PURE_APP_PENDING keys, saves the burst first). */
+ * ones. A save publishes, in one commit, the states changed since the last
+ * save; if it fails, every event since the last save is undone. By default
+ * each key, text and message event saves before it returns (a frame waits for
+ * the next one). Deferred, events apply at once and a host saves a burst with
+ * one commit: an event is durable once a later save succeeds. */
 /* The runtime's lists' places among the stored lists' records (PureApp):
  * the numbers heard, and the outbox. */
 enum { PURE_LIST_HEARD = PURE_MODULE_STATES, PURE_LIST_OUTBOX, PURE_LISTS_STORED };
@@ -521,20 +503,12 @@ typedef struct {
     bool uncertain; /* a save may or may not be stored: none follows until a start */
     PureDraft *stored_values;                   /* numbers, cursors and indices, when kept */
     PureVersion saved[PURE_MODULE_STATES];      /* text and list versions at the last save */
-    /* Events since the last save: what a failed save returns to, and the
-     * documents messages opened (held until the save). */
+    /* Events since the last save: what a failed save returns to. */
     bool deferred, open;
     PureValue durable_values[PURE_MODULE_STATES];
     PureVersion durable_texts[PURE_MODULE_STATES];
     size_t durable_lists[PURE_MODULE_STATES]; /* each stored list's journal length */
     uint64_t durable_ticks, durable_events;
-    struct PurePending { void *document; char key[65]; bool edited; } *pending; /* grows to PURE_APP_PENDING */
-    unsigned pending_count, pending_capacity;
-    /* The pending documents by key, so a message finds its key in one look:
-     * open addressing over the key's hash, a slot holding one more than the
-     * document's place in pending (0: none). */
-    uint16_t pending_index[2 * PURE_APP_PENDING];
-    bool document_pending; /* the current event's document is among them */
     PureFault fault;
     uint32_t fault_pc;
     size_t memory; /* the budget of what the states hold (0: none): pure_app_memory */
@@ -553,12 +527,10 @@ typedef struct {
     struct PureRows { uint32_t table; uint64_t changes, given; size_t *items, count, capacity; PureFault fault; } *rows; /* a filtered table's items */
     unsigned row_tables;
     /* Current message or text event, kept until pure_app_finish. */
-    void *document;
     PureSpan payload;
     bool has_reply;
     PureBytes reply;
     unsigned char *copied;
-    int64_t revision;
     PureArena arena, view_arena;
     /* Links (runtime-owned, saved with the states): the outbox, messages sent
      * on outputs and not trimmed, in the order sent, a list of {output (its
@@ -612,11 +584,8 @@ PureResult pure_app_start(PureApp *, const PureModule *, PureData data);
 /* Publish every change since the last save in one commit, or undo them all. */
 PureResult pure_app_save(PureApp *);
 /* Defer saving to pure_app_save (false: save after each event). Needs a data
- * host that saves documents together (PureData.save). */
+ * host that saves together (PureData.save). */
 bool pure_app_defer(PureApp *, bool deferred);
-/* Whether key's document is in the unsaved burst: a message for it would
- * save the burst first. */
-bool pure_app_pending(const PureApp *, const char *key);
 /* Leaves unsaved frame changes unsaved: call pure_app_save first to keep them. */
 void pure_app_stop(PureApp *);
 PureResult pure_app_frame(PureApp *);
@@ -629,18 +598,14 @@ PureResult pure_app_input(PureApp *, uint32_t input, PureEdge);
 PureResult pure_app_point(PureApp *, uint32_t state, size_t position);
 /* Deliver committed text (for example from an input method). Not UTF-8: invalid. */
 PureResult pure_app_text(PureApp *, uint32_t input, PureSpan text);
-/* Deliver a message. base is the revision the sender edited, or -1 for none;
- * a handler that edits the document needs one. payload stays alive until
- * pure_app_finish. On return app->revision is the document's revision
- * (deferred: the revision the next save gives it). */
-PureResult pure_app_message(PureApp *, uint32_t input, const char *key, int64_t base, PureSpan payload);
+/* Deliver a message. payload stays alive until pure_app_finish. */
+PureResult pure_app_message(PureApp *, uint32_t input, PureSpan payload);
 /* The same, with the variable fields where the host found them: field f
  * starts at placed[2f] in payload and has placed[2f + 1] bytes (entries of
  * fixed fields are not read, nor are the variable fields' lengths in the
  * prefix). A host that parsed a request in place passes the fields' bytes
  * where they are. */
-PureResult pure_app_message_fields(PureApp *, uint32_t input, const char *key, int64_t base, PureSpan payload,
-                                   const uint32_t *placed);
+PureResult pure_app_message_fields(PureApp *, uint32_t input, PureSpan payload, const uint32_t *placed);
 /* Visit the reply of the last message in order, without copying, until the
  * next event (deferred: copy it before a later save too). */
 PureResult pure_app_reply(const PureApp *, bool (*visit)(void *, PureSpan), void *context);

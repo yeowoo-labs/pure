@@ -15,8 +15,8 @@
  * then its items (module-list.h). The log has an entry for each save that
  * changed lists: per list changed, {u8 name length, the name, u32le length,
  * the records of its changes (module-list.h) in its image's fields}. A save
- * with such an entry that also commits the tree (numbers, texts, links,
- * documents) stores its number there as the state "seq": the entry counts
+ * with such an entry that also commits the tree (numbers, texts, links)
+ * stores its number there as the state "seq": the entry counts
  * only when the tree holds its number (or a later one), so both are kept or
  * neither. A start
  * reads each list's image and makes again the changes logged after the save
@@ -1059,15 +1059,8 @@ static unsigned char *list_changes(const PureApp *app, size_t *size) {
     return payload;
 }
 
-PureResult pure_save_commit(PureApp *app, const PureValue *values, void *const *documents, size_t document_count,
-                            int64_t *revisions) {
-    if (!pure_save_enabled(app)) {
-        /* Without a host that saves together, a save has one document at most. */
-        PureResult result = PURE_OK;
-        for (size_t i = 0; i < document_count && result == PURE_OK; ++i)
-            result = app->data.commit(app->data.context, documents[i], &revisions[i]);
-        return result;
-    }
+PureResult pure_save_commit(PureApp *app, const PureValue *values) {
+    if (!pure_save_enabled(app)) return PURE_OK; /* the states live in memory alone */
     /* A save that may or may not have been stored: until the app starts again
      * from what the store has, no save follows it. */
     if (app->uncertain) return PURE_CONFLICT;
@@ -1125,7 +1118,7 @@ PureResult pure_save_commit(PureApp *app, const PureValue *values, void *const *
     size_t payload_size = 0;
     unsigned char *payload = result == PURE_OK ? list_changes(app, &payload_size) : NULL;
     if (payload_size && !payload) result = PURE_ALLOCATION;
-    bool tree = count || document_count;
+    bool tree = count;
     uint64_t seq = app->seq + 1;
     if (result == PURE_OK && tree && payload_size && app->log) {
         result = app->stored_seq ? PURE_OK : open_state(app, "", "seq", &app->stored_seq);
@@ -1146,7 +1139,7 @@ PureResult pure_save_commit(PureApp *app, const PureValue *values, void *const *
     }
     free(payload);
     if (result == PURE_OK && tree) {
-        result = app->data.save(app->data.context, documents, document_count, drafts, count, revisions);
+        result = app->data.save(app->data.context, drafts, count);
         /* A commit that may yet be stored leaves the app apart from its store,
          * whatever the save changed: no save follows until it starts again.
          * One that failed takes back the logged entry, which is on the device. */

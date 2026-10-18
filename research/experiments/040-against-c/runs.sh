@@ -27,7 +27,9 @@ build)
     git worktree add -f -q --detach "$builds/src-$2" "$3"
     make -s -C "$builds/src-$2" build/libpure.a
     mkdir -p "$builds/$2"
-    cc -O2 -g -std=c17 -I"$builds/src-$2/core" $here/suite-run.c "$builds/src-$2/build/libpure.a" -lm -o "$builds/$2/suite-run"
+    keyed=""
+    grep -q PURE_APP_PENDING "$builds/src-$2/core/module.h" && keyed=-DPURE_KEYED_MESSAGES # before 027's 4b
+    cc -O2 -g -std=c17 $keyed -I"$builds/src-$2/core" $here/suite-run.c "$builds/src-$2/build/libpure.a" -lm -o "$builds/$2/suite-run"
     git worktree remove --force "$builds/src-$2"
     for work in roots knapsack sort join words matmul; do ../aup/build/aup build $here/$work.aup -o "$builds/$2/$work.pmod"; done
     ../aup/build/aup build research/experiments/033-computing/graph.aup -o "$builds/$2/graph.pmod" ;;

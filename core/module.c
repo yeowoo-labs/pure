@@ -10,7 +10,7 @@
 #include <string.h>
 
 enum { FUNCTION_BYTES = 12, SIGNATURE_BYTES = 4 };
-enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 8,
+enum { STATE_BYTES = 16, INPUT_BYTES = 16, FIELD_BYTES = 8,
        CONSTANT_BYTES = 8, RECORD_BYTES = 8, RECORD_FIELD_BYTES = 16, VIEW_BYTES = 16,
        HANDLER_BYTES = 12, OP_BYTES = 16 };
 /* T_FIELD and T_ITEM stand for the type of the message or record field
@@ -19,25 +19,25 @@ enum { STATE_BYTES = 16, COLLECTION_BYTES = 12, INPUT_BYTES = 16, FIELD_BYTES = 
  * state named. */
 enum { T_NUM = 1, T_BYTES = 2, T_TEXT = 3, T_CURSOR = 4, T_FIELD = 5, T_INDEX = 6, T_ITEM = 7, T_KEY = 8, T_LOCAL = 9,
        T_BOOL = 10, T_STATE = 11, T_I64 = 12, T_LIST = 13 }; /* T_LIST: a list value, its owner the record of its items */
-enum { FROM_PAYLOAD, FROM_DOCUMENT, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUMENTS, FROM_HELD };
+enum { FROM_PAYLOAD, FROM_COPY, FROM_CONSTANT, FROM_TEXT, FROM_ARENA, FROM_ARGUMENTS, FROM_HELD };
 /* Where an opcode may appear. */
 /* IN_ARGUMENTS: fields read where nothing is done with them (a view's arguments, a message's fields in a fold). */
 /* IN_LOCALS: a handler's locals, read in its walks and the folds in them. */
 /* IN_COMPUTE: what a view's body may do too (018): loops, locals, and changes to an event's lists alone. */
 /* IN_FUNCTION: a function's code (027's 2c), a handler's but for a message. */
-enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_KEYED = 8, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64, IN_ARGUMENTS = 128,
+enum { IN_VIEW = 1, IN_HANDLER = 2, IN_MESSAGE = 4, IN_TEXT = 16, IN_ROW = 32, IN_OUTER = 64, IN_ARGUMENTS = 128,
        IN_LOCALS = 256, IN_COMPUTE = 512, IN_FUNCTION = 1024 };
 enum { READ = IN_VIEW | IN_HANDLER };
 /* What an argument names: nothing (it is 0), a state of one type (A_STATE +
- * the type), a list and one of its record's fields, a message field, the
- * collection, a constant, a unit, the column's row, a branch target, a stack
+ * the type), a list and one of its record's fields, a message field, a
+ * constant, a unit, the column's row, a branch target, a stack
  * depth, a fold, a relation, a keyed list, an output, the row of the column
  * a fold runs in, a number, bool or i64 state (A_VALUE), or the value's type
  * (A_TYPE: 0 a number, 1 a bool, 2 an i64), how I64_BITS computes (A_BITS),
  * what a position is (A_POSITION: 0 a number, 1 an i64), what CONCAT joins
  * (A_JOINED: 0 texts, 1 bytes), how NUM_TEXT writes (A_FORMAT) or the value
  * held by name (A_HELD), or a function (A_FUNCTION: CALL's, and RETURN's own). */
-enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_COLLECTION, A_CONSTANT, A_UNIT,
+enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_CONSTANT, A_UNIT,
        A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL, A_VALUE, A_TYPE,
        A_LOOP, A_BITS, A_POSITION, A_JOINED, A_FORMAT, A_HELD, A_FUNCTION };
 /* A fold's block is verified as a column that leaves one bool (count, first)
@@ -56,7 +56,7 @@ enum { FOLD_ONE = 100, FOLD_TWO, FOLD_I64, FILTER, WALK, STEPS, STEPS_WALK, FUNC
  * O_REF: the text or list of the argument's cursor or index state. O_LIST:
  * the list of an item argument. */
 enum { O_ANY, O_OPERAND, O_ARG, O_REF, O_LIST };
-static const unsigned char magic[8] = {'P','U','R','E','M','O','D','6'};
+static const unsigned char magic[8] = {'P','U','R','E','M','O','D','7'};
 
 /* Operand types popped (bottom to top), the type pushed, where allowed, what
  * the argument names and the text or list worked on. */
@@ -77,10 +77,7 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_JZ] = {1, {T_BOOL}, 0, READ, A_TARGET, O_ANY},
     [PURE_OP_JMP] = {0, {0}, 0, READ, A_TARGET, O_ANY},
     [PURE_OP_FIELD] = {0, {0}, T_FIELD, IN_MESSAGE | IN_ARGUMENTS, A_FIELD, O_ANY},
-    [PURE_OP_DOC] = {0, {0}, T_BYTES, IN_KEYED, A_COLLECTION, O_ANY},
-    [PURE_OP_DOC_SIZE] = {0, {0}, T_NUM, IN_KEYED, A_COLLECTION, O_ANY},
     [PURE_OP_LEN] = {1, {T_BYTES}, T_NUM, READ, A_NONE, O_ANY},
-    [PURE_OP_REPLACE] = {3, {T_NUM, T_NUM, T_BYTES}, 0, IN_KEYED, A_COLLECTION, O_ANY},
     [PURE_OP_REPLY] = {1, {T_BYTES}, 0, IN_MESSAGE, A_NONE, O_ANY},
     [PURE_OP_REQUIRE] = {1, {T_BOOL}, 0, IN_HANDLER, A_NONE, O_ANY},
     [PURE_OP_TEXT_CONST] = {0, {0}, T_TEXT, READ, A_CONSTANT, O_ANY},
@@ -309,18 +306,6 @@ PURE_COLD static bool key_name(const char *key) {
     return false;
 }
 
-/* A document key: 1..64 bytes of [A-Za-z0-9_-], as every Pure store accepts. */
-static bool document_key(const char *key) {
-    size_t length = key ? strlen(key) : 0;
-    if (!length || length > 64) return false;
-    for (size_t i = 0; i < length; ++i) {
-        char c = key[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-              c == '-' || c == '_')) return false;
-    }
-    return true;
-}
-
 /* Strings are [u8 length][bytes]; a name is 1..31 bytes: an ASCII identifier,
  * a path of identifiers joined by dots (a message field inside a group, as
  * user.name), or any printable ASCII (a key's name). */
@@ -438,7 +423,6 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_ITEM:
         return state_of(m, list_of(arg), PURE_STATE_LIST) && item_field(arg) < m->record[m->state_ref[list_of(arg)]].count;
     case A_FIELD: return arg < shape->field_count && m->field[shape->field_start + arg].type != PURE_FIELD_ROWS;
-    case A_COLLECTION: return arg < m->collections;
     case A_CONSTANT: return arg < m->constants;
     case A_UNIT: return arg <= PURE_UNIT_LINE;
     case A_ROW: return (int)arg == row;
@@ -519,7 +503,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
     unsigned where = steps ? IN_VIEW | IN_COMPUTE | (view == STEPS_WALK ? IN_ROW : 0)
                    : !handler ? IN_VIEW | (row >= 0 ? IN_ROW : 0) | (folding && outer >= 0 ? IN_OUTER : 0) | (body ? IN_COMPUTE : 0)
                               : IN_HANDLER | (view == WALK ? IN_ROW : 0);
-    if (shape && handler && !steps && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE | (shape->keyed ? IN_KEYED : 0);
+    if (shape && handler && !steps && shape->kind == PURE_KIND_MESSAGE) where |= IN_MESSAGE;
     if (shape && handler && !steps && shape->kind == PURE_KIND_TEXT) where |= IN_TEXT;
     if (shape && (!handler || steps) && (shape->kind == PURE_KIND_MESSAGE || shape->kind == PURE_KIND_ARGUMENTS))
         where |= IN_ARGUMENTS;
@@ -568,7 +552,6 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             if (view == FILTER) REFUSE("filter with an effect");
             if (folding) REFUSE("fold with an effect");
             if (!handler || steps) REFUSE("view with an effect");
-            if (allowed & IN_KEYED) REFUSE("document operation outside a keyed message handler");
             if (allowed & IN_TEXT) REFUSE("text input outside a text handler");
             REFUSE("message operation outside a message handler");
         }
@@ -1602,7 +1585,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     if (error_size) error[0] = 0;
     pure_module_release(out);
     memset(out, 0, sizeof(*out));
-    if (!p || size < PURE_MODULE_HEADER || memcmp(p, magic, sizeof(magic))) REFUSE("not a Pure module v6", 0);
+    if (!p || size < PURE_MODULE_HEADER || memcmp(p, magic, sizeof(magic))) REFUSE("not a Pure module v7", 0);
     out->states = (uint16_t)read16(p + 8);
     out->inputs = (uint16_t)read16(p + 10);
     out->views = (uint16_t)read16(p + 12);
@@ -1610,24 +1593,21 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     out->code_count = read32(p + 16);
     uint32_t strings = read32(p + 20);
     out->fields = (uint16_t)read16(p + 24);
-    out->collections = (uint16_t)read16(p + 26);
-    out->constants = (uint16_t)read16(p + 28);
-    out->records = (uint16_t)read16(p + 30);
-    uint32_t constant_bytes = read32(p + 32);
-    out->record_fields = (uint16_t)read16(p + 36);
-    out->functions = (uint16_t)read16(p + 38);
+    out->constants = (uint16_t)read16(p + 26);
+    out->records = (uint16_t)read16(p + 28);
+    uint32_t constant_bytes = read32(p + 30);
+    out->record_fields = (uint16_t)read16(p + 34);
+    out->functions = (uint16_t)read16(p + 36);
     if (out->states > PURE_MODULE_STATES || out->inputs > PURE_MODULE_INPUTS ||
         out->views > PURE_MODULE_VIEWS || out->handlers > PURE_MODULE_HANDLERS ||
         out->code_count > PURE_MODULE_CODE || strings > PURE_MODULE_STRINGS ||
-        out->fields > PURE_MODULE_FIELDS || out->collections > PURE_MODULE_COLLECTIONS ||
-        out->constants > PURE_MODULE_CONSTANTS || constant_bytes > PURE_MODULE_CONSTANT_BYTES ||
+        out->fields > PURE_MODULE_FIELDS || out->constants > PURE_MODULE_CONSTANTS || constant_bytes > PURE_MODULE_CONSTANT_BYTES ||
         out->records > PURE_MODULE_RECORDS || out->record_fields > PURE_MODULE_RECORD_FIELDS ||
         out->functions > PURE_MODULE_FUNCTIONS) {
         result = PURE_LIMIT;
         REFUSE("module exceeds a limit", 8);
     }
-    size_t functions_at = PURE_MODULE_HEADER + (size_t)out->states * STATE_BYTES +
-        (size_t)out->collections * COLLECTION_BYTES + (size_t)out->inputs * INPUT_BYTES +
+    size_t functions_at = PURE_MODULE_HEADER + (size_t)out->states * STATE_BYTES + (size_t)out->inputs * INPUT_BYTES +
         (size_t)out->fields * FIELD_BYTES + (size_t)out->constants * CONSTANT_BYTES +
         (size_t)out->records * RECORD_BYTES + (size_t)out->record_fields * RECORD_FIELD_BYTES +
         (size_t)out->views * VIEW_BYTES + (size_t)out->handlers * HANDLER_BYTES;
@@ -1695,24 +1675,19 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             out->state_key[i] = (uint8_t)key;
         }
     }
-    for (uint32_t i = 0; i < out->collections; ++i, at += COLLECTION_BYTES) {
-        if (!name_at(text, strings, read32(at), NAME_IDENTIFIER, out->collection_names[i])) REFUSE("collection name", i);
-        if (read32(at + 4) != 1 || read32(at + 8) != 1) REFUSE("collection must hold bytes by key", i);
-    }
     uint32_t next_field = 0;
     const unsigned char *fields = at + (size_t)out->inputs * INPUT_BYTES;
     for (uint32_t i = 0; i < out->inputs; ++i, at += INPUT_BYTES) {
         PureInputShape *shape = &out->input[i];
         shape->kind = at[4];
-        shape->keyed = at[5];
         shape->field_start = (uint16_t)read16(at + 12);
         shape->field_count = (uint16_t)read16(at + 14);
         /* Arguments bear their view's name (view.args); other inputs are identifiers. */
         if (!name_at(text, strings, read32(at), shape->kind == PURE_KIND_ARGUMENTS ? NAME_PATH : NAME_IDENTIFIER,
                      out->input_names[i])) REFUSE("input name", i);
-        if (read16(at + 6) || at[5] > 1) REFUSE("input flags", i);
+        if (read16(at + 6) || at[5]) REFUSE("input flags", i);
         if (shape->kind == PURE_KIND_KEY) {
-            if (shape->keyed || shape->field_start || shape->field_count ||
+            if (shape->field_start || shape->field_count ||
                 !name_at(text, strings, read32(at + 8), NAME_PRINTABLE, out->input_keys[i]) ||
                 !key_name(out->input_keys[i])) REFUSE("input key", i);
             for (uint32_t k = 0; k < i; ++k)
@@ -1721,19 +1696,18 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             continue;
         }
         if (shape->kind == PURE_KIND_TEXT) {
-            if (shape->keyed || shape->field_start || shape->field_count || read32(at + 8))
-                REFUSE("text input shape", i);
+            if (shape->field_start || shape->field_count || read32(at + 8)) REFUSE("text input shape", i);
             continue;
         }
         if (shape->kind == PURE_KIND_TIMER) {
             shape->period = read32(at + 8);
-            if (shape->keyed || shape->field_start || shape->field_count || !shape->period ||
+            if (shape->field_start || shape->field_count || !shape->period ||
                 shape->period > PURE_TIMER_LONGEST) REFUSE("timer input", i);
             continue;
         }
         bool arguments = shape->kind == PURE_KIND_ARGUMENTS;
         if ((shape->kind != PURE_KIND_MESSAGE && shape->kind != PURE_KIND_OUTPUT && !arguments) || (!arguments && read32(at + 8)) ||
-            ((shape->kind == PURE_KIND_OUTPUT || arguments) && shape->keyed) || shape->field_start != next_field ||
+            shape->field_start != next_field ||
             shape->field_count > out->fields - next_field) REFUSE("message shape", i);
         shape->view = arguments ? read32(at + 8) : 0;
         for (uint32_t f = 0; f < shape->field_count; ++f) {
@@ -1892,13 +1866,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if (at[1] || at[2] || at[3]) REFUSE("instruction padding", i);
         out->code[i] = (PureOp){.op = at[0], .arg = read32(at + 4), .value = read_double(at + 8)};
     }
-    /* States, records, collections, inputs and views share one namespace. */
-    const char *names[PURE_MODULE_STATES + PURE_MODULE_RECORDS + PURE_MODULE_COLLECTIONS +
-                      PURE_MODULE_INPUTS + PURE_MODULE_VIEWS];
+    /* States, records, inputs and views share one namespace. */
+    const char *names[PURE_MODULE_STATES + PURE_MODULE_RECORDS + PURE_MODULE_INPUTS + PURE_MODULE_VIEWS];
     size_t count = 0;
     for (uint32_t i = 0; i < out->states; ++i) names[count++] = out->state_names[i];
     for (uint32_t i = 0; i < out->records; ++i) names[count++] = out->record_names[i];
-    for (uint32_t i = 0; i < out->collections; ++i) names[count++] = out->collection_names[i];
     for (uint32_t i = 0; i < out->inputs; ++i) names[count++] = out->input_names[i];
     for (uint32_t i = 0; i < out->views; ++i) if (!out->view_table[i]) names[count++] = out->view_names[i];
     for (size_t i = 0; i < count; ++i)
@@ -1954,6 +1926,20 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event, true, 0, 0, -1, &bad))) goto refused;
         if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
     }
+    /* An instruction in no handler's, view's or function's block never runs and was never verified: it becomes CONST 0,
+     * so the passes below, which read every instruction's arguments, read only what was verified. */
+    unsigned char *held = calloc(out->code_count + 1, 1);
+    if (!held) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
+    for (uint32_t i = 0; i < out->handlers; ++i) memset(held + out->handler[i].code.start, 1, out->handler[i].code.length);
+    for (uint32_t i = 0; i < out->functions; ++i) memset(held + out->function[i].code.start, 1, out->function[i].code.length);
+    for (uint32_t i = 0; i < out->views; ++i)
+        if (out->view_code[i].length) memset(held + out->view_code[i].start, 1, out->view_code[i].length);
+    for (uint32_t pc = 0; pc < out->code_count; ++pc)
+        if (!held[pc]) out->code[pc] = (PureOp){.op = PURE_OP_CONST};
+    free(held);
     for (uint32_t i = 0; i < out->views; ++i) {
         int given = (int)out->view_arguments[i] - 1;
         plan_folds(out, out->view_code[i], given);
@@ -2264,12 +2250,9 @@ static PureResult visit_value(const PureApp *app, const PureArena *arena, PureBy
     case FROM_CONSTANT: direct = app->module->constant_data + v.offset; break;
     case FROM_ARENA: direct = arena->bytes + v.offset; break;
     case FROM_HELD: direct = app->held[v.owner].data + v.offset; break;
-    case FROM_TEXT:
+    default: /* FROM_TEXT */
         return pure_draft_read_version(app->texts[v.owner], v.version, (size_t)v.offset, (size_t)v.length,
                                        visit, context);
-    default:
-        return app->data.read(app->data.context, app->document, v.version, (size_t)v.offset,
-                              (size_t)v.length, visit, context);
     }
     visit(context, (PureSpan){direct, (size_t)v.length});
     return PURE_OK;
@@ -3719,31 +3702,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
                                              ev->spans[arg][1]};
         NEXT;
     }
-    case PURE_OP_DOC: case PURE_OP_DOC_SIZE: {
-        if (op->op == PURE_OP_DOC && !ev->exists) { kind = PURE_FAULT_NOT_FOUND; FAILED; }
-        PureVersion version = app->data.version(app->data.context, app->document);
-        if (op->op == PURE_OP_DOC) stack[sp++].bytes = (PureBytes){FROM_DOCUMENT, 0, version, 0, version.bytes};
-        else stack[sp++].num = (double)version.bytes;
-        NEXT;
-    }
     case PURE_OP_LEN: case PURE_OP_TEXT_BYTES: top->num = (double)top->bytes.length; NEXT;
-    case PURE_OP_REPLACE: {
-        PureBytes insert = stack[--sp].bytes;
-        double last = stack[--sp].num, first = stack[--sp].num;
-        double size = (double)app->data.version(app->data.context, app->document).bytes;
-        if (first != floor(first) || last != floor(last) || first < 0 || last < first || last > size) {
-            kind = PURE_FAULT_LIMIT;
-            FAILED;
-        }
-        PureSpan span;
-        size_t mark = arena->used;
-        if ((status = contiguous(app, arena, insert, &span)) == PURE_OK)
-            status = app->data.splice(app->data.context, app->document, (size_t)first, (size_t)(last - first), span);
-        arena->used = mark;
-        if (status != PURE_OK) REFUSED;
-        ev->modified = ev->exists = true;
-        NEXT;
-    }
     /* A reply outlives the arena mark of later statements: keep it by value. */
     case PURE_OP_REPLY: { /* by value; a value held by name may change after it, so its bytes go to the arena */
         PureBytes reply = stack[--sp].bytes;
@@ -4773,25 +4732,8 @@ PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record, bool k
     return pure_list_new(r->count, kinds);
 }
 
-/* Where key is in the pending index: its slot, or the empty one it would take. */
-static unsigned pending_slot(const PureApp *app, const char *key) {
-    uint32_t hash = 2166136261u; /* FNV-1a */
-    for (const char *c = key; *c; ++c) hash = (hash ^ (unsigned char)*c) * 16777619u;
-    unsigned mask = 2 * PURE_APP_PENDING - 1, slot = hash & mask;
-    while (app->pending_index[slot] && strcmp(app->pending[app->pending_index[slot] - 1].key, key)) slot = (slot + 1) & mask;
-    return slot;
-}
-
-bool pure_app_pending(const PureApp *app, const char *key) {
-    return app->pending_count && app->pending_index[pending_slot(app, key)];
-}
-
 void pure_app_finish(PureApp *app) {
-    /* A document in the unsaved burst stays open until the save. */
-    if (app->document && !app->document_pending) app->data.close(app->data.context, app->document);
-    app->document_pending = false;
     free(app->copied);
-    app->document = NULL;
     app->copied = NULL;
     app->has_reply = false;
     app->payload = (PureSpan){0};
@@ -4820,14 +4762,8 @@ static void open_burst(PureApp *app) {
     app->open = true;
 }
 
-/* End a burst, keeping it (saved) or undoing all of it. The documents it held
- * close, except the current event's, which pure_app_finish closes. */
+/* End a burst, keeping it (saved) or undoing all of it. */
 static void close_burst(PureApp *app, bool keep) {
-    for (unsigned i = 0; i < app->pending_count; ++i)
-        if (app->pending[i].document != app->document) app->data.close(app->data.context, app->pending[i].document);
-    if (app->pending_count) memset(app->pending_index, 0, sizeof(app->pending_index));
-    app->pending_count = 0;
-    app->document_pending = false;
     if (!app->open) return;
     const PureModule *m = app->module;
     for (uint32_t i = 0; i < m->states; ++i) {
@@ -4866,12 +4802,7 @@ static void settle_links(PureApp *app, bool saved) {
 }
 
 PureResult pure_app_save(PureApp *app) {
-    void *documents[PURE_APP_PENDING];
-    int64_t revisions[PURE_APP_PENDING];
-    size_t count = 0;
-    for (unsigned i = 0; i < app->pending_count; ++i)
-        if (app->pending[i].edited) documents[count++] = app->pending[i].document;
-    PureResult result = pure_save_commit(app, app->values, documents, count, revisions);
+    PureResult result = pure_save_commit(app, app->values);
     settle_links(app, result == PURE_OK);
     close_burst(app, result == PURE_OK);
     /* Images due are written now, unless the host writes them on another thread. */
@@ -4988,7 +4919,6 @@ void pure_app_stop(PureApp *app) {
     pure_draft_close(app->stored_seq);
     pure_save_close_start(app);
     pure_log_close(app->log);
-    free(app->pending);
     pure_undo_free(&app->undo);
     for (unsigned i = 0; i < app->row_tables; ++i) free(app->rows[i].items);
     free(app->rows);
@@ -5105,8 +5035,7 @@ size_t pure_app_state_bytes(const PureApp *app) {
 /* One event: every handler for it runs in module order against pending
  * states, all or nothing. A key, text or message event saves before it
  * returns unless saving is deferred; a frame leaves that to the next event
- * (frames come 60 times a second). A message's document joins the burst.
- * With a memory budget, an event that leaves the states over it, and
+ * (frames come 60 times a second). With a memory budget, an event that leaves the states over it, and
  * holding more than before, fails. */
 static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     const PureModule *m = app->module;
@@ -5131,13 +5060,8 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
         if (m->handler[i].event == event)
             result = charge(app, m->handler[i].code.length) ? run(m, pending, m->handler[i].code, ev, NULL)
                                                             : fault(app, PURE_FAULT_WORK, m->handler[i].code.start);
-    /* An edit needs the revision it was made against. A save rebases an
-     * edited document and releasing texts may reclaim earlier text versions:
-     * keep such a reply by copying it first. */
-    if (result == PURE_OK && ev->modified && ev->base < 0) result = PURE_INVALID;
-    if (result == PURE_OK && app->has_reply &&
-        ((app->reply.source == FROM_DOCUMENT && ev->modified) || app->reply.source == FROM_TEXT))
-        result = keep_reply(app);
+    /* Releasing texts may reclaim earlier text versions: keep a text's reply by copying it first. */
+    if (result == PURE_OK && app->has_reply && app->reply.source == FROM_TEXT) result = keep_reply(app);
     /* A delivery's number is heard with its changes, and an answer's sends go with it. */
     if (result == PURE_OK && app->delivering.pending) result = hear(app, app->delivering.source, app->delivering.seq);
     if (result == PURE_OK && app->delivering.pending && app->delivering.release)
@@ -5160,14 +5084,6 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     ++app->events;
     ++app->changes;
     if (!event) ++app->ticks;
-    if (app->document) {
-        app->pending_index[pending_slot(app, ev->key)] = (uint16_t)(app->pending_count + 1); /* not there: a key joins once */
-        app->pending[app->pending_count].document = app->document;
-        app->pending[app->pending_count].edited = ev->modified;
-        memcpy(app->pending[app->pending_count++].key, ev->key, strlen(ev->key) + 1);
-        app->document_pending = true;
-        app->revision += ev->modified; /* a save moves an edited document one revision */
-    }
     app->delivering.pending = false;
     return event && !app->deferred ? pure_app_save(app) : PURE_OK;
 }
@@ -5279,38 +5195,16 @@ PureResult pure_app_arguments(PureApp *app, uint32_t view, PureSpan payload, con
 
 /* A message whose variable fields are where placed says (start and size in
  * the payload), or, without it, one after another after the prefix. */
-static PureResult message(PureApp *app, uint32_t input, const char *key, int64_t base, PureSpan payload,
-                          const uint32_t *placed) {
+static PureResult message(PureApp *app, uint32_t input, PureSpan payload, const uint32_t *placed) {
     pure_app_finish(app);
     const PureModule *m = app->module;
     app->fault = PURE_FAULT_NONE;
     app->fault_pc = UINT32_MAX;
-    app->revision = 0;
-    if (input >= m->inputs || m->input[input].kind != PURE_KIND_MESSAGE || base < -1 ||
-        (payload.size && !payload.data) || (m->input[input].keyed ? !document_key(key) : key != NULL))
-        return PURE_INVALID;
+    if (input >= m->inputs || m->input[input].kind != PURE_KIND_MESSAGE || (payload.size && !payload.data)) return PURE_INVALID;
     const PureInputShape *shape = &m->input[input];
     uint32_t spans[PURE_MODULE_FIELDS][2];
     PureFault wrong = place_fields(m, shape, payload, placed, spans);
     if (wrong != PURE_FAULT_NONE) return fault(app, wrong, UINT32_MAX);
-    if (shape->keyed && m->collections) {
-        if (!app->data.open) return PURE_INVALID;
-        /* A key joins a burst once, so its revision moves once per save. */
-        if (app->pending_count == PURE_APP_PENDING || pure_app_pending(app, key)) {
-            PureResult saved = pure_app_save(app);
-            if (saved != PURE_OK) return saved;
-        }
-        if (app->pending_count == app->pending_capacity) {
-            unsigned capacity = app->pending_capacity ? 2 * app->pending_capacity : 16;
-            struct PurePending *grown = realloc(app->pending, capacity * sizeof(*grown));
-            if (!grown) return PURE_ALLOCATION;
-            app->pending = grown;
-            app->pending_capacity = capacity;
-        }
-        PureResult opened = app->data.open(app->data.context, 0, key, &app->document, &app->revision);
-        if (opened != PURE_OK) { app->document = NULL; return opened; }
-        if (base >= 0 && base != app->revision) { pure_app_finish(app); return PURE_CONFLICT; }
-    }
     /* Its rows fill their lists (emptied when the event ends); rows that are not whole fail it. Rows whose records hold
      * lists (027's 4a) read those into the event's lists as a kept list's cell is read, in the event's lists begun anew. */
     bool nested = false;
@@ -5335,20 +5229,16 @@ static PureResult message(PureApp *app, uint32_t input, const char *key, int64_t
         return filled == PURE_ALLOCATION ? filled : fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
     }
     app->payload = payload;
-    Event ev = {.app = app, .shape = shape, .key = key, .base = base, .arena = &app->arena, .exists = app->revision > 0,
-                .nested = nested, .spans = spans};
+    Event ev = {.app = app, .shape = shape, .arena = &app->arena, .nested = nested, .spans = spans};
     PureResult result = dispatch(app, 1 + 2 * input, &ev);
     if (result != PURE_OK) pure_app_finish(app);
     return result;
 }
 
-PureResult pure_app_message(PureApp *app, uint32_t input, const char *key, int64_t base, PureSpan payload) {
-    return message(app, input, key, base, payload, NULL);
-}
+PureResult pure_app_message(PureApp *app, uint32_t input, PureSpan payload) { return message(app, input, payload, NULL); }
 
-PureResult pure_app_message_fields(PureApp *app, uint32_t input, const char *key, int64_t base, PureSpan payload,
-                                   const uint32_t *placed) {
-    return message(app, input, key, base, payload, placed);
+PureResult pure_app_message_fields(PureApp *app, uint32_t input, PureSpan payload, const uint32_t *placed) {
+    return message(app, input, payload, placed);
 }
 
 /* The outbox's item at: its output (the module's, by name), number and payload. */
@@ -5388,7 +5278,7 @@ static PureResult deliver(PureApp *app, uint32_t input, uint32_t release, const 
     size_t length = source ? strlen(source) : 0;
     app->duplicate = false;
     /* Kept states without a directory would not keep the numbers heard. */
-    if (input >= m->inputs || m->input[input].kind != PURE_KIND_MESSAGE || m->input[input].keyed || !length ||
+    if (input >= m->inputs || m->input[input].kind != PURE_KIND_MESSAGE || !length ||
         length > PURE_SOURCE || !seq || seq > PURE_SEQ_MOST || !app->heard || (pure_save_enabled(app) && !app->log))
         return PURE_INVALID;
     for (size_t i = 0; i < length; ++i)
@@ -5402,7 +5292,7 @@ static PureResult deliver(PureApp *app, uint32_t input, uint32_t release, const 
     app->delivering.seq = seq;
     app->delivering.release = release;
     app->delivering.pending = true;
-    PureResult result = message(app, input, NULL, -1, payload, placed);
+    PureResult result = message(app, input, payload, placed);
     if (!app->delivering.pending) return result;
     /* Not applied. Refused by the app (a fault), the message was delivered
      * all the same: its number is heard, saved like a key event's changes.
@@ -6305,7 +6195,7 @@ PURE_COLD PureResult pure_app_replace(PureApp *app, const PureModule *module) {
     drop_nested(app);
     drop_spares(app);
     pure_app_finish(app);
-    if (app->open || app->pending_count) {
+    if (app->open) {
         PureResult saved = pure_app_save(app); /* the burst belongs to the module that made it */
         if (saved != PURE_OK) return saved;
     }

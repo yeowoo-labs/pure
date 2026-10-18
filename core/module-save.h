@@ -54,10 +54,8 @@ PureResult pure_save_open_values(PureApp *, const PureModule *m, PureValue *valu
  * runtime lists kept the numbers heard and the sends: they go to them
  * (moved: they need images). */
 PureResult pure_save_open_links(PureApp *, const PureModule *m, bool *heard_moved, bool *sent_moved);
-/* Publish the documents and every state changed since the last save
- * (values are the states' numbers); revisions are the documents'. */
-PureResult pure_save_commit(PureApp *, const PureValue *values, void *const *documents, size_t document_count,
-                            int64_t *revisions);
+/* Publish every state changed since the last save (values are the states' numbers). */
+PureResult pure_save_commit(PureApp *, const PureValue *values);
 
 /* A message's fields laid out as load lays them: in order, the fixed ones
  * and the variable ones' lengths in the prefix, but the last variable

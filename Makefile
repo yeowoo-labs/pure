@@ -32,7 +32,7 @@ OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(MODEL) $(STORE))
 LINK_OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(LINK))
 
 .PHONY: all check
-all: $(BUILD)/libpure.a $(BUILD)/libpure-link.a $(BUILD)/pure-serve $(BUILD)/pure-crypto.so $(BUILD)/pure-run $(BUILD)/pure-edit-module
+all: $(BUILD)/libpure.a $(BUILD)/libpure-link.a $(BUILD)/pure-serve $(BUILD)/pure-crypto.so $(BUILD)/pure-run
 
 $(BUILD)/obj/%.o: %.c $(HEADERS)
 	@mkdir -p $(dir $@)
@@ -78,10 +78,6 @@ $(BUILD)/pure-crypto.so: link/crypto-openssl.c $(HEADERS)
 
 $(BUILD)/pure-run: cli/pure-run.c $(BUILD)/libpure.a $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) cli/pure-run.c $(BUILD)/libpure.a $(LDFLAGS) -lm $(LDLIBS) -o $@
-
-# The document CLI contract, driven by a module on the tree store.
-$(BUILD)/pure-edit-module: cli/edit-module.c $(BUILD)/libpure.a $(HEADERS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) cli/edit-module.c $(BUILD)/libpure.a $(LDFLAGS) -lm $(LDLIBS) -o $@
 
 # Tests build their own copies: the store's fault hooks exist only under PURE_STORE_TEST.
 $(BUILD)/test-module: core/test-module.c $(MODEL) $(STORE) $(HEADERS)

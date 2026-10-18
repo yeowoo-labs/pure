@@ -267,8 +267,8 @@ uint32_t pure_wire_output(const PureWire *w) { return w->output; }
 
 bool pure_wire_reply(PureWire *w, uint32_t input, char *error, size_t size) {
     const PureModule *m = w->module;
-    if (input >= m->inputs || m->input[input].kind != PURE_KIND_MESSAGE || m->input[input].keyed) {
-        snprintf(error, size, "an answer goes to a message input without a key");
+    if (input >= m->inputs || m->input[input].kind != PURE_KIND_MESSAGE) {
+        snprintf(error, size, "an answer goes to a message input");
         return false;
     }
     w->answer_input = (int)input;

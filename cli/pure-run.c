@@ -226,7 +226,7 @@ int main(int argc, char **argv) {
             if (failure) {
             } else if (input < 0) failure = "unknown input";
             else if ((command[0] == 't' ? pure_app_text(&app, (uint32_t)input, given)
-                                        : pure_app_message(&app, (uint32_t)input, NULL, -1, given)) != PURE_OK)
+                                        : pure_app_message(&app, (uint32_t)input, given)) != PURE_OK)
                 failure = "event failed";
             free(read);
         } else if (!strcmp(command, "tick")) {

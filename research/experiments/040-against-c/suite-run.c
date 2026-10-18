@@ -12,6 +12,14 @@
  * Without NAMEs, all of them. PURE_JIT and PURE_AHEAD as the core reads them. */
 #define _POSIX_C_SOURCE 200809L
 #include "module.h"
+/* A message: before 027's 4b it took a key and a base revision too (runs.sh build gives -DPURE_KEYED_MESSAGES then). */
+static PureResult send_message(PureApp *app, uint32_t input, PureSpan payload) {
+#ifdef PURE_KEYED_MESSAGES
+    return pure_app_message(app, input, NULL, -1, payload);
+#else
+    return pure_app_message(app, input, payload);
+#endif
+}
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -38,13 +46,13 @@ static bool load_graph(PureApp *app, const PureModule *m, uint32_t nodes, size_t
     size_t unique = graph_build(nodes, edges, &keys);
     unsigned char four[4];
     memcpy(four, &nodes, 4);
-    if (pure_app_message(app, (uint32_t)pure_module_input(m, "size"), NULL, -1, (PureSpan){four, 4}) != PURE_OK) return false;
+    if (send_message(app, (uint32_t)pure_module_input(m, "size"), (PureSpan){four, 4}) != PURE_OK) return false;
     enum { CHUNK = 65536 };
     double *rows = malloc(CHUNK * 2 * sizeof(*rows));
     for (size_t at = 0; at < unique; at += CHUNK) {
         size_t n = unique - at < CHUNK ? unique - at : CHUNK;
         for (size_t k = 0; k < n; ++k) rows[2 * k] = (double)keys[at + k], rows[2 * k + 1] = (double)(keys[at + k] & 0xFFFFF);
-        if (pure_app_message(app, (uint32_t)pure_module_input(m, "load"), NULL, -1, (PureSpan){(unsigned char *)rows, n * 16}) !=
+        if (send_message(app, (uint32_t)pure_module_input(m, "load"), (PureSpan){(unsigned char *)rows, n * 16}) !=
             PURE_OK)
             return false;
     }
@@ -94,7 +102,7 @@ static int run(const char *dir, const Work *w, unsigned rounds) {
         unsigned char bytes[8];
         memcpy(bytes, args, 4 * w->argc);
         double a = now_ms();
-        PureResult result = pure_app_message(&app, (uint32_t)input, NULL, -1, (PureSpan){bytes, 4 * w->argc});
+        PureResult result = send_message(&app, (uint32_t)input, (PureSpan){bytes, 4 * w->argc});
         double b = now_ms();
         if (result != PURE_OK) { fprintf(stderr, "%s failed: %s\n", w->name, pure_fault_name(app.fault)); return 1; }
         double out[4] = {0};

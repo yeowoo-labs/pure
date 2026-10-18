@@ -1,16 +1,16 @@
 # HTTP 벤치마크
 
-Pure의 문서 서버들과 같은 계약의 axum(Rust)·drogon(C++) 서비스를 같은 기기·코어 배정·부하 생성기로 잰다
-([075](../../docs/research/075-http-host-against-axum.md)).
+Pure의 문서 서버와 같은 계약의 axum(Rust)·drogon(C++) 서비스를 같은 기기·코어 배정·부하 생성기로 잰다
+([075](../../docs/research/075-http-host-against-axum.md)). 027의 4b부터 pure-serve에는 키별 문서가 없다(키 있는 리스트가
+담고, 입력과 보기로 내놓는다). 그래서 문서 묶음은 옛 문서 서버(`prototypes/connections`)와 기준선만 돌고, pure-serve는 앱
+묶음에서 잰다.
 
 ```sh
 cc -O2 -std=c17 -o load load.c
 (cd axum-baseline && cargo build --release)
 drogon-baseline/build.sh   # Debian의 drogon 패키지를 설치하지 않고 .deps에 풀어 빌드한다
-make -C ../.. build/pure-serve
 make -C ../../prototypes/connections BUILD=build/tree STORE=store-tree.c build/tree/pure-connections
-aup build ../../../aup/examples/editor.aup -o editor.pmod
-python3 run.py --module editor.pmod --directory /var/tmp   # 저장소를 둘 장치에서
+python3 run.py --directory /var/tmp   # 저장소를 둘 장치에서
 ```
 
 저장 보장 쓰기는 장치 상태가 같을 때만 비교된다. SD 카드는 동기 쓰기가 이어지면 느려지므로 실행 순서만으로
@@ -19,8 +19,7 @@ python3 run.py --module editor.pmod --directory /var/tmp   # 저장소를 둘 �
 중앙값이다.
 
 ```sh
-python3 run.py --module editor.pmod --workloads put --rounds 5 --seconds 3 \
-    --only pure-serve,pure-serve-3,axum-durable,axum-atomic
+python3 run.py --workloads put --rounds 5 --seconds 3 --only pure-program,axum-durable,axum-atomic
 ```
 
 앱 벤치마크([077](../../docs/research/077-apps-as-http-services.md))는 aup로 쓴 점수판(`scores.aup`)을 pure-serve가 보기와

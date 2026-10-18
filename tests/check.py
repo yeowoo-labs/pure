@@ -3,14 +3,14 @@
 aup builds (the sibling checkout, --aup-root). The core's and the store's own
 tests are core/test-module.c and store/test-tree-store.c.
 
-1. Documents: pure-serve running the document editor written in aup
-   (aup's examples/editor.aup) answers random requests exactly as the earlier
-   document server running editor.pure, with one and with three connection
+1. Documents: keyed byte documents as a keyed list (DOCS_SOURCE, each edit
+   checked against the revision it was made on) answer random edits and
+   reads exactly as a model says, with one and with three connection
    threads, on persistent and pipelined connections too.
-2. Lending: a read lends the stored extents and still carries its version
-   while the document changes; lent answers count against the payload budget;
-   a text view is lent while its answer waits and let go when it is read or
-   its connection closes, the store keeping one mapping again.
+2. Lending: a text view lends the state's stored extents while its answer
+   waits, each answer whole in one version while the text changes, and lets
+   them go when it is read or its connection closes, the store keeping one
+   mapping again; lent answers count against the payload budget.
 3. Durability: concurrent edits share commits, and every acknowledged edit
    survives kill -9, with one and with three threads; so do the app's
    acknowledged posts (keyed lists, JSON bodies with groups).
@@ -39,8 +39,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-# The app that exercises documents: the editor written in aup, from aup's examples.
-EDITOR = ROOT.parent / 'aup' / 'examples' / 'editor.aup'
+# aup's examples (its checkout beside this one, or --aup-root).
+EXAMPLES = ROOT.parent / 'aup' / 'examples'
 
 
 def run(*args, stdin=None, check=True):
@@ -67,19 +67,6 @@ class HttpHost:
         self.info = json.loads(line)  # its port, name, public key
         self.port = self.info['port']
 
-    def request(self, method, key, body=b'', expected=None):
-        import http.client
-        headers = {'Content-Length': str(len(body))}
-        if expected is not None:
-            headers['If-None-Match' if expected == 0 else 'If-Match'] = '*' if expected == 0 else f'"{expected}"'
-        connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=30)
-        try:
-            connection.request(method, f'/objects/{key}', body, headers)
-            response = connection.getresponse()
-            return response.status, response.getheader('ETag'), response.getheader('X-Pure-Error'), response.read()
-        finally:
-            connection.close()
-
     def stop(self):
         self.process.terminate()
         _, error = self.process.communicate(timeout=30)
@@ -87,48 +74,146 @@ class HttpHost:
         return [json.loads(line) for line in error.decode().splitlines() if line.startswith('{')]
 
 
-def server_parity(aup, pure, work, seeds, operations=150, threads=1):
-    """The document server running editor.aup answers every request exactly
-    as the server running editor.pure: status, revision, error and body."""
-    import struct
-    module = work / 'editor-server.pmod'
-    compile_module(aup, EDITOR, module)
+DOCS_SOURCE = """record Doc {
+  id: text
+  body: bytes
+  revision: i64
+}
+state docs: list of Doc by id
+
+input edit = message {
+  id: text
+  base: i64
+  start: u32
+  remove: u32
+  insert: bytes
+}
+
+on edit {
+  if docs.has(edit.id) {
+    let d = docs[edit.id]
+    require d.revision == edit.base
+    require edit.start + edit.remove <= d.body.bytes
+    docs[edit.id].body = d.body[0 .. edit.start] + edit.insert + d.body[edit.start + edit.remove .. d.body.bytes]
+    docs[edit.id].revision = d.revision + 1
+  } else {
+    require edit.base == 0 && edit.start == 0 && edit.remove == 0
+    docs.add(Doc { id: edit.id, body: edit.insert, revision: 1 })
+  }
+  reply edit.insert
+}
+
+view revision(id: text) = docs[id].revision
+view size(id: text) = docs[id].body.bytes
+view body(id: text) = text(docs[id].body)
+"""
+
+
+def edit_body(key, base, start, remove, insert):
+    """An edit of DOCS_SOURCE as its JSON body."""
+    return json.dumps({'id': key, 'base': base, 'start': start, 'remove': remove, 'insert': insert}).encode()
+
+
+def edit_request(key, base, start, remove, insert):
+    body = edit_body(key, base, start, remove, insert)
+    return (b'POST /inputs/edit HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ' +
+            str(len(body)).encode() + b'\r\n\r\n' + body)
+
+
+def view_request(view, key):
+    from urllib.parse import quote
+    return f'GET /views/{view}?id={quote(key)} HTTP/1.1\r\nHost: x\r\n\r\n'.encode()
+
+
+def docs_call(port, request):
+    """One raw request on its own connection: status, X-Pure-Error, body."""
+    import socket
+    with socket.create_connection(('127.0.0.1', port), timeout=30) as sock:
+        sock.sendall(request)
+        return read_answer(sock.makefile('rb'))
+
+
+def read_answer(reader):
+    status = int(reader.readline().split()[1])
+    length, error = 0, None
+    for line in iter(reader.readline, b'\r\n'):
+        name, _, value = line.decode().partition(':')
+        if name.lower() == 'content-length': length = int(value)
+        if name.lower() == 'x-pure-error': error = value.strip()
+    return status, error, reader.read(length)
+
+
+class DocsModel:
+    """DOCS_SOURCE as Python: an edit's answer (status, error, body) and each document's revision and body."""
+
+    def __init__(self):
+        self.docs = {}
+
+    def edit(self, key, base, start, remove, insert):
+        body, revision = self.docs.get(key, (b'', 0))
+        data = insert.encode()
+        if key in self.docs:
+            if base != revision or start + remove > len(body): return 422, 'limit', b''
+            self.docs[key] = (body[:start] + data + body[start + remove:], revision + 1)
+        elif base or start or remove:
+            return 422, 'limit', b''
+        else:
+            self.docs[key] = (data, 1)
+        return 200, 'none', data
+
+    def view(self, view, key):
+        if key not in self.docs: return 404, 'no_value', b''
+        body, revision = self.docs[key]
+        if view == 'body':
+            try:
+                body.decode()
+            except UnicodeDecodeError:  # cut inside a character: text(...) refuses it
+                return 400, 'invalid', b''
+            return 200, 'none', body
+        return 200, 'none', str(revision if view == 'revision' else len(body)).encode()
+
+
+def server_documents(aup, pure, work, seeds, operations=150, threads=1):
+    """Keyed byte documents as a keyed list (027's 4b; DOCS_SOURCE): random
+    edits (current, stale and future revisions, past the end, texts of any
+    size up to 5,000 bytes) and reads of a document's revision, size and
+    body answer exactly as a model says, with one and with three connection
+    threads; after a restart every document is as acknowledged."""
+    module = work / 'docs.pmod'
+    (work / 'docs.aup').write_text(DOCS_SOURCE)
+    compile_module(aup, work / 'docs.aup', module)
     compared = 0
+    words = ['', 'a', 'hello', '빨리', 'a "quoted" \\ word', '😀', 'line\nbreak']
     for seed in seeds:
         rng = random.Random(seed + 13000)
-        old = HttpHost([pure / 'prototypes/connections/build/tree/pure-connections', '--program', pure / 'prototypes/connections/examples/editor.pure',
-                        '--store', work / f'http-old-{seed}-{threads}'])
-        new = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / f'http-new-{seed}-{threads}',
-                        '--threads', str(threads)])
+        store = work / f'docs-{seed}-{threads}'
+        model = DocsModel()
+        host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store, '--threads', str(threads)])
         try:
-            revision, size = {}, {}
             for _ in range(operations):
-                key = rng.choice(['a', 'b', 'long-key_1'])
-                current, length = revision.get(key, 0), size.get(key, 0)
+                key = rng.choice(['a', 'b', 'long-key_1', '문서'])
+                body, current = model.docs.get(key, (b'', 0))
                 if rng.random() < 0.35:
-                    request = ('GET', key, b'', None)
+                    view = rng.choice(['revision', 'size', 'body'])
+                    want, got = model.view(view, key), docs_call(host.port, view_request(view, key))
                 else:
                     pick = rng.random()
                     base = current if pick < 0.75 else max(current - 1, 0) if pick < 0.9 else current + 3
-                    if rng.random() < 0.05:
-                        body = bytes(rng.randrange(256) for _ in range(rng.randint(0, 7)))  # too short
-                    else:
-                        insert = bytes(rng.randrange(256) for _ in range(rng.choice([0, 1, 7, 300, 5000])))
-                        body = struct.pack('<II', rng.randint(0, length + 2), rng.choice([0, 1, 3, length])) + insert
-                    request = ('PUT', key, body, base)
-                theirs, ours = old.request(*request), new.request(*request)
-                assert ours == theirs, (seed, request[:2], request[3], ours[:3], theirs[:3])
-                if theirs[0] == 200 and theirs[1]:
-                    revision[key] = int(theirs[1].strip('"'))
-                    if request[0] == 'GET':
-                        size[key] = len(theirs[3])
-                    else:
-                        size[key] = len(old.request('GET', key)[3])
-                        assert new.request('GET', key) == old.request('GET', key)
+                    insert = ''.join(rng.choice(words) for _ in range(rng.choice([0, 1, 7, 300, 700])))[:5000]
+                    start, remove = rng.randint(0, len(body) + 2), rng.choice([0, 1, 3, len(body)])
+                    want = model.edit(key, base, start, remove, insert)
+                    got = docs_call(host.port, edit_request(key, base, start, remove, insert))
+                assert got == want, (seed, key, got[:2], want[:2])
                 compared += 1
         finally:
-            old.stop()
-            new.stop()
+            host.stop()
+        host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store, '--threads', str(threads)])
+        try:
+            for key in model.docs:
+                for view in ('revision', 'size', 'body'):
+                    assert docs_call(host.port, view_request(view, key)) == model.view(view, key), (key, view)
+        finally:
+            host.stop()
     return compared
 
 
@@ -136,122 +221,77 @@ def server_pipelining(aup, pure, work):
     """One connection, many requests: a keep-alive client and a pipelined
     burst (all requests in one write, one split across writes) get the same
     answers, in order, as separate connections would."""
-    import http.client
     import socket
-    import struct
-    module = work / 'editor-pipeline.pmod'
-    compile_module(aup, EDITOR, module)
+    module = work / 'docs-pipeline.pmod'
+    (work / 'docs.aup').write_text(DOCS_SOURCE)
+    compile_module(aup, work / 'docs.aup', module)
     host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'pipeline'])
+    answers = []
     try:
-        connection = http.client.HTTPConnection('127.0.0.1', host.port, timeout=30)
-        answers = []
-        for body, headers in [(struct.pack('<II', 0, 0) + b'hello', {'If-None-Match': '*'}),
-                              (struct.pack('<II', 5, 0) + b'!', {'If-Match': '"1"'}),
-                              (struct.pack('<II', 0, 0) + b'x', {'If-Match': '"1"'})]:
-            connection.request('PUT', '/objects/p', body, headers)
-            response = connection.getresponse()
-            answers.append((response.status, response.getheader('ETag'), response.read()))
-        connection.request('GET', '/objects/p')
-        response = connection.getresponse()
-        answers.append((response.status, response.getheader('ETag'), response.read()))
-        connection.close()
-        assert answers == [(200, '"1"', b'hello'), (200, '"2"', b'!'), (412, '"2"', b''), (200, '"2"', b'hello!')], answers
-
-        def request(method, key, body=b'', condition=''):
-            return (f'{method} /objects/{key} HTTP/1.1\r\nHost: x\r\nContent-Length: {len(body)}\r\n{condition}\r\n'
-                    .encode() + body)
-        pipeline = (request('GET', 'p') + request('PUT', 'q', struct.pack('<II', 0, 0) + b'q1', 'If-None-Match: *\r\n') +
-                    request('GET', 'q') + request('GET', 'missing') +
-                    request('PUT', 'q', struct.pack('<II', 2, 0) + b'!', 'If-Match: "1"\r\n') + request('GET', 'q'))
-        expected = [(200, b'hello!'), (200, b'q1'), (200, b'q1'), (404, b''), (200, b'!'), (200, b'q1!')]
+        with socket.create_connection(('127.0.0.1', host.port), timeout=30) as sock:
+            reader = sock.makefile('rb')
+            for request in (edit_request('p', 0, 0, 0, 'hello'), edit_request('p', 1, 5, 0, '!'),
+                            edit_request('p', 1, 0, 0, 'x'), view_request('body', 'p')):
+                sock.sendall(request)
+                answers.append(read_answer(reader))
+        assert answers == [(200, 'none', b'hello'), (200, 'none', b'!'), (422, 'limit', b''), (200, 'none', b'hello!')], answers
+        pipeline = (view_request('body', 'p') + edit_request('q', 0, 0, 0, 'q1') + view_request('body', 'q') +
+                    view_request('body', 'missing') + edit_request('q', 1, 2, 0, '!') + view_request('body', 'q'))
+        expected = [(200, 'none', b'hello!'), (200, 'none', b'q1'), (200, 'none', b'q1'), (404, 'no_value', b''),
+                    (200, 'none', b'!'), (200, 'none', b'q1!')]
         for split in (len(pipeline), 7, 61):  # one write, and small writes that cut heads and bodies
             with socket.create_connection(('127.0.0.1', host.port), timeout=30) as sock:
                 for at in range(0, len(pipeline), split):
                     sock.sendall(pipeline[at:at + split])
                 reader = sock.makefile('rb')
-                for status, body in expected:
-                    code = int(reader.readline().split()[1])
-                    length = 0
-                    for line in iter(reader.readline, b'\r\n'):
-                        name, _, value = line.decode().partition(':')
-                        if name.lower() == 'content-length':
-                            length = int(value)
-                    assert (code, reader.read(length)) == (status, body), (split, code, status, body)
-            # The next round starts from the same documents.
-            host.request('PUT', 'q', struct.pack('<II', 0, 3) + b'q1', int(host.request('GET', 'q')[1].strip('"')))
-            expected = [(200, b'hello!'), (412, b''), (200, b'q1'), (404, b''), (412, b''), (200, b'q1')]
-            pipeline = (request('GET', 'p') + request('PUT', 'q', struct.pack('<II', 0, 0) + b'q1', 'If-None-Match: *\r\n') +
-                        request('GET', 'q') + request('GET', 'missing') +
-                        request('PUT', 'q', struct.pack('<II', 2, 0) + b'!', 'If-Match: "1"\r\n') + request('GET', 'q'))
+                got = [read_answer(reader) for _ in expected]
+                assert got == expected, (split, got)
+            # The next round edits a document made already: its creation is refused, its later edit not.
+            revision = int(docs_call(host.port, view_request('revision', 'q'))[2])
+            pipeline = (view_request('body', 'p') + edit_request('q', 0, 0, 0, 'q1') + view_request('size', 'q') +
+                        view_request('body', 'missing') + edit_request('q', revision, 0, 0, '!') + view_request('size', 'q'))
+            size = int(docs_call(host.port, view_request('size', 'q'))[2])
+            expected = [(200, 'none', b'hello!'), (422, 'limit', b''), (200, 'none', str(size).encode()),
+                        (404, 'no_value', b''), (200, 'none', b'!'), (200, 'none', str(size + 1).encode())]
     finally:
         stats = host.stop()
     assert stats[0]['active'] == 0 and stats[0]['retained_payload_bytes'] == 0, stats
     return len(answers) + 3 * len(expected)
 
 
-def server_lent_reads(aup, pure, work):
-    """A read lends the stored document's extents instead of copying them: a
-    1 MiB answer sent slowly still carries the version read while the
-    document is replaced five times meanwhile."""
-    import socket
-    import struct
-    module = work / 'editor-lent.pmod'
-    compile_module(aup, EDITOR, module)
-    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'lent'])
-    big = bytes(range(256)) * 4096
-    try:
-        assert host.request('PUT', 'big', struct.pack('<II', 0, 0) + big, 0)[0] == 200
-        with socket.create_connection(('127.0.0.1', host.port), timeout=30) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
-            sock.sendall(b'GET /objects/big HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n')
-            data = sock.recv(100)
-            for revision in range(1, 6):
-                edit = struct.pack('<II', 0, len(big) if revision == 1 else 1) + b'Z'
-                assert host.request('PUT', 'big', edit, revision)[0] == 200
-            while b'\r\n\r\n' not in data or len(data) < data.index(b'\r\n\r\n') + 4 + len(big):
-                chunk = sock.recv(65536)
-                assert chunk, len(data)
-                data += chunk
-        assert data[data.index(b'\r\n\r\n') + 4:] == big
-        assert host.request('GET', 'big') == (200, '"6"', 'none', b'Z')
-    finally:
-        stats = host.stop()
-    assert stats[0]['active'] == 0 and stats[0]['retained_payload_bytes'] == 0, stats
-    return len(big)
-
-
 def server_lent_budget(aup, pure, work):
     """Lent extents count against the payload budget while an answer waits
-    on its socket. Two readers pipeline 1 MiB reads without reading: the
-    kernel takes what it can and each reader leaves one answer waiting. A
-    third request finds no room (503 payload_budget) until a reader goes."""
+    on its socket. Two readers pipeline 1 MiB reads of a text view without
+    reading: the kernel takes what it can and each reader leaves one answer
+    waiting. A third request finds no room (503 payload_budget) until a
+    reader goes."""
     import socket
-    import struct
     import time
-    module = work / 'editor-budget.pmod'
-    compile_module(aup, EDITOR, module)
-    big = bytes(range(256)) * 4096
+    module, source = work / 'note-budget.pmod', work / 'note.aup'
+    source.write_text(NOTE_SOURCE)
+    compile_module(aup, source, module)
+    big = (bytes(range(32, 127)) * ((1 << 20) // 95 + 1))[:1 << 20]  # 1 MiB of text
     budget = 2 * len(big) + len(big) // 2
     host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'lent-budget',
                      '--budget', budget])
     readers = []
     try:
-        assert host.request('PUT', 'big', struct.pack('<II', 0, 0) + big, 0)[0] == 200
+        assert post(host.port, '/inputs/write', {'text': big.decode()})[0] == 200
         for _ in range(2):
             sock = socket.create_connection(('127.0.0.1', host.port), timeout=30)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
-            sock.sendall(b'GET /objects/big HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n' * 32)
+            sock.sendall(b'GET /views/page HTTP/1.1\r\nHost: x\r\n\r\n' * 32)
             readers.append(sock)
         time.sleep(0.3)
-        refused = host.request('GET', 'big')
-        assert refused[0] == 503 and refused[2] == 'payload_budget', refused[:3]
+        refused = http(host.port, 'GET', '/views/page')
+        assert refused[:2] == (503, 'payload_budget'), refused[:2]
         readers.pop().close()
         for _ in range(100):
-            answered = host.request('GET', 'big')
+            answered = http(host.port, 'GET', '/views/page')
             if answered[0] == 200:
                 break
             time.sleep(0.05)
-        assert answered[0] == 200 and answered[3] == big, answered[:3]
+        assert answered[0] == 200 and answered[3] == big, answered[:2]
     finally:
         for sock in readers:
             sock.close()
@@ -351,25 +391,25 @@ def server_lent_views(aup, pure, work, threads=1):
 def server_bursts(aup, pure, work, clients=8, edits=30, shards=1):
     """Concurrent edits share commits, and every acknowledged edit survives a
     kill -9 of the server."""
-    import http.client
     import signal
-    import struct
     import threading
     import time
-    module = work / 'editor-bursts.pmod'
-    compile_module(aup, EDITOR, module)
+    module = work / 'docs-bursts.pmod'
+    (work / 'docs.aup').write_text(DOCS_SOURCE)
+    compile_module(aup, work / 'docs.aup', module)
+    store = work / f'bursts-{shards}'
 
     def load(host, rounds, acknowledged):
         def client(number):
             key, base = f'c{number}', acknowledged[number][1]
             for _ in range(rounds):
                 try:
-                    status, tag, _, _ = host.request('PUT', key, struct.pack('<II', 0, 0) + b'x', base)
-                except (OSError, http.client.HTTPException):  # the server died mid-answer: not acknowledged
+                    status, _, _ = docs_call(host.port, edit_request(key, base, 0, 0, 'x'))
+                except Exception:  # the server died mid-answer: not acknowledged
                     return
                 if status != 200:
                     return
-                base = int(tag.strip('"'))
+                base += 1
                 acknowledged[number] = (acknowledged[number][0] + 1, base)
         threads = [threading.Thread(target=client, args=(n,)) for n in range(clients)]
         start = time.perf_counter()
@@ -377,22 +417,18 @@ def server_bursts(aup, pure, work, clients=8, edits=30, shards=1):
             thread.start()
         return threads, start
 
-    timings = {}
-    for name, args in [('program', [pure / 'prototypes/connections/build/tree/pure-connections', '--program', pure / 'prototypes/connections/examples/editor.pure']),
-                       ('module', [pure / 'build/pure-serve', '--module', module, '--threads', str(shards)])]:
-        host = HttpHost(args + ['--store', work / f'bursts-{name}-{shards}'])
-        acknowledged = [(0, 0)] * clients
-        threads, start = load(host, edits, acknowledged)
-        for thread in threads:
-            thread.join()
-        timings[name] = time.perf_counter() - start
-        assert all(count == edits for count, _ in acknowledged), acknowledged
-        stats = host.stop()
-        if name == 'module':
-            bursts = stats[0]['bursts']
-            assert stats[0]['burst_events'] == clients * edits and (clients == 1 or bursts < clients * edits), stats
-    # Kill the module server while clients edit; what it acknowledged is stored.
-    store = work / f'bursts-module-{shards}'
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store, '--threads', str(shards)])
+    acknowledged = [(0, 0)] * clients
+    threads, start = load(host, edits, acknowledged)
+    for thread in threads:
+        thread.join()
+    seconds = time.perf_counter() - start
+    assert all(count == edits for count, _ in acknowledged), acknowledged
+    stats = host.stop()
+    owner = next(line for line in stats if 'bursts' in line)
+    bursts = owner['bursts']
+    assert owner['burst_events'] == clients * edits and (clients == 1 or bursts < clients * edits), stats
+    # Kill the server while clients edit; what it acknowledged is stored.
     host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store, '--threads', str(shards)])
     acknowledged = [(edits, edits)] * clients
     threads, _ = load(host, 1000, acknowledged)
@@ -404,13 +440,13 @@ def server_bursts(aup, pure, work, clients=8, edits=30, shards=1):
     host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store, '--threads', str(shards)])
     try:
         for number, (count, base) in enumerate(acknowledged):
-            status, tag, _, body = host.request('GET', f'c{number}')
-            stored = int(tag.strip('"'))
-            assert status == 200 and stored in (base, base + 1) and len(body) == stored, (number, count, base, tag)
+            status, _, body = docs_call(host.port, view_request('revision', f'c{number}'))
+            stored = int(body)
+            size = int(docs_call(host.port, view_request('size', f'c{number}'))[2])
+            assert status == 200 and stored in (base, base + 1) and size == stored, (number, count, base, stored)
     finally:
         host.stop()
-    return {'writes': clients * edits, 'bursts': bursts, 'program_seconds': round(timings['program'], 3),
-            'module_seconds': round(timings['module'], 3),
+    return {'writes': clients * edits, 'bursts': bursts, 'seconds': round(seconds, 3),
             'acknowledged_before_kill': sum(count for count, _ in acknowledged) - clients * edits}
 
 
@@ -1700,7 +1736,7 @@ def module_specs(aup, pure, work):
     import struct
     runs = {}
     program = work / 'sha256.pmod'
-    compile_module(aup, EDITOR.parent / 'sha256.aup', program)
+    compile_module(aup, EXAMPLES / 'sha256.aup', program)
     chooser = random.Random(140)
     messages = [b'abc', b'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq',
                 b'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu']
@@ -1715,7 +1751,7 @@ def module_specs(aup, pure, work):
     assert digests == [hashlib.sha256(m).hexdigest() for m in messages], 'sha256'
     runs['sha256'] = len(messages)
     program = work / 'json.pmod'
-    compile_module(aup, EDITOR.parent / 'json.aup', program)
+    compile_module(aup, EXAMPLES / 'json.aup', program)
     suite = pure / 'tests/specs/json'
     cases = {name: (suite / name).read_bytes() for name in sorted(os.listdir(suite)) if name.endswith('.json')}
     cases['n_structure_100000_opening_arrays.json'] = b'[' * 100000
@@ -1776,7 +1812,7 @@ def module_specs(aup, pure, work):
         cases[f'r_{k}.json'] = json.dumps(value(0), ensure_ascii=chooser.random() < 0.5, indent=chooser.choice([None, 1, 2])).encode()
         (work / f'r_{k}.json').write_bytes(cases[f'r_{k}.json'])
     program = work / 'json_tree.pmod'
-    compile_module(aup, EDITOR.parent / 'json_tree.aup', program)
+    compile_module(aup, EXAMPLES / 'json_tree.aup', program)
     given = ''.join(f'message check @{work / name}\n' for name in cases)
     outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
                                     timeout=600, env=dict(os.environ, **env)).stdout
@@ -4445,12 +4481,12 @@ def cpu_seconds(pid):
 def server_clocks(aup, pure, work):
     """The wall clock moved an hour while a node runs (build/clock-back.so
     moves what the node reads of it, from its start): its timers, the pauses
-    of a wire whose receiver is down, the owner's waits and a store's group
-    commit all count on the monotonic clock. Were a wait's deadline read
-    from the wall clock, set back it would end at once, again and again (a
-    core spun, the wire tried thousands of times); set forward it would last
-    an hour (the timers stopped, the wire tried once, and a lone commit
-    after a group waited that long for the others to join it)."""
+    of a wire whose receiver is down and the owner's waits all count on the
+    monotonic clock. Were a wait's deadline read from the wall clock, set
+    back it would end at once, again and again (a core spun, the wire tried
+    thousands of times); set forward it would last an hour (the timers
+    stopped, the wire tried once, and a lone edit after three at once waited
+    that long)."""
     import os
     import socket
     import struct
@@ -4479,12 +4515,12 @@ def server_clocks(aup, pure, work):
             (shift, stats['ticks'], share, stats['delivery_attempts'])
         seen[f'shift_{shift}'] = {'ticks': stats['ticks'], 'cpu_share': round(share, 3),
                                   'wire_attempts': stats['delivery_attempts']}
-    editor = work / 'clocks-editor.pmod'
-    compile_module(aup, EDITOR, editor)
+    editor = work / 'clocks-docs.pmod'
+    (work / 'clocks-docs.aup').write_text(DOCS_SOURCE)
+    compile_module(aup, work / 'clocks-docs.aup', editor)
     env = {**os.environ, 'LD_PRELOAD': str(pure / 'build/clock-back.so'), 'CLOCK_BACK_MS': '0', 'CLOCK_SHIFT_S': '3600'}
     host = HttpHost([pure / 'build/pure-serve', '--module', editor, '--store', work / 'clocks-docs', '--threads', 3],
                     env=env)
-    new = struct.pack('<II', 0, 0)  # an edit that makes the document: at 0, none removed, then its bytes
     statuses, alone = [], 0.0
     try:
         for round_number in range(20):  # three at once, grouped; then one alone
@@ -4492,7 +4528,7 @@ def server_clocks(aup, pure, work):
 
             def put(k):
                 together.wait()
-                statuses.append(host.request('PUT', f'd{round_number}-{k}', new + b'x' * 100000, 0)[0])
+                statuses.append(docs_call(host.port, edit_request(f'd{round_number}-{k}', 0, 0, 0, 'x' * 100000))[0])
 
             threads = [threading.Thread(target=put, args=(k,)) for k in range(3)]
             for thread in threads:
@@ -4500,12 +4536,11 @@ def server_clocks(aup, pure, work):
             for thread in threads:
                 thread.join()
             began = time.time()
-            statuses.append(host.request('PUT', f'alone-{round_number}', new + b'y', 0)[0])
+            statuses.append(docs_call(host.port, edit_request(f'alone-{round_number}', 0, 0, 0, 'y'))[0])
             alone = max(alone, time.time() - began)
     finally:
-        stats = host.stop()[-1]
-    assert statuses == [200] * 80 and alone < 1 and stats['grouped_commits'] > stats['commit_groups'], \
-        (statuses, alone, stats)
+        host.stop()
+    assert statuses == [200] * 80 and alone < 1, (statuses, alone)
     seen['alone_after_groups_s'] = round(alone, 4)
     return seen
 
@@ -5790,7 +5825,7 @@ def server_view_bodies(aup, pure, work):
     import random
     import threading
     module = work / 'routes-view.pmod'
-    compile_module(aup, EDITOR.parent / 'routes.aup', module)
+    compile_module(aup, EXAMPLES / 'routes.aup', module)
     rng = random.Random(18)
     n, edges = 300, set()
     while len(edges) < 1200:
@@ -6268,8 +6303,9 @@ def server_tokens(aup, pure, work):
     for name, text in (('tokens', TOKENS_SOURCE), ('tokens-sender', TOKENS_SENDER)):
         (work / f'{name}.aup').write_text(text)
         compile_module(aup, work / f'{name}.aup', work / f'{name}.pmod')
-    editor = work / 'tokens-editor.pmod'
-    compile_module(aup, EDITOR, editor)
+    editor = work / 'tokens-docs.pmod'
+    (work / 'tokens-docs.aup').write_text(DOCS_SOURCE)
+    compile_module(aup, work / 'tokens-docs.aup', editor)
     serve = pure / 'build/pure-serve'
     names = {'read': 'r' * 40, 'write': 'w' * 40, 'input=add': 'i' * 40, 'read2': 'q' * 40}
     lengths = {n: bytes(65 + (k * 7) % 57 for k in range(n)).decode() for n in (1, 55, 56, 63, 64, 65, 119, 200)}
@@ -6306,7 +6342,7 @@ def server_tokens(aup, pure, work):
     try:
         none = call('GET', '/t/views/total')
         assert none[:3] == (401, 'unauthorized', 'Bearer'), none
-        for method, path in (('POST', '/t/inputs/add?step=1'), ('GET', '/docs/objects/k'), ('PUT', '/t/queries/q'),
+        for method, path in (('POST', '/t/inputs/add?step=1'), ('GET', '/docs/views/body?id=k'), ('PUT', '/t/queries/q'),
                              ('GET', '/t/queries/q')):
             assert call(method, path)[:2] == (401, 'unauthorized'), (method, path)
         assert call('GET', '/t/views/total', 'x' * 40)[:2] == (401, 'unauthorized')
@@ -6314,11 +6350,11 @@ def server_tokens(aup, pure, work):
         assert call('GET', '/t/views/total', r)[0] == 200
         assert call('GET', '/t/queries/q', r)[:2] == (404, 'no_value')  # read, and there is none
         assert call('POST', '/t/inputs/add?step=1', r)[:2] == (403, 'forbidden')
-        assert call('PUT', '/docs/objects/k', r, b'x', {'If-None-Match': '*'})[:2] == (403, 'forbidden')
+        json_type = {'Content-Type': 'application/json'}
+        assert call('POST', '/docs/inputs/edit', r, edit_body('k', 0, 0, 0, 'x'), json_type)[:2] == (403, 'forbidden')
         assert call('POST', '/t/inputs/add?step=1', w)[0] == 200
-        edit = struct.pack('<II', 0, 0) + b'hello'  # the edit: start, remove, insert
-        assert call('PUT', '/docs/objects/k', w, edit, {'If-None-Match': '*'})[0] == 200
-        assert call('GET', '/docs/objects/k', r)[::3] == (200, b'hello')
+        assert call('POST', '/docs/inputs/edit', w, edit_body('k', 0, 0, 0, 'hello'), json_type)[0] == 200
+        assert call('GET', '/docs/views/body?id=k', r)[::3] == (200, b'hello')
         assert call('POST', '/t/inputs/add?step=2', i)[0] == 200
         assert call('POST', '/t/inputs/other?step=1', i)[:2] == (403, 'forbidden')
         assert call('GET', '/t/views/total', i)[:2] == (403, 'forbidden')
@@ -6417,14 +6453,14 @@ def server_tokens(aup, pure, work):
 
 
 def main():
-    global EDITOR
+    global EXAMPLES
     parser = argparse.ArgumentParser()
     parser.add_argument('--aup', type=Path, required=True, help='the aup compiler')
-    parser.add_argument('--aup-root', type=Path, default=ROOT.parent / 'aup', help='its checkout, for examples/editor.aup')
+    parser.add_argument('--aup-root', type=Path, default=ROOT.parent / 'aup', help='its checkout, for its examples')
     parser.add_argument('--seeds', type=int, default=4)
     args = parser.parse_args()
     aup, pure = args.aup.resolve(), ROOT
-    EDITOR = args.aup_root.resolve() / 'examples' / 'editor.aup'
+    EXAMPLES = args.aup_root.resolve() / 'examples'
     report = {}
     with tempfile.TemporaryDirectory(prefix='pure-check-') as directory:
         work = Path(directory)
@@ -6432,10 +6468,9 @@ def main():
         report['module_assumptions'] = module_assumptions(aup, pure, work)
         report['module_specs'] = module_specs(aup, pure, work)
         report['module_tier'] = module_tier(aup, pure, work)
-        report['server_parity_requests'] = sum(server_parity(aup, pure, work, range(args.seeds), threads=threads)
-                                               for threads in (1, 3))
+        report['server_documents_requests'] = sum(server_documents(aup, pure, work, range(args.seeds), threads=threads)
+                                                  for threads in (1, 3))
         report['server_pipelined_answers'] = server_pipelining(aup, pure, work)
-        report['server_lent_read_bytes'] = server_lent_reads(aup, pure, work)
         report['server_lent_budget_bytes'] = server_lent_budget(aup, pure, work)
         report['server_lent_views'] = [server_lent_views(aup, pure, work, threads) for threads in (1, 3)]
         report['server_bursts'] = server_bursts(aup, pure, work)

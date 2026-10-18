@@ -132,7 +132,7 @@ def mixed(port, seconds, writers, readers):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--module', type=Path, required=True, help='editor.pmod built by aup, or scores.pmod for --suite app')
+    parser.add_argument('--module', type=Path, help='scores.pmod built by aup, for --suite app')
     parser.add_argument('--suite', choices=['documents', 'app'], default='documents')
     parser.add_argument('--directory', type=Path, default=Path('/var/tmp'))
     parser.add_argument('--seconds', type=float, default=5)
@@ -186,8 +186,14 @@ def main():
             ('mixed, 8 score + 56 total conn', dict(connections=64, method='mixed', keys=64, mode='keep-alive',
                                                     writes=True)),
         ]
+        if not args.module: parser.error('--suite app serves --module')
         for name in ('pure-program', 'axum-atomic', 'drogon-atomic'):
             del servers[name]  # atomic is durable for a log already
+    else:
+        # The document contract (/objects, If-Match) is the earlier document server's alone since Pure 027's 4b:
+        # pure-serve has no keyed documents (a keyed list holds them, served through inputs and views).
+        for name in [name for name in servers if name.startswith('pure-serve')]:
+            del servers[name]
     if args.workloads:
         workloads = [w for w in workloads if re.search(args.workloads, w[0])]
     chosen = [name for name in servers if not args.only or name in args.only.split(',')]
