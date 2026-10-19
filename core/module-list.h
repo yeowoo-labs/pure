@@ -214,6 +214,10 @@ bool pure_list_takes(const PureList *, int key, size_t n, const double *keys, si
 size_t pure_list_add_many(PureList *, size_t n, const double *const *fields);
 /* What it keeps its items in now: 0 a tree, 1 FLAT arrays, 2 DENSE (for tests and counts). */
 unsigned pure_list_form(const PureList *);
+/* A new event's list with the items of one in FLAT arrays, not keyed, its cells numbers, bools and integers: its
+ * columns copied whole (what inserting its items one by one into a new list gives, in its form). NULL for any other
+ * list (copy it item by item) or without memory. */
+PureList *pure_list_copied(const PureList *);
 /* Field of the item whose key_field is key, in a list ordered by key_field
  * (seek, then get, as one: a DENSE list reads it at its key); false when no
  * item has key. */

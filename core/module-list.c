@@ -1800,6 +1800,30 @@ bool pure_list_arrays(PureList *list) {
 
 unsigned pure_list_form(const PureList *list) { return list->form; }
 
+PureList *pure_list_copied(const PureList *from) {
+    const Layout *l = &from->layout;
+    if (from->form != FLAT || !from->arrays || from->pack || from->copy || l->key >= 0) return NULL;
+    for (unsigned f = 0; f < l->fields; ++f)
+        if (pure_cell_text(l->kinds[f]) || l->kinds[f] == PURE_CELL_LIST) return NULL;
+    PureList *list = pure_list_new(l->fields, l->kinds);
+    if (!list || !pure_list_arrays(list)) {
+        pure_list_free(list);
+        return NULL;
+    }
+    for (unsigned f = 0; f < l->fields; ++f) { /* its widths as they are: narrowed or widened by what it holds */
+        list->width[f] = from->width[f];
+        if (!from->count || !from->width[f]) continue;
+        if (!(list->columns[f] = malloc(from->count * from->width[f]))) {
+            pure_list_free(list);
+            return NULL;
+        }
+        memcpy(list->columns[f], from->columns[f], from->count * from->width[f]);
+    }
+    list->count = list->room = from->count;
+    list->bytes = from->bytes;
+    return list;
+}
+
 bool pure_list_cells(PureList *list, PureCells *out) {
     if (list->form != FLAT && !(list->form == DENSE && pure_list_full(list))) return false;
     const Layout *l = &list->layout;

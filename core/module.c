@@ -2668,10 +2668,11 @@ static uint64_t nest(PureApp *app, uint32_t record, const PureList *from) {
         app->nested.shared = shared;
         app->nested.capacity = capacity;
     }
-    PureList *list = new_list(m, record, false);
-    if (!list) return 0;
+    PureList *list = from && !m->record_nested[record] ? pure_list_copied(from) : NULL; /* numbers in arrays: at once */
+    size_t at = list ? pure_list_count(from) : 0;
+    if (!list && !(list = new_list(m, record, false))) return 0;
     const PureRecord *r = &m->record[record];
-    for (size_t at = 0, count = from ? pure_list_count(from) : 0; at < count; ++at) {
+    for (size_t count = from ? pure_list_count(from) : 0; at < count; ++at) {
         PureCell cells[PURE_RECORD_FIELDS];
         for (unsigned f = 0; f < r->count; ++f) cells[f] = pure_list_get(from, at, f);
         if (pure_list_insert(list, at, cells, NULL) != PURE_OK) { pure_list_free(list); return 0; }

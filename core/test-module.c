@@ -1583,6 +1583,78 @@ static void text_keys_equivalence(void) {
     CHECK(hashed > 8000);
 }
 
+/* Two lists of fields cells each (no text): the same items, every cell (its bits). */
+static void same_cells(const PureList *a, const PureList *b, unsigned fields) {
+    CHECK(pure_list_count(a) == pure_list_count(b) && pure_list_size(a) == pure_list_size(b));
+    for (size_t i = 0; i < pure_list_count(a); ++i)
+        for (unsigned f = 0; f < fields; ++f) CHECK(pure_list_get(a, i, f).i64 == pure_list_get(b, i, f).i64);
+}
+
+/* An event's list in FLAT arrays copied whole (pure_list_copied, after 140's LIST_VALUE review): random lists of
+ * numbers (narrow and wide), bools and integers, the copy the same as one made item by item, and each changed apart
+ * after (the copy grows and widens as a list does; neither sees the other's changes). A list in a tree, keyed, or
+ * with texts is not copied so. */
+static void copied_lists(void) {
+    static const uint8_t fields[4] = {PURE_CELL_NUMBER, PURE_CELL_BOOL, PURE_CELL_INTEGER, PURE_CELL_NUMBER};
+    uint32_t seed = 0x636f7079u;
+    unsigned copies = 0;
+    for (unsigned round = 0; round < 300; ++round) {
+        PureList *a = pure_list_new(4, fields);
+        CHECK(a && pure_list_arrays(a));
+        unsigned changes = next_random(&seed) % (round % 10 == 0 ? 3000 : 60);
+        for (unsigned c = 0; c < changes; ++c) {
+            uint32_t r = next_random(&seed);
+            size_t n = pure_list_count(a);
+            PureCell cells[4] = {{.num = some_number(round, r)}, {.num = r % 2}, {.i64 = (int64_t)r * (r % 3 ? 1 : -977)},
+                                 {.num = some_number(round + 1, r >> 5)}};
+            if (r % 7 == 0 && n) CHECK(pure_list_remove(a, r % n, NULL) == PURE_OK);
+            else if (r % 11 == 0 && n) CHECK(pure_list_set(a, r % n, 3, (PureCell){.num = 1e300 / (1 + r % 9)}, NULL) == PURE_OK);
+            else CHECK(pure_list_insert(a, r % 5 ? n : r % (n + 1), cells, NULL) == PURE_OK);
+        }
+        if (pure_list_form(a) != 1) { /* a tree since (moved too much): not copied so */
+            CHECK(!pure_list_copied(a));
+            pure_list_free(a);
+            continue;
+        }
+        PureList *copy = pure_list_copied(a), *each = pure_list_new(4, fields);
+        CHECK(copy && each && pure_list_arrays(each) && pure_list_form(copy) == 1);
+        for (size_t i = 0; i < pure_list_count(a); ++i) {
+            PureCell cells[4];
+            for (unsigned f = 0; f < 4; ++f) cells[f] = pure_list_get(a, i, f);
+            CHECK(pure_list_insert(each, i, cells, NULL) == PURE_OK);
+        }
+        same_cells(copy, each, 4);
+        same_cells(copy, a, 4);
+        for (unsigned c = 0; c < 40; ++c) { /* apart: the copy and the one made item by item alike, the list otherwise */
+            uint32_t r = next_random(&seed);
+            PureCell cells[4] = {{.num = 1.5 * r}, {.num = 1}, {.i64 = -(int64_t)r}, {.num = -0.0}};
+            size_t n = pure_list_count(copy);
+            if (r % 3 == 0 && n) {
+                CHECK(pure_list_set(copy, r % n, 0, cells[0], NULL) == PURE_OK);
+                CHECK(pure_list_set(each, r % n, 0, cells[0], NULL) == PURE_OK);
+            } else {
+                CHECK(pure_list_insert(copy, n, cells, NULL) == PURE_OK && pure_list_insert(each, n, cells, NULL) == PURE_OK);
+            }
+            if (pure_list_count(a)) CHECK(pure_list_remove(a, 0, NULL) == PURE_OK);
+        }
+        same_cells(copy, each, 4);
+        pure_list_free(a);
+        pure_list_free(each);
+        pure_list_free(copy);
+        ++copies;
+    }
+    CHECK(copies > 200);
+    static const uint8_t texts[2] = {PURE_CELL_NUMBER, PURE_CELL_TEXT};
+    PureList *t = pure_list_new(2, texts), *k = pure_list_new(4, fields), *tree = pure_list_new(4, fields);
+    CHECK(t && k && tree && pure_list_arrays(t) && pure_list_keyed(k, 0) == PURE_OK && pure_list_arrays(k));
+    CHECK(pure_list_insert(t, 0, (PureCell[]){{.num = 1}, {.text = (unsigned char *)"x", .size = 1}}, NULL) == PURE_OK);
+    CHECK(pure_list_insert(tree, 0, (PureCell[]){{.num = 1}, {.num = 0}, {.i64 = 2}, {.num = 3}}, NULL) == PURE_OK);
+    CHECK(!pure_list_copied(t) && !pure_list_copied(k) && !pure_list_copied(tree)); /* texts, a key, a tree */
+    pure_list_free(t);
+    pure_list_free(k);
+    pure_list_free(tree);
+}
+
 static void arrays_equivalence(void) {
     static const uint8_t fields[3] = {PURE_CELL_NUMBER, PURE_CELL_TEXT, PURE_CELL_NUMBER};
     uint32_t seed = 0x61727261u;
@@ -7475,6 +7547,7 @@ int main(void) {
     keyed_journal();
     text_keys_equivalence();
     arrays_equivalence();
+    copied_lists();
     packed_lists();
     folds();
     filters();
