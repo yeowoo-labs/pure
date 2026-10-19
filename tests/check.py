@@ -1736,7 +1736,9 @@ def module_specs(aup, pure, work):
     written back by its view to the same records, cut ones refused; HTTP/1.1
     request streams (tests/specs/http) read by its examples/http.aup a packet
     at a time, cut anywhere, to the same requests; line breaking (UAX #14) by its
-    examples/linebreak.aup on LineBreakTest.txt's lines (tests/specs/linebreak)."""
+    examples/linebreak.aup on LineBreakTest.txt's lines (tests/specs/linebreak);
+    RFC 6298's retransmission timer by its examples/rto.aup on a scenario's
+    events (tests/specs/rto), the model's state after each."""
     import hashlib
     import os
     import random
@@ -1962,6 +1964,30 @@ def module_specs(aup, pure, work):
         state = json.loads(line)
         assert state['fault'] == 'none' and [b != 0 for b in bytes.fromhex(state['views']['boundaries'])] == want, codes
     runs['linebreak'] = {'lines': len(lines), 'code_points': sum(len(c) for c, _ in lines)}
+    # RFC 6298's retransmission timer (its examples/rto.aup, ticked): a scenario's sends, acknowledgements and ticks
+    # (tests/specs/rto, at periods of 10 and 100 ms), after each the model's SRTT, RTTVAR, RTO, deadline and counts.
+    source, events = (EXAMPLES / 'rto.aup').read_text(), 0
+    for scenario in json.loads((pure / 'tests/specs/rto/scenarios.json').read_text()):
+        period = scenario['period']
+        (work / 'rto.aup').write_text(source.replace('every 10 ms', f'every {period} ms').replace('fn PERIOD = 10 ', f'fn PERIOD = {period} '))
+        program = work / 'rto.pmod'
+        compile_module(aup, work / 'rto.aup', program)
+        given = ''.join(f'time {t}\n' + ('tick tick\n' if kind == 'tick' else f"message {kind} {struct.pack('<I', seq).hex()}\n")
+                        for t, kind, seq in scenario['events'])
+        shown = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                      timeout=120, env=dict(os.environ, **env)).stdout
+                 for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+        for name in ('rounds', 'all'):
+            assert shown[name] == shown['batches'], ('rto', period, name)
+        out = shown['batches'].splitlines()[1::2]
+        assert len(out) == len(scenario['states']), ('rto', period, len(out))
+        for line, want in zip(out, scenario['states']):
+            state = json.loads(line)
+            s = state['states']
+            assert state['fault'] == 'none' and [s['srtt'], s['rttvar'], s['rto'], s['deadline'], len(s['outstanding']),
+                                                 len(s['retransmits'])] == want, ('rto', period, want)
+        events += len(out)
+    runs['rto'] = {'scenarios': 2, 'events': events}
     return runs
 
 
