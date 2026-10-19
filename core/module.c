@@ -3980,6 +3980,8 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
     }
     case PURE_OP_CONCAT: {
         PureBytes right = stack[--sp].bytes, left = stack[sp - 1].bytes;
+        if (!right.length) NEXT; /* joined with nothing: the other as it is, uncopied (values do not change) */
+        if (!left.length) { stack[sp - 1].bytes = right; NEXT; }
         size_t start = arena->used;
         if ((status = append_value(app, arena, left)) != PURE_OK ||
             (status = append_value(app, arena, right)) != PURE_OK) STOPPED(status);
