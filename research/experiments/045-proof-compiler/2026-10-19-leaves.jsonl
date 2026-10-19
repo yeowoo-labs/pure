@@ -1,0 +1,21 @@
+{"what": "feedback 009: ranges read where its tree keeps it (no copy); app.c built with core/module-list.c in it (the tree read as its layout is), so the list code is this build -O2 and inlinable (exact 8,785 before, 8,532 here; the runtime 40,365 before, 40,745 here); every rung answers all 18,672 lines; with LB18 wrong every rung and end refused"}
+{"rung":"exact","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":8532.0,"cycles_per_point":3652.8,"answers":"the test's, and exact's"}
+{"rung":"integer","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":7782.7,"cycles_per_point":3195.9,"answers":"the test's, and exact's"}
+{"rung":"stored_flat","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":6136.1,"cycles_per_point":2418.0,"answers":"the test's, and exact's"}
+{"rung":"leaves","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":7930.7,"cycles_per_point":3143.2,"answers":"the test's, and exact's"}
+{"rung":"leaves_direct","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":7135.4,"cycles_per_point":3053.1,"answers":"the test's, and exact's"}
+{"rung":"local_flat","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1697.8,"cycles_per_point":1004.8,"answers":"the test's, and exact's"}
+{"rung":"shared","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1576.4,"cycles_per_point":959.4,"answers":"the test's, and exact's"}
+{"rung":"unbounded","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1526.9,"cycles_per_point":941.9,"answers":"the test's, and exact's"}
+{"rung":"plain","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1367.0,"cycles_per_point":908.8,"answers":"the test's, and exact's"}
+{"rung":"leaves_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":6137.4,"cycles_per_point":2487.3,"answers":"the test's, and exact's"}
+{"rung":"local_flat_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":697.7,"cycles_per_point":431.9,"answers":"the test's, and exact's"}
+{"rung":"shared_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":578.3,"cycles_per_point":387.5,"answers":"the test's, and exact's"}
+{"rung":"unbounded_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":538.3,"cycles_per_point":375.9,"answers":"the test's, and exact's"}
+{"rung":"vega","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":222.6,"cycles_per_point":86.2,"answers":"the test's, and exact's"}
+{"end":"runtime","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":40810.5,"cycles_per_point":15664.7,"instructions_per_line":133947.7,"answers":"the test's"}
+{"end":"runtime_empty_handler","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1624.5,"cycles_per_point":681.8,"instructions_per_line":5332.0,"answers":"the test's"}
+{"end":"end_to_end_shared","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1598.3,"cycles_per_point":938.8,"instructions_per_line":5245.9,"answers":"the test's"}
+{"end":"end_to_end_plain","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1380.1,"cycles_per_point":887.6,"instructions_per_line":4529.8,"answers":"the test's"}
+{"end":"end_to_end_vega","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":240.5,"cycles_per_point":89.8,"instructions_per_line":789.5,"answers":"the test's"}
+{"end":"end_to_end_shared_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":601.7,"cycles_per_point":367.3,"instructions_per_line":1975.0,"answers":"the test's"}

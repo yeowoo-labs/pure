@@ -9,8 +9,12 @@
  *                 ranges the stored tree (pure_list_get); a Text's lists copied (pure_list_copied, LIST_VALUE) and let
  *                 go at the line's end; the work budget charged each round and call. Locals in registers, plain calls.
  *   integer       + whole numbers as integers (positions, counts, ranges, start, nonspace, ri, at): one bounds check.
- *   stored_flat   + ranges' columns flat (unchanged in the event).
- *   local_flat    + the event's lists, the points and out as flat buffers (a memory charge an append kept).
+ *   stored_flat   + ranges' columns flat (unchanged in the event): copied out of the tree first. Kept to compare: it is
+ *                 the copy feedback 009 forbids, and the rungs after it do not use it.
+ *   leaves        integer, + ranges read where its tree keeps it: a leaf's column at the item's place, no copy (the
+ *                 leaf found by the list's own pure_list_run when the item is not in the one kept).
+ *   leaves_direct integer, + the same, the tree read as its layout is (the descent by the guides' counts, no run).
+ *   local_flat    leaves_direct, + the event's lists, the points and out as flat buffers (a memory charge an append kept).
  *   shared        + a Text's lists the buffers themselves (no copy).
  *   unbounded     - the bounds checks (the budget and memory still charged).
  *   plain         - every charge too: the same algorithm in C.
@@ -30,6 +34,9 @@
 #include "module.h"
 #include "module-list.h"
 #include "text.h"
+/* The list's own source, so a rung can read its tree as an emitter that knows the tree's layout would (leaves_direct);
+ * built with this file, it stands in for libpure.a's module-list.o, which the link then does not take. */
+#include "../../../core/module-list.c"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +74,9 @@ typedef struct {
     size_t ranges_count;
     const double *r_start, *r_class;
     const unsigned char *r_pi, *r_pf, *r_east, *r_pict;
+    PureRun run; /* the leaf of ranges last read, its columns where the tree keeps them (pure_list_run): begun each message */
+    const Node *leaf; /* leaves_direct's: the leaf of ranges last read, its first item's place and its items */
+    size_t leaf_start, leaf_count;
     PureList *codes, *cls, *eff, *start, *nonspace, *ri, *at, *joined, *numeric, *out; /* the event's lists */
     PureList *copies[9];
     unsigned copied;
@@ -198,6 +208,95 @@ static __attribute__((noinline)) bool grow(void **v, size_t *cap, size_t size) {
 #include "app-way.h"
 #undef WAY
 
+/* ======== leaves: ranges read where its tree keeps it, no copy (feedback 009) ========
+ * An item's field is its leaf's column at its place in the leaf: the leaf last read is kept (a run), and a position
+ * outside it finds its own (pure_list_run: the descent, the columns' addresses; nothing copied). Valid while the list
+ * does not change: within the event (N2). Begun anew each message. */
+#define WAY leaves
+#undef R_COUNT
+#undef R_AT
+#define R_COUNT ((IDX)x->ranges_count)
+#define R_LEAF(f, k) ({ IDX k_ = (k); CHECK_AT(x->ranges_count, k_); size_t at_ = (size_t)k_; \
+        if (at_ - x->run.start >= x->run.count && !pure_list_run(x->ranges, at_, &x->run)) FAIL; \
+        x->run.column[f].numbers[at_ - x->run.start]; })
+#undef R_START
+#undef R_CLASS
+#undef R_PI
+#undef R_PF
+#undef R_EAST
+#undef R_PICT
+#define R_START(k) R_LEAF(START, k)
+#define R_CLASS(k) R_LEAF(CLASS, k)
+#define R_PI(k) (R_LEAF(PI_FIELD, k) != 0)
+#define R_PF(k) (R_LEAF(PF_FIELD, k) != 0)
+#define R_EAST(k) (R_LEAF(EAST_FIELD, k) != 0)
+#define R_PICT(k) (R_LEAF(PICT_FIELD, k) != 0)
+#undef LINE_BEGIN
+#define LINE_BEGIN do { PureList *all_[] = {x->codes, x->cls, x->eff, x->start, x->nonspace, x->ri, x->at, x->joined, \
+        x->numeric, x->out}; for (unsigned l_ = 0; l_ < 10; ++l_) pure_list_clear(all_[l_]); x->copied = 0; \
+        x->run.count = 0; } while (0)
+#include "app-way.h"
+#undef WAY
+
+/* ======== leaves_direct: ranges' tree read as its layout is (no pure_list_run): the descent by the guides' counts
+ * (child_at), the leaf's column at the item's place, the last leaf kept ======== */
+#define WAY leaves_direct
+static inline __attribute__((always_inline)) double leaf_number(Context *x, size_t at, unsigned f) {
+    if (at - x->leaf_start >= x->leaf_count) {
+        const Node *node = x->ranges->root;
+        size_t start = 0;
+        while (!node->leaf) {
+            unsigned i = child_at(node, at - start);
+            start += guide(node)->before[i];
+            node = node->child[i];
+        }
+        x->leaf = node, x->leaf_start = start, x->leaf_count = node->count;
+    }
+    return numbers(&x->ranges->layout, x->leaf, f)[at - x->leaf_start];
+}
+#undef R_LEAF
+#define R_LEAF(f, k) ({ IDX k_ = (k); CHECK_AT(x->ranges_count, k_); leaf_number(x, (size_t)k_, f); })
+#undef LINE_BEGIN
+#define LINE_BEGIN do { PureList *all_[] = {x->codes, x->cls, x->eff, x->start, x->nonspace, x->ri, x->at, x->joined, \
+        x->numeric, x->out}; for (unsigned l_ = 0; l_ < 10; ++l_) pure_list_clear(all_[l_]); x->copied = 0; \
+        x->leaf_count = 0; } while (0)
+#include "app-way.h"
+#undef WAY
+
+/* ======== leaves_seek: leaves_direct, and range() done by the tree's own order: each inner node's children chosen by
+ * their first items' starts (the leaf each names, read where it is), then halving within the leaf. Another algorithm
+ * than the app's (positions halved): it needs ranges ordered by start, which the data is and a list declared keyed by
+ * start would be (its seek, pure_list_seek's); the budget charged for the call alone ======== */
+#define WAY leaves_seek
+static inline __attribute__((always_inline)) size_t seek_start(Context *x, double c) {
+    const Layout *l = &x->ranges->layout;
+    const Node *node = x->ranges->root;
+    size_t start = 0;
+    while (!node->leaf) {
+        unsigned low = 0, high = node->count;
+        while (high - low > 1) {
+            unsigned middle = (low + high) / 2;
+            if (numbers(l, node->child[middle]->first, START)[0] <= c) low = middle;
+            else high = middle;
+        }
+        start += guide(node)->before[low];
+        node = node->child[low];
+    }
+    const double *starts = numbers(l, node, START);
+    unsigned low = 0, high = node->count;
+    while (high - low > 1) {
+        unsigned middle = (low + high) / 2;
+        if (starts[middle] <= c) low = middle;
+        else high = middle;
+    }
+    x->leaf = node, x->leaf_start = start, x->leaf_count = node->count; /* the class read next is in it */
+    return start + low;
+}
+#define RANGE_SEEK(c) seek_start(x, (c))
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
+
 /* ======== local_flat: the event's lists, the points and out as buffers ======== */
 #define WAY local_flat
 #undef LIST_N
@@ -243,10 +342,15 @@ static __attribute__((noinline)) bool grow(void **v, size_t *cap, size_t size) {
 #define OUT_EMIT(got) do { for (size_t k_ = 0; k_ < x->b_out.n; ++k_) { int64_t v_ = x->b_out.v[k_]; \
         if ((uint64_t)v_ > 255) FAIL; (got)[k_] = (uint8_t)v_; } } while (0)
 #define LINE_BEGIN do { x->b_codes.n = x->b_cls.n = x->b_eff.n = x->b_start.n = x->b_nonspace.n = x->b_ri.n = x->b_at.n = \
-        x->b_joined.n = x->b_numeric.n = x->b_out.n = 0; } while (0)
+        x->b_joined.n = x->b_numeric.n = x->b_out.n = 0; x->leaf_count = 0; } while (0)
 #define LINE_END do { } while (0)
 #include "app-way.h"
 #undef WAY
+#define WAY local_flat_seek /* the same, range() by the tree's order (leaves_seek) */
+#define RANGE_SEEK(c) seek_start(x, (c))
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
 
 /* ======== shared: a Text's lists the buffers ======== */
 #define WAY shared
@@ -254,6 +358,11 @@ static __attribute__((noinline)) bool grow(void **v, size_t *cap, size_t size) {
 #define CAPTURE(dst, name) ((dst) = L(name))
 #include "app-way.h"
 #undef WAY
+#define WAY shared_seek /* the same, range() by the tree's order (leaves_seek) */
+#define RANGE_SEEK(c) seek_start(x, (c))
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
 
 /* ======== unbounded: shared, no bounds checks (the budget and memory charged) ======== */
 #define WAY unbounded
@@ -261,6 +370,11 @@ static __attribute__((noinline)) bool grow(void **v, size_t *cap, size_t size) {
 #define CHECK_AT(count, i) do { (void)(count); } while (0)
 #include "app-way.h"
 #undef WAY
+#define WAY unbounded_seek /* the same, range() by the tree's order (leaves_seek) */
+#define RANGE_SEEK(c) seek_start(x, (c))
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
 
 /* ======== plain: no check, no charge ======== */
 #define WAY plain
@@ -315,6 +429,7 @@ enum { HANDLER_LENGTH = 180 }; /* what the handler charges as it begins (its ins
     }
 BORDER(shared, true)
 BORDER(plain, false)
+BORDER(shared_seek, true)
 
 /* The same message to Vega's C: its numbers as code points, the boundaries into the state's buffer. */
 static bool message_vega(BytesState *breaks, const unsigned char *payload, size_t size, uint32_t *scratch) {
@@ -368,18 +483,26 @@ static uint64_t read_counter(int fd) {
 }
 
 typedef struct { Points points; const uint32_t *codes; const unsigned char *want; } Line;
-enum { RUNGS = 8 };
-static const char *const names[RUNGS] = {"exact", "integer", "stored_flat", "local_flat", "shared", "unbounded", "plain", "vega"};
+enum { RUNGS = 14 };
+static const char *const names[RUNGS] = {"exact", "integer", "stored_flat", "leaves", "leaves_direct", "local_flat", "shared",
+                                         "unbounded", "plain", "leaves_seek", "local_flat_seek", "shared_seek",
+                                         "unbounded_seek", "vega"};
 
 static bool run(int rung, Context *x, const Line *l, uint8_t *got) {
     switch (rung) {
     case 0: return on_line_exact(x, &l->points, got);
     case 1: return on_line_integer(x, &l->points, got);
     case 2: return on_line_stored_flat(x, &l->points, got);
-    case 3: return on_line_local_flat(x, &l->points, got);
-    case 4: return on_line_shared(x, &l->points, got);
-    case 5: return on_line_unbounded(x, &l->points, got);
-    case 6: return on_line_plain(x, &l->points, got);
+    case 3: return on_line_leaves(x, &l->points, got);
+    case 4: return on_line_leaves_direct(x, &l->points, got);
+    case 5: return on_line_local_flat(x, &l->points, got);
+    case 6: return on_line_shared(x, &l->points, got);
+    case 7: return on_line_unbounded(x, &l->points, got);
+    case 8: return on_line_plain(x, &l->points, got);
+    case 9: return on_line_leaves_seek(x, &l->points, got);
+    case 10: return on_line_local_flat_seek(x, &l->points, got);
+    case 11: return on_line_shared_seek(x, &l->points, got);
+    case 12: return on_line_unbounded_seek(x, &l->points, got);
     default: return on_line_vega(x, &l->points, l->codes, got);
     }
 }
@@ -497,10 +620,11 @@ int main(int argc, char **argv) {
         payloads[k] = malloc(8 * n + 8);
         memcpy(payloads[k], lines[k].points.codes, 8 * n); /* the message: each point's code, a number (8 bytes) */
     }
-    static BytesState breaks[3];
+    static BytesState breaks[4];
     static uint32_t scratch[4096];
-    enum { ENDS = 5 };
-    const char *ends[ENDS] = {"runtime", "runtime_empty_handler", "end_to_end_shared", "end_to_end_plain", "end_to_end_vega"};
+    enum { ENDS = 6 };
+    const char *ends[ENDS] = {"runtime", "runtime_empty_handler", "end_to_end_shared", "end_to_end_plain", "end_to_end_vega",
+                              "end_to_end_shared_seek"};
     size_t wrong_ends[ENDS] = {0};
     for (size_t k = 0; k < count; ++k) { /* checked first: each end's boundaries the test's */
         const Line *l = &lines[k];
@@ -513,7 +637,7 @@ int main(int argc, char **argv) {
         for (int e = 2; e < ENDS; ++e) {
             BytesState *b = &breaks[e - 2];
             bool done = e == 2 ? message_shared(&x, b, payloads[k], size) : e == 3 ? message_plain(&x, b, payloads[k], size)
-                                                                            : message_vega(b, payloads[k], size, scratch);
+                        : e == 4 ? message_vega(b, payloads[k], size, scratch) : message_shared_seek(&x, b, payloads[k], size);
             bool same = done && b->size == l->points.count + 1;
             for (size_t i = 0; same && i < b->size; ++i) same = (b->buffer[b->now][i] != NONE) == l->want[i];
             wrong_ends[e] += !same;
@@ -534,7 +658,8 @@ int main(int argc, char **argv) {
                 case 1: pure_app_message(&empty, (uint32_t)empty_line, (PureSpan){payloads[k], size}); break;
                 case 2: message_shared(&x, &breaks[0], payloads[k], size); break;
                 case 3: message_plain(&x, &breaks[1], payloads[k], size); break;
-                default: message_vega(&breaks[2], payloads[k], size, scratch);
+                case 4: message_vega(&breaks[2], payloads[k], size, scratch); break;
+                default: message_shared_seek(&x, &breaks[3], payloads[k], size);
                 }
             }
             ioctl(ins, PERF_EVENT_IOC_DISABLE, 0), ioctl(cyc, PERF_EVENT_IOC_DISABLE, 0);

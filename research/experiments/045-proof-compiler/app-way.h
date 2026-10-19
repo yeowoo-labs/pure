@@ -19,6 +19,9 @@ typedef struct { LIST_N codes, cls, eff; LIST_I start, nonspace, ri, at; LIST_B 
 
 static double FN(range)(CONTEXT *x, double c) {
     CHARGE(CALL_COST);
+#ifdef RANGE_SEEK /* the halving done by the tree's own order (a way that says why it may) */
+    return (double)RANGE_SEEK(c);
+#endif
     IDX low = 0, high = R_COUNT;
     while (GT(SUB(high, low), 1)) {
         CHARGE(ROUND_COST);
