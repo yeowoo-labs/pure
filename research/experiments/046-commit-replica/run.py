@@ -86,7 +86,7 @@ def stores_differ(a, b):
 class Run:
     """A follower, a shipper and an owner, started in that order on fresh stores."""
 
-    def __init__(self, keys, every=0, shim=True, module='entries'):
+    def __init__(self, keys, every=0, shim=True, module='entries', extra=()):
         self.owner_dir, self.follower_dir = WORK / 'owner-store', WORK / 'follower-store'
         for d in (self.owner_dir, self.follower_dir):
             shutil.rmtree(d, ignore_errors=True)
@@ -112,7 +112,7 @@ class Run:
             self.paused = os.open(WORK / 'paused', os.O_RDWR)  # held open both ways: no open waits for the other end
             self.resume = os.open(WORK / 'resume', os.O_RDWR)
             env.update(SHIM_PAUSE_EVERY=str(every), SHIM_PAUSE_DIR=str(WORK))
-        self.owner = subprocess.Popen([str(RUN), str(WORK / f'{module}.pmod'), '--views', '--store', str(self.owner_dir)],
+        self.owner = subprocess.Popen([str(RUN), str(WORK / f'{module}.pmod'), '--views', '--store', str(self.owner_dir), *extra],
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                       env=env, bufsize=1)
         self.done = 0  # messages the owner said done (each line comes after its save, so after the follower's ack)
