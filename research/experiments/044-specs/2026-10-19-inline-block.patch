@@ -1,0 +1,276 @@
+diff --git a/compiler/compile.c b/compiler/compile.c
+index 0fcaa1b..47d525e 100644
+--- a/compiler/compile.c
++++ b/compiler/compile.c
+@@ -182,6 +182,8 @@ typedef struct {
+     bool typed;  /* -> its results' types */
+     bool active; /* being inlined: a call back into it is recursion */
+     bool called; /* run as a function (a block, or a cycle of calls through it) */
++    bool inlined; /* a block inlined where it is called (its only return last, no let's list, no cycle: inline_block) */
++    bool loops;   /* its block holds a for or a while: inlined only where the stack is empty (Pure opens no loop above values) */
+ } Fn;
+ 
+ typedef struct { uint8_t op; uint32_t arg; union { double value; int64_t integer; }; } Op;
+@@ -274,6 +276,13 @@ typedef struct {
+      * fields; variant: a variant's case; alias: a match's name for a case's value (read, never assigned). */
+     struct { char name[NAME]; unsigned slot; Kind kind; int list; bool counter, variant, alias; } locals[LOCALS];
+     unsigned local_count, local_slots, held_bytes, held_texts; /* held: the bytes' and texts' lets' slots */
++    /* An inlined block's names begin at these floors (its parameters and lets alone); its slots, one set for each fn and
++     * kinds of arguments in a handler (or a function), used again at each call: where they start. */
++    unsigned local_floor, loop_floor, alias_floor;
++    struct { int fn; Kind kinds[PARAMS]; unsigned slots, bytes, texts; } inlines[64];
++    unsigned inline_count, inline_floor;
++    /* The block being inlined: its last return leaves its value at its call's height and says its kind here. */
++    struct { Kind *kind; int height; Type want; bool handler; } giving;
+     unsigned whiles; /* while loops so far: each counts by a name of its own */
+     unsigned settled; /* records' values calls gave, held by names of their own (027's 2c) */
+     const struct Expr *given; /* the left side of the && or || whose right side faultless looks at */
+@@ -1521,7 +1530,7 @@ static int input_index(const Compiler *c, const char *name) {
+ }
+ 
+ static int state_index(const Compiler *c, const char *name) {
+-    for (unsigned i = c->local_count; i-- > 0;) /* a let's list, by the let's name */
++    for (unsigned i = c->local_count; i-- > c->local_floor;) /* a let's list, by the let's name */
+         if (c->locals[i].list >= 0 && !strcmp(c->locals[i].name, name)) return c->locals[i].list;
+     for (unsigned i = 0; i < c->states; ++i) if (!c->state_event[i] && !strcmp(c->state_names[i], name)) return (int)i;
+     return -1;
+@@ -2689,21 +2698,21 @@ static void app_name(Compiler *c, const Expr *e, const char *name) {
+ /* The local named name in scope, or -1. */
+ /* A let of a value (or a for's count) in scope, by name, or -1; a let's list is a state (state_index). */
+ static int local_named(const Compiler *c, const char *name) {
+-    for (unsigned i = c->local_count; i-- > 0;)
++    for (unsigned i = c->local_count; i-- > c->local_floor;)
+         if (c->locals[i].list < 0 && !strcmp(c->locals[i].name, name)) return (int)i;
+     return -1;
+ }
+ 
+ /* Any let in scope by name (a value's or a list's), or -1. */
+ static int let_named(const Compiler *c, const char *name) {
+-    for (unsigned i = c->local_count; i-- > 0;)
++    for (unsigned i = c->local_count; i-- > c->local_floor;)
+         if (!strcmp(c->locals[i].name, name)) return (int)i;
+     return -1;
+ }
+ 
+ /* The for (walk or count) in whose block a name is its item or count, innermost first, or -1. */
+ static int loop_named(const Compiler *c, const char *name) {
+-    for (unsigned i = c->loop_count; i-- > 0;)
++    for (unsigned i = c->loop_count; i-- > c->loop_floor;)
+         if (!strcmp(c->loops[i].name, name)) return (int)i;
+     return -1;
+ }
+@@ -2780,7 +2789,7 @@ static int loop_named(const Compiler *c, const char *name);
+ static int parameter(const Compiler *c, const char *name);
+ 
+ static int alias_named(const Compiler *c, const char *name) {
+-    for (unsigned i = c->alias_count; i-- > 0;) if (!strcmp(c->aliases[i].name, name)) return (int)i;
++    for (unsigned i = c->alias_count; i-- > c->alias_floor;) if (!strcmp(c->aliases[i].name, name)) return (int)i;
+     return -1;
+ }
+ 
+@@ -3139,6 +3148,32 @@ static void named_by(const Compiler *c, int module, const Stmt *s, uint64_t *out
+ }
+ 
+ /* Which fns run as functions: those with a block, and those a cycle of calls goes through. */
++/* Whether statements hold a for or a while, at any depth. */
++static bool holds_loop(const Stmt *s) {
++    for (; s; s = s->next)
++        if (s->kind == S_FOR || s->kind == S_COUNT || holds_loop(s->then) || holds_loop(s->otherwise)) return true;
++    return false;
++}
++
++/* Whether statements return only at their end (top: the block's own last statement, a return of one value at most)
++ * and hold no let's list (each call would want its own). */
++static bool returns_last(const Stmt *s, bool top) {
++    for (; s; s = s->next) {
++        if ((s->kind == S_RETURN && (!top || s->next)) || (s->kind == S_LET && s->listed)) return false;
++        if (!returns_last(s->then, false) || !returns_last(s->otherwise, false)) return false;
++    }
++    return true;
++}
++
++/* The type a typed fn's one result names when it is a number, an i64, a bool, bytes or text, or 0. */
++static Type result_type(const Fn *f) {
++    static const char *const names[] = {"number", "i64", "bool", "bytes", "text"};
++    static const Type types[] = {NUM, I64, BOOL, BYTES, TEXT};
++    for (unsigned k = 0; f->typed && f->result_count == 1 && !f->results[0].list && k < 5; ++k)
++        if (!strcmp(f->results[0].name, names[k])) return types[k];
++    return 0;
++}
++
+ static void called_fns(Compiler *c) {
+     uint64_t reach[FNS] = {0};
+     for (unsigned i = 0; i < c->fn_count; ++i) {
+@@ -3148,7 +3183,15 @@ static void called_fns(Compiler *c) {
+     for (unsigned k = 0; k < c->fn_count; ++k)
+         for (unsigned i = 0; i < c->fn_count; ++i)
+             if (reach[i] >> k & 1) reach[i] |= reach[k];
+-    for (unsigned i = 0; i < c->fn_count; ++i) c->fns[i].called = c->fns[i].block || (reach[i] >> i & 1);
++    for (unsigned i = 0; i < c->fn_count; ++i) {
++        Fn *f = &c->fns[i];
++        f->called = f->block || (reach[i] >> i & 1);
++        const Stmt *last = f->block;
++        while (last && last->next) last = last->next;
++        f->inlined = f->block && !(reach[i] >> i & 1) && returns_last(f->block, true) && (!f->typed || result_type(f)) &&
++                     (!last || last->kind != S_RETURN || !last->value || !last->value->next);
++        f->loops = holds_loop(f->block);
++    }
+ }
+ 
+ /* What making a function's code puts aside of what was being made. */
+@@ -3159,6 +3202,7 @@ typedef struct {
+     Scope *fold_scope, *scope;
+     const Expr *given;
+     unsigned local_count, local_slots, held_bytes, held_texts, alias_count, loop_count, nested, joins, code_count, code_capacity;
++    unsigned local_floor, loop_floor, alias_floor, inline_count, inline_floor;
+     Type want;
+     Kind returned;
+     Op *code;
+@@ -3167,8 +3211,8 @@ typedef struct {
+ static void put_aside(Compiler *c, Aside *a, void *locals, void *aliases, void *loops) {
+     *a = (Aside){c->message, c->arguments, c->row, c->fold_list, c->module, c->current, c->folding, c->filtering, c->handling,
+                  c->has_returned, {0}, c->fold_scope, c->scope, c->given, c->local_count, c->local_slots, c->held_bytes,
+-                 c->held_texts, c->alias_count, c->loop_count, c->nested, c->joins, c->code_count, c->code_capacity, c->want,
+-                 c->returned, c->code};
++                 c->held_texts, c->alias_count, c->loop_count, c->nested, c->joins, c->code_count, c->code_capacity,
++                 c->local_floor, c->loop_floor, c->alias_floor, c->inline_count, c->inline_floor, c->want, c->returned, c->code};
+     memcpy(a->fold_name, c->fold_name, NAME);
+     memcpy(locals, c->locals, sizeof(c->locals));
+     memcpy(aliases, c->aliases, sizeof(c->aliases));
+@@ -3183,6 +3227,8 @@ static void take_back(Compiler *c, const Aside *a, const void *locals, const voi
+     c->alias_count = a->alias_count, c->loop_count = a->loop_count, c->nested = a->nested, c->joins = a->joins;
+     c->code_count = a->code_count, c->code_capacity = a->code_capacity, c->want = a->want, c->returned = a->returned;
+     c->code = a->code;
++    c->local_floor = a->local_floor, c->loop_floor = a->loop_floor, c->alias_floor = a->alias_floor;
++    c->inline_count = a->inline_count, c->inline_floor = a->inline_floor;
+     memcpy(c->fold_name, a->fold_name, NAME);
+     memcpy(c->locals, locals, sizeof(c->locals));
+     memcpy(c->aliases, aliases, sizeof(c->aliases));
+@@ -3207,6 +3253,7 @@ static void make_instance(Compiler *c, int index) {
+     c->message = c->arguments = c->row = c->fold_list = -1;
+     c->folding = c->filtering = false, c->fold_scope = NULL, c->given = NULL, c->want = 0, c->joins = 0;
+     c->local_count = c->local_slots = c->held_bytes = c->held_texts = c->alias_count = c->loop_count = c->nested = 0;
++    c->local_floor = c->loop_floor = c->alias_floor = 0, c->inline_floor = c->inline_count; /* its slots its own */
+     for (unsigned i = 0; i < in->param_count; ++i) name_value(c, f->params[i], in->params[i], f->line, f->column);
+     for (unsigned i = in->param_count; i-- > 0;) pop_named(c, local_named(c, f->params[i]), f->line, f->column);
+     if (f->block) {
+@@ -3257,11 +3304,86 @@ static int instance_of(Compiler *c, int fn, const Kind *kinds, unsigned count, c
+ 
+ /* A call of a fn run as a function: its arguments onto the stack (an item's as its record's value), the CALL, and
+  * what it gives (a value, several: TUPLE, or none). Arguments already given (count of them, kinds) are on the stack. */
++static void statements(Compiler *c, const Stmt *s);
++static void name_value(Compiler *c, const char *name, Kind kind, int line, int column);
++static void pop_named(Compiler *c, int local, int line, int column);
++
++/* A block fn inlined where it is called (Fn.inlined): its arguments stored into its parameters (each a let of its own),
++ * its statements and its last return made here, its names its own (the floors). Its slots are one set for each fn and
++ * kinds of arguments in a handler, used again at each call: Pure keeps a slot one kind, and a call's arguments are all
++ * made before its body stores them, so f(x, f(y)) is done with the inner body before the outer one begins. */
++static Kind inline_block(Compiler *c, const Expr *e, int fn, bool handler, int height) {
++    Fn *f = &c->fns[fn];
++    Kind kinds[PARAMS];
++    for (unsigned i = 0; i < f->param_count; ++i) {
++        kinds[i] = as_value(c, e->args[i], value(c, e->args[i], handler, height + (int)i));
++        Type t = kinds[i].type;
++        if (t != NUM && t != BOOL && t != I64 && t != BYTES && t != TEXT && t != LIST) /* a record's: called */
++            return call_fn(c, e, fn, handler, height, kinds, i + 1);
++    }
++    unsigned entry = c->inline_floor;
++    while (entry < c->inline_count &&
++           (c->inlines[entry].fn != fn || memcmp(c->inlines[entry].kinds, kinds, f->param_count * sizeof(Kind))))
++        ++entry;
++    if (entry == c->inline_count) {
++        if (entry == sizeof(c->inlines) / sizeof(c->inlines[0])) return call_fn(c, e, fn, handler, height, kinds, f->param_count);
++        c->inlines[entry].fn = fn;
++        memcpy(c->inlines[entry].kinds, kinds, f->param_count * sizeof(Kind));
++        c->inlines[entry].slots = c->local_slots, c->inlines[entry].bytes = c->held_bytes, c->inlines[entry].texts = c->held_texts;
++        ++c->inline_count;
++    }
++    unsigned slots = c->local_slots, bytes = c->held_bytes, texts = c->held_texts, locals = c->local_count;
++    unsigned floors[3] = {c->local_floor, c->loop_floor, c->alias_floor};
++    int message = c->message, arguments = c->arguments, row = c->row, module = c->module;
++    Scope *scope = c->scope;
++    c->local_slots = c->inlines[entry].slots, c->held_bytes = c->inlines[entry].bytes, c->held_texts = c->inlines[entry].texts;
++    c->local_floor = c->local_count, c->loop_floor = c->loop_count, c->alias_floor = c->alias_count;
++    c->message = c->arguments = c->row = -1, c->scope = NULL, c->module = f->module;
++    ++c->nested; /* its lets' lists begin empty at each call (c2) */
++    for (unsigned i = f->param_count; i-- > 0;) { /* the last argument is on top */
++        if (kinds[i].type == LIST) {
++            name_value(c, f->params[i], kinds[i], e->line, e->column);
++            pop_named(c, local_named(c, f->params[i]), e->line, e->column);
++            continue;
++        }
++        if (c->local_count == LOCALS || c->local_slots == LOCALS)
++            fail_at(c, e->line, e->column, "at most %d lets are allowed in a handler", LOCALS);
++        unsigned local = c->local_count++;
++        memset(&c->locals[local], 0, sizeof(c->locals[local]));
++        memcpy(c->locals[local].name, f->params[i], NAME);
++        c->locals[local].kind = kinds[i];
++        c->locals[local].list = -1;
++        if (kinds[i].type == BYTES || kinds[i].type == TEXT) {
++            unsigned *count = kinds[i].type == BYTES ? &c->held_bytes : &c->held_texts;
++            if (*count == HELD)
++                fail_at(c, e->line, e->column, "at most %d lets of %s are allowed in a handler", HELD, type_name(kinds[i].type));
++            c->locals[local].slot = (kinds[i].type == TEXT ? HELD_TEXT : 0) + (*count)++;
++            emit(c, e->line, e->column, BYTES_STORE, c->locals[local].slot, 0);
++        } else {
++            c->locals[local].slot = c->local_slots++;
++            emit(c, e->line, e->column, LOCAL_STORE, local_arg(c, (int)local), 0);
++        }
++    }
++    Kind result = {NOTHING, -1};
++    __typeof__(c->giving) giving = c->giving;
++    c->giving.kind = &result, c->giving.height = height, c->giving.want = result_type(f), c->giving.handler = handler;
++    statements(c, f->block); /* its return (its last line) leaves the value, its lets still there */
++    c->giving = giving;
++    --c->nested;
++    c->local_count = locals;
++    c->local_floor = floors[0], c->loop_floor = floors[1], c->alias_floor = floors[2];
++    c->message = message, c->arguments = arguments, c->row = row, c->scope = scope, c->module = module;
++    c->local_slots = c->local_slots > slots ? c->local_slots : slots;
++    c->held_bytes = c->held_bytes > bytes ? c->held_bytes : bytes, c->held_texts = c->held_texts > texts ? c->held_texts : texts;
++    return result;
++}
++
+ static Kind call_fn(Compiler *c, const Expr *e, int fn, bool handler, int height, Kind *kinds, unsigned given) {
+     const Fn *f = &c->fns[fn];
+     unsigned count = e->kind == E_FN ? e->count : 0;
+     if (count != f->param_count)
+         fail_at(c, e->line, e->column, "%s expects %u argument%s", f->name, f->param_count, f->param_count == 1 ? "" : "s");
++    if (f->inlined && !given && !c->folding && !c->filtering && (!height || !f->loops)) return inline_block(c, e, fn, handler, height);
+     if (c->folding) fail_at(c, e->line, e->column, "count, sum, max and min call no fn with a block, nor one that calls itself");
+     if (!handler && c->current < 0)
+         fail_at(c, e->line, e->column, "a view calls no fn with a block, nor one that calls itself: handlers do ('%s')", f->name);
+@@ -5033,6 +5155,16 @@ static void statements(Compiler *c, const Stmt *s) {
+             break;
+         }
+         case S_RETURN:
++            if (c->giving.kind) { /* an inlined block's last line: its value where its call is (inline_block) */
++                Kind *into = c->giving.kind;
++                Type want = c->giving.want;
++                const Expr *v = s->value;
++                c->giving.kind = NULL; /* (a block inlined in its value gives its own) */
++                if (v) *into = as_value(c, v, want == NUM || want == I64 ? wanted(c, v, c->giving.handler, c->giving.height, want)
++                                                                       : value(c, v, c->giving.handler, c->giving.height));
++                if (v && want && into->type != want) expect_kind(c, v, *into, want);
++                break;
++            }
+             if (c->current >= 0) { /* what a fn's call gives (027's 2c) */
+                 Instance *in = &c->instances[c->current];
+                 const char *name = c->fns[in->fn].name;
+@@ -5611,6 +5743,7 @@ static void generate(Compiler *c, unsigned char **module, size_t *size) {
+         Kind kind;
+         if (c->view_body[i]) { /* statements as a handler's, changing only its lets and lists, and the value returned */
+             c->local_count = c->local_slots = c->loop_count = c->nested = c->held_bytes = c->held_texts = 0;
++            c->inline_count = c->inline_floor = 0;
+             c->handling = c->has_returned = false;
+             statements(c, c->view_body[i]);
+             kind = c->returned;
+@@ -5633,6 +5766,7 @@ static void generate(Compiler *c, unsigned char **module, size_t *size) {
+         int input = handler_input[i];
+         c->message = input >= 0 && c->inputs[input].kind != KIND_KEY && c->inputs[input].kind != KIND_RELEASE ? input : -1;
+         c->local_count = c->local_slots = c->loop_count = c->nested = c->held_bytes = c->held_texts = 0;
++        c->inline_count = c->inline_floor = 0;
+         c->handler_code[i][0] = c->code_count;
+         if (c->inputs[input].kind == KIND_POINT) { /* a pointing: its list's item at the row's position, the index's */
+             const Input *in = &c->inputs[input];
