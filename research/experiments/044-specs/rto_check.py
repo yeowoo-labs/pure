@@ -112,9 +112,9 @@ if __name__ == '__main__':
     with tempfile.TemporaryDirectory() as work:
         source = open(os.path.join(aup, 'examples', 'rto.aup')).read()
         for period in (10, 100):
-            module = os.path.join(work, f'rto-{period}.pmod')  # its tick and its G the scenario's period
+            module = os.path.join(work, f'rto-{period}.pmod')  # its tick the scenario's period
             with open(os.path.join(work, f'rto-{period}.aup'), 'w') as f:
-                f.write(source.replace('every 10 ms', f'every {period} ms').replace('fn PERIOD = 10 ', f'fn PERIOD = {period} '))
+                f.write(source.replace('every 10 ms', f'every {period} ms'))  # G, tick.period, follows
             subprocess.run([os.path.join(aup, 'build', 'aup'), 'build', os.path.join(work, f'rto-{period}.aup'), '-o', module], check=True)
             ticks = timeouts = 0
             lateness = []

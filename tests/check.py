@@ -1971,7 +1971,7 @@ def module_specs(aup, pure, work):
     source, events = (EXAMPLES / 'rto.aup').read_text(), 0
     for scenario in json.loads((pure / 'tests/specs/rto/scenarios.json').read_text()):
         period = scenario['period']
-        (work / 'rto.aup').write_text(source.replace('every 10 ms', f'every {period} ms').replace('fn PERIOD = 10 ', f'fn PERIOD = {period} '))
+        (work / 'rto.aup').write_text(source.replace('every 10 ms', f'every {period} ms'))  # G is tick.period
         program = work / 'rto.pmod'
         compile_module(aup, work / 'rto.aup', program)
         given = ''.join(f'time {t}\n' + ('tick tick\n' if kind == 'tick' else f"message {kind} {struct.pack('<I', seq).hex()}\n")
