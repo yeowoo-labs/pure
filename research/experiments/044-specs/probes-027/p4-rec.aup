@@ -1,0 +1,6 @@
+fn depth(n) -> number = if n == 0 { 0 } else { 1 + depth(n - 1) }
+state d = 0
+input go = key Space
+on go.down {
+  d = depth(3)
+}

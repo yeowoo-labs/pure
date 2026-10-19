@@ -1,0 +1,8 @@
+record Leaf {
+  v = 0
+}
+variant X {
+  leaf(Leaf)
+  word(text)
+}
+state x: X

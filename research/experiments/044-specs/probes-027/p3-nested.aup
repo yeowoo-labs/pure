@@ -1,0 +1,5 @@
+record Node {
+  name: text
+  children: list of Node
+}
+state root: list of Node

@@ -1,0 +1,9 @@
+p1-byte.aup	compiles
+p2-bits.aup	compiles
+p3-nested.aup	compiles
+p4-rec.aup	compiles
+p4b-rec-view.aup	p4b-rec-view.aup:2:10: a view calls no fn with a block, nor one that calls itself: handlers do ('depth')
+p5b-chars.aup	compiles
+p6-variant.aup	p6-variant.aup:8:10: state types are numbers, bools, i64, text, cursor or mark in a text, list of a record and index of a list
+p6b-variant-field.aup	compiles
+p7-record-state.aup	p7-record-state.aup:5:11: state types are numbers, bools, i64, text, cursor or mark in a text, list of a record and index of a list

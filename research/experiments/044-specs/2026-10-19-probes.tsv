@@ -1,0 +1,10 @@
+p1-byte.aup	p1-byte.aup:4:22: expected a number, not an i64
+p2-bits.aup	p2-bits.aup:4:8: bit operations take i64s, not numbers: convert, as in i64(x)
+p2b-bits.aup	compiles
+p3-nested.aup	p3-nested.aup:2:10: expected a numeric field default
+p3b-nested.aup	compiles
+p4-rec.aup	p4-rec.aup:2:10: a view calls no fn with a block, nor one that calls itself: handlers do ('depth')
+p5-chars.aup	compiles
+p5b-chars.aup	p5b-chars.aup:4:17: a text is read by position through its bytes, as in bytes(t)[i]
+p5c-cursor.aup	p5c-cursor.aup:6:12: unknown library 'note'; write use note first
+p6-variant.aup	p6-variant.aup:2:10: state types are numbers, bools, i64, text, cursor or mark in a text, list of a record and index of a list

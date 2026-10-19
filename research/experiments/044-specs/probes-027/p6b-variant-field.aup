@@ -1,0 +1,11 @@
+record Leaf {
+  v = 0
+}
+variant X {
+  leaf(Leaf)
+  word(text)
+}
+record Holder {
+  x: X
+}
+state xs: list of Holder

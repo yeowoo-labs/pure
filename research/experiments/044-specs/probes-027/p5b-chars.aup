@@ -1,0 +1,8 @@
+state first: text
+input line = message { t: text }
+on line {
+  for c in line.t {
+    first = char(c)
+    break
+  }
+}

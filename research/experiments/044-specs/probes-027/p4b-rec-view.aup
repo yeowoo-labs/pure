@@ -1,0 +1,2 @@
+fn depth(n) -> number = if n == 0 { 0 } else { 1 + depth(n - 1) }
+view d = depth(3)
