@@ -3,7 +3,8 @@
 part of a cut: a cut's records travel together). The owner takes EVENTS messages with the shim keeping every op it
 shipped (SHIM_JOURNAL); then the ops are done again in order into a fresh directory, and at SAMPLES points (op
 boundaries drawn at random, within cuts and at their ends, and the whole stream) a copy of what is there is opened by
-pure-run as the owner (and around every rename: a compaction's or an image's install). Each must open without a fault, hold the first `total` messages' entries exactly (summed), hold
+pure-run as the owner (and around every rename: a compaction's or an image's install). Each must open without a fault, take
+a message as an owner does, hold the first `total` messages' entries exactly (summed), hold
 no fewer than at the sample before (a prefix never loses what a shorter one held), and the whole stream every message.
 
   prefixes.py EVENTS SAMPLES     one JSON line a sample, then one of the totals"""
@@ -98,7 +99,8 @@ def main():
         shutil.copytree(root, copy)
         took = harness.opened(copy)
         total = int(took.get('total', -1)) if took.get('opened') else -1
-        good = (took.get('opened') and took.get('fault') == 'none' and took.get('summed') == harness.summed(total) and
+        good = (took.get('opened') and took.get('fault') == 'none' and took.get('takes_a_message') and
+                took.get('summed') == harness.summed(total) and
                 total >= last_total and (pick < len(ops) or total == events))
         if not good:
             failures.append({'ops': pick, 'cut': ops[pick - 1][3], 'within_cut': mid, 'took': took, 'before': last_total})

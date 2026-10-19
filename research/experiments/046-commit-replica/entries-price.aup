@@ -1,0 +1,11 @@
+record Entry {
+  n = 0
+}
+state entries: list of Entry
+state count = 0
+input add = message { n: number }
+on add {
+  entries.append(Entry { n: add.n })
+  count = count + 1
+}
+view total = count

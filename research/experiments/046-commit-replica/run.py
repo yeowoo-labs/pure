@@ -46,7 +46,8 @@ def build():
     for name in ('shipper', 'follower'):
         subprocess.run(cc + [f'-I{PURE / "link"}', str(HERE / f'{name}.c'), str(PURE / 'build' / 'libpure-link.a'),
                              '-lm', '-pthread', '-ldl', '-o', str(WORK / name)], check=True)
-    subprocess.run([str(AUP), 'build', str(HERE / 'entries.aup'), '-o', str(WORK / 'entries.pmod')], check=True)
+    for name in ('entries', 'entries-price'):  # the price's: no view that folds the list (each message shows the views)
+        subprocess.run([str(AUP), 'build', str(HERE / f'{name}.aup'), '-o', str(WORK / f'{name}.pmod')], check=True)
     keys = json.loads(subprocess.run([str(WORK / 'follower'), 'keys', str(WORK)], capture_output=True, text=True,
                                      check=True, env=ENV).stdout)
     return keys
@@ -85,7 +86,7 @@ def stores_differ(a, b):
 class Run:
     """A follower, a shipper and an owner, started in that order on fresh stores."""
 
-    def __init__(self, keys, every=0, shim=True):
+    def __init__(self, keys, every=0, shim=True, module='entries'):
         self.owner_dir, self.follower_dir = WORK / 'owner-store', WORK / 'follower-store'
         for d in (self.owner_dir, self.follower_dir):
             shutil.rmtree(d, ignore_errors=True)
@@ -111,7 +112,7 @@ class Run:
             self.paused = os.open(WORK / 'paused', os.O_RDWR)  # held open both ways: no open waits for the other end
             self.resume = os.open(WORK / 'resume', os.O_RDWR)
             env.update(SHIM_PAUSE_EVERY=str(every), SHIM_PAUSE_DIR=str(WORK))
-        self.owner = subprocess.Popen([str(RUN), str(WORK / 'entries.pmod'), '--views', '--store', str(self.owner_dir)],
+        self.owner = subprocess.Popen([str(RUN), str(WORK / f'{module}.pmod'), '--views', '--store', str(self.owner_dir)],
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                       env=env, bufsize=1)
         self.done = 0  # messages the owner said done (each line comes after its save, so after the follower's ack)
@@ -144,14 +145,19 @@ class Run:
 
 
 def opened(store):
-    """The store opened by pure-run as its owner: the views (total, summed) it shows, or why it did not open."""
-    r = subprocess.run([str(RUN), str(WORK / 'entries.pmod'), '--views', '--store', str(store)], input='show\n',
-                       capture_output=True, text=True, env=ENV, timeout=120)
-    lines = [l for l in r.stdout.splitlines() if l.startswith('{')]
-    if r.returncode or not lines:
+    """The store opened by pure-run as its owner: the views (total, summed) it shows, and whether it then takes a message
+    as an owner does (total one more, the entry its own; on a copy: the store looked at is left as it was)."""
+    shutil.rmtree(WORK / 'opened', ignore_errors=True)
+    shutil.copytree(store, WORK / 'opened')
+    r = subprocess.run([str(RUN), str(WORK / 'entries.pmod'), '--views', '--store', str(WORK / 'opened')],
+                       input='show\n' + message(7) + 'show\n', capture_output=True, text=True, env=ENV, timeout=120)
+    lines = [json.loads(l) for l in r.stdout.splitlines() if l.startswith('{')]
+    if r.returncode or len(lines) < 3:
         return {'opened': False, 'exit': r.returncode, 'stderr': r.stderr[-300:]}
-    shown = json.loads(lines[-1])
-    return {'opened': True, 'fault': shown.get('fault'), **shown['views']}
+    shown, after = lines[0], lines[-1]
+    took = (after['views']['total'] == shown['views']['total'] + 1 and after['fault'] == 'none' and
+            after['views']['summed'] == shown['views']['summed'] + 7.25)
+    return {'opened': True, 'fault': shown.get('fault'), **shown['views'], 'takes_a_message': took}
 
 
 def summed(n):  # every partial sum a multiple of 0.25 below 2^50: exact as a binary64
@@ -212,7 +218,8 @@ def takeover(keys, runs, events, torn=False):
         time.sleep(1.0)  # what was on the way reaches the follower
         follower = run.stop_follower()
         took = opened(run.follower_dir)
-        good = (took.get('opened') and took.get('fault') == 'none' and done <= took.get('total', -1) <= sent and
+        good = (took.get('opened') and took.get('fault') == 'none' and took.get('takes_a_message') and
+                done <= took.get('total', -1) <= sent and
                 took.get('summed') == summed(int(took.get('total', 0))))
         print(json.dumps({'run': 'takeover', 'k': k, 'whole_node': whole_node, 'record': os.environ.get('SHIPPER_RECORD'), 'sent': sent, 'owner_said_done': done,
                           'follower_took': took, 'follower': follower, 'passed': bool(good),
@@ -222,7 +229,7 @@ def takeover(keys, runs, events, torn=False):
 def price(keys, events):
     out = {}
     for shim in (False, True):
-        run = Run(keys, shim=shim)
+        run = Run(keys, shim=shim, module='entries-price')
         start = time.perf_counter()
         run.feed(events)
         run.owner.wait()
