@@ -7,7 +7,7 @@
 #include <string.h>
 
 /* Test host for a verified module: reads commands from stdin and prints one
- * JSON snapshot per command. Not a product interface. With --store the app's
+ * JSON snapshot per command (--views: its states left out). Not a product interface. With --store the app's
  * states live in that tree store: it starts from them, and frame changes are
  * saved at the end of input or by save. --batch N defers saving and saves
  * every N commands (and at the end), so N events share one commit.
@@ -142,10 +142,14 @@ static void show_value(PureApp *app, uint32_t view, size_t row) {
 /* The frames that ran, and the device events no message takes (a release, a frame): a surface's events all the same. */
 static unsigned long long ticks, untaken;
 
+/* --views: each snapshot without its states (an app holding a table, as research 140's UAX #14 holds its ranges, would
+ * print the table at every command). */
+static bool views_only;
+
 static void show(PureApp *app, const char *failure) {
     const PureModule *m = app->module;
     printf("{\"states\":{");
-    for (uint32_t i = 0; i < m->states; ++i) {
+    for (uint32_t i = 0; !views_only && i < m->states; ++i) {
         printf("%s\"%s\":", i ? "," : "", m->state_names[i]);
         if (m->state_type[i] == PURE_STATE_TEXT && m->state_flags[i] & PURE_TEXT_BYTES) {
             putchar('"'); /* a bytes state (028): its bytes' hex digits */
@@ -198,11 +202,16 @@ static int hex(char c) {
 
 int main(int argc, char **argv) {
     static PureModule modules[2];
+    if (argc >= 3 && !strcmp(argv[2], "--views")) { /* MODULE --views ...: the rest as without it */
+        views_only = true;
+        for (int i = 2; i + 1 < argc; ++i) argv[i] = argv[i + 1];
+        argv[--argc] = NULL;
+    }
     bool stored = argc >= 4 && !strcmp(argv[2], "--store");
     long batch = argc == 6 && stored && !strcmp(argv[4], "--batch") ? strtol(argv[5], NULL, 10) : 0;
     bool usage = argc != 2 && !(stored && argc == 4) && !(batch > 0 && batch <= 100000);
     if (usage || !load(argv[1], &modules[0])) {
-        if (usage) fputs("pure-run MODULE [--store PATH [--batch N]] < commands\n", stderr);
+        if (usage) fputs("pure-run MODULE [--views] [--store PATH [--batch N]] < commands\n", stderr);
         return 2;
     }
     if (stored && pure_store_init(argv[3]) != PURE_OK) { fprintf(stderr, "cannot open store %s\n", argv[3]); return 2; }
