@@ -154,6 +154,7 @@ static int FN(decide)(CONTEXT *x, const FN(Text) *t, IDX i) {
 /* on line: the boundaries of the line's points into got (0 none, 1 allowed, 2 mandatory), count + 1 of them; false on a fault. */
 static bool FN(on_line)(CONTEXT *x, const POINTS *points, uint8_t *got) {
     LINE_BEGIN;
+    x->kleaf = NULL, x->found_leaf = NULL; /* the keyed ranges' leaf kept: begun anew each message (valid within the event: N2) */
     for (IDX k = 0; k < P_COUNT(points); k = k + 1) {
         CHARGE(ROUND_COST);
         double code = P_CODE(points, k);

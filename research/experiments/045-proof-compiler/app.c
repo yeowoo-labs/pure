@@ -77,6 +77,12 @@ typedef struct {
     PureRun run; /* the leaf of ranges last read, its columns where the tree keeps them (pure_list_run): begun each message */
     const Node *leaf; /* leaves_direct's: the leaf of ranges last read, its first item's place and its items */
     size_t leaf_start, leaf_count;
+    const PureList *keyed; /* the keyed app's ranges (by last: linebreak-keyed.aup), and its leaf last read */
+    size_t keyed_count;
+    const Node *kleaf;
+    const Node *found_leaf; /* the item the last seek found (linebreak-keyed2.aup reads its range's fields from it) */
+    unsigned found_index;
+    double found_key;
     PureList *codes, *cls, *eff, *start, *nonspace, *ri, *at, *joined, *numeric, *out; /* the event's lists */
     PureList *copies[9];
     unsigned copied;
@@ -121,6 +127,53 @@ static __attribute__((noinline)) bool grow(void **v, size_t *cap, size_t size) {
 
 #define CHARGES_ON(n) do { if ((uint64_t)(n) > x->budget - x->work) FAIL; x->work += (uint64_t)(n); } while (0)
 
+/* ---- The keyed app's (linebreak-keyed.aup): ranges by last, a range found by a seek (first(x in ranges where
+ * x.last >= code), the item itself: linebreak-keyed2.aup's found) and read by key (ranges[key]); the found item's
+ * fields read from it. Two ways: through the list's own seek and get (keyed_api), and by
+ * its tree as its layout is (keyed_at: the leaf kept, else each level's last child whose lead is at or below the key,
+ * then the leaf's keys; past the leaf, the next item by its place), nothing copied. ---- */
+static inline __attribute__((always_inline)) bool keyed_at(Context *x, double key, const Node **out, unsigned *index) {
+    const Layout *l = &x->keyed->layout;
+    if (x->kleaf) {
+        const double *keys = numbers(l, x->kleaf, 0);
+        if (keys[0] <= key && key <= keys[x->kleaf->count - 1]) {
+            *out = x->kleaf, *index = lower(keys, x->kleaf->count, key);
+            return true;
+        }
+    }
+    const Node *node = x->keyed->root;
+    size_t start = 0;
+    while (!node->leaf) {
+        unsigned taken = child_by_key(node, key);
+        start += guide(node)->before[taken];
+        node = child(node, taken);
+    }
+    unsigned low = lower(numbers(l, node, 0), node->count, key);
+    if (low == node->count) { /* every key here below it: the next item, by its place */
+        size_t at = start + low;
+        if (at >= x->keyed_count) return false;
+        node = x->keyed->root, start = 0;
+        while (!node->leaf) {
+            unsigned i = child_at(node, at - start);
+            start += guide(node)->before[i];
+            node = node->child[i];
+        }
+        low = (unsigned)(at - start);
+    }
+    x->kleaf = node;
+    *out = node, *index = low;
+    return true;
+}
+#define KEYED_SEEK_DIRECT(c) ({ const Node *n_; unsigned i_; if (!keyed_at(x, (c), &n_, &i_)) FAIL; \
+        x->found_leaf = n_, x->found_index = i_, x->found_key = numbers(&x->keyed->layout, n_, 0)[i_]; (IDX)x->found_key; })
+#define KEYED_GET_DIRECT(f, k) ({ const Node *n_; unsigned i_; double k_ = (double)(k); \
+        if (k_ == x->found_key && x->found_leaf) n_ = x->found_leaf, i_ = x->found_index; /* the item the seek found */ \
+        else if (!keyed_at(x, k_, &n_, &i_) || numbers(&x->keyed->layout, n_, 0)[i_] != k_) FAIL; \
+        numbers(&x->keyed->layout, n_, f)[i_]; })
+#define KEYED_SEEK_API(c) ({ bool f_; size_t p_ = pure_list_seek(x->keyed, 0, (PureCell){.num = (c)}, &f_); \
+        if (p_ >= pure_list_count(x->keyed)) FAIL; (IDX)pure_list_get(x->keyed, p_, 0).num; })
+#define KEYED_GET_API(f, k) ({ bool f_; double k_ = (double)(k); size_t p_ = pure_list_seek(x->keyed, 0, (PureCell){.num = k_}, &f_); \
+        if (!f_) FAIL; pure_list_get(x->keyed, p_, f).num; })
 /* ======== exact ======== */
 #define WAY exact
 #define IDX double
@@ -168,6 +221,31 @@ static __attribute__((noinline)) bool grow(void **v, size_t *cap, size_t size) {
 #define LINE_END do { for (unsigned c_ = 0; c_ < x->copied; ++c_) pure_list_free(x->copies[c_]); x->copied = 0; } while (0)
 #include "app-way.h"
 #undef WAY
+#define WAY keyed_exact /* exact, on the keyed app: range() its seek, ranges read by key */
+#pragma push_macro("R_CLASS")
+#undef R_CLASS
+#pragma push_macro("R_PI")
+#undef R_PI
+#pragma push_macro("R_PF")
+#undef R_PF
+#pragma push_macro("R_EAST")
+#undef R_EAST
+#pragma push_macro("R_PICT")
+#undef R_PICT
+#define RANGE_SEEK(c) KEYED_SEEK_API(c)
+#define R_CLASS(k) KEYED_GET_API(CLASS, k)
+#define R_PI(k) (KEYED_GET_API(PI_FIELD, k) != 0)
+#define R_PF(k) (KEYED_GET_API(PF_FIELD, k) != 0)
+#define R_EAST(k) (KEYED_GET_API(EAST_FIELD, k) != 0)
+#define R_PICT(k) (KEYED_GET_API(PICT_FIELD, k) != 0)
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
+#pragma pop_macro("R_CLASS")
+#pragma pop_macro("R_PI")
+#pragma pop_macro("R_PF")
+#pragma pop_macro("R_EAST")
+#pragma pop_macro("R_PICT")
 #undef IDX
 #undef ADD
 #undef SUB
@@ -187,6 +265,31 @@ static __attribute__((noinline)) bool grow(void **v, size_t *cap, size_t size) {
 #define GETI(l, i) ((IDX)GET_CELL(l, i).num)
 #include "app-way.h"
 #undef WAY
+#define WAY keyed_integer /* integer, on the keyed app: range() its seek, ranges read by key */
+#pragma push_macro("R_CLASS")
+#undef R_CLASS
+#pragma push_macro("R_PI")
+#undef R_PI
+#pragma push_macro("R_PF")
+#undef R_PF
+#pragma push_macro("R_EAST")
+#undef R_EAST
+#pragma push_macro("R_PICT")
+#undef R_PICT
+#define RANGE_SEEK(c) KEYED_SEEK_API(c)
+#define R_CLASS(k) KEYED_GET_API(CLASS, k)
+#define R_PI(k) (KEYED_GET_API(PI_FIELD, k) != 0)
+#define R_PF(k) (KEYED_GET_API(PF_FIELD, k) != 0)
+#define R_EAST(k) (KEYED_GET_API(EAST_FIELD, k) != 0)
+#define R_PICT(k) (KEYED_GET_API(PICT_FIELD, k) != 0)
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
+#pragma pop_macro("R_CLASS")
+#pragma pop_macro("R_PI")
+#pragma pop_macro("R_PF")
+#pragma pop_macro("R_EAST")
+#pragma pop_macro("R_PICT")
 
 /* ======== stored_flat: ranges' columns flat ======== */
 #define WAY stored_flat
@@ -262,6 +365,31 @@ static inline __attribute__((always_inline)) double leaf_number(Context *x, size
         x->leaf_count = 0; } while (0)
 #include "app-way.h"
 #undef WAY
+#define WAY keyed_leaves_direct /* leaves_direct, on the keyed app: range() its seek, ranges read by key */
+#pragma push_macro("R_CLASS")
+#undef R_CLASS
+#pragma push_macro("R_PI")
+#undef R_PI
+#pragma push_macro("R_PF")
+#undef R_PF
+#pragma push_macro("R_EAST")
+#undef R_EAST
+#pragma push_macro("R_PICT")
+#undef R_PICT
+#define RANGE_SEEK(c) KEYED_SEEK_DIRECT(c)
+#define R_CLASS(k) KEYED_GET_DIRECT(CLASS, k)
+#define R_PI(k) (KEYED_GET_DIRECT(PI_FIELD, k) != 0)
+#define R_PF(k) (KEYED_GET_DIRECT(PF_FIELD, k) != 0)
+#define R_EAST(k) (KEYED_GET_DIRECT(EAST_FIELD, k) != 0)
+#define R_PICT(k) (KEYED_GET_DIRECT(PICT_FIELD, k) != 0)
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
+#pragma pop_macro("R_CLASS")
+#pragma pop_macro("R_PI")
+#pragma pop_macro("R_PF")
+#pragma pop_macro("R_EAST")
+#pragma pop_macro("R_PICT")
 
 /* ======== leaves_seek: leaves_direct, and range() done by the tree's own order: each inner node's children chosen by
  * their first items' starts (the leaf each names, read where it is), then halving within the leaf. Another algorithm
@@ -346,6 +474,31 @@ static inline __attribute__((always_inline)) size_t seek_start(Context *x, doubl
 #define LINE_END do { } while (0)
 #include "app-way.h"
 #undef WAY
+#define WAY keyed_local_flat /* local_flat, on the keyed app: range() its seek, ranges read by key */
+#pragma push_macro("R_CLASS")
+#undef R_CLASS
+#pragma push_macro("R_PI")
+#undef R_PI
+#pragma push_macro("R_PF")
+#undef R_PF
+#pragma push_macro("R_EAST")
+#undef R_EAST
+#pragma push_macro("R_PICT")
+#undef R_PICT
+#define RANGE_SEEK(c) KEYED_SEEK_DIRECT(c)
+#define R_CLASS(k) KEYED_GET_DIRECT(CLASS, k)
+#define R_PI(k) (KEYED_GET_DIRECT(PI_FIELD, k) != 0)
+#define R_PF(k) (KEYED_GET_DIRECT(PF_FIELD, k) != 0)
+#define R_EAST(k) (KEYED_GET_DIRECT(EAST_FIELD, k) != 0)
+#define R_PICT(k) (KEYED_GET_DIRECT(PICT_FIELD, k) != 0)
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
+#pragma pop_macro("R_CLASS")
+#pragma pop_macro("R_PI")
+#pragma pop_macro("R_PF")
+#pragma pop_macro("R_EAST")
+#pragma pop_macro("R_PICT")
 #define WAY local_flat_seek /* the same, range() by the tree's order (leaves_seek) */
 #define RANGE_SEEK(c) seek_start(x, (c))
 #include "app-way.h"
@@ -358,6 +511,31 @@ static inline __attribute__((always_inline)) size_t seek_start(Context *x, doubl
 #define CAPTURE(dst, name) ((dst) = L(name))
 #include "app-way.h"
 #undef WAY
+#define WAY keyed_shared /* shared, on the keyed app: range() its seek, ranges read by key */
+#pragma push_macro("R_CLASS")
+#undef R_CLASS
+#pragma push_macro("R_PI")
+#undef R_PI
+#pragma push_macro("R_PF")
+#undef R_PF
+#pragma push_macro("R_EAST")
+#undef R_EAST
+#pragma push_macro("R_PICT")
+#undef R_PICT
+#define RANGE_SEEK(c) KEYED_SEEK_DIRECT(c)
+#define R_CLASS(k) KEYED_GET_DIRECT(CLASS, k)
+#define R_PI(k) (KEYED_GET_DIRECT(PI_FIELD, k) != 0)
+#define R_PF(k) (KEYED_GET_DIRECT(PF_FIELD, k) != 0)
+#define R_EAST(k) (KEYED_GET_DIRECT(EAST_FIELD, k) != 0)
+#define R_PICT(k) (KEYED_GET_DIRECT(PICT_FIELD, k) != 0)
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
+#pragma pop_macro("R_CLASS")
+#pragma pop_macro("R_PI")
+#pragma pop_macro("R_PF")
+#pragma pop_macro("R_EAST")
+#pragma pop_macro("R_PICT")
 #define WAY shared_seek /* the same, range() by the tree's order (leaves_seek) */
 #define RANGE_SEEK(c) seek_start(x, (c))
 #include "app-way.h"
@@ -370,6 +548,31 @@ static inline __attribute__((always_inline)) size_t seek_start(Context *x, doubl
 #define CHECK_AT(count, i) do { (void)(count); } while (0)
 #include "app-way.h"
 #undef WAY
+#define WAY keyed_unbounded /* unbounded, on the keyed app: range() its seek, ranges read by key */
+#pragma push_macro("R_CLASS")
+#undef R_CLASS
+#pragma push_macro("R_PI")
+#undef R_PI
+#pragma push_macro("R_PF")
+#undef R_PF
+#pragma push_macro("R_EAST")
+#undef R_EAST
+#pragma push_macro("R_PICT")
+#undef R_PICT
+#define RANGE_SEEK(c) KEYED_SEEK_DIRECT(c)
+#define R_CLASS(k) KEYED_GET_DIRECT(CLASS, k)
+#define R_PI(k) (KEYED_GET_DIRECT(PI_FIELD, k) != 0)
+#define R_PF(k) (KEYED_GET_DIRECT(PF_FIELD, k) != 0)
+#define R_EAST(k) (KEYED_GET_DIRECT(EAST_FIELD, k) != 0)
+#define R_PICT(k) (KEYED_GET_DIRECT(PICT_FIELD, k) != 0)
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
+#pragma pop_macro("R_CLASS")
+#pragma pop_macro("R_PI")
+#pragma pop_macro("R_PF")
+#pragma pop_macro("R_EAST")
+#pragma pop_macro("R_PICT")
 #define WAY unbounded_seek /* the same, range() by the tree's order (leaves_seek) */
 #define RANGE_SEEK(c) seek_start(x, (c))
 #include "app-way.h"
@@ -386,6 +589,31 @@ static inline __attribute__((always_inline)) size_t seek_start(Context *x, doubl
 #define OUT_EMIT(got) do { for (size_t k_ = 0; k_ < x->b_out.n; ++k_) (got)[k_] = (uint8_t)x->b_out.v[k_]; } while (0)
 #include "app-way.h"
 #undef WAY
+#define WAY keyed_plain /* plain, on the keyed app: range() its seek, ranges read by key */
+#pragma push_macro("R_CLASS")
+#undef R_CLASS
+#pragma push_macro("R_PI")
+#undef R_PI
+#pragma push_macro("R_PF")
+#undef R_PF
+#pragma push_macro("R_EAST")
+#undef R_EAST
+#pragma push_macro("R_PICT")
+#undef R_PICT
+#define RANGE_SEEK(c) KEYED_SEEK_DIRECT(c)
+#define R_CLASS(k) KEYED_GET_DIRECT(CLASS, k)
+#define R_PI(k) (KEYED_GET_DIRECT(PI_FIELD, k) != 0)
+#define R_PF(k) (KEYED_GET_DIRECT(PF_FIELD, k) != 0)
+#define R_EAST(k) (KEYED_GET_DIRECT(EAST_FIELD, k) != 0)
+#define R_PICT(k) (KEYED_GET_DIRECT(PICT_FIELD, k) != 0)
+#include "app-way.h"
+#undef WAY
+#undef RANGE_SEEK
+#pragma pop_macro("R_CLASS")
+#pragma pop_macro("R_PI")
+#pragma pop_macro("R_PF")
+#pragma pop_macro("R_EAST")
+#pragma pop_macro("R_PICT")
 
 static bool on_line_vega(Context *x, const Points *p, const uint32_t *codes, uint8_t *got) {
     (void)x, (void)p;
@@ -430,6 +658,7 @@ enum { HANDLER_LENGTH = 180 }; /* what the handler charges as it begins (its ins
 BORDER(shared, true)
 BORDER(plain, false)
 BORDER(shared_seek, true)
+BORDER(keyed_shared, true)
 
 /* The same message to Vega's C: its numbers as code points, the boundaries into the state's buffer. */
 static bool message_vega(BytesState *breaks, const unsigned char *payload, size_t size, uint32_t *scratch) {
@@ -483,10 +712,11 @@ static uint64_t read_counter(int fd) {
 }
 
 typedef struct { Points points; const uint32_t *codes; const unsigned char *want; } Line;
-enum { RUNGS = 14 };
+enum { RUNGS = 21 };
 static const char *const names[RUNGS] = {"exact", "integer", "stored_flat", "leaves", "leaves_direct", "local_flat", "shared",
                                          "unbounded", "plain", "leaves_seek", "local_flat_seek", "shared_seek",
-                                         "unbounded_seek", "vega"};
+                                         "unbounded_seek", "keyed_exact", "keyed_integer", "keyed_leaves_direct",
+                                         "keyed_local_flat", "keyed_shared", "keyed_unbounded", "keyed_plain", "vega"};
 
 static bool run(int rung, Context *x, const Line *l, uint8_t *got) {
     switch (rung) {
@@ -503,12 +733,19 @@ static bool run(int rung, Context *x, const Line *l, uint8_t *got) {
     case 10: return on_line_local_flat_seek(x, &l->points, got);
     case 11: return on_line_shared_seek(x, &l->points, got);
     case 12: return on_line_unbounded_seek(x, &l->points, got);
+    case 13: return on_line_keyed_exact(x, &l->points, got);
+    case 14: return on_line_keyed_integer(x, &l->points, got);
+    case 15: return on_line_keyed_leaves_direct(x, &l->points, got);
+    case 16: return on_line_keyed_local_flat(x, &l->points, got);
+    case 17: return on_line_keyed_shared(x, &l->points, got);
+    case 18: return on_line_keyed_unbounded(x, &l->points, got);
+    case 19: return on_line_keyed_plain(x, &l->points, got);
     default: return on_line_vega(x, &l->points, l->codes, got);
     }
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6) { fprintf(stderr, "usage: %s linebreak.pmod RANGES LINES ROUNDS v0-empty.pmod\n", argv[0]); return 2; }
+    if (argc != 7) { fprintf(stderr, "usage: %s linebreak.pmod RANGES LINES ROUNDS v0-empty.pmod linebreak-keyed.pmod\n", argv[0]); return 2; }
     size_t ranges_size, lines_size;
     unsigned char *ranges = whole(argv[2], &ranges_size), *bytes = whole(argv[3], &lines_size);
     int rounds = atoi(argv[4]);
@@ -530,6 +767,16 @@ int main(int argc, char **argv) {
         for (unsigned f = 0; f < 4; ++f) flags[f * x.ranges_count + i] = pure_list_get(x.ranges, i, PI_FIELD + f).num != 0;
     }
     x.r_start = r_start, x.r_class = r_class;
+    /* The keyed app (ranges by last), its ranges loaded the same way: what its keyed rungs read. */
+    static PureModule keyed_module;
+    static PureApp keyed_app;
+    if (pure_module_read(argv[6], &keyed_module, error, sizeof(error)) != PURE_OK) { fprintf(stderr, "%s\n", error); return 1; }
+    if (pure_app_start(&keyed_app, &keyed_module, (PureData){0}) != PURE_OK ||
+        pure_app_message(&keyed_app, (uint32_t)pure_module_input(&keyed_module, "load"), (PureSpan){ranges, ranges_size}) != PURE_OK)
+        return 1;
+    x.keyed = keyed_app.lists[pure_module_state(&keyed_module, "ranges")];
+    x.keyed_count = pure_list_count(x.keyed);
+    if (pure_list_form(x.keyed) != 0 || x.keyed_count != x.ranges_count) { fprintf(stderr, "the keyed ranges: not a tree\n"); return 1; }
     x.r_pi = flags, x.r_pf = flags + x.ranges_count, x.r_east = flags + 2 * x.ranges_count, x.r_pict = flags + 3 * x.ranges_count;
     const uint8_t number[] = {PURE_CELL_NUMBER}, boolean[] = {PURE_CELL_BOOL}, integer[] = {PURE_CELL_INTEGER};
     PureList **numbers[] = {&x.codes, &x.cls, &x.eff, &x.start, &x.nonspace, &x.ri, &x.at};
@@ -620,11 +867,12 @@ int main(int argc, char **argv) {
         payloads[k] = malloc(8 * n + 8);
         memcpy(payloads[k], lines[k].points.codes, 8 * n); /* the message: each point's code, a number (8 bytes) */
     }
-    static BytesState breaks[4];
+    static BytesState breaks[6];
     static uint32_t scratch[4096];
-    enum { ENDS = 6 };
+    enum { ENDS = 8 };
     const char *ends[ENDS] = {"runtime", "runtime_empty_handler", "end_to_end_shared", "end_to_end_plain", "end_to_end_vega",
-                              "end_to_end_shared_seek"};
+                              "end_to_end_shared_seek", "runtime_keyed", "end_to_end_keyed_shared"};
+    int keyed_line = pure_module_input(&keyed_module, "line"), keyed_boundaries = pure_module_view(&keyed_module, "boundaries");
     size_t wrong_ends[ENDS] = {0};
     for (size_t k = 0; k < count; ++k) { /* checked first: each end's boundaries the test's */
         const Line *l = &lines[k];
@@ -634,10 +882,16 @@ int main(int argc, char **argv) {
                  pure_app_view_text(&app, (uint32_t)boundaries, compare, &c) == PURE_OK && c.at == l->points.count + 1;
         wrong_ends[0] += !c.same;
         wrong_ends[1] += pure_app_message(&empty, (uint32_t)empty_line, (PureSpan){payloads[k], size}) != PURE_OK;
+        Compare ck = {l->want, 0, true};
+        ck.same = pure_app_message(&keyed_app, (uint32_t)keyed_line, (PureSpan){payloads[k], size}) == PURE_OK &&
+                  pure_app_view_text(&keyed_app, (uint32_t)keyed_boundaries, compare, &ck) == PURE_OK && ck.at == l->points.count + 1;
+        wrong_ends[6] += !ck.same;
         for (int e = 2; e < ENDS; ++e) {
+            if (e == 6) continue;
             BytesState *b = &breaks[e - 2];
             bool done = e == 2 ? message_shared(&x, b, payloads[k], size) : e == 3 ? message_plain(&x, b, payloads[k], size)
-                        : e == 4 ? message_vega(b, payloads[k], size, scratch) : message_shared_seek(&x, b, payloads[k], size);
+                        : e == 4 ? message_vega(b, payloads[k], size, scratch) : e == 5 ? message_shared_seek(&x, b, payloads[k], size)
+                        : message_keyed_shared(&x, b, payloads[k], size);
             bool same = done && b->size == l->points.count + 1;
             for (size_t i = 0; same && i < b->size; ++i) same = (b->buffer[b->now][i] != NONE) == l->want[i];
             wrong_ends[e] += !same;
@@ -659,7 +913,9 @@ int main(int argc, char **argv) {
                 case 2: message_shared(&x, &breaks[0], payloads[k], size); break;
                 case 3: message_plain(&x, &breaks[1], payloads[k], size); break;
                 case 4: message_vega(&breaks[2], payloads[k], size, scratch); break;
-                default: message_shared_seek(&x, &breaks[3], payloads[k], size);
+                case 5: message_shared_seek(&x, &breaks[3], payloads[k], size); break;
+                case 6: pure_app_message(&keyed_app, (uint32_t)keyed_line, (PureSpan){payloads[k], size}); break;
+                default: message_keyed_shared(&x, &breaks[5], payloads[k], size);
                 }
             }
             ioctl(ins, PERF_EVENT_IOC_DISABLE, 0), ioctl(cyc, PERF_EVENT_IOC_DISABLE, 0);
@@ -670,6 +926,7 @@ int main(int argc, char **argv) {
                "\"cycles_per_point\":%.1f,\"instructions_per_line\":%.1f,\"answers\":\"the test's\"}\n",
                ends[e], count, points, rounds, end_ins[e] / n, end_cyc[e] / n, end_ins[e] / ((double)count * rounds));
     pure_app_stop(&empty);
+    pure_app_stop(&keyed_app);
     pure_app_stop(&app);
     return 0;
 }

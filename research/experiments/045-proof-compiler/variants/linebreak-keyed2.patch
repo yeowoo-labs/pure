@@ -1,0 +1,77 @@
+--- linebreak.aup
++++ linebreak-keyed2.aup
+@@ -3,7 +3,7 @@
+ # loaded once: each its class after LB1, whether an initial or a final quotation mark (Pi, Pf), East Asian (width F, W
+ # or H), and pictographic and unassigned (Extended_Pictographic and Cn). A line's boundaries, the ends included, are 0
+ # (none), 1 (allowed) or 2 (mandatory).
+-record Range {
++record Row {                                     # a range as the load message gives it: by its first code point
+   start = 0
+   class = 0
+   pi = false
+@@ -11,6 +11,14 @@
+   east = false
+   pictographic = false
+ }
++record Range {                                   # a range as the state keeps it: by its last code point
++  last = 0
++  class = 0
++  pi = false
++  pf = false
++  east = false
++  pictographic = false
++}
+ record Point {
+   code = 0
+ }
+@@ -25,10 +33,10 @@
+   ri: list of number                             # how many regional indicators end at its unit
+   at: list of number                             # its range
+ }
+-state ranges: list of Range                      # by start, from 0
++state ranges: list of Range by last              # by its last code point, every one up to 0x10FFFF in one
+ state breaks: bytes                              # the last line's boundaries
+ view boundaries = breaks
+-input load = message { rows: list of Range }
++input load = message { rows: list of Row }
+ input line = message { points: list of Point }
+ 
+ fn BK = 0; fn CR = 1; fn LF = 2; fn NL = 3; fn SP = 4; fn ZW = 5; fn ZWJ = 6; fn CM = 7; fn WJ = 8; fn GL = 9
+@@ -40,18 +48,15 @@
+ fn end(c) = c == BK || c == CR || c == LF || c == NL
+ 
+ on load {
+-  for r in load.rows { ranges.append(Range { ..r }) }
++  let n = load.rows.count
++  for i in 0 .. n {
++    let last = if i + 1 < n { load.rows[i + 1].start - 1 } else { 0x10FFFF }
++    ranges.add(Range { last: last, class: load.rows[i].class, pi: load.rows[i].pi, pf: load.rows[i].pf,
++                       east: load.rows[i].east, pictographic: load.rows[i].pictographic })
++  }
+ }
+ 
+ # The range holding code point c (ranges by start: the last whose start is c or before).
+-fn range(c) {
+-  let low, high = 0, ranges.count
+-  while high - low > 1 {
+-    let middle = (low + high) // 2
+-    if ranges[middle].start <= c { low = middle } else { high = middle }
+-  }
+-  return low
+-}
+ 
+ fn next_unit(t, i) {
+   let j = i + 1
+@@ -157,8 +162,10 @@
+   let joined, numeric: list of bool
+   for p in line.points {
+     let i = codes.count
+-    let r = range(p.code)
+-    let c = ranges[r].class
++    let code = p.code
++    let found = first(x in ranges where x.last >= code)          # its range: a seek, the item itself
++    let r = found.last
++    let c = found.class
+     let mark = c == CM || c == ZWJ
+     let previous = if i > 0 { eff[i - 1] } else { SP }
+     let joins = mark && i > 0 && !end(previous) && previous != SP && previous != ZW   # LB9, LB10

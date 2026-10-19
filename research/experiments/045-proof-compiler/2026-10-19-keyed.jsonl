@@ -1,0 +1,30 @@
+{"what": "the app with ranges keyed by last and a range found by a seek (variants/linebreak-keyed2.patch: first(x in ranges where x.last >= code), its item read for class; ranges[key] for pi, pf, east, pictographic): the executor answers all 18,672 lines (cost.c: 28,061 a point keyed, 27,934 keyed2); the hand rungs keyed_* emit what it says (the seek by each level guide keys and the leaf key column, nothing copied); every rung and end answers all lines; with LB18 wrong all 26 hand rungs and ends refused"}
+{"rung":"exact","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":8658.5,"cycles_per_point":3697.8,"answers":"the test's, and exact's"}
+{"rung":"integer","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":7908.5,"cycles_per_point":3252.8,"answers":"the test's, and exact's"}
+{"rung":"stored_flat","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":6261.9,"cycles_per_point":2464.7,"answers":"the test's, and exact's"}
+{"rung":"leaves","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":8014.2,"cycles_per_point":3198.8,"answers":"the test's, and exact's"}
+{"rung":"leaves_direct","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":7263.2,"cycles_per_point":3110.3,"answers":"the test's, and exact's"}
+{"rung":"local_flat","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1700.4,"cycles_per_point":1007.9,"answers":"the test's, and exact's"}
+{"rung":"shared","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1578.9,"cycles_per_point":964.3,"answers":"the test's, and exact's"}
+{"rung":"unbounded","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1518.3,"cycles_per_point":955.2,"answers":"the test's, and exact's"}
+{"rung":"plain","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1411.5,"cycles_per_point":911.7,"answers":"the test's, and exact's"}
+{"rung":"leaves_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":6265.2,"cycles_per_point":2526.7,"answers":"the test's, and exact's"}
+{"rung":"local_flat_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":700.7,"cycles_per_point":437.5,"answers":"the test's, and exact's"}
+{"rung":"shared_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":580.9,"cycles_per_point":393.0,"answers":"the test's, and exact's"}
+{"rung":"unbounded_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":544.5,"cycles_per_point":381.2,"answers":"the test's, and exact's"}
+{"rung":"keyed_exact","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":6884.5,"cycles_per_point":2649.5,"answers":"the test's, and exact's"}
+{"rung":"keyed_integer","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":6846.6,"cycles_per_point":2644.2,"answers":"the test's, and exact's"}
+{"rung":"keyed_leaves_direct","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":6467.4,"cycles_per_point":2506.1,"answers":"the test's, and exact's"}
+{"rung":"keyed_local_flat","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":909.2,"cycles_per_point":410.1,"answers":"the test's, and exact's"}
+{"rung":"keyed_shared","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":788.1,"cycles_per_point":365.5,"answers":"the test's, and exact's"}
+{"rung":"keyed_unbounded","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":756.7,"cycles_per_point":355.1,"answers":"the test's, and exact's"}
+{"rung":"keyed_plain","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":670.4,"cycles_per_point":317.3,"answers":"the test's, and exact's"}
+{"rung":"vega","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":222.6,"cycles_per_point":85.4,"answers":"the test's, and exact's"}
+{"end":"runtime","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":40876.8,"cycles_per_point":15771.8,"instructions_per_line":134165.3,"answers":"the test's"}
+{"end":"runtime_empty_handler","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1618.4,"cycles_per_point":668.8,"instructions_per_line":5311.8,"answers":"the test's"}
+{"end":"end_to_end_shared","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1602.7,"cycles_per_point":946.2,"instructions_per_line":5260.3,"answers":"the test's"}
+{"end":"end_to_end_plain","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":1424.0,"cycles_per_point":893.5,"instructions_per_line":4673.8,"answers":"the test's"}
+{"end":"end_to_end_vega","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":247.1,"cycles_per_point":92.4,"instructions_per_line":811.0,"answers":"the test's"}
+{"end":"end_to_end_shared_seek","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":604.0,"cycles_per_point":373.9,"instructions_per_line":1982.5,"answers":"the test's"}
+{"end":"runtime_keyed","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":28630.6,"cycles_per_point":11110.3,"instructions_per_line":93971.0,"answers":"the test's"}
+{"end":"end_to_end_keyed_shared","lines":18672,"code_points":61285,"rounds":5,"instructions_per_point":812.5,"cycles_per_point":347.5,"instructions_per_line":2666.8,"answers":"the test's"}
