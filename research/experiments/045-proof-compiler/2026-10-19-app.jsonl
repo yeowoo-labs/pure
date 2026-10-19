@@ -1,0 +1,18 @@
+{"what": "the executor and the stitched build on the app (cost.c, 2026-10-19-break.jsonl), and the empty handler (v0: the event itself, the same in both)", "executor": {"instructions_per_point": 40189.2, "cycles_per_point": 15416}, "stitched": {"instructions_per_point": 28088.7, "cycles_per_point": 11704}, "event_v0": {"instructions_per_point": 1565.6, "cycles_per_point": 625}, "event_v0_by_file": {"module-list.c": 674, "libc (malloc, free)": 389, "module.c": 386, "store-tree.c": 113}}
+{"rung": "exact", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 8784.6, "cycles_per_point": 3996.8, "answers": "the test's, and exact's", "run": 1}
+{"rung": "integer", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 7979.0, "cycles_per_point": 3539.1, "answers": "the test's, and exact's", "run": 1}
+{"rung": "stored_flat", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 6560.8, "cycles_per_point": 2800.3, "answers": "the test's, and exact's", "run": 1}
+{"rung": "local_flat", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 696.4, "cycles_per_point": 364.4, "answers": "the test's, and exact's", "run": 1}
+{"rung": "shared", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 564.3, "cycles_per_point": 319.4, "answers": "the test's, and exact's", "run": 1}
+{"rung": "unbounded", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 501.9, "cycles_per_point": 300.3, "answers": "the test's, and exact's", "run": 1}
+{"rung": "plain", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 361.7, "cycles_per_point": 260.1, "answers": "the test's, and exact's", "run": 1}
+{"rung": "vega", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 224.7, "cycles_per_point": 87.7, "answers": "the test's, and exact's", "run": 1}
+{"rung": "exact", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 8784.6, "cycles_per_point": 4007.0, "answers": "the test's, and exact's", "run": 2}
+{"rung": "integer", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 7979.0, "cycles_per_point": 3554.2, "answers": "the test's, and exact's", "run": 2}
+{"rung": "stored_flat", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 6560.8, "cycles_per_point": 2799.8, "answers": "the test's, and exact's", "run": 2}
+{"rung": "local_flat", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 696.4, "cycles_per_point": 362.9, "answers": "the test's, and exact's", "run": 2}
+{"rung": "shared", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 564.3, "cycles_per_point": 314.7, "answers": "the test's, and exact's", "run": 2}
+{"rung": "unbounded", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 501.9, "cycles_per_point": 295.5, "answers": "the test's, and exact's", "run": 2}
+{"rung": "plain", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 361.7, "cycles_per_point": 255.1, "answers": "the test's, and exact's", "run": 2}
+{"rung": "vega", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 224.7, "cycles_per_point": 87.2, "answers": "the test's, and exact's", "run": 2}
+{"what": "built with -DBREAK_ONE_RULE (LB18 wrong): every hand rung refused, 6,233 of 18,672 lines wrong each"}

@@ -1,0 +1,75 @@
+1,577 machine instructions a code point, 48,284 samples
+
+by mechanism:
+       660   41.9%  unknown
+       375   23.8%  list build
+       249   15.8%  memory
+       178   11.3%  event
+        45    2.9%  dispatch
+        44    2.8%  compute
+        18    1.2%  list read
+         4    0.2%  moves
+         2    0.1%  loop
+
+in step(), by the case its line is in (code the compiler shares between cases goes to one of them):
+        47  LIST_APPEND
+        45  (fetch, decode)
+        39  TEXT_INSERT
+        13  BYTES_OF
+         5  TEXT_REMOVE
+         4  CONST
+         1  FLOORDIV
+
+outside step(), by function as linked:
+       127  ??
+       121  arrays_free
+        96  free
+        88  place
+        79  decode_cell
+        79  pure_list_insert
+        77  message
+        57  malloc
+        52  __default_morecore
+        49  pure_list_read
+        47  prepare_extras
+        37  __xpg_strerror_r
+        35  clear_rows
+        34  open_burst
+        30  pure_list_clear
+        25  pure_list_settle
+        23  chunk_bytes
+        23  own
+        22  sum
+        20  mark_event
+        20  run_batches
+        19  collect
+        19  pure_list_changes
+        19  sum_path
+        18  close_burst
+        14  put_cells
+        14  descend
+        14  add_node
+        13  let_go_tree
+        12  timer_settime
+
+no mechanism:
+        67  ?? (where:0) < ??
+        61  ?? (??:0) < ??
+        50  decode_cell (module-list.c:2132) < decode_cell
+        45  prepare_extras (module-list.c:625) < prepare_extras
+        26  decode_item (module-list.c:2344) < pure_list_read
+        13  move_items (module-list.c:337) < place
+        13  decode_cell (module-list.c:2130) < decode_cell
+        12  place (module-list.c:729) < place
+        12  sum_path (module-list.c:591) < sum_path
+        11  place (module-list.c:689) < place
+         9  own (module-list.c:563) < own
+         9  own (module-list.c:552) < own
+         8  pure_list_read (module-list.c:2358) < pure_list_read
+         8  run_batches (module.c:4968) < run_batches
+         8  release_extras (module-list.c:673) < place
+         8  pure_draft_size (store-tree.c:1530) < pure_draft_size
+         8  pure_draft_version (store-tree.c:1584) < pure_draft_version
+         8  place (module-list.c:682) < place
+         8  chunk_bytes (store-tree.c:615) < chunk_bytes
+         7  sum (module-list.c:511) < sum
