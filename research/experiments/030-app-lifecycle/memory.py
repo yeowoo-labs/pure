@@ -6,9 +6,12 @@ Private_Dirty and Pss) is read after a warm-up of changes, then after
 CHANGES changes more: in place to another module (its line naming in turn
 items.pmod and items-next.pmod: each reading loads a module, and keeps the
 one it replaced), and with its module as it was (its queue budget changed
-in turn: no module loaded). The difference a change.
+in turn: no module loaded). The difference a change. Each reading waits
+SETTLE seconds first: a module replaced is freed once no request or snapshot
+reads it and each connection thread has passed by (they wake each second);
+the host's own count of the modules it freed and still holds comes with it.
 
-memory.py PURE_SERVE CHANGES   a JSON line per way
+memory.py PURE_SERVE CHANGES [SETTLE]   a JSON line per way
 """
 import json
 import select
@@ -17,6 +20,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from window import AUP, HERE, grow
@@ -32,6 +36,7 @@ def own(pid):
 
 def main():
     serve, changes = Path(sys.argv[1]).resolve(), int(sys.argv[2])
+    settle = float(sys.argv[3]) if len(sys.argv) > 3 else 2
     work = Path(tempfile.mkdtemp(prefix='pure-030-', dir='/dev/shm'))
     try:
         modules = {}
@@ -62,15 +67,23 @@ def main():
 
             for n in range(1, 101):  # warm: the allocator's arenas settle
                 change(n)
+            time.sleep(settle)
             dirty, pss = own(host.pid)
             for n in range(101, 101 + changes):
                 change(n)
+            time.sleep(settle)
             dirty_after, pss_after = own(host.pid)
             host.terminate()
-            host.communicate(timeout=60)
+            _, errors = host.communicate(timeout=60)
+            stats = {}
+            for line in errors.decode().splitlines():
+                if '"modules_freed"' in line:
+                    stats = json.loads(line)
             print(json.dumps({'way': way, 'changes': changes, 'private_dirty_kib': [dirty, dirty_after],
                               'pss_kib': [pss, pss_after],
-                              'per_change_bytes': round((dirty_after - dirty) * 1024 / changes)}), flush=True)
+                              'per_change_bytes': round((dirty_after - dirty) * 1024 / changes),
+                              'modules_freed': stats.get('modules_freed'), 'modules_retired': stats.get('modules_retired')}),
+                  flush=True)
     finally:
         shutil.rmtree(work)
 

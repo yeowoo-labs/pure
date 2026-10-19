@@ -1,0 +1,2 @@
+{"way": "module", "changes": 4000, "private_dirty_kib": [3024, 3024], "pss_kib": [3953, 3953], "per_change_bytes": 0, "modules_freed": 4100, "modules_retired": 0}
+{"way": "budget", "changes": 4000, "private_dirty_kib": [2960, 2960], "pss_kib": [3889, 3889], "per_change_bytes": 0, "modules_freed": 0, "modules_retired": 0}

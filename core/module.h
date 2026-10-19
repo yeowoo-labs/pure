@@ -453,6 +453,9 @@ typedef struct {
     uint16_t *signature_record;
     bool calls; /* it has functions: its blocks run in the executor that calls (module.c) */
     uint32_t nesting; /* its loops' deepest nesting (set at load) */
+    /* Which load this is, of the process's: never 0, never the same twice. Who keeps a module's address to ask later
+     * whether it is the same module asks this instead, since another may come to that address once one is freed. */
+    uint64_t serial;
 } PureModule;
 
 /* Whether a state of m is transient (PURE_STATE_TRANSIENT). */
@@ -533,6 +536,7 @@ typedef struct { unsigned char *bytes; size_t used, capacity; } PureArena;
 enum { PURE_LIST_HEARD = 0x10000, PURE_LIST_OUTBOX, PURE_LIST_RUNTIME = 2 };
 typedef struct {
     const PureModule *module;
+    uint64_t module_serial; /* a reader's: its module's serial when it read (the module may since be freed) */
     PureData data;
     /* The arrays of each state (027's 4f-2), sized to the module in one block (states) for the states it was laid out
      * for (laid). */
@@ -792,7 +796,10 @@ void pure_app_checkpointed(PureApp *, PureCheckpoint *, PureResult);
 PureSnapshot *pure_app_snapshot(PureApp *);
 void pure_snapshot_hold(PureSnapshot *);
 /* On any thread; the last reference frees it. */
-void pure_snapshot_release(PureSnapshot *);
+/* Let a reference go: true when it was the last, the snapshot freed. */
+bool pure_snapshot_release(PureSnapshot *);
+/* The module the snapshot's app ran when it was taken. */
+const PureModule *pure_snapshot_module(const PureSnapshot *);
 /* Show a snapshot's states in reader, a zeroed app or a reader before: its
  * views read them while the snapshot is held, with the reader's own arena and
  * row cache (one thread at a time). It applies no events. pure_app_stop frees

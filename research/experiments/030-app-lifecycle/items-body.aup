@@ -1,0 +1,43 @@
+record Pick {
+  n = 0
+}
+record Item {
+  n = 0
+}
+state items: list of Item
+state more: list of Item
+state hits = 0
+input seed = message { n: number }
+input grow = message { step: number }
+input add = message { step: number }
+on seed {
+  items.append(Item { n: seed.n })
+}
+on grow {
+  for i in items {
+    more.append(Item { n: i.n + grow.step })
+  }
+  for m in more {
+    items.append(Item { n: m.n })
+  }
+  for m in more {
+    more.remove(m)
+  }
+}
+on add {
+  hits = hits + add.step
+}
+view count = count(i in items where i.n > 0)
+view total = hits
+view summed {
+  let t = 0
+  for i in items { t = t + i.n }
+  return t
+}
+view picked {
+  let ps: list of Pick
+  for i in items {
+    if i.n > 9 { ps.append(Pick { n: i.n }) }
+  }
+  return ps.count
+}

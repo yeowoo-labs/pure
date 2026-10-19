@@ -84,6 +84,7 @@ typedef struct {
     const char *given;
     App *app;
     const PureModule *module;
+    uint64_t serial; /* the module's: compared, not the address (one freed, another may come to it) */
 } Route;
 
 /* An app's tokens (docs/design/017's 3b): what each grants, by its token's
@@ -242,7 +243,7 @@ typedef struct {
      * itself), and the app's changes and module the last one shows. */
     Published *published;
     uint64_t published_changes, publications;
-    const PureModule *published_module;
+    uint64_t published_serial; /* the module's of the last snapshot published */
     struct PureSurfaceHost *surface; /* told of each snapshot published */
     /* The owner's: outputs wired to HTTP receivers, and how far each was trimmed. */
     PureWire *wires[OUTLETS];
@@ -443,8 +444,32 @@ static App *apps;
 static _Atomic unsigned app_count;
 static unsigned app_slots = 1;
 static unsigned places(void) { return atomic_load_explicit(&app_count, memory_order_acquire); }
-/* The modules apps ran before the one they run, kept as long as the host runs. */
-static struct Retired { PureModule *module; struct Retired *next; } *retired_modules;
+/* A module an app runs or ran (every app's module is one), and what still reads it: its snapshots and the requests
+ * read with it (holds). One an app ran before is retired, then freed (free_retired) once nothing holds it, no app runs
+ * it, and every connection thread has begun a pass since (a request read with it took its hold in resolve, within the
+ * pass it was read in). Who keeps a module to ask later whether it is the same one asks its serial. */
+typedef struct Loaded {
+    PureModule module; /* first: a module's address is its Loaded's */
+    _Atomic uint32_t holds;
+    uint64_t *passes; /* retired: each connection thread's passes then */
+    struct Loaded *next;
+} Loaded;
+static Loaded *retired_modules;
+static uint64_t modules_freed, modules_at_freed; /* (for its stats: freed, and loaded where one freed was) */
+static uintptr_t freed_at[64]; /* the last ones freed: addresses, compared, never read */
+static pthread_mutex_t binding_lock = PTHREAD_MUTEX_INITIALIZER; /* a link naming an input reads an app's module */
+static void hold_module(const PureModule *m) {
+    if (m) atomic_fetch_add_explicit(&((Loaded *)(uintptr_t)m)->holds, 1, memory_order_relaxed);
+}
+static void let_go_module(const PureModule *m) {
+    if (m) atomic_fetch_sub_explicit(&((Loaded *)(uintptr_t)m)->holds, 1, memory_order_release);
+}
+/* A snapshot let go: when it was the last reference, its module's hold too (taken when it was made). */
+static void let_go_snapshot(PureSnapshot *snapshot) {
+    if (!snapshot) return;
+    const PureModule *m = pure_snapshot_module(snapshot);
+    if (pure_snapshot_release(snapshot)) let_go_module(m);
+}
 static bool named_apps; /* --apps: a route's first segment names its app */
 static Host *all_hosts;  /* the connection threads, for moving a connection to its app's home */
 static unsigned host_count;
@@ -458,6 +483,7 @@ struct Host {
     PureApp *readers; /* by app: shows its owner's snapshots here */
     PureSnapshot **snapshots; /* by app: the snapshot a round reads views from, once */
     uint64_t round, *read_in, *handed_in; /* by app: the round it was read in, its requests handed in */
+    _Atomic uint64_t passes; /* its loop's passes begun: a retired module waits for each thread's next */
     unsigned *touched; /* the apps read in this round */
     Applied *views; /* a round's views shown here, answered together */
     size_t views_capacity;
@@ -563,6 +589,8 @@ static void close_connection(Connection *c) {
     if (c->phase == CLOSED) return;
     Host *host = c->host;
     finish_output(c);
+    let_go_module(c->module);
+    c->module = NULL;
     close(c->fd); /* also leaves the epoll set */
     c->phase = CLOSED;
     host->table[c->index] = NULL;
@@ -882,7 +910,10 @@ static const char *resolve(Connection *c, char *query, Route *route, int *status
         return "stopped";
     }
     route->app = app;
+    let_go_module(c->module); /* (a request before it on this connection: answered, so let go already) */
+    hold_module(m);           /* within this pass: no retired module is freed before this thread's next */
     route->module = c->module = m;
+    route->serial = m->serial;
     if (route->kind == ROUTE_NONE || (route->kind == ROUTE_QUERY && !app->owned)) return "route"; /* a query reads states */
     if (route->kind == ROUTE_QUERY) { /* the view is the query module's, found when shown */
         route->from = 0;
@@ -1295,6 +1326,8 @@ static void drive(Connection *c) {
             if (c->out_at < c->out_count) continue;
             /* Answered: the next request may already be here. */
             finish_output(c);
+            let_go_module(c->module);
+            c->module = NULL;
             c->deadline = c->host->now + c->host->timeout_ms;
             if (!c->keep_alive) { close_connection(c); return; }
             c->phase = READING_HEAD;
@@ -1768,16 +1801,17 @@ static void surface_changed(PureSurfaceHost *s) {
  * saved, so a read made after a write's answer sees the write. A failed save
  * returns the app to the last save's states, which the snapshot still shows. */
 static void publish(Executor *ex) {
-    if (!ex->published || (ex->publications && ex->published_changes == ex->app.changes && ex->published_module == ex->module))
+    if (!ex->published || (ex->publications && ex->published_changes == ex->app.changes && ex->published_serial == ex->module->serial))
         return;
     PureSnapshot *made = pure_app_snapshot(&ex->app), *old;
+    if (made) hold_module(ex->module); /* let go with the snapshot's last reference (let_go_snapshot) */
     pthread_mutex_lock(&ex->published->lock);
     old = ex->published->snapshot;
     ex->published->snapshot = made;
     pthread_mutex_unlock(&ex->published->lock);
-    pure_snapshot_release(old);
+    let_go_snapshot(old);
     ex->published_changes = ex->app.changes;
-    ex->published_module = ex->module;
+    ex->published_serial = ex->module->serial;
     ++ex->publications;
     if (ex->surface) surface_changed(ex->surface);
     if (atomic_load_explicit(&ex->published->subscribers, memory_order_relaxed)) wake_pushers();
@@ -1803,6 +1837,7 @@ typedef struct Local {
     Owner *from, *to;
     uint32_t output, input; /* the sender's output, the receiver's input */
     const PureModule *sender, *module; /* the sender's module; the receiver's, which input is in */
+    uint64_t serial; /* the receiver's module's: asked, not its address */
     char input_name[PURE_MODULE_NAME + 1], why[160]; /* the input by name; why it holds its sends, as last said */
     char source[PURE_SOURCE + 1];
     unsigned char fields[PURE_FIELDS_NAMED]; /* the sender's, when the input takes them by name */
@@ -1873,6 +1908,7 @@ static bool local_bind(Local *l, const PureModule *r, char *error, size_t size) 
     l->input = (uint32_t)input;
     l->fields_size = fields_size;
     l->module = r;
+    l->serial = r->serial;
     return true;
 }
 
@@ -1889,11 +1925,12 @@ static void local_hand(Executor *ex, Local *l, uint64_t now) {
     pthread_mutex_unlock(&l->lock);
     if (waits) return;
     Owner *to = l->to;
-    pthread_mutex_lock(&to->lock);
-    const PureModule *runs = to->stopping ? NULL : to->module;
-    pthread_mutex_unlock(&to->lock);
     char error[160] = "its receiver does not run";
-    if (!runs || (runs != l->module && !local_bind(l, runs, error, sizeof(error)))) {
+    pthread_mutex_lock(&to->lock); /* bound while it runs the module (a module it ran before may be freed) */
+    const PureModule *runs = to->stopping ? NULL : to->module;
+    bool bound = runs && (runs->serial == l->serial || local_bind(l, runs, error, sizeof(error)));
+    pthread_mutex_unlock(&to->lock);
+    if (!bound) {
         if (strcmp(error, l->why)) { /* said once a cause */
             snprintf(l->why, sizeof(l->why), "%s", error);
             fprintf(stderr, "{\"local\":\"%s\",\"input\":\"%s\",\"error\":\"%s; its sends wait\"}\n", l->source,
@@ -1931,10 +1968,11 @@ static void local_hand(Executor *ex, Local *l, uint64_t now) {
     l->count = 0;
     l->retry = 0;
     pthread_mutex_unlock(&l->lock);
-    Job job = {.route = {.kind = ROUTE_INPUT, .target = l->input, .module = l->module}, .link = link,
+    Job job = {.route = {.kind = ROUTE_INPUT, .target = l->input, .module = l->module, .serial = l->serial}, .link = link,
                .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {ingress, size}}};
     pthread_mutex_lock(&to->lock);
-    bool queued = !to->stopping && to->module == l->module && grow(&to->jobs, &to->capacity, to->count + 1, sizeof(*to->jobs));
+    bool queued = !to->stopping && to->module && to->module->serial == l->serial &&
+                  grow(&to->jobs, &to->capacity, to->count + 1, sizeof(*to->jobs));
     if (queued) {
         to->jobs[to->count++] = job;
         ++to->arrivals;
@@ -2295,7 +2333,7 @@ static PureSnapshot *read_newest(PureApp *reader, App *app) {
     if (snapshot) pure_snapshot_hold(snapshot);
     pthread_mutex_unlock(&published->lock);
     if (snapshot && !pure_app_read(reader, snapshot)) { /* no room for its states: none shown */
-        pure_snapshot_release(snapshot);
+        let_go_snapshot(snapshot);
         snapshot = NULL;
     }
     reader->work_budget = atomic_load_explicit(&app->work, memory_order_relaxed);
@@ -2370,7 +2408,7 @@ static void *run_view_worker(void *unused) {
         PureApp *reader = &readers[app - apps];
         PureSnapshot *snapshot = read_newest(reader, app);
         Applied a = {.host = job->host, .ticket = job->ticket, .input = job->input, .route = ROUTE_VIEW, .group = job->group};
-        if (!snapshot || reader->module != job->route.module) { /* its app stopped, or runs another module now */
+        if (!snapshot || reader->module_serial != job->route.serial) { /* its app stopped, or runs another module now */
             a.status = PURE_CLOSED;
             a.refused = "stopped";
         } else {
@@ -2378,7 +2416,7 @@ static void *run_view_worker(void *unused) {
             a.changes = reader->changes;
             if (job->group && a.status != PURE_OK && a.fault == PURE_FAULT_NONE) a.fault = pure_app_view_fault(reader);
         }
-        if (snapshot) pure_snapshot_release(snapshot); /* an answer holds what it lends */
+        if (snapshot) let_go_snapshot(snapshot); /* an answer holds what it lends */
         if (!job->group) atomic_fetch_sub_explicit(&app->viewing, 1, memory_order_relaxed);
         give_back(job->host, &a, 1);
         free(job);
@@ -2445,7 +2483,9 @@ typedef struct Group {
     /* A view worker evaluates it (a view with a body): for the module asked
      * of; again: a newer snapshot came meanwhile. It stays until it is back. */
     bool evaluating, again;
-    const PureModule *asked;
+    uint64_t asked; /* the module's serial */
+    uint8_t view_type; /* its view's, and whether it takes arguments: asked again of the module the app runs next */
+    bool arguments;
     Subscriber *first;
     struct Group *next;
 } Group;
@@ -2663,19 +2703,19 @@ static void push_group(Host *host, Group *g) {
     bool quiet = !atomic_load(&app->live);
     PureSnapshot *snapshot = read_published(host, app);
     if (quiet && !snapshot) { close_group(host, g); return; }
-    if (quiet) { pure_snapshot_release(snapshot); return; }
+    if (quiet) { let_go_snapshot(snapshot); return; }
     if (!snapshot) return; /* none yet: the next publication wakes this */
     PureApp *reader = &host->readers[app - apps];
-    if (reader->module != g->route.module) { /* the app changed module: the view of that name, if it is the same kind */
-        const PureModule *was = g->route.module, *now = reader->module;
+    if (reader->module_serial != g->route.serial) { /* the app changed module: the view of that name, if it is the same kind */
+        const PureModule *now = reader->module;
         int view = pure_module_view(now, g->name);
-        if (view < 0 || now->view_type[view] != was->view_type[g->route.target] ||
-            (pure_module_arguments(now, (uint32_t)view) < 0) != (pure_module_arguments(was, g->route.target) < 0)) {
-            pure_snapshot_release(snapshot);
+        if (view < 0 || now->view_type[view] != g->view_type || (pure_module_arguments(now, (uint32_t)view) >= 0) != g->arguments) {
+            let_go_snapshot(snapshot);
             close_group(host, g);
             return;
         }
         g->route.module = now;
+        g->route.serial = reader->module_serial;
         g->route.target = (uint32_t)view;
         g->computed = false;
     }
@@ -2684,7 +2724,7 @@ static void push_group(Host *host, Group *g) {
             if (g->evaluating) g->again = true;
             else {
                 g->evaluating = true;
-                g->asked = g->route.module;
+                g->asked = g->route.serial;
                 hand_view(host, &g->route, (PureTicket){0}, PURE_INPUT_READ, PURE_OBJECT_LIMIT, g);
             }
         } else {
@@ -2695,7 +2735,7 @@ static void push_group(Host *host, Group *g) {
             let_go_applied(&a);
         }
     }
-    pure_snapshot_release(snapshot);
+    let_go_snapshot(snapshot);
     group_send(host, g);
 }
 
@@ -2710,7 +2750,7 @@ static void group_evaluated(Host *host, Applied *a) {
         free_group(g);
         return;
     }
-    if (a->refused || g->asked != g->route.module) g->again = true;
+    if (a->refused || g->asked != g->route.serial) g->again = true;
     else group_value(g, a, a->changes);
     let_go_applied(a);
     if (!group_send(host, g)) return;
@@ -2737,7 +2777,7 @@ static void subscribe(Connection *c, const Route *route, const char *raw, size_t
     if (c->in_used) { refuse(c, 400, "Bad Request", "request"); return; } /* no request follows a stream */
     if (host->subscribers >= subscribers_most) { reject(c, 503, "Service Unavailable", "busy"); return; }
     Group *g = host->groups;
-    while (g && !(g->app == route->app && g->route.module == route->module && g->route.target == route->target &&
+    while (g && !(g->app == route->app && g->route.serial == route->serial && g->route.target == route->target &&
                   g->route.from == route->from && g->route.count == route->count && strlen(g->text) == raw_size &&
                   !memcmp(g->text, raw, raw_size)))
         g = g->next;
@@ -2749,6 +2789,8 @@ static void subscribe(Connection *c, const Route *route, const char *raw, size_t
         g->text[raw_size] = 0;
         g->route.given = g->text;
         snprintf(g->name, sizeof(g->name), "%s", route->module->view_names[route->target]);
+        g->view_type = route->module->view_type[route->target];
+        g->arguments = pure_module_arguments(route->module, route->target) >= 0;
         g->next = host->groups;
         host->groups = g;
     }
@@ -2783,7 +2825,7 @@ static void subscribe(Connection *c, const Route *route, const char *raw, size_t
  * holds up, the owner's writes. */
 enum { QUERIES = 64 };
 typedef struct { PureModule module; unsigned refs; } Held;
-static struct { const App *app; char name[65]; Held *held; const PureModule *checked; } queries[QUERIES];
+static struct { const App *app; char name[65]; Held *held; uint64_t checked; } queries[QUERIES]; /* checked: a serial */
 static pthread_mutex_t queries_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void let_go_query(Held *held) {
@@ -2838,7 +2880,7 @@ static PureResult register_query(const Job *job) {
         else {
             old = queries[slot].held;
             queries[slot].app = app;
-            queries[slot].checked = job->route.module;
+            queries[slot].checked = job->route.serial;
             snprintf(queries[slot].name, sizeof(queries[slot].name), "%s", job->effect.key);
             queries[slot].held = held;
         }
@@ -2851,7 +2893,7 @@ static PureResult register_query(const Job *job) {
 
 static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) {
     Held *held = NULL;
-    const PureModule *checked = NULL;
+    uint64_t checked = 0;
     pthread_mutex_lock(&queries_lock);
     for (int i = 0; i < QUERIES && !held; ++i)
         if (queries[i].held && queries[i].app == job->route.app && !strcmp(queries[i].name, job->effect.key)) {
@@ -2870,7 +2912,7 @@ static PureResult run_query(const Job *job, PureSnapshot *snapshot, Applied *a) 
         let_go_query(held);
         return PURE_ALLOCATION;
     }
-    if (reader.module != checked && !same_states(&held->module, reader.module)) { /* its app's states are laid out anew */
+    if (reader.module_serial != checked && !same_states(&held->module, reader.module)) { /* its states laid out anew */
         pure_app_stop(&reader);
         let_go_query(held);
         return PURE_CONFLICT;
@@ -2935,7 +2977,7 @@ static void serve_bursts(Host *host) {
             for (size_t k = i; k < count; ++k) {
                 const Job *mine = &host->jobs[k];
                 if (mine->route.app != app || shown_here(host, mine)) continue;
-                if (owner->stopping || mine->route.module != owner->module) { /* its app stopped, or runs another module now */
+                if (owner->stopping || !owner->module || mine->route.serial != owner->module->serial) { /* stopped, or another module now */
                     host->views[answers++] = (Applied){.host = host, .ticket = mine->effect.ticket, .input = mine->effect.input,
                                                        .route = mine->route.kind, .status = PURE_CLOSED, .refused = "stopped"};
                     continue;
@@ -2966,7 +3008,7 @@ static void serve_bursts(Host *host) {
             bool registering = job->route.kind == ROUTE_QUERY && job->effect.input == PURE_INPUT_WRITE;
             *applied = (Applied){.host = host, .ticket = job->effect.ticket, .input = job->effect.input,
                                  .route = registering ? ROUTE_QUERY : ROUTE_VIEW};
-            if (job->route.kind == ROUTE_VIEW && host->readers[a].module != job->route.module) { /* another module's view now */
+            if (job->route.kind == ROUTE_VIEW && host->readers[a].module_serial != job->route.serial) { /* another module's view now */
                 applied->status = PURE_CLOSED;
                 applied->refused = "stopped";
                 continue;
@@ -2989,7 +3031,7 @@ static void serve_bursts(Host *host) {
                                                            : run_query(job, host->snapshots[a], applied);
             ++shown;
         }
-        for (size_t i = 0; i < touched; ++i) pure_snapshot_release(host->snapshots[host->touched[i]]); /* answers lend their own */
+        for (size_t i = 0; i < touched; ++i) let_go_snapshot(host->snapshots[host->touched[i]]); /* answers lend their own */
         if (!answers) return;
         for (size_t i = 0; i < answers; ++i) answer_applied(host, &host->views[i]);
         host->shown += shown;
@@ -3201,7 +3243,7 @@ static PureSnapshot *surface_read(PureSurfaceHost *s, PureApp *reader) {
     if (snapshot) pure_snapshot_hold(snapshot);
     pthread_mutex_unlock(&published->lock);
     if (snapshot && !pure_app_read(reader, snapshot)) { /* no room for its states: none shown */
-        pure_snapshot_release(snapshot);
+        let_go_snapshot(snapshot);
         snapshot = NULL;
     }
     return snapshot;
@@ -3209,7 +3251,7 @@ static PureSnapshot *surface_read(PureSurfaceHost *s, PureApp *reader) {
 
 static void surface_release(PureSurfaceHost *s, PureSnapshot *snapshot) {
     (void)s;
-    pure_snapshot_release(snapshot);
+    let_go_snapshot(snapshot);
 }
 
 /* An event queued at the owner as a request is, waited for until its save. */
@@ -3309,9 +3351,10 @@ static bool replies_borrow(const PureModule *m, uint32_t input) {
 /* ---- Main ------------------------------------------------------------- */
 
 /* A module from its file for an app; false, with why, when it does not load
- * or cannot be served. The module the app had is kept (see retired_modules). */
+ * or cannot be served. The module the app had is retired (see Loaded). */
 static bool load_module(App *app, const char *path) {
-    PureModule *m = calloc(1, sizeof(*m));
+    Loaded *loaded = calloc(1, sizeof(*loaded));
+    PureModule *m = loaded ? &loaded->module : NULL;
     char error[160];
     if (!m) {
         snprintf(app->why, sizeof(app->why), "Module: out of memory");
@@ -3319,9 +3362,12 @@ static bool load_module(App *app, const char *path) {
     }
     if (pure_module_read(path, m, error, sizeof(error)) != PURE_OK) {
         snprintf(app->why, sizeof(app->why), "Module: %s", error);
-        free(m);
+        free(loaded);
         return false;
     }
+    bool at_freed = false;
+    for (unsigned i = 0; i < 64; ++i) at_freed = at_freed || freed_at[i] == (uintptr_t)loaded;
+    modules_at_freed += at_freed;
     bool served = true;
     for (uint32_t i = 0; served && i < m->inputs; ++i) {
         if (m->input[i].kind == PURE_KIND_MESSAGE && !replies_borrow(m, i)) {
@@ -3329,22 +3375,58 @@ static bool load_module(App *app, const char *path) {
             served = false;
         }
     }
-    struct Retired *kept = served && app->module ? malloc(sizeof(*kept)) : NULL;
-    if (served && app->module && !kept) {
+    uint64_t *passes = served && app->module ? calloc(host_count ? host_count : 1, sizeof(*passes)) : NULL;
+    if (served && app->module && !passes) {
         snprintf(app->why, sizeof(app->why), "Module: out of memory");
         served = false;
     }
     if (!served) {
         pure_module_release(m);
-        free(m);
+        free(loaded);
         return false;
     }
-    if (kept) { /* requests and snapshots may still point to it */
-        *kept = (struct Retired){app->module, retired_modules};
-        retired_modules = kept;
+    if (passes) { /* requests and snapshots may still read it: freed once none does (free_retired) */
+        Loaded *was = (Loaded *)(uintptr_t)app->module;
+        for (unsigned h = 0; h < host_count; ++h) passes[h] = atomic_load_explicit(&all_hosts[h].passes, memory_order_acquire);
+        was->passes = passes;
+        was->next = retired_modules;
+        retired_modules = was;
+        uint64_t one = 1;
+        for (unsigned h = 0; h < host_count; ++h) /* each begins a pass now, not when its wait ends: freed sooner */
+            if (write(all_hosts[h].wake, &one, sizeof(one)) != sizeof(one)) { /* full: it wakes anyway */ }
     }
     app->module = m;
     return true;
+}
+
+/* The retired modules nothing reads any more, freed, on the thread that changes apps (run_apps): no app runs one (its
+ * line, its owner, its executor, what a request reads), every connection thread has begun a pass since it was retired
+ * (a request resolved with it holds it by then), then (in that order) no snapshot or request holds it. A link naming
+ * an input reads an app's module under binding_lock: taken, none is reading one. */
+static void free_retired(void) {
+    for (Loaded **at = &retired_modules; *at;) {
+        Loaded *l = *at;
+        const PureModule *m = &l->module;
+        bool kept = false;
+        for (unsigned a = 0, count = places(); !kept && a < count; ++a)
+            kept = apps[a].module == m || apps[a].owner.executor.module == m || apps[a].owner.module == m ||
+                   atomic_load_explicit(&apps[a].live, memory_order_acquire) == m;
+        for (unsigned h = 0; !kept && h < host_count; ++h)
+            kept = atomic_load_explicit(&all_hosts[h].passes, memory_order_acquire) <= l->passes[h];
+        kept = kept || atomic_load_explicit(&l->holds, memory_order_acquire) > 0;
+        if (kept) {
+            at = &l->next;
+            continue;
+        }
+        *at = l->next;
+        pthread_mutex_lock(&binding_lock);
+        pthread_mutex_unlock(&binding_lock);
+        pure_module_release(&l->module);
+        free(l->passes);
+        freed_at[modules_freed % 64] = (uintptr_t)l;
+        free(l);
+        ++modules_freed;
+    }
 }
 
 /* A connection on this thread for fd (accepted, or moved here); NULL, fd
@@ -3360,6 +3442,7 @@ static Connection *adopt(Host *host, int fd) {
     c->index = index;
     c->fd = fd;
     c->phase = READING_HEAD;
+    c->module = NULL;
     c->readable = c->writable = c->keep_alive = true;
     c->hung_up = c->settled = false;
     c->deadline = host->now + host->timeout_ms;
@@ -3429,6 +3512,8 @@ static bool moved_home(Connection *c, size_t head_size) {
     if (write(home->wake, &one, sizeof(one)) != sizeof(one)) abort();
     Host *host = c->host; /* here it is gone, its descriptor open there */
     epoll_ctl(host->epoll, EPOLL_CTL_DEL, c->fd, NULL);
+    let_go_module(c->module); /* (none yet: a connection moves at its first request) */
+    c->module = NULL;
     c->phase = CLOSED;
     host->table[c->index] = NULL;
     c->next = host->closed;
@@ -3488,7 +3573,7 @@ static void stop_executor(Executor *ex) {
         PureSnapshot *last = ex->published->snapshot;
         ex->published->snapshot = NULL;
         pthread_mutex_unlock(&ex->published->lock);
-        pure_snapshot_release(last);
+        let_go_snapshot(last);
         if (atomic_load_explicit(&ex->published->subscribers, memory_order_relaxed)) wake_pushers(); /* their streams end */
     }
     pure_app_stop(&ex->app);
@@ -3564,6 +3649,7 @@ static void *run_shard(void *context) {
     host->now = now_ms();
     uint64_t next_sweep = host->now + 1000;
     while (!atomic_load(&stopping)) {
+        atomic_fetch_add_explicit(&host->passes, 1, memory_order_acq_rel); /* (a request resolved before is held) */
         /* A thread that runs the app ticks its timers on time. */
         long due = apps[0].owned ? -1 : run_timers(&host->local);
         if (host->push_waiting) { /* a pass waits for --push-every-ms */
@@ -3683,7 +3769,8 @@ static void stop_shard(Host *host) {
  * thread's alone. A delivery whose app runs another module now, or none, is
  * not taken: the receiver keeps it and finds the input again once told
  * (pure_link_listener_rebind, when the app starts). */
-static struct Binding { unsigned app; const PureModule *module; uint32_t input; } *bindings;
+static struct Binding { unsigned app; const PureModule *module; uint64_t serial; uint32_t input; } *bindings; /* serial: the module's */
+static int bind_input(unsigned a, const char *name, uint32_t shape, const unsigned char *fields, size_t size);
 static size_t binding_count, binding_capacity;
 static int link_input(void *context, const char *name, uint32_t shape, const unsigned char *fields, size_t size) {
     (void)context;
@@ -3696,6 +3783,15 @@ static int link_input(void *context, const char *name, uint32_t shape, const uns
         if (a == count) return -PURE_LINK_NO_INPUT;
         name = slash + 1;
     }
+    pthread_mutex_lock(&binding_lock); /* the module read stays while it is read (free_retired takes this lock) */
+    int found = bind_input(a, name, shape, fields, size);
+    pthread_mutex_unlock(&binding_lock);
+    return found;
+}
+
+/* link_input's binding of app a's input name in the module it runs, under binding_lock. A binding is of a module (its
+ * shape was checked against that one's): one of a module the app no longer runs stays, refusing what comes to it. */
+static int bind_input(unsigned a, const char *name, uint32_t shape, const unsigned char *fields, size_t size) {
     const PureModule *m = atomic_load_explicit(&apps[a].live, memory_order_acquire);
     int index = m ? pure_module_input(m, name) : -1;
     if (index < 0 || m->input[index].kind != PURE_KIND_MESSAGE) return -PURE_LINK_NO_INPUT;
@@ -3703,10 +3799,10 @@ static int link_input(void *context, const char *name, uint32_t shape, const uns
     if (pure_module_shape(m, (uint32_t)index) != shape && !pure_module_takes(m, (uint32_t)index, fields, size))
         return -PURE_LINK_FIELDS_LACKED;
     for (size_t b = 0; b < binding_count; ++b)
-        if (bindings[b].app == a && bindings[b].module == m && bindings[b].input == (uint32_t)index) return (int)b;
+        if (bindings[b].app == a && bindings[b].serial == m->serial && bindings[b].input == (uint32_t)index) return (int)b;
     if (binding_count > INT32_MAX - 1 || !grow(&bindings, &binding_capacity, binding_count + 1, sizeof(*bindings)))
         return -PURE_LINK_NO_INPUT;
-    bindings[binding_count] = (struct Binding){a, m, (uint32_t)index};
+    bindings[binding_count] = (struct Binding){a, m, m->serial, (uint32_t)index};
     return (int)binding_count++;
 }
 
@@ -3734,10 +3830,10 @@ static bool link_deliver(void *context, const PureLinkDelivery *d) {
     memcpy(ingress + 4 + DELIVERY, d->records, d->size);
     if (d->fields_size) memcpy(ingress + 4 + DELIVERY + d->size, d->fields, d->fields_size); /* laid out with those */
     *link = (LinkJob){.listener = link_listener, .token = d->token, .ingress = ingress};
-    Job job = {.route = {.kind = ROUTE_INPUT, .target = bound->input, .module = bound->module}, .link = link,
+    Job job = {.route = {.kind = ROUTE_INPUT, .target = bound->input, .module = bound->module, .serial = bound->serial}, .link = link,
                .effect = {.input = PURE_INPUT_WRITE, .key = "", .expected = -1, .value = {ingress, size}}};
     pthread_mutex_lock(&owner->lock);
-    bool queued = !owner->stopping && owner->module == bound->module &&
+    bool queued = !owner->stopping && owner->module && owner->module->serial == bound->serial &&
                   grow(&owner->jobs, &owner->capacity, owner->count + 1, sizeof(*owner->jobs));
     if (queued) {
         owner->jobs[owner->count++] = job;
@@ -4397,6 +4493,9 @@ static bool resume_app(App *app) {
     pthread_mutex_unlock(&turns.lock);
     atomic_store(&app->gone, false);
     atomic_store_explicit(&app->live, app->module, memory_order_release);
+    /* The snapshot was published before it took requests: a push group that looked meanwhile found it quiet and
+     * waits for the next word. This is it (else a stream waits for the app's next save). */
+    if (ex->published && atomic_load_explicit(&ex->published->subscribers, memory_order_relaxed)) wake_pushers();
     app->running = true;
     if (link_listener) {
         char prefix[APP_NAME + 2];
@@ -4645,7 +4744,12 @@ static void *run_apps(void *context) {
     sigset_t hangup;
     sigemptyset(&hangup);
     sigaddset(&hangup, SIGHUP);
-    for (int signal_number; !sigwait(&hangup, &signal_number) && !atomic_load(&stopping);) read_again(path);
+    for (;;) { /* retired modules waiting: looked at again every 100 ms, until all are freed */
+        free_retired();
+        int got = retired_modules ? sigtimedwait(&hangup, NULL, &(struct timespec){0, 100 * 1000000}) : sigwaitinfo(&hangup, NULL);
+        if (atomic_load(&stopping)) break;
+        if (got == SIGHUP) read_again(path);
+    }
     return NULL;
 }
 
@@ -5002,8 +5106,11 @@ int main(int argc, char **argv) {
             heard.active, heard.keyed, heard.secrets, heard.epochs, heard.refused, state_bytes, memory_refused,
             windows_full, unauthorized, forbidden, subscribers, subscribed, pushes, pushed, replaced);
     if (named_apps) { /* what each app did */
-        fprintf(stderr, ",\"workers\":%u,\"moved_home\":%" PRIu64 ",\"handed\":%" PRIu64 ",\"apps\":[",
-                worker_count, moved, handed);
+        size_t still = 0;
+        for (const Loaded *l = retired_modules; l; l = l->next) ++still;
+        fprintf(stderr, ",\"workers\":%u,\"moved_home\":%" PRIu64 ",\"handed\":%" PRIu64 ",\"modules_freed\":%" PRIu64
+                ",\"modules_retired\":%zu,\"modules_at_freed\":%" PRIu64 ",\"apps\":[", worker_count, moved, handed, modules_freed,
+                still, modules_at_freed);
         for (unsigned a = 0, count = places(); a < count; ++a) {
             const App *app = &apps[a];
             fprintf(stderr, "%s{\"name\":", a ? "," : "");

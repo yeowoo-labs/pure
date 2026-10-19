@@ -2284,6 +2284,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     }
     out->runner = out->calls || out->nesting > PURE_MODULE_NESTING ? 2 : out->batches ? 1 : 0;
     out->jit = pure_jit_make(out); /* none: the executor runs it all */
+    static uint64_t loads;
+    out->serial = __atomic_add_fetch(&loads, 1, __ATOMIC_RELAXED);
     return PURE_OK;
 refused:
     if (error_size) snprintf(error, error_size, "%s (%u)", why, bad);
@@ -5171,8 +5173,10 @@ const PureList *pure_snapshot_list(const PureSnapshot *snapshot, uint32_t state)
     return state >= PURE_LIST_HEARD ? snapshot->runtime[state - PURE_LIST_HEARD] : snapshot->lists[state];
 }
 
-void pure_snapshot_release(PureSnapshot *snapshot) {
-    if (!snapshot || __atomic_sub_fetch(&snapshot->refs, 1, __ATOMIC_ACQ_REL)) return;
+const PureModule *pure_snapshot_module(const PureSnapshot *snapshot) { return snapshot->module; }
+
+bool pure_snapshot_release(PureSnapshot *snapshot) {
+    if (!snapshot || __atomic_sub_fetch(&snapshot->refs, 1, __ATOMIC_ACQ_REL)) return false;
     Register *all = snapshot->all;
     if (all) { /* out of the links: what the one before may read goes to it (still linked, so still there) */
         lock_register(all);
@@ -5193,6 +5197,7 @@ void pure_snapshot_release(PureSnapshot *snapshot) {
         pure_retired_free(&all->returned); /* the app is gone: no list takes it back */
         free(all);
     }
+    return true;
 }
 
 static void let_own_go(PureApp *app);
@@ -6058,13 +6063,15 @@ static void let_own_go(PureApp *app) {
 }
 
 bool pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
-    if (reader->module != snapshot->module) drop_passes(reader), let_own_go(reader); /* laid out for its module */
+    if (reader->module_serial != snapshot->module->serial) /* laid out for its module (by serial: freed, another may */
+        drop_passes(reader), let_own_go(reader);           /* come to its address) */
     if (!reader->states || reader->laid != snapshot->states) { /* its arrays for as many states (027's 4f-2) */
         void *was = reader->states;
         if (!lay_app(reader, snapshot->states)) return false;
         free(was);
     }
     reader->module = snapshot->module;
+    reader->module_serial = snapshot->module->serial;
     reader->reading = true;
     reader->changes = snapshot->changes; /* what the row cache is fresh for */
     memcpy(reader->values, snapshot->values, snapshot->states * sizeof(*reader->values));
