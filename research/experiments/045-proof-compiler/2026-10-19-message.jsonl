@@ -1,0 +1,14 @@
+{"rung": "exact", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 8784.0, "cycles_per_point": 3989.2, "answers": "the test's, and exact's", "run": 2}
+{"rung": "integer", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 7979.0, "cycles_per_point": 3547.1, "answers": "the test's, and exact's", "run": 2}
+{"rung": "stored_flat", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 6559.9, "cycles_per_point": 2788.4, "answers": "the test's, and exact's", "run": 2}
+{"rung": "local_flat", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 698.1, "cycles_per_point": 364.5, "answers": "the test's, and exact's", "run": 2}
+{"rung": "shared", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 570.5, "cycles_per_point": 313.2, "answers": "the test's, and exact's", "run": 2}
+{"rung": "unbounded", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 499.8, "cycles_per_point": 296.5, "answers": "the test's, and exact's", "run": 2}
+{"rung": "plain", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 365.9, "cycles_per_point": 257.8, "answers": "the test's, and exact's", "run": 2}
+{"rung": "vega", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 224.7, "cycles_per_point": 87.9, "answers": "the test's, and exact's", "run": 2}
+{"end": "runtime", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 40364.6, "cycles_per_point": 15524.6, "instructions_per_line": 132484.1, "answers": "the test's", "run": 2}
+{"end": "runtime_empty_handler", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 1595.2, "cycles_per_point": 664.4, "instructions_per_line": 5235.8, "answers": "the test's", "run": 2}
+{"end": "end_to_end_shared", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 592.2, "cycles_per_point": 292.3, "instructions_per_line": 1943.6, "answers": "the test's", "run": 2}
+{"end": "end_to_end_plain", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 379.3, "cycles_per_point": 237.6, "instructions_per_line": 1245.1, "answers": "the test's", "run": 2}
+{"end": "end_to_end_vega", "lines": 18672, "code_points": 61285, "rounds": 5, "instructions_per_point": 239.9, "cycles_per_point": 90.9, "instructions_per_line": 787.5, "answers": "the test's", "run": 2}
+{"what": "built with -DBREAK_ONE_RULE: every hand rung and both hand-written ends refused, 6,233 of 18,672 lines wrong each"}

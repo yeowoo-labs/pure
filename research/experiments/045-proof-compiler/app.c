@@ -22,7 +22,10 @@
  *
  *   cc -O2 -std=gnu17 -I../../../core -I../../../../vega/text app.c ../../../../vega/text/linebreak.c \
  *      ../../../../vega/text/unicode-data.c ../../../build/libpure.a -lm -pthread -o app
- *   ./app linebreak.pmod RANGES LINES ROUNDS     one JSON line a rung */
+ * Then a message end to end (BORDER below): the runtime's pure_app_message (the executor; an empty handler, the event
+ * alone), the border written by hand around shared and plain, and Vega's C given the same payload.
+ *
+ *   ./app linebreak.pmod RANGES LINES ROUNDS v0-empty.pmod     one JSON line a rung, then one an end */
 #define _GNU_SOURCE
 #include "module.h"
 #include "module-list.h"
@@ -275,6 +278,69 @@ static bool on_line_vega(Context *x, const Points *p, const uint32_t *codes, uin
     return vega_line_breaks(codes, p->count, got);
 }
 
+/* ---- A message end to end: the event's border written by hand around a rung's handler. What it keeps of the
+ * runtime's meaning: the payload's rows whole and each number finite (place_fields, decode_cell); the work budget
+ * begun again and charged the handler's length (dispatch); the memory counts begun again; the one state the handler
+ * changes (breaks, its change set: N2) written apart and made the state's only when the handler ends without a fault
+ * (the pending copy and undo, for that state alone), into the buffer readers do not hold (a snapshot holding it: a new
+ * one); the events and changes counted. The rows are read where the payload has them (the message cannot change them),
+ * and breaks is a buffer (the module only ever sets it whole). Without a store (as the runtime here): no save. */
+typedef struct { uint8_t *buffer[2]; size_t room[2], size; unsigned now; bool held[2]; uint64_t events, changes; } BytesState;
+enum { HANDLER_LENGTH = 180 }; /* what the handler charges as it begins (its instructions as written: a constant) */
+
+#define BORDER(WAYNAME, CHECKED)                                                                                       \
+    static bool message_##WAYNAME(Context *x, BytesState *breaks, const unsigned char *payload, size_t size) {        \
+        if (CHECKED && size % 8) return false; /* rows not whole: LIMIT */                                             \
+        size_t n = size / 8;                                                                                           \
+        const double *codes = (const double *)payload;                                                                 \
+        if (CHECKED)                                                                                                   \
+            for (size_t i = 0; i < n; ++i)                                                                             \
+                if (!isfinite(codes[i])) return false; /* a number that does not fit */                                \
+        x->fault = false, x->work = 0, x->spent = x->grown = 0;                                                        \
+        if (CHECKED && HANDLER_LENGTH > x->budget) return false;                                                       \
+        x->work = HANDLER_LENGTH;                                                                                      \
+        unsigned next = breaks->now ^ 1;                                                                               \
+        if (breaks->held[next] || breaks->room[next] < n + 1) { /* a snapshot reads it, or it is too small: another */ \
+            size_t room = n + 1 > 2 * breaks->room[next] ? n + 1 : 2 * breaks->room[next];                             \
+            uint8_t *b = malloc(room);                                                                                 \
+            if (!b) return false;                                                                                      \
+            if (!breaks->held[next]) free(breaks->buffer[next]);                                                       \
+            breaks->buffer[next] = b, breaks->room[next] = room, breaks->held[next] = false;                           \
+        }                                                                                                              \
+        Points p = {NULL, codes, n};                                                                                   \
+        if (!on_line_##WAYNAME(x, &p, breaks->buffer[next]) || x->fault) return false; /* nothing changed */          \
+        breaks->now = next, breaks->size = n + 1;                                                                      \
+        ++breaks->events, ++breaks->changes;                                                                           \
+        return true;                                                                                                   \
+    }
+BORDER(shared, true)
+BORDER(plain, false)
+
+/* The same message to Vega's C: its numbers as code points, the boundaries into the state's buffer. */
+static bool message_vega(BytesState *breaks, const unsigned char *payload, size_t size, uint32_t *scratch) {
+    size_t n = size / 8;
+    const double *codes = (const double *)payload;
+    for (size_t i = 0; i < n; ++i) scratch[i] = (uint32_t)codes[i];
+    unsigned next = breaks->now ^ 1;
+    if (breaks->room[next] < n + 1) {
+        free(breaks->buffer[next]);
+        if (!(breaks->buffer[next] = malloc(n + 1))) return false;
+        breaks->room[next] = n + 1;
+    }
+    if (!vega_line_breaks(scratch, n, breaks->buffer[next])) return false;
+    breaks->now = next, breaks->size = n + 1;
+    ++breaks->events, ++breaks->changes;
+    return true;
+}
+
+/* Pure's own boundaries, from its view: compared with the test's. */
+typedef struct { const unsigned char *want; size_t at; bool same; } Compare;
+static bool compare(void *context, PureSpan span) {
+    Compare *c = context;
+    for (size_t i = 0; i < span.size; ++i, ++c->at) c->same = c->same && (span.data[i] != 0) == c->want[c->at];
+    return true;
+}
+
 /* ---- the harness ---- */
 static unsigned char *whole(const char *path, size_t *size) {
     FILE *f = fopen(path, "rb");
@@ -319,7 +385,7 @@ static bool run(int rung, Context *x, const Line *l, uint8_t *got) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5) { fprintf(stderr, "usage: %s linebreak.pmod RANGES LINES ROUNDS\n", argv[0]); return 2; }
+    if (argc != 6) { fprintf(stderr, "usage: %s linebreak.pmod RANGES LINES ROUNDS v0-empty.pmod\n", argv[0]); return 2; }
     size_t ranges_size, lines_size;
     unsigned char *ranges = whole(argv[2], &ranges_size), *bytes = whole(argv[3], &lines_size);
     int rounds = atoi(argv[4]);
@@ -393,7 +459,9 @@ int main(int argc, char **argv) {
     bool refused = false;
     for (int r = 0; r < RUNGS; ++r)
         if (wrong[r]) fprintf(stderr, "%s: %zu of %zu lines wrong\n", names[r], wrong[r], count), refused = true;
+#ifndef BREAK_ONE_RULE /* broken, on to the ends: they must be refused too */
     if (refused) return 1;
+#endif
     int ins = counter(PERF_COUNT_HW_INSTRUCTIONS), cyc = counter(PERF_COUNT_HW_CPU_CYCLES);
     if (ins < 0 || cyc < 0) { perror("perf_event_open"); return 1; }
     uint64_t total_ins[RUNGS] = {0}, total_cyc[RUNGS] = {0};
@@ -412,6 +480,71 @@ int main(int argc, char **argv) {
         printf("{\"rung\":\"%s\",\"lines\":%zu,\"code_points\":%zu,\"rounds\":%d,\"instructions_per_point\":%.1f,"
                "\"cycles_per_point\":%.1f,\"answers\":\"the test's, and exact's\"}\n",
                names[r], count, points, rounds, total_ins[r] / n, total_cyc[r] / n);
+    /* A message end to end: the runtime (the executor, and an empty handler: the event alone), the border written by
+     * hand around shared and plain, and Vega's C on the same payload. */
+    PureModule empty_module = {0};
+    PureApp empty;
+    if (pure_module_read(argv[5], &empty_module, error, sizeof(error)) != PURE_OK) { fprintf(stderr, "%s\n", error); return 1; }
+    if (pure_app_start(&empty, &empty_module, (PureData){0}) != PURE_OK ||
+        pure_app_message(&empty, (uint32_t)pure_module_input(&empty_module, "load"), (PureSpan){ranges, ranges_size}) != PURE_OK)
+        return 1;
+    int line = pure_module_input(&module, "line"), empty_line = pure_module_input(&empty_module, "line");
+    int boundaries = pure_module_view(&module, "boundaries");
+    if (line < 0 || empty_line < 0 || boundaries < 0) return 1;
+    unsigned char **payloads = malloc(count * sizeof(*payloads));
+    for (size_t k = 0; k < count; ++k) {
+        size_t n = lines[k].points.count;
+        payloads[k] = malloc(8 * n + 8);
+        memcpy(payloads[k], lines[k].points.codes, 8 * n); /* the message: each point's code, a number (8 bytes) */
+    }
+    static BytesState breaks[3];
+    static uint32_t scratch[4096];
+    enum { ENDS = 5 };
+    const char *ends[ENDS] = {"runtime", "runtime_empty_handler", "end_to_end_shared", "end_to_end_plain", "end_to_end_vega"};
+    size_t wrong_ends[ENDS] = {0};
+    for (size_t k = 0; k < count; ++k) { /* checked first: each end's boundaries the test's */
+        const Line *l = &lines[k];
+        size_t size = 8 * l->points.count;
+        Compare c = {l->want, 0, true};
+        c.same = pure_app_message(&app, (uint32_t)line, (PureSpan){payloads[k], size}) == PURE_OK &&
+                 pure_app_view_text(&app, (uint32_t)boundaries, compare, &c) == PURE_OK && c.at == l->points.count + 1;
+        wrong_ends[0] += !c.same;
+        wrong_ends[1] += pure_app_message(&empty, (uint32_t)empty_line, (PureSpan){payloads[k], size}) != PURE_OK;
+        for (int e = 2; e < ENDS; ++e) {
+            BytesState *b = &breaks[e - 2];
+            bool done = e == 2 ? message_shared(&x, b, payloads[k], size) : e == 3 ? message_plain(&x, b, payloads[k], size)
+                                                                            : message_vega(b, payloads[k], size, scratch);
+            bool same = done && b->size == l->points.count + 1;
+            for (size_t i = 0; same && i < b->size; ++i) same = (b->buffer[b->now][i] != NONE) == l->want[i];
+            wrong_ends[e] += !same;
+        }
+    }
+    for (int e = 0; e < ENDS; ++e)
+        if (wrong_ends[e]) fprintf(stderr, "%s: %zu of %zu lines wrong\n", ends[e], wrong_ends[e], count), refused = true;
+    if (refused) return 1;
+    uint64_t end_ins[ENDS] = {0}, end_cyc[ENDS] = {0};
+    for (int round = 0; round < rounds; ++round)
+        for (int e = 0; e < ENDS; ++e) {
+            ioctl(ins, PERF_EVENT_IOC_RESET, 0), ioctl(cyc, PERF_EVENT_IOC_RESET, 0);
+            ioctl(ins, PERF_EVENT_IOC_ENABLE, 0), ioctl(cyc, PERF_EVENT_IOC_ENABLE, 0);
+            for (size_t k = 0; k < count; ++k) {
+                size_t size = 8 * lines[k].points.count;
+                switch (e) {
+                case 0: pure_app_message(&app, (uint32_t)line, (PureSpan){payloads[k], size}); break;
+                case 1: pure_app_message(&empty, (uint32_t)empty_line, (PureSpan){payloads[k], size}); break;
+                case 2: message_shared(&x, &breaks[0], payloads[k], size); break;
+                case 3: message_plain(&x, &breaks[1], payloads[k], size); break;
+                default: message_vega(&breaks[2], payloads[k], size, scratch);
+                }
+            }
+            ioctl(ins, PERF_EVENT_IOC_DISABLE, 0), ioctl(cyc, PERF_EVENT_IOC_DISABLE, 0);
+            end_ins[e] += read_counter(ins), end_cyc[e] += read_counter(cyc);
+        }
+    for (int e = 0; e < ENDS; ++e)
+        printf("{\"end\":\"%s\",\"lines\":%zu,\"code_points\":%zu,\"rounds\":%d,\"instructions_per_point\":%.1f,"
+               "\"cycles_per_point\":%.1f,\"instructions_per_line\":%.1f,\"answers\":\"the test's\"}\n",
+               ends[e], count, points, rounds, end_ins[e] / n, end_cyc[e] / n, end_ins[e] / ((double)count * rounds));
+    pure_app_stop(&empty);
     pure_app_stop(&app);
     return 0;
 }
