@@ -1,0 +1,6 @@
+{"ranges": 2787, "test_lines": 16672, "random_lines": 2000, "right": {"batches": 18672, "rounds": 18672, "all": 18672}, "paths_same": true, "aup_lines": 176, "aup_brace_lines": 19, "python_lines": 99}
+{"lines":18672,"code_points":61285,"right":18672,"jit":"0","batch":"","c_ns_per_point":34.7,"pure_ns_per_point":6942.5,"to_c":199.8,"instructions":108735033,"instructions_per_point":1774.3}
+{"lines":18672,"code_points":61285,"right":18672,"jit":"0","batch":"0","c_ns_per_point":34.5,"pure_ns_per_point":6921.6,"to_c":200.4,"instructions":108735033,"instructions_per_point":1774.3}
+{"lines":18672,"code_points":61285,"right":18672,"jit":"all","batch":"","c_ns_per_point":34.8,"pure_ns_per_point":6913.7,"to_c":198.5,"instructions":108735033,"instructions_per_point":1774.3}
+{"python_ns_per_point": 2523.1, "lines": 18672, "points": 61285}
+{"parts_instructions_per_point": {"setup": 260.3, "range_search": 360.0, "decide": 1154.0}}

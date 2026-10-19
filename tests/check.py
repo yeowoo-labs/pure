@@ -1735,7 +1735,8 @@ def module_specs(aup, pure, work):
     messages dnspython made (tests/specs/dns) read by its examples/dns.aup and
     written back by its view to the same records, cut ones refused; HTTP/1.1
     request streams (tests/specs/http) read by its examples/http.aup a packet
-    at a time, cut anywhere, to the same requests."""
+    at a time, cut anywhere, to the same requests; line breaking (UAX #14) by its
+    examples/linebreak.aup on LineBreakTest.txt's lines (tests/specs/linebreak)."""
     import hashlib
     import os
     import random
@@ -1933,6 +1934,34 @@ def module_specs(aup, pure, work):
             assert fed(packets, {})[1] == want, ('http cut', len(packets))
             cuts += 1
     runs['http'] = {'streams': len(made), 'requests': sum(len(w['requests']) for w in reading), 'cuts': cuts}
+    # Line breaking (UAX #14, its examples/linebreak.aup): the properties' ranges loaded (tests/specs/linebreak, from the
+    # UCD 16.0 Vega's text is frozen at), then every line of LineBreakTest.txt and 2,000 random ones, each line's
+    # boundaries as the test says, on the three paths; pure-run prints views alone (the ranges would be in every line).
+    program = work / 'linebreak.pmod'
+    compile_module(aup, EXAMPLES / 'linebreak.aup', program)
+    given, lines = (pure / 'tests/specs/linebreak/lines.bin').read_bytes(), []
+    while given:
+        n = struct.unpack_from('<I', given)[0]
+        lines.append((struct.unpack_from(f'<{n}I', given, 4), [b == 1 for b in given[4 + 4 * n:5 + 5 * n]]))
+        given = given[5 + 5 * n:]
+    commands = work / 'linebreak.commands'
+    with open(commands, 'w') as f:
+        f.write(f"message load @{pure / 'tests/specs/linebreak/ranges.bin'}\n")
+        for codes, _ in lines:
+            f.write(f"message line {b''.join(struct.pack('<d', c) for c in codes).hex() or '-'}\n")
+    shown = {}
+    for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'})):
+        with open(commands) as stdin:
+            shown[name] = subprocess.run([str(pure / 'build/pure-run'), str(program), '--views'], stdin=stdin, capture_output=True,
+                                         text=True, timeout=600, env=dict(os.environ, **env)).stdout
+    for name in ('rounds', 'all'):
+        assert shown[name] == shown['batches'], ('linebreak', name)
+    out = shown['batches'].splitlines()[1:]
+    assert len(out) == len(lines), ('linebreak', len(out))
+    for (codes, want), line in zip(lines, out):
+        state = json.loads(line)
+        assert state['fault'] == 'none' and [b != 0 for b in bytes.fromhex(state['views']['boundaries'])] == want, codes
+    runs['linebreak'] = {'lines': len(lines), 'code_points': sum(len(c) for c, _ in lines)}
     return runs
 
 
