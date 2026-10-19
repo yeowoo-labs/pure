@@ -40,15 +40,15 @@ units (or the log kept for updates alone), not one.
 
   model.py WORKLOAD MESSAGES     one JSON line a way and grouping"""
 import json
+import os
 import random
 import sys
 
 HEADER, INNER, FANOUT, RECORD, PER_LIST, SLOTS, SLACK = 40, 680, 32, 128, 16, 8192, 1 << 20
 ENTRY = 20  # a child entry written into a parent in place: its pointer (8), count before (4) and key (8)
 KEEP_EVERY, KEPT = 64, 16
-DELTAS, DELTA = 8, 16  # delta: a leaf's room for changes after its cells (u32 place, u8 field, pad, the 8-byte cell)
-import os  # noqa: E402
-DELTAS = int(os.environ.get('MODEL_DELTAS', DELTAS))
+DELTA = 16  # delta: a change in a leaf's room after its cells (u32 place, u8 field, pad, the 8-byte cell)
+DELTAS = int(os.environ.get('MODEL_DELTAS', 8))  # the room's changes (MODEL_DELTAS: 8 unless set)
 
 
 class List:
