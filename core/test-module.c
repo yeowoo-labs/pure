@@ -102,7 +102,9 @@ static unsigned char *put_double(unsigned char *p, double value) {
  * module has their anchor (027's 4c), its type 2, and its instructions, which name the text or list (bits 0-15 of a
  * MOVE's and a COUNT's argument: IN), so a test gives that where a step does not name it. */
 #define IN(target, unit) ((uint32_t)(target) | (uint32_t)(unit) << PURE_ANCHOR_UNIT)
+#define T_BYTES_STATE 64 /* in a T's type: a bytes state (028), ref its constant as a text's */
 static uint32_t module_type(uint32_t type) {
+    if (type == T_BYTES_STATE) return PURE_MODULE_BYTES;
     static const uint8_t types[] = {[PURE_STATE_NUM] = PURE_MODULE_NUM, [PURE_STATE_TEXT] = PURE_MODULE_TEXT,
                                     [PURE_STATE_CURSOR] = PURE_MODULE_ANCHOR, [PURE_STATE_LIST] = PURE_MODULE_LIST,
                                     [PURE_STATE_INDEX] = PURE_MODULE_ANCHOR, [PURE_STATE_BOOL] = PURE_MODULE_BOOL,
@@ -6164,6 +6166,109 @@ static void bits_and_bytes(void) {
     printf("{\"bits_and_bytes\":{\"bits\":%zu,\"reads\":%zu,\"refused\":%zu}}\n", LEN(cases), LEN(reads), LEN(refused));
 }
 
+/* ---- Bytes alone as a state (docs/design/028) ----------------------------
+ * A bytes state is held as a text is (one draft) and read and set whole as
+ * bytes, UTF-8 asked of none of it: 0xff and 0x00 kept across a restart.
+ * Text and bytes of a name carry over each other when exact, on a replace
+ * and on a start from a store: a text always, bytes when UTF-8, else the
+ * initial value (the values record marks a bytes state, so a text's bytes
+ * that are no UTF-8 are a move, not a store gone wrong). Refused: an anchor
+ * in it, a cursor's op on it, a text set into it, its bytes into a text. */
+typedef struct { unsigned char *at; size_t used; } Gathered64;
+static bool gathered64(void *context, PureSpan span) {
+    Gathered64 *g = context;
+    if (g->used + span.size > 64) return false;
+    if (span.size) memcpy(g->at + g->used, span.data, span.size);
+    g->used += span.size;
+    return true;
+}
+static size_t draft_bytes(const PureApp *app, uint32_t state, unsigned char *out) {
+    Gathered64 g = {out, 0};
+    return pure_draft_read(app->texts[state], 0, pure_draft_size(app->texts[state]), gathered64, &g) == PURE_OK ? g.used
+                                                                                                               : (size_t)-1;
+}
+
+static void bytes_states(void) {
+    enum { TS = PURE_OP_TEXT_SET, CAT_ = PURE_OP_CONCAT, BYTE_ = PURE_OP_BYTE, LEN_ = PURE_OP_LEN, CH = PURE_OP_CHARS };
+    static const S nums[] = {{"n", 0}};
+    static const char *const constants[] = {"Az\xc3\xa9", ""};
+    static const I inputs[] = {KEY("go", "KeyG"), KEY("set", "KeyS")};
+    static const H handlers[] = {{1, 0, 11}, {3, 11, 6}}, text_handlers[] = {{1, 0, 3}, {3, 3, 5}};
+    /* As bytes: go appends ff 00 (n its length), set gives it "Az\xc3\xa9"'s bytes. */
+    const O as_bytes[] = {{TL, 1, 0}, IC(0xFF), {BYTE_, 0, 0}, {CAT_, 1, 0}, IC(0), {BYTE_, 0, 0}, {CAT_, 1, 0}, {TS, 1, 0},
+                          {TL, 1, 0}, {LEN_, 0, 0}, {ST, 0, 0},
+                          {TK, 0, 0}, {PURE_OP_BYTES_FROM, 0, 0}, {TS, 1, 0}, {TL, 1, 0}, {LEN_, 0, 0}, {ST, 0, 0}};
+    /* As a text: go counts its characters, set gives it "Az\xc3\xa9". */
+    static const O as_text[] = {{TL, 1, 0}, {CH, 0, 0}, {ST, 0, 0}, {TK, 0, 0}, {TS, 1, 0}, {TL, 1, 0}, {CH, 0, 0}, {ST, 0, 0}};
+    static const T bytes_state[] = {{"data", T_BYTES_STATE, 1}}, text_state[] = {{"data", 1, 1}};
+    Spec bytes_spec = {nums, 1, inputs, 2, NULL, 0, handlers, 2, as_bytes, LEN(as_bytes), NULL, 0, bytes_state, 1, constants,
+                       2, NULL, 0, NULL, 0, NULL, 0};
+    Spec text_spec = {nums, 1, inputs, 2, NULL, 0, text_handlers, 2, as_text, LEN(as_text), NULL, 0, text_state, 1, constants,
+                      2, NULL, 0, NULL, 0, NULL, 0};
+    static PureModule bytes_module, text_module;
+    if (load(bytes_spec, &bytes_module) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    if (load(text_spec, &text_module) != PURE_OK) { fprintf(stderr, "%s\n", error); abort(); }
+    CHECK(bytes_module.state_type[1] == PURE_STATE_TEXT && bytes_module.state_flags[1] & PURE_TEXT_BYTES &&
+          !(text_module.state_flags[1] & PURE_TEXT_BYTES));
+    unsigned char got[64];
+    static const unsigned char twice[] = {0xFF, 0, 0xFF, 0}, word[] = {'A', 'z', 0xC3, 0xA9};
+    /* Stored: 0xff and 0x00 kept across a restart. */
+    char *path = new_store();
+    PureApp app;
+    CHECK(pure_app_start(&app, &bytes_module, pure_tree_data(path)) == PURE_OK);
+    CHECK(press(&app, 0) == PURE_OK && press(&app, 0) == PURE_OK && app.values[0].num == 4);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &bytes_module, pure_tree_data(path)) == PURE_OK);
+    CHECK(draft_bytes(&app, 1, got) == 4 && !memcmp(got, twice, 4));
+    pure_app_stop(&app);
+    /* Bytes to a text across a start: no UTF-8, the record says bytes: its initial value (not a store gone wrong). */
+    CHECK(pure_app_start(&app, &text_module, pure_tree_data(path)) == PURE_OK);
+    CHECK(pure_draft_size(app.texts[1]) == 0 && press(&app, 1) == PURE_OK && app.values[0].num == 3);
+    pure_app_stop(&app);
+    /* Back to bytes: the text's bytes; then ff 00 after them; then to a text again: no UTF-8 now, initial again. */
+    CHECK(pure_app_start(&app, &bytes_module, pure_tree_data(path)) == PURE_OK);
+    CHECK(draft_bytes(&app, 1, got) == 4 && !memcmp(got, word, 4) && press(&app, 0) == PURE_OK && app.values[0].num == 6);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &text_module, pure_tree_data(path)) == PURE_OK && pure_draft_size(app.texts[1]) == 0);
+    pure_app_stop(&app);
+    /* Bytes that are UTF-8 become the text. */
+    CHECK(pure_app_start(&app, &bytes_module, pure_tree_data(path)) == PURE_OK && press(&app, 1) == PURE_OK);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &text_module, pure_tree_data(path)) == PURE_OK);
+    CHECK(!strcmp(state_text(&app, 1), "Az\xc3\xa9") && press(&app, 0) == PURE_OK && app.values[0].num == 3);
+    pure_app_stop(&app);
+    remove_store(path);
+    /* In memory, by replace: bytes that are no UTF-8 become a new text; UTF-8 ones the text; a text the bytes. */
+    CHECK(pure_app_start(&app, &bytes_module, (PureData){0}) == PURE_OK && press(&app, 0) == PURE_OK);
+    CHECK(pure_app_replace(&app, &text_module) == PURE_OK && pure_draft_size(app.texts[1]) == 0);
+    CHECK(press(&app, 1) == PURE_OK && pure_app_replace(&app, &bytes_module) == PURE_OK);
+    CHECK(draft_bytes(&app, 1, got) == 4 && !memcmp(got, word, 4) && press(&app, 1) == PURE_OK);
+    CHECK(pure_app_replace(&app, &text_module) == PURE_OK && !strcmp(state_text(&app, 1), "Az\xc3\xa9"));
+    pure_app_stop(&app);
+    /* Refused: a text set into it, its bytes into a text, a cursor's op on it, an anchor in it. */
+    const O refused[][2] = {
+        {{TK, 0, 0}, {TS, 1, 0}},                              /* a text into the bytes state */
+        {{PURE_OP_CUR_START, 1, 0}, {PURE_OP_TEXT_LINE, 1, 0}}, /* a cursor of it */
+    };
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        H handler = {1, 0, 2};
+        Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, refused[k], 2, NULL, 0, bytes_state, 1, constants, 2, NULL, 0,
+                     NULL, 0, NULL, 0};
+        if (load(spec, &module_b) == PURE_OK) { fprintf(stderr, "bytes states: refused %zu loaded\n", k); abort(); }
+    }
+    static const O into_text[] = {{TL, 1, 0}, {TS, 2, 0}, {C, 0, 0}}; /* the bytes state's bytes into a text */
+    static const T both[] = {{"data", T_BYTES_STATE, 1}, {"note", 1, 1}};
+    H handler = {1, 0, 2};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, into_text, 2, NULL, 0, both, 2, constants, 2, NULL, 0, NULL, 0, NULL, 0};
+    CHECK(load(spec, &module_b) != PURE_OK);
+    static const T anchored[] = {{"data", T_BYTES_STATE, 1}, {"at", PURE_STATE_CURSOR, 1}};
+    static const O nothing[] = {{C, 0, 0}, {ST, 0, 0}};
+    Spec with_anchor = {nums, 1, inputs, 1, NULL, 0, &handler, 1, nothing, 2, NULL, 0, anchored, 2, constants, 2, NULL, 0, NULL, 0,
+                        NULL, 0};
+    CHECK(load(with_anchor, &module_b) != PURE_OK);
+    printf("{\"bytes_states\":{\"starts\":7,\"replaces\":3,\"refused\":%zu}}\n", LEN(refused) + 2);
+}
+
 /* ---- Bytes compared (after research 140's DNS and HTTP) --------------------
  * TEXT_COMPARE with PURE_COMPARE_BYTES relates two bytes by their bytes, as
  * it relates texts (a shorter before a longer it begins), UTF-8 asked of
@@ -7391,6 +7496,7 @@ int main(void) {
     integers();
     bits_and_bytes();
     bytes_compared();
+    bytes_states();
     formats_and_held();
     lists_in_records();
     functions_and_characters();

@@ -131,24 +131,53 @@ PURE_COLD static bool named(const unsigned char *bytes, size_t size, size_t *at,
     return true;
 }
 
-PURE_COLD PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint32_t state, PureDraft **out,
+/* A bytes state's mark among the values (028): its kind past every state type, its name, 8 bytes of 0. A text state's
+ * stored bytes that are no UTF-8 are then a move from bytes (its initial value), not a store gone wrong. */
+enum { SAVED_BYTES = 7 };
+static bool bytes_state(const PureModule *m, uint32_t i) {
+    return m->state_type[i] == PURE_STATE_TEXT && m->state_flags[i] & PURE_TEXT_BYTES;
+}
+
+/* Whether the values record marks the state of that name as bytes (028). */
+PURE_COLD static bool marked_bytes(PureApp *app, const char *name) {
+    if (!app->stored_values && open_state(app, "", "values", &app->stored_values) != PURE_OK) return false;
+    unsigned char *bytes;
+    size_t size;
+    if (!pure_draft_revision(app->stored_values) || read_whole(app->stored_values, &bytes, &size) != PURE_OK) return false;
+    bool found = false, ok = size >= 4 && !memcmp(bytes, values_magic, 4);
+    for (size_t at = 4; ok && !found && at < size; at += 8) {
+        char entry[PURE_MODULE_NAME];
+        uint8_t type;
+        if (!(ok = named(bytes, size, &at, 8, &type, entry))) break;
+        found = type == SAVED_BYTES && !strcmp(entry, name);
+    }
+    free(bytes);
+    return found;
+}
+
+PURE_COLD PureResult pure_save_open_text(PureApp *app, const PureModule *m, uint32_t state, bool anew, PureDraft **out,
                                PureVersion *saved) {
     PureResult result = open_state(app, "text-", m->state_names[state], out);
     if (result != PURE_OK) return result;
     *saved = pure_draft_version(*out);
-    if (!pure_draft_revision(*out)) {
-        uint32_t constant = m->state_ref[state];
-        PureSpan initial = {m->constant_data + m->constant_offset[constant], m->constant_length[constant]};
-        result = pure_draft_splice(*out, 0, pure_draft_size(*out), initial);
-        *saved = unsaved;
-    } else {
+    bool initial = anew || !pure_draft_revision(*out);
+    if (!initial && !bytes_state(m, state)) { /* a text's bytes are UTF-8, or a bytes state's were (a move: anew) */
         unsigned char *bytes;
         size_t size;
         result = read_whole(*out, &bytes, &size);
         if (result == PURE_OK) {
-            if (!pure_utf8_valid((PureSpan){bytes, size})) result = PURE_STORE_ERROR;
+            if (!pure_utf8_valid((PureSpan){bytes, size})) {
+                if (marked_bytes(app, m->state_names[state])) initial = true;
+                else result = PURE_STORE_ERROR;
+            }
             free(bytes);
         }
+    }
+    if (result == PURE_OK && initial) {
+        uint32_t constant = m->state_ref[state];
+        PureSpan value = {m->constant_data + m->constant_offset[constant], m->constant_length[constant]};
+        result = pure_draft_splice(*out, 0, pure_draft_size(*out), value);
+        *saved = unsaved;
     }
     if (result != PURE_OK) { pure_draft_close(*out); *out = NULL; }
     return result;
@@ -789,11 +818,11 @@ static size_t encode_values(const PureModule *m, const PureValue *values, unsign
     size_t at = 4;
     memcpy(out, values_magic, 4);
     for (uint32_t i = 0; i < m->states; ++i) {
-        if (!scalar(m->state_type[i]) || pure_state_transient(m, i)) continue;
+        if ((!scalar(m->state_type[i]) && !bytes_state(m, i)) || pure_state_transient(m, i)) continue;
         size_t length = strlen(m->state_names[i]);
-        uint64_t bits;
-        memcpy(&bits, &values[i], sizeof(bits));
-        out[at++] = m->state_type[i];
+        uint64_t bits = 0;
+        if (!bytes_state(m, i)) memcpy(&bits, &values[i], sizeof(bits));
+        out[at++] = bytes_state(m, i) ? (unsigned char)SAVED_BYTES : m->state_type[i];
         out[at++] = (unsigned char)length;
         memcpy(out + at, m->state_names[i], length);
         at += length;
@@ -813,6 +842,8 @@ PURE_COLD PureResult pure_save_open_values(PureApp *app, const PureModule *m, Pu
         if (scalar(m->state_type[i]) && !pure_state_transient(m, i)) {
             scalars = true;
             fresh = fresh || kept[i] < 0;
+        } else if (bytes_state(m, i) && !pure_state_transient(m, i)) {
+            scalars = true; /* its mark is among the values */
         }
     if (!scalars) return PURE_OK;
     PureResult result = app->stored_values ? PURE_OK : open_state(app, "", "values", &app->stored_values);

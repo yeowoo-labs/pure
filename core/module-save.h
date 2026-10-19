@@ -10,7 +10,10 @@
 
 bool pure_save_enabled(const PureApp *);
 /* A text state of m: its stored value, or its initial constant when none. */
-PureResult pure_save_open_text(PureApp *, const PureModule *m, uint32_t state, PureDraft **out, PureVersion *saved);
+/* A text state's draft in the store, its initial value where it has none, where anew says (a move that keeps nothing,
+ * 028), or where its bytes are no UTF-8 but the values record marks it bytes; store_error where they are no UTF-8
+ * otherwise. A bytes state's asks no UTF-8. */
+PureResult pure_save_open_text(PureApp *, const PureModule *m, uint32_t state, bool anew, PureDraft **out, PureVersion *saved);
 /* Stored lists (module-save.c): at a start, the log opened and read for the
  * lists (pure_save_open_log), each list opened from its image with its
  * logged changes made again (pure_save_open_list; saved says what its image

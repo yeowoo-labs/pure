@@ -259,8 +259,11 @@ typedef enum {
     PURE_STATE_NUM = 0, PURE_STATE_TEXT = 1, PURE_STATE_CURSOR = 2, PURE_STATE_LIST = 3, PURE_STATE_INDEX = 4,
     PURE_STATE_BOOL = 5, PURE_STATE_I64 = 6
 } PureStateType;
-/* A state's type in a module: a number, a text, an anchor, a list, a bool or an i64. */
-enum { PURE_MODULE_NUM, PURE_MODULE_TEXT, PURE_MODULE_ANCHOR, PURE_MODULE_LIST, PURE_MODULE_BOOL, PURE_MODULE_I64 };
+/* A state's type in a module: a number, a text, an anchor, a list, a bool, an i64 or bytes (028: held as a text is, its
+ * flag PURE_TEXT_BYTES, UTF-8 asked of none of it). */
+enum { PURE_MODULE_NUM, PURE_MODULE_TEXT, PURE_MODULE_ANCHOR, PURE_MODULE_LIST, PURE_MODULE_BOOL, PURE_MODULE_I64,
+       PURE_MODULE_BYTES };
+#define PURE_TEXT_BYTES 1u /* a text state's flag (state_flags): its type is bytes (028) */
 /* A number's, a bool's or an i64's state as a list cell's kind (PURE_CELL_...,
  * for pure_cell_as), or 0xFF for any other state. */
 static inline uint8_t pure_value_kind(uint8_t state_type) {

@@ -575,6 +575,10 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             (truth ? !canonical_bool(op->value) : integer ? false : constant ? !isfinite(op->value) : op->integer != 0))
             REFUSE("non-canonical operand");
         if (!names_arg(m, kind, arg, shape, row, outer)) REFUSE("operand names no such state, field, constant or unit");
+        /* A bytes state (028) is read whole and set whole: no anchor is in it, so no op of a text's anchors takes it. */
+        if ((kind == A_STATE + PURE_STATE_TEXT || kind == A_IN_TEXT) && op->op != PURE_OP_TEXT_LOAD && op->op != PURE_OP_TEXT_SET &&
+            m->state_flags[arg & 0xFFFF] & PURE_TEXT_BYTES)
+            REFUSE("anchor in bytes");
         /* A keyed list places its items by key, and an item's key stays. */
         if (op->op == PURE_OP_LIST_INSERT && m->state_key[arg]) REFUSE("insert by position into a keyed list");
         /* A walk ends: no list a walk walks grows while it runs, and only the innermost walk's may shrink (it moves with it). */
@@ -672,6 +676,8 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             need[0] = (arg & 3) == 1 ? T_BOOL : T_I64;
         } else if ((op->op == PURE_OP_CONCAT && arg) || (op->op == PURE_OP_TEXT_COMPARE && arg & PURE_COMPARE_BYTES)) {
             need[0] = need[1] = T_BYTES;
+        } else if (op->op == PURE_OP_TEXT_SET && m->state_flags[arg] & PURE_TEXT_BYTES) {
+            need[0] = T_BYTES; /* a bytes state's whole value (028) */
         } else if (op->op == PURE_OP_BYTES_SLICE && arg) {
             need[1] = need[2] = T_I64; /* the positions i64s */
         } else if (op->op == PURE_OP_BYTES_STORE && (arg & 0xFF) >= PURE_HELD_TEXT) {
@@ -729,7 +735,9 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (out == T_STATE) out = state_type(m, arg);
         if (truth) out = T_BOOL;
         if (integer) out = T_I64;
-        if ((op->op == PURE_OP_CONCAT && arg) || (op->op == PURE_OP_BYTES_LOAD && (arg & 0xFF) < PURE_HELD_TEXT)) out = T_BYTES;
+        if ((op->op == PURE_OP_CONCAT && arg) || (op->op == PURE_OP_BYTES_LOAD && (arg & 0xFF) < PURE_HELD_TEXT) ||
+            (op->op == PURE_OP_TEXT_LOAD && m->state_flags[arg] & PURE_TEXT_BYTES))
+            out = T_BYTES;
         else if (op->op == PURE_OP_BYTES_LOAD) out = T_TEXT;
         if (op->op == PURE_OP_CALL) /* its results */
             for (uint32_t k = 0, first = m->function[arg].first + m->function[arg].params; k < m->function[arg].results; ++k) {
@@ -1799,11 +1807,12 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
      * be in a list (below). */
     static const uint8_t held_as[] = {[PURE_MODULE_NUM] = PURE_STATE_NUM, [PURE_MODULE_TEXT] = PURE_STATE_TEXT,
                                       [PURE_MODULE_ANCHOR] = PURE_STATE_CURSOR, [PURE_MODULE_LIST] = PURE_STATE_LIST,
-                                      [PURE_MODULE_BOOL] = PURE_STATE_BOOL, [PURE_MODULE_I64] = PURE_STATE_I64};
+                                      [PURE_MODULE_BOOL] = PURE_STATE_BOOL, [PURE_MODULE_I64] = PURE_STATE_I64,
+                                      [PURE_MODULE_BYTES] = PURE_STATE_TEXT};
     const unsigned char *states_at = at;
     for (uint32_t i = 0; i < out->states; ++i, at += STATE_BYTES) {
         uint32_t type = read32(at + 4);
-        if ((type & ~(uint32_t)PURE_STATE_TRANSIENT) > PURE_MODULE_I64) REFUSE("state type", i);
+        if ((type & ~(uint32_t)PURE_STATE_TRANSIENT) > PURE_MODULE_BYTES) REFUSE("state type", i);
         out->state_type[i] = held_as[type & 0xFF];
         out->state_transient[i] = type & PURE_STATE_TRANSIENT;
         /* A number's, a bool's or an i64's value is its 8 bytes; others have flags:
@@ -1833,7 +1842,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             if ((flags && !(cursor && flags == PURE_CURSOR_STAYS) && !(list && key <= PURE_RECORD_FIELDS)) ||
                 read32(at + 8) > UINT16_MAX) REFUSE("state reference", i);
             out->state_ref[i] = (uint16_t)read32(at + 8);
-            out->state_flags[i] = cursor ? (uint8_t)flags : (uint8_t)((rows ? PURE_LIST_ROWS >> 8 : 0) | (bound ? PURE_LIST_BOUND >> 8 : 0));
+            out->state_flags[i] = cursor ? (uint8_t)flags : list ? (uint8_t)((rows ? PURE_LIST_ROWS >> 8 : 0) | (bound ? PURE_LIST_BOUND >> 8 : 0))
+                                  : (type & 0xFF) == PURE_MODULE_BYTES ? (uint8_t)PURE_TEXT_BYTES : 0;
             out->state_key[i] = (uint8_t)key;
         }
     }
@@ -1960,7 +1970,8 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     at = fields_at + (size_t)out->record_fields * RECORD_FIELD_BYTES;
     for (uint32_t i = 0; i < out->states; ++i)
         if ((out->state_type[i] == PURE_STATE_TEXT && out->state_ref[i] >= out->constants) ||
-            (out->state_type[i] == PURE_STATE_CURSOR && !state_of(out, out->state_ref[i], PURE_STATE_TEXT)) ||
+            (out->state_type[i] == PURE_STATE_CURSOR &&
+             (!state_of(out, out->state_ref[i], PURE_STATE_TEXT) || out->state_flags[out->state_ref[i]] & PURE_TEXT_BYTES)) ||
             (out->state_type[i] == PURE_STATE_LIST &&
              (out->state_ref[i] >= out->records || out->state_key[i] > out->record[out->state_ref[i]].count ||
               (out->state_key[i] &&
@@ -4981,6 +4992,23 @@ PURE_COLD static PureResult new_text(PureDraft **out, const PureModule *m, uint3
 }
 
 /* A stored draft given a transient text's bytes, to be saved (saved: none yet). */
+/* Whether a draft's bytes are UTF-8 (a bytes state's, before it is a text's: 028). */
+typedef struct { unsigned char *bytes; size_t used; } Drafted;
+static bool drafted(void *context, PureSpan span) {
+    Drafted *d = context;
+    if (span.size) memcpy(d->bytes + d->used, span.data, span.size);
+    d->used += span.size;
+    return true;
+}
+PURE_COLD static bool draft_utf8(const PureDraft *draft) {
+    size_t size = pure_draft_size(draft);
+    Drafted into = {malloc(size ? size : 1), 0};
+    bool valid = into.bytes && pure_draft_read(draft, 0, size, drafted, &into) == PURE_OK && into.used == size &&
+                 pure_utf8_valid((PureSpan){into.bytes, size});
+    free(into.bytes);
+    return valid;
+}
+
 PURE_COLD static PureResult copy_text(PureDraft *to, const PureDraft *from, PureVersion *saved) {
     size_t size = pure_draft_size(from);
     unsigned char *bytes = size ? malloc(size) : NULL;
@@ -6445,17 +6473,21 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
         /* A number, a bool and an i64 carry over each other when the value fits (pure_cell_as), else start anew. */
         uint8_t was = previous >= 0 ? old->state_type[previous] : 0, now = module->state_type[i];
         bool valued = pure_value_kind(was) != 0xFF && pure_value_kind(now) != 0xFF;
-        kept[i] = previous >= 0 && (was == now || valued) ? previous : -1;
+        /* A text and bytes (028) carry over each other when exact: bytes become a text when they are UTF-8, else it is new. */
+        bool anew = previous >= 0 && was == PURE_STATE_TEXT && now == PURE_STATE_TEXT &&
+                    old->state_flags[previous] & PURE_TEXT_BYTES && !(module->state_flags[i] & PURE_TEXT_BYTES) &&
+                    !draft_utf8(app->texts[previous]);
+        kept[i] = previous >= 0 && (was == now || valued) && !anew ? previous : -1;
         if (kept[i] >= 0) saved[i] = app->saved[kept[i]];
         /* A transient state is never stored (018): one that was stored is now as a dropped one is. */
         bool transient = pure_state_transient(module, i), was_transient = kept[i] >= 0 && pure_state_transient(old, kept[i]);
         if (module->state_type[i] == PURE_STATE_TEXT) {
             if (kept[i] >= 0 && (transient || !was_transient || !stored)) texts[i] = app->texts[kept[i]];
             else if (result == PURE_OK && kept[i] >= 0 && /* a text stored from now on: its draft in the store holds it */
-                     (result = pure_save_open_text(app, module, i, &texts[i], &saved[i])) == PURE_OK)
+                     (result = pure_save_open_text(app, module, i, false, &texts[i], &saved[i])) == PURE_OK)
                 result = copy_text(texts[i], app->texts[kept[i]], &saved[i]);
             else if (result == PURE_OK)
-                result = stored && !transient ? pure_save_open_text(app, module, i, &texts[i], &saved[i]) :
+                result = stored && !transient ? pure_save_open_text(app, module, i, anew, &texts[i], &saved[i]) :
                          new_text(&texts[i], module, module->state_ref[i]);
         } else if (module->state_type[i] == PURE_STATE_LIST) {
             if (result != PURE_OK) continue;

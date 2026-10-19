@@ -68,6 +68,12 @@ static void show_value_items(const PureModule *m, uint32_t record, const unsigne
     putchar(']');
 }
 
+static bool hex_span(void *context, PureSpan span) {
+    (void)context;
+    for (size_t i = 0; i < span.size; ++i) printf("%02x", span.data[i]);
+    return true;
+}
+
 static void show_hex(PureSpan bytes) {
     putchar('"');
     for (size_t i = 0; i < bytes.size; ++i) printf("%02x", bytes.data[i]);
@@ -141,7 +147,11 @@ static void show(PureApp *app, const char *failure) {
     printf("{\"states\":{");
     for (uint32_t i = 0; i < m->states; ++i) {
         printf("%s\"%s\":", i ? "," : "", m->state_names[i]);
-        if (m->state_type[i] == PURE_STATE_TEXT) {
+        if (m->state_type[i] == PURE_STATE_TEXT && m->state_flags[i] & PURE_TEXT_BYTES) {
+            putchar('"'); /* a bytes state (028): its bytes' hex digits */
+            pure_draft_read(app->texts[i], 0, pure_draft_size(app->texts[i]), hex_span, NULL);
+            putchar('"');
+        } else if (m->state_type[i] == PURE_STATE_TEXT) {
             putchar('"');
             pure_draft_read(app->texts[i], 0, pure_draft_size(app->texts[i]), json_span, NULL);
             putchar('"');
