@@ -1,0 +1,5 @@
+{"streams": 640, "bytes": 6488480, "right": {"batches": 640, "rounds": 640, "all": 640}, "paths_same": true, "damaged": 240, "damaged_refused": 165, "damaged_agreed": 240, "aup_lines": 132, "aup_brace_lines": 18, "python_lines": 81}
+{"size":65536,"stream":22991,"jit":"0","batch":"","c_ns_per_byte":10.657,"zlib_ns_per_byte":3.500,"pure_ns_per_byte":1152.379,"to_c":108.1,"to_zlib":329.3,"instructions":12527836,"instructions_per_byte":191.2}
+{"size":65536,"stream":22991,"jit":"0","batch":"0","c_ns_per_byte":10.651,"zlib_ns_per_byte":3.491,"pure_ns_per_byte":1153.844,"to_c":108.3,"to_zlib":330.6,"instructions":12527836,"instructions_per_byte":191.2}
+{"size":65536,"stream":22991,"jit":"all","batch":"","c_ns_per_byte":10.646,"zlib_ns_per_byte":3.503,"pure_ns_per_byte":1151.154,"to_c":108.1,"to_zlib":328.7,"instructions":12527836,"instructions_per_byte":191.2}
+{"size":65536,"packed":22991,"python_ns_per_byte":1213.5}

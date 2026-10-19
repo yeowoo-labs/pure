@@ -1729,7 +1729,9 @@ def module_specs(aup, pure, work):
     messages of every length up to two blocks; whether bytes are JSON (its
     examples/json.aup) on JSONTestSuite's parsing cases (tests/specs/json):
     every y_ case taken, every n_ case refused (a refusal: valid false, or
-    the event failing as encoding on bytes that are not UTF-8)."""
+    the event failing as encoding on bytes that are not UTF-8); JSON read into
+    a tree (its examples/json_tree.aup); raw deflate streams zlib made inflated
+    by its examples/inflate.aup to the original's bytes, cut ones refused."""
     import hashlib
     import os
     import random
@@ -1829,6 +1831,39 @@ def module_specs(aup, pure, work):
             assert {k: state['states'][k] for k in keys} == digest(cases[name]), name
         trees[name[0]] += accepted
     runs['json_tree'] = {'cases': len(cases), 'taken': trees}
+    # inflate (RFC 1951, its examples/inflate.aup): raw deflate streams zlib made (stored, fixed and dynamic blocks, its
+    # strategies, words, runs and repeats 32,768 bytes back), each inflated to the original's bytes; a stream cut short
+    # fails its event and leaves the last stream's bytes.
+    import zlib
+    program = work / 'inflate.pmod'
+    compile_module(aup, EXAMPLES / 'inflate.aup', program)
+    words = [bytes(chooser.choices(b'abcdefghijklmnopqrstuvwxyz', k=chooser.randrange(2, 9))) for _ in range(200)]
+    streams = []
+    for size in (0, 1, 100, 1000, 10000, 40000):
+        far = bytes(chooser.randrange(256) for _ in range(min(size, 33000)))
+        for data in (bytes(chooser.randrange(256) for _ in range(size)), b' '.join(chooser.choice(words) for _ in range(size))[:size],
+                     (b'abaabbb' * size)[:size], (far + far[:32768])[:size]):
+            for level, strategy in ((0, zlib.Z_DEFAULT_STRATEGY), (6, zlib.Z_DEFAULT_STRATEGY), (9, zlib.Z_FILTERED),
+                                    (6, zlib.Z_HUFFMAN_ONLY), (6, zlib.Z_RLE), (9, zlib.Z_FIXED)):
+                packer = zlib.compressobj(level, zlib.DEFLATED, -15, 9, strategy)
+                streams.append((data, packer.compress(data) + packer.flush()))
+    cut = [(data, packed[:len(packed) // 2]) for data, packed in streams[::7] if len(packed) > 1]
+    given = ''
+    for n, (_, packed) in enumerate(streams + cut):
+        (work / f'{n}.deflate').write_bytes(packed)
+        given += f'message inflate @{work / f"{n}.deflate"}\n'
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                    timeout=600, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('inflate', name)
+    shown = [json.loads(line) for line in outputs['batches'].splitlines()]
+    assert len(shown) == len(streams) + len(cut), ('inflate', len(shown))
+    for (data, _), state in zip(streams, shown):
+        assert state['fault'] == 'none' and state['states']['inflated'][-1]['data'] == data.hex(), ('inflate', len(data))
+    for state in shown[len(streams):]:
+        assert state['fault'] != 'none' and state['states']['inflated'][-1]['data'] == streams[-1][0].hex(), ('inflate cut', state['fault'])
+    runs['inflate'] = {'streams': len(streams), 'bytes': sum(len(d) for d, _ in streams), 'cut': len(cut)}
     return runs
 
 

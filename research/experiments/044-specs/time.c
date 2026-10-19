@@ -91,7 +91,7 @@ int main(int argc, char **argv) {
     int hash = pure_module_input(&module, "hash");
     char want[65];
     sha256(data, size, want);
-    if (pure_app_message(&app, (uint32_t)hash, NULL, -1, (PureSpan){data, size}) != PURE_OK) { fprintf(stderr, "event failed\n"); return 1; }
+    if (pure_app_message(&app, (uint32_t)hash, (PureSpan){data, size}) != PURE_OK) { fprintf(stderr, "event failed\n"); return 1; }
     uint64_t work = app.work;
     Hex got = {{0}, 0};
     pure_draft_read(app.texts[0], 0, pure_draft_size(app.texts[0]), gather, &got);
@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
         c_runs[r] = (now_ns() - start) / rounds;
         start = now_ns();
         for (int i = 0; i < rounds; ++i)
-            if (pure_app_message(&app, (uint32_t)hash, NULL, -1, (PureSpan){data, size}) != PURE_OK) return 1;
+            if (pure_app_message(&app, (uint32_t)hash, (PureSpan){data, size}) != PURE_OK) return 1;
         pure_runs[r] = (now_ns() - start) / rounds;
     }
     qsort(c_runs, 7, sizeof(double), by_value);

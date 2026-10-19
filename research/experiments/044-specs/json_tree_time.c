@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
     PureApp app;
     if (pure_app_start(&app, &module, (PureData){0}) != PURE_OK) return 1;
     int check = pure_module_input(&module, "check");
-    if (pure_app_message(&app, (uint32_t)check, NULL, -1, (PureSpan){(const unsigned char *)doc, n}) != PURE_OK) {
+    if (pure_app_message(&app, (uint32_t)check, (PureSpan){(const unsigned char *)doc, n}) != PURE_OK) {
         fprintf(stderr, "event failed\n");
         return 1;
     }
@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
         c_runs[r] = (now_ns() - start) / rounds;
         start = now_ns();
         for (int i = 0; i < rounds; ++i)
-            if (pure_app_message(&app, (uint32_t)check, NULL, -1, (PureSpan){(const unsigned char *)doc, n}) != PURE_OK) return 1;
+            if (pure_app_message(&app, (uint32_t)check, (PureSpan){(const unsigned char *)doc, n}) != PURE_OK) return 1;
         pure_runs[r] = (now_ns() - start) / rounds;
     }
     qsort(c_runs, 7, sizeof(double), by_value);

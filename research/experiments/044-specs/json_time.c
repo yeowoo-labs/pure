@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
     PureApp app;
     if (pure_app_start(&app, &module, (PureData){0}) != PURE_OK) return 1;
     int check = pure_module_input(&module, "check");
-    if (pure_app_message(&app, (uint32_t)check, NULL, -1, (PureSpan){doc, n}) != PURE_OK) { fprintf(stderr, "event failed\n"); return 1; }
+    if (pure_app_message(&app, (uint32_t)check, (PureSpan){doc, n}) != PURE_OK) { fprintf(stderr, "event failed\n"); return 1; }
     uint64_t work = app.work;
     if (app.values[0].num != 1 || !valid(doc, n, open)) { fprintf(stderr, "not both valid\n"); return 1; }
     double c_runs[7], pure_runs[7];
@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
         c_runs[r] = (now_ns() - start) / rounds;
         start = now_ns();
         for (int i = 0; i < rounds; ++i)
-            if (pure_app_message(&app, (uint32_t)check, NULL, -1, (PureSpan){doc, n}) != PURE_OK) return 1;
+            if (pure_app_message(&app, (uint32_t)check, (PureSpan){doc, n}) != PURE_OK) return 1;
         pure_runs[r] = (now_ns() - start) / rounds;
     }
     qsort(c_runs, 7, sizeof(double), by_value);
