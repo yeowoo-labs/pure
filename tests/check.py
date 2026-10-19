@@ -1733,7 +1733,9 @@ def module_specs(aup, pure, work):
     a tree (its examples/json_tree.aup); raw deflate streams zlib made inflated
     by its examples/inflate.aup to the original's bytes, cut ones refused; DNS
     messages dnspython made (tests/specs/dns) read by its examples/dns.aup and
-    written back by its view to the same records, cut ones refused."""
+    written back by its view to the same records, cut ones refused; HTTP/1.1
+    request streams (tests/specs/http) read by its examples/http.aup a packet
+    at a time, cut anywhere, to the same requests."""
     import hashlib
     import os
     import random
@@ -1896,6 +1898,41 @@ def module_specs(aup, pure, work):
     cut = [wire[:len(wire) // 2] for wire in wires[::9]]
     assert all(json.loads(line)['fault'] != 'none' for line in read(cut, {}).splitlines()), 'dns cut'
     runs['dns'] = {'messages': len(wires), 'records': sum(len(state['states']['records']) for state in first), 'cut': len(cut)}
+    # HTTP/1.1 requests read a packet at a time (its examples/http.aup): streams and their reading (tests/specs/http, h11's
+    # in the research check), each stream fed whole, at random boundaries and a byte at a time if it is short, each packet
+    # an event: the same requests and bytes left on every cut, and on the three paths fed whole.
+    program = work / 'http.pmod'
+    compile_module(aup, EXAMPLES / 'http.aup', program)
+    given, made = (pure / 'tests/specs/http/streams.bin').read_bytes(), []
+    while given:
+        made.append(given[4:4 + int.from_bytes(given[:4], 'big')])
+        given = given[4 + len(made[-1]):]
+    reading = json.loads((pure / 'tests/specs/http/read.json').read_text())
+
+    def fed(packets, env):
+        lines = ''
+        for n, packet in enumerate(packets):
+            (work / f'{n}.packet').write_bytes(packet)
+            lines += f'message packet @{work / f"{n}.packet"}\n'
+        out = subprocess.run([str(pure / 'build/pure-run'), str(program)], input=lines, capture_output=True, text=True,
+                             timeout=120, env=dict(os.environ, **env)).stdout.splitlines()
+        assert all(json.loads(line)['fault'] == 'none' for line in out), 'http'
+        s = json.loads(out[-1])['states']
+        pairs = lambda fs: [[f['name'], f['value']] for f in fs]
+        return out[-1], {'requests': [[r['method'], r['target'], r['minor'], pairs(r['fields']), r['body'], pairs(r['trailers'])]
+                                      for r in s['requests']], 'left': s['pending'][0]['data'] if s['pending'] else ''}
+
+    cuts = 0
+    for stream, want in zip(made, reading):
+        whole = {name: fed([stream], env) for name, env in
+                 (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+        assert whole['rounds'][0] == whole['all'][0] == whole['batches'][0] and whole['batches'][1] == want, 'http'
+        at = sorted(chooser.sample(range(1, len(stream)), min(len(stream) - 1, 6)))
+        for packets in [[stream[a:b] for a, b in zip([0] + at, at + [len(stream)])]] + \
+                ([[stream[i:i + 1] for i in range(len(stream))]] if len(stream) < 300 else []):
+            assert fed(packets, {})[1] == want, ('http cut', len(packets))
+            cuts += 1
+    runs['http'] = {'streams': len(made), 'requests': sum(len(w['requests']) for w in reading), 'cuts': cuts}
     return runs
 
 

@@ -1,0 +1,5 @@
+{"streams": 200, "bytes": 132623, "requests": 578, "right": {"whole": 200, "random": 200, "bytes": 50}, "paths": {"batches": 200, "rounds": 200, "all": 200}, "paths_same": true, "damaged": 200, "damaged_refused": 35, "damaged_agreed": 200, "aup_lines": 159, "aup_brace_lines": 24, "python_lines": 79}
+{"streams":151,"bytes":98838,"requests":444,"jit":"0","batch":"","c_ns_per_byte":3.267,"pure_ns_per_byte":277.393,"to_c":84.9,"instructions":6066750,"instructions_per_byte":61.4}
+{"streams":151,"bytes":98838,"requests":444,"jit":"0","batch":"0","c_ns_per_byte":3.281,"pure_ns_per_byte":279.531,"to_c":85.2,"instructions":6066750,"instructions_per_byte":61.4}
+{"streams":151,"bytes":98838,"requests":444,"jit":"all","batch":"","c_ns_per_byte":3.274,"pure_ns_per_byte":278.113,"to_c":84.9,"instructions":6066750,"instructions_per_byte":61.4}
+{"streams":151,"bytes":98838,"python_ns_per_byte":66.7,"h11_ns_per_byte":283.8}
