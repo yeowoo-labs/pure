@@ -6164,6 +6164,54 @@ static void bits_and_bytes(void) {
     printf("{\"bits_and_bytes\":{\"bits\":%zu,\"reads\":%zu,\"refused\":%zu}}\n", LEN(cases), LEN(reads), LEN(refused));
 }
 
+/* ---- Bytes compared (after research 140's DNS and HTTP) --------------------
+ * TEXT_COMPARE with PURE_COMPARE_BYTES relates two bytes by their bytes, as
+ * it relates texts (a shorter before a longer it begins), UTF-8 asked of
+ * neither; without the bit it takes texts alone, with it bytes alone. */
+static void bytes_compared(void) {
+    enum { CMP = PURE_OP_TEXT_COMPARE, BF = PURE_OP_BYTES_FROM, JZ_ = PURE_OP_JZ, BYTE_ = PURE_OP_BYTE, B = PURE_COMPARE_BYTES };
+    const O word = {TK, 0, 0}, none = {TK, 1, 0}; /* "Az\xc3\xa9" and "" */
+    const struct { O a[2], b[2]; uint32_t relation; double holds; } cases[] = {
+        {{word, {BF, 0, 0}}, {word, {BF, 0, 0}}, PURE_EQUAL, 1},
+        {{word, {BF, 0, 0}}, {none, {BF, 0, 0}}, PURE_GREATER, 1},
+        {{none, {BF, 0, 0}}, {word, {BF, 0, 0}}, PURE_LESS, 1},
+        {{none, {BF, 0, 0}}, {none, {BF, 0, 0}}, PURE_LESS_EQUAL, 1},
+        {{IC(0xFF), {BYTE_, 0, 0}}, {word, {BF, 0, 0}}, PURE_GREATER, 1},           /* no UTF-8: 0xff after 'A' */
+        {{IC(0xFF), {BYTE_, 0, 0}}, {IC(0xFF), {BYTE_, 0, 0}}, PURE_NOT_EQUAL, 0},
+        {{word, {BF, 0, 0}}, {IC('A'), {BYTE_, 0, 0}}, PURE_GREATER_EQUAL, 1},      /* longer, the same first byte */
+        {{word, {BF, 0, 0}}, {IC('A'), {BYTE_, 0, 0}}, PURE_EQUAL, 0},
+    };
+    for (size_t k = 0; k < LEN(cases); ++k) {
+        O code[] = {cases[k].a[0], cases[k].a[1], cases[k].b[0], cases[k].b[1], {CMP, cases[k].relation | B, 0}, {JZ_, 8, 0},
+                    {C, 0, 1}, {ST, 0, 0}};
+        Byted ran = run_bytes(code, LEN(code));
+        if (ran.fault != PURE_FAULT_NONE || ran.n != cases[k].holds) {
+            fprintf(stderr, "bytes compared %zu: fault %d, %g\n", k, (int)ran.fault, ran.n);
+            abort();
+        }
+    }
+    /* Refused: the bit on texts, no bit on bytes, a text with bytes, a relation past NE. */
+    const O refused[][5] = {
+        {word, none, {CMP, PURE_EQUAL | B, 0}, {JZ_, 5, 0}, {C, 0, 1}},
+        {word, {BF, 0, 0}, none, {BF, 0, 0}, {CMP, PURE_EQUAL, 0}},
+        {word, {BF, 0, 0}, none, {CMP, PURE_EQUAL | B, 0}, {JZ_, 5, 0}},
+        {word, {BF, 0, 0}, none, {BF, 0, 0}, {CMP, (PURE_NOT_EQUAL + 1) | B, 0}},
+    };
+    for (size_t k = 0; k < LEN(refused); ++k) {
+        static const S nums[] = {{"n", 0}};
+        static const T others[] = {{"note", 1, 0}, {"bytes", 3, 0}, {"i", PURE_STATE_I64, 0}, {"said", 1, 1}};
+        static const RF byte_fields[] = {{"v", 3, 0}};
+        static const R records[] = {{"Byte", byte_fields, 1}};
+        static const char *const constants[] = {"Az\xc3\xa9", ""};
+        static const I inputs[] = {KEY("go", "KeyG")};
+        H handler = {1, 0, 5};
+        Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, refused[k], 5, NULL, 0, others, LEN(others), constants,
+                     LEN(constants), NULL, 0, records, 1, NULL, 0};
+        if (load(spec, &module_b) == PURE_OK) { fprintf(stderr, "bytes compared: refused %zu loaded\n", k); abort(); }
+    }
+    printf("{\"bytes_compared\":{\"cases\":%zu,\"refused\":%zu}}\n", LEN(cases), LEN(refused));
+}
+
 /* ---- Formats, slices and values held by name (docs/design/027, stage 2a) --
  * NUM_TEXT writes a number, a bool or an i64 in a width, with zeros or
  * spaces, in a base or with fixed digits, or an integer in minor units
@@ -7342,6 +7390,7 @@ int main(void) {
     bools();
     integers();
     bits_and_bytes();
+    bytes_compared();
     formats_and_held();
     lists_in_records();
     functions_and_characters();

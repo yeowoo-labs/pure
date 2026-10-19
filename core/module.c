@@ -35,11 +35,12 @@ enum { READ = IN_VIEW | IN_HANDLER };
  * a fold runs in, a number, bool or i64 state (A_VALUE), or the value's type
  * (A_TYPE: 0 a number, 1 a bool, 2 an i64), how I64_BITS computes (A_BITS),
  * what a position is (A_POSITION: 0 a number, 1 an i64), what CONCAT joins
- * (A_JOINED: 0 texts, 1 bytes), how NUM_TEXT writes (A_FORMAT) or the value
+ * (A_JOINED: 0 texts, 1 bytes), what TEXT_COMPARE relates (A_ORDER: a relation,
+ * and PURE_COMPARE_BYTES for two bytes), how NUM_TEXT writes (A_FORMAT) or the value
  * held by name (A_HELD), or a function (A_FUNCTION: CALL's, and RETURN's own). */
 enum { A_NONE, A_STATE, A_ITEM = A_STATE + PURE_STATE_I64 + 1, A_FIELD, A_CONSTANT, A_IN_TEXT, A_IN_LIST,
        A_ROW, A_TARGET, A_DEPTH, A_FOLD, A_RELATION, A_KEYED, A_OUTPUT, A_OUTER, A_EACH, A_LOCAL, A_VALUE, A_TYPE,
-       A_LOOP, A_BITS, A_POSITION, A_JOINED, A_FORMAT, A_HELD, A_FUNCTION };
+       A_LOOP, A_BITS, A_POSITION, A_JOINED, A_FORMAT, A_HELD, A_FUNCTION, A_ORDER };
 /* A fold's block is verified as a column that leaves one bool (count, first)
  * or a value and whether to include it (a bool): a number (FOLD_TWO) or an
  * i64 (FOLD_I64). A table's filter is verified as a column that leaves a
@@ -119,7 +120,7 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     [PURE_OP_PICK] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
     [PURE_OP_SLIDE] = {0, {0}, 0, READ, A_DEPTH, O_ANY},
     [PURE_OP_FOLD] = {0, {0}, T_NUM, READ, A_FOLD, O_ANY},
-    [PURE_OP_TEXT_COMPARE] = {2, {T_TEXT, T_TEXT}, T_BOOL, READ, A_RELATION, O_ANY},
+    [PURE_OP_TEXT_COMPARE] = {2, {T_TEXT, T_TEXT}, T_BOOL, READ, A_ORDER, O_ANY},
     [PURE_OP_LIST_FIND] = {1, {T_KEY}, T_INDEX, READ, A_KEYED, O_ARG},
     [PURE_OP_LIST_HAS] = {1, {T_KEY}, T_BOOL, READ, A_KEYED, O_ANY},
     [PURE_OP_NOW] = {0, {0}, T_NUM, IN_HANDLER, A_NONE, O_ANY},
@@ -459,6 +460,7 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
                (form != PURE_FORMAT_FIXED || type == 0) && (form == PURE_FORMAT_FIXED || form == PURE_FORMAT_DECIMAL || !digits);
     }
     case A_RELATION: return arg <= PURE_NOT_EQUAL;
+    case A_ORDER: return (arg & ~PURE_COMPARE_BYTES) <= PURE_NOT_EQUAL; /* a relation, of texts or of bytes */
     case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
     case A_OUTPUT: return arg < m->inputs && m->input[arg].kind == PURE_KIND_OUTPUT;
     case A_NONE: case A_TARGET: case A_DEPTH: return true;
@@ -668,7 +670,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             need[0] = state_type(m, arg);
         } else if (op->op == PURE_OP_NUM_TEXT && arg & 3) {
             need[0] = (arg & 3) == 1 ? T_BOOL : T_I64;
-        } else if (op->op == PURE_OP_CONCAT && arg) {
+        } else if ((op->op == PURE_OP_CONCAT && arg) || (op->op == PURE_OP_TEXT_COMPARE && arg & PURE_COMPARE_BYTES)) {
             need[0] = need[1] = T_BYTES;
         } else if (op->op == PURE_OP_BYTES_SLICE && arg) {
             need[1] = need[2] = T_I64; /* the positions i64s */
@@ -4233,7 +4235,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         int order = shorter ? memcmp(a.data, b.data, shorter) : 0;
         if (!order) order = (a.size > b.size) - (a.size < b.size);
         arena->used = mark;
-        stack[sp - 1].num = related(arg, order);
+        stack[sp - 1].num = related(arg & ~PURE_COMPARE_BYTES, order);
         NEXT;
     }
     case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS: {

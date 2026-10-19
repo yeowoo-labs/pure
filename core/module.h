@@ -209,8 +209,10 @@ enum { PURE_LOOP_INTEGER = 256, PURE_MODULE_NESTING = 8 };
 #define PURE_WORK_DEFAULT (UINT64_C(1) << 28)
 #define PURE_GROWTH_DEFAULT ((size_t)1 << 28)
 /* TEXT_COMPARE's argument: the relation, in the order of the number
- * comparisons (LT LE GT GE EQ NE); texts order by their bytes. */
+ * comparisons (LT LE GT GE EQ NE), and PURE_COMPARE_BYTES with it when its
+ * two are bytes (texts and bytes alike order by their bytes). */
 typedef enum { PURE_LESS, PURE_LESS_EQUAL, PURE_GREATER, PURE_GREATER_EQUAL, PURE_EQUAL, PURE_NOT_EQUAL } PureRelation;
+#define PURE_COMPARE_BYTES 0x100u
 
 /* An input is a message (027's 4d: the only thing an app takes), an output
  * or a view's arguments. An output is a message the app sends (SEND, in a
