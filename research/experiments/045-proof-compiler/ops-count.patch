@@ -1,0 +1,62 @@
+diff --git a/core/module.c b/core/module.c
+index 4b20e25..2205f77 100644
+--- a/core/module.c
++++ b/core/module.c
+@@ -3902,7 +3902,57 @@ static __attribute__((noinline, cold)) int open_batches(Frame *frame, uint32_t p
+ #define STOPPED(why) do { frame->status = (why); return STEP_RETURN; } while (0)
+ 
+ /* The instruction op at pc; *next the one to run after it. */
++/* Research only (029's breaking experiment): the instructions the executor runs, by opcode. */
++#include <stdio.h>
++static uint64_t research_ops[256], research_same[256];
++static const char *const research_names[] = {"CONST", "LOAD", "ADD", "SUB", "MUL", "DIV", "NEG", "LT", "LE", "GT", "GE", "EQ", "NE", "AND", "OR", "NOT", "MIN", "MAX", "CLAMP", "STORE", "JZ", "JMP", "FIELD", "LEN", "REPLY", "REQUIRE", "TEXT_CONST", "TEXT_LOAD", "NUM_TEXT", "CONCAT", "CHARS", "LINES", "TEXT_BYTES", "ANCHOR_LOAD", "ANCHOR_START", "ANCHOR_END", "ANCHOR_MOVE", "ANCHOR_STORE", "TEXT_INSERT", "TEXT_REMOVE", "TEXT_LINE", "TEXT_SET", "TEXT_FROM", "BYTES_FROM", "ANCHOR_COUNT", "LIST_COUNT", "LIST_APPEND", "LIST_INSERT", "LIST_REMOVE", "ITEM_GET", "ITEM_SET", "ROW", "PICK", "SLIDE", "FOLD", "TEXT_COMPARE", "LIST_FIND", "LIST_HAS", "NOW", "FLOOR", "MOD", "SEND", "OUTER_ROW", "EACH", "LOCAL_LOAD", "LOCAL_STORE", "I64_ADD", "I64_SUB", "I64_MUL", "I64_DIV", "I64_MOD", "I64_NEG", "I64_COMPARE", "I64_MIN", "I64_MAX", "I64_FROM", "NUM_FROM", "LOOP", "BREAK", "I64_BITS", "BYTE_AT", "BYTES_OF", "ANCHOR_AT", "BYTES_SLICE", "BYTE", "BYTES_LOAD", "BYTES_STORE", "LIST_VALUE", "LIST_BIND", "APPEND_IN", "NUM_PARSE", "CALL", "RETURN", "CHAR_AT", "CHAR", "FLOORDIV", "CUR_LOAD", "CUR_START", "CUR_END", "CUR_MOVE", "CUR_STORE", "CUR_COUNT", "CUR_AT", "INDEX_LOAD", "INDEX_STORE", "INDEX_MOVE", "INDEX_FIRST", "INDEX_LAST", "INDEX_NUM", "INDEX_AT", "KEPT_GET", "KEPT_SET", "KEPT_APPEND", "KEPT_INSERT", "KEPT_APPEND_IN"};
++static void research_reads(const Frame *frame, const PureOp *op);
++static void research_dump(void) {
++    const char *out = getenv("PURE_OPS_OUT");
++    FILE *f = out ? fopen(out, "w") : stderr;
++    for (unsigned i = 0; i < 256; ++i)
++        if (research_ops[i]) fprintf(f, "%s %llu %llu\n", i < sizeof(research_names) / sizeof(*research_names) ? research_names[i] : "?",
++                                     (unsigned long long)research_ops[i], (unsigned long long)research_same[i]);
++    if (out) fclose(f);
++}
++/* Reads the proof makes the same: the same list (its address and version: a change makes another), field and place
++ * read again within an event (the event's work starts again at 0). Counted by opcode. */
++static uint64_t research_last_work, research_keys[1 << 16];
++static uint32_t research_key_count;
++static void research_reads(const Frame *frame, const PureOp *op) {
++    if (frame->app->work < research_last_work) memset(research_keys, 0, sizeof(research_keys)), research_key_count = 0;
++    research_last_work = frame->app->work;
++    uint64_t list = 0, version = 0, place = 0, id = 0;
++    switch (op->op) {
++    case PURE_OP_ITEM_GET: case PURE_OP_INDEX_AT: case PURE_OP_LIST_COUNT: {
++        uint32_t state = op->op == PURE_OP_ITEM_GET ? (op->arg & 0xFFFF) : op->arg;
++        if (state >= frame->app->laid && state < PURE_LIST_HEARD) return;
++        const PureList *l = frame->app->lists[state];
++        if (!l) return;
++        pure_list_stamp(l, &id, &version);
++        list = (uint64_t)(uintptr_t)l;
++        if (op->op != PURE_OP_LIST_COUNT) memcpy(&place, &frame->stack[frame->sp - 1], sizeof(place));
++        break;
++    }
++    case PURE_OP_LIST_BIND: {
++        list = 0x51ull << 56 | op->arg;
++        memcpy(&place, &frame->stack[frame->sp - 1], sizeof(place));
++        version = 0;
++        break;
++    }
++    default: return;
++    }
++    uint64_t key = ((list * 0x9E3779B97F4A7C15ull) ^ (version * 0xC2B2AE3D27D4EB4Full) ^ (place * 0x165667B19E3779F9ull) ^
++                    ((uint64_t)op->op << 32 | op->arg)) | 1;
++    for (uint32_t i = (uint32_t)(key >> 40) & 0xFFFF, k = 0; k < 1 << 16; ++k, i = (i + 1) & 0xFFFF) {
++        if (research_keys[i] == key) { ++research_same[op->op]; return; }
++        if (!research_keys[i]) { if (research_key_count < (1 << 15)) research_keys[i] = key, ++research_key_count; return; }
++    }
++}
++__attribute__((constructor)) static void research_start(void) { atexit(research_dump); }
+ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp *op, uint32_t pc, uint32_t *next, bool batches) {
++    ++research_ops[op->op];
++    research_reads(frame, op);
+     const PureModule *m = frame->m;
+     PureValue *values = frame->values;
+     Event *ev = frame->ev;

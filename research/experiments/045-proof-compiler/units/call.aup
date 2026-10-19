@@ -1,0 +1,11 @@
+state t = 0
+input go = message { n: u32 }
+fn f(x) {
+  if x > 1000000 { return 0 }
+  return x + 1
+}
+on go {
+  let s = 0
+  for i in 0 .. go.n { s = s + f(i) }
+  t = s
+}

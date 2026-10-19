@@ -1,0 +1,25 @@
+diff --git a/core/module.c b/core/module.c
+index 4b20e25..fd953e8 100644
+--- a/core/module.c
++++ b/core/module.c
+@@ -4967,10 +4967,20 @@ static __attribute__((noinline, aligned(64))) PureResult run_batches(const PureM
+     return finish(&frame, how, result);
+ }
+ 
++#ifdef PURE_NATIVE_INC /* research 045: the executor's steps stitched for one module */
++#include PURE_NATIVE_INC
++#endif
++
+ /* At a cache line's start: the steps' branches land where they would (research 126: else 10% more cycles, as many instructions). */
+ static __attribute__((aligned(64))) PureResult run(const PureModule *m, PureValue *values, PureBlock block, Event *ev, Slot *result) {
+     PureCompiled code = m->jit ? pure_jit_code(m->jit, block) : NULL;
+     if (code) return run_compiled(code, m, values, block, ev, result);
++#ifdef PURE_NATIVE_INC
++    static const PureModule *native_seen;
++    static bool native_ok;
++    if (m != native_seen) native_seen = m, native_ok = native_matches(m) && getenv("PURE_NATIVE");
++    if (native_ok && m->runner == 2) return run_native(m, values, block, ev, result);
++#endif
+     if (m->runner) return m->runner == 2 ? run_calls(m, values, block, ev, result) : run_batches(m, values, block, ev, result);
+     Slot stack[PURE_MODULE_STACK];
+     Loop loops[PURE_MODULE_NESTING];

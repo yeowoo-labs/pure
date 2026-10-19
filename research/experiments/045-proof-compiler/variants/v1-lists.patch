@@ -1,0 +1,14 @@
+--- linebreak.aup
++++ v1-lists.aup
+@@ -173,10 +173,6 @@
+     numeric.append(if joins { numeric[i - 1] } else { e == NU || ((e == SY || e == IS) && i > 0 && numeric[i - 1]) })
+     ri.append(if joins { ri[i - 1] } else if e == RI { (if i > 0 { ri[i - 1] } else { 0 }) + 1 } else { 0 })
+   }
+-  let t = Text { codes: codes, cls: cls, eff: eff, joined: joined, start: start, nonspace: nonspace, numeric: numeric, ri: ri,
+-                 at: at }
+-  let out: list of i64 = [0]                                                          # LB2
+-  for i in 1 .. codes.count { out.append(i64(decide(t, i))) }
+-  if codes.count > 0 { out.append(2) }                                                # LB3
++  let out: list of i64 = [0]
+   breaks = bytes(out)
+ }

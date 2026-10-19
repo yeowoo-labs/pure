@@ -1,0 +1,7 @@
+state t = 0
+input go = message { n: u32 }
+on go {
+  let s = 0
+  for i in 0 .. go.n { s = s + i % 1000 }
+  t = s
+}

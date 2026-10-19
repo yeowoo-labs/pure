@@ -1,0 +1,14 @@
+record R {
+  start = 0
+}
+state ranges: list of R
+state t = 0
+input go = message { n: u32 }
+on go {
+  if ranges.count == 0 {
+    for i in 0 .. 1000 { ranges.append(R { start: i }) }
+  }
+  let s = 0
+  for i in 0 .. go.n { s = s + ranges[i].start }
+  t = s
+}

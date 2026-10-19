@@ -1,0 +1,7 @@
+state t = 0
+input go = message { n: u32 }
+on go {
+  let xs: list of number
+  for i in 0 .. go.n { xs.append(i) }
+  t = xs.count
+}
