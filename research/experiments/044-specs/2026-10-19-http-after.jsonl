@@ -1,0 +1,4 @@
+{"streams": 200, "bytes": 132623, "requests": 578, "right": {"whole": 200, "random": 200, "bytes": 50}, "paths": {"batches": 200, "rounds": 200, "all": 200}, "paths_same": true, "damaged": 200, "damaged_refused": 35, "damaged_agreed": 200, "aup_lines": 148, "aup_brace_lines": 21, "python_lines": 79}
+{"streams":151,"bytes":98838,"requests":444,"jit":"0","batch":"","c_ns_per_byte":3.249,"pure_ns_per_byte":270.433,"to_c":83.2,"instructions":6074414,"instructions_per_byte":61.5}
+{"streams":151,"bytes":98838,"requests":444,"jit":"0","batch":"0","c_ns_per_byte":3.250,"pure_ns_per_byte":270.680,"to_c":83.3,"instructions":6074414,"instructions_per_byte":61.5}
+{"streams":151,"bytes":98838,"requests":444,"jit":"all","batch":"","c_ns_per_byte":3.245,"pure_ns_per_byte":270.454,"to_c":83.3,"instructions":6074414,"instructions_per_byte":61.5}

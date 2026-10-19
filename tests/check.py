@@ -1864,9 +1864,9 @@ def module_specs(aup, pure, work):
     shown = [json.loads(line) for line in outputs['batches'].splitlines()]
     assert len(shown) == len(streams) + len(cut), ('inflate', len(shown))
     for (data, _), state in zip(streams, shown):
-        assert state['fault'] == 'none' and state['states']['inflated'][-1]['data'] == data.hex(), ('inflate', len(data))
+        assert state['fault'] == 'none' and state['states']['inflated'] == data.hex(), ('inflate', len(data))
     for state in shown[len(streams):]:
-        assert state['fault'] != 'none' and state['states']['inflated'][-1]['data'] == streams[-1][0].hex(), ('inflate cut', state['fault'])
+        assert state['fault'] != 'none' and state['states']['inflated'] == streams[-1][0].hex(), ('inflate cut', state['fault'])
     runs['inflate'] = {'streams': len(streams), 'bytes': sum(len(d) for d, _ in streams), 'cut': len(cut)}
     # DNS messages (RFC 1035, its examples/dns.aup): messages dnspython made (tests/specs/dns), each read without fault on
     # the three paths, what its view wire writes back read to the same records and written again to the same bytes; a
@@ -1920,7 +1920,7 @@ def module_specs(aup, pure, work):
         s = json.loads(out[-1])['states']
         pairs = lambda fs: [[f['name'], f['value']] for f in fs]
         return out[-1], {'requests': [[r['method'], r['target'], r['minor'], pairs(r['fields']), r['body'], pairs(r['trailers'])]
-                                      for r in s['requests']], 'left': s['pending'][0]['data'] if s['pending'] else ''}
+                                      for r in s['requests']], 'left': s['pending']}
 
     cuts = 0
     for stream, want in zip(made, reading):

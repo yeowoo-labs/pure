@@ -217,7 +217,7 @@ int main(int argc, char **argv) {
         }
         work += app.work;
     }
-    if ((long)pure_list_count(app.lists[requests]) != c_requests || pure_list_count(app.lists[left])) {
+    if ((long)pure_list_count(app.lists[requests]) != c_requests || pure_draft_size(app.texts[left])) {
         fprintf(stderr, "Pure read %zu requests, C %ld\n", pure_list_count(app.lists[requests]), c_requests);
         return 1;
     }

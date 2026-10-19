@@ -72,8 +72,7 @@ def run(module, packed_streams, env, work):
     got = []
     for line in out:
         state = json.loads(line)
-        items = state['states']['inflated']
-        got.append(bytes.fromhex(items[-1]['data']) if state['fault'] == 'none' and items else None)
+        got.append(bytes.fromhex(state['states']['inflated']) if state['fault'] == 'none' else None)  # a bytes state (028)
     return out, got
 
 

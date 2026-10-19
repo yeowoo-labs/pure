@@ -159,6 +159,15 @@ static int by_value(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 
+/* Each span of a draft read in order against the original's bytes from where the last ended. */
+static size_t compared;
+static bool compare_original(void *context, PureSpan span) {
+    const unsigned char *original = context;
+    if (memcmp(original + compared, span.data, span.size)) return false;
+    compared += span.size;
+    return true;
+}
+
 static unsigned char *whole(const char *path, size_t *size) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -199,9 +208,12 @@ int main(int argc, char **argv) {
         return 1;
     }
     uint64_t work = app.work - before;
-    const PureList *list = app.lists[state];
-    PureCell cell = pure_list_count(list) == 1 ? pure_list_get(list, 0, 0) : (PureCell){0};
-    if (cell.size != original_size || memcmp(cell.text, original, original_size)) { fprintf(stderr, "Pure's bytes differ\n"); return 1; }
+    /* The bytes state (028): its draft's bytes. */
+    if (pure_draft_size(app.texts[state]) != original_size ||
+        pure_draft_read(app.texts[state], 0, original_size, compare_original, original) != PURE_OK) {
+        fprintf(stderr, "Pure's bytes differ\n");
+        return 1;
+    }
 
     double c_runs[7], zlib_runs[7], pure_runs[7];
     volatile unsigned char sink = 0;

@@ -137,7 +137,7 @@ def run(module, packets, env, work):
     pairs = lambda fs: [(bytes.fromhex(f['name']), bytes.fromhex(f['value'])) for f in fs]
     requests = [(bytes.fromhex(r['method']), bytes.fromhex(r['target']), r['minor'], pairs(r['fields']), bytes.fromhex(r['body']),
                  pairs(r['trailers'])) for r in s['requests']]
-    left = bytes.fromhex(s['pending'][0]['data']) if s['pending'] else b''
+    left = bytes.fromhex(s['pending'])  # a bytes state (028)
     return out, (requests, left), any(json.loads(line)['fault'] != 'none' for line in out)
 
 
