@@ -34,6 +34,14 @@ static unsigned char *whole(const char *path, size_t *size) {
 
 typedef struct { uint32_t count; const uint32_t *codes; const unsigned char *want; unsigned char *payload; } Line;
 
+/* A line's boundaries from Pure: the bytes view "boundaries", compared as breaks or not with want. */
+typedef struct { const unsigned char *want; size_t at; bool same; } Compare;
+static bool compare(void *context, PureSpan span) {
+    Compare *c = context;
+    for (size_t i = 0; i < span.size; ++i, ++c->at) c->same = c->same && (span.data[i] != 0) == c->want[c->at];
+    return true;
+}
+
 /* Addresses sampled, counted in an open table. */
 enum { SLOTS = 1 << 20, PAGES = 64 };
 static uint64_t address[SLOTS], hits[SLOTS];
@@ -92,14 +100,22 @@ int main(int argc, char **argv) {
     int load = pure_module_input(&module, "load"), line = pure_module_input(&module, "line");
     if (pure_app_message(&app, (uint32_t)load, (PureSpan){ranges, ranges_size}) != PURE_OK) return 1;
     static uint8_t got[4096];
-    size_t right = 0;
-    for (size_t k = 0; k < count; ++k) { /* checked first: Pure gives the test's boundaries */
-        bool same = pure_app_message(&app, (uint32_t)line, (PureSpan){lines[k].payload, 8 * (size_t)lines[k].count}) == PURE_OK &&
-                    lines[k].count < sizeof(got) && vega_line_breaks(lines[k].codes, lines[k].count, got);
+    size_t right = 0, pure_right = 0;
+    int boundaries = pure_module_view(&module, "boundaries");
+    for (size_t k = 0; k < count; ++k) { /* checked first: both give the test's boundaries, Pure's read from its view */
+        bool same = lines[k].count < sizeof(got) && vega_line_breaks(lines[k].codes, lines[k].count, got);
         for (uint32_t i = 0; same && i <= lines[k].count; ++i) same = (got[i] != VEGA_BREAK_NONE) == lines[k].want[i];
         right += same;
+        Compare c = {lines[k].want, 0, true};
+        c.same = boundaries >= 0 &&
+                 pure_app_message(&app, (uint32_t)line, (PureSpan){lines[k].payload, 8 * (size_t)lines[k].count}) == PURE_OK &&
+                 pure_app_view_text(&app, (uint32_t)boundaries, compare, &c) == PURE_OK;
+        pure_right += c.same && c.at == lines[k].count + 1;
     }
-    if (right != count && !getenv("WHERE_VARIANT")) { fprintf(stderr, "right %zu of %zu\n", right, count); return 1; }
+    if ((right != count || pure_right != count) && !getenv("WHERE_VARIANT")) {
+        fprintf(stderr, "right: C %zu, Pure %zu, of %zu\n", right, pure_right, count);
+        return 1;
+    }
     struct perf_event_attr a;
     memset(&a, 0, sizeof(a));
     a.size = sizeof(a), a.type = PERF_TYPE_HARDWARE, a.config = PERF_COUNT_HW_INSTRUCTIONS, a.disabled = 1,

@@ -13,22 +13,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <linux/perf_event.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-
-static double now_ns(void) {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return (double)t.tv_sec * 1e9 + (double)t.tv_nsec;
-}
-
-static int by_value(const void *a, const void *b) {
-    double x = *(const double *)a, y = *(const double *)b;
-    return (x > y) - (x < y);
-}
 
 static unsigned char *whole(const char *path, size_t *size) {
     FILE *f = fopen(path, "rb");
@@ -44,7 +32,7 @@ static unsigned char *whole(const char *path, size_t *size) {
 
 typedef struct { uint32_t count; const uint32_t *codes; const unsigned char *want; unsigned char *payload; } Line;
 
-/* A line's boundaries from Pure: the bytes state "breaks", compared as breaks or not with want. */
+/* A line's boundaries from Pure: the bytes view "boundaries", compared as breaks or not with want. */
 typedef struct { const unsigned char *want; size_t at; bool same; } Compare;
 static bool compare(void *context, PureSpan span) {
     Compare *c = context;
@@ -95,14 +83,19 @@ int main(int argc, char **argv) {
     int load = pure_module_input(&module, "load"), line = pure_module_input(&module, "line");
     if (pure_app_message(&app, (uint32_t)load, (PureSpan){ranges, ranges_size}) != PURE_OK) return 1;
     static uint8_t got[4096];
-    size_t right = 0;
-    for (size_t k = 0; k < count; ++k) { /* checked first: both give the test's boundaries */
-        bool same = pure_app_message(&app, (uint32_t)line, (PureSpan){lines[k].payload, 8 * (size_t)lines[k].count}) == PURE_OK &&
-                    lines[k].count < sizeof(got) && vega_line_breaks(lines[k].codes, lines[k].count, got);
+    size_t right = 0, pure_right = 0;
+    int boundaries = pure_module_view(&module, "boundaries");
+    for (size_t k = 0; k < count; ++k) { /* checked first: both give the test's boundaries, Pure's read from its view */
+        bool same = lines[k].count < sizeof(got) && vega_line_breaks(lines[k].codes, lines[k].count, got);
         for (uint32_t i = 0; same && i <= lines[k].count; ++i) same = (got[i] != VEGA_BREAK_NONE) == lines[k].want[i];
         right += same;
+        Compare c = {lines[k].want, 0, true};
+        c.same = boundaries >= 0 &&
+                 pure_app_message(&app, (uint32_t)line, (PureSpan){lines[k].payload, 8 * (size_t)lines[k].count}) == PURE_OK &&
+                 pure_app_view_text(&app, (uint32_t)boundaries, compare, &c) == PURE_OK;
+        pure_right += c.same && c.at == lines[k].count + 1;
     }
-    if (right != count) { fprintf(stderr, "right %zu of %zu\n", right, count); return 1; }
+    if (right != count || pure_right != count) { fprintf(stderr, "right: C %zu, Pure %zu, of %zu\n", right, pure_right, count); return 1; }
     int ins = counter(PERF_COUNT_HW_INSTRUCTIONS), cyc = counter(PERF_COUNT_HW_CPU_CYCLES);
     if (ins < 0 || cyc < 0) { perror("perf_event_open"); return 1; }
     volatile unsigned sink = 0;
