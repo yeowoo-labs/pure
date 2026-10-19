@@ -130,7 +130,7 @@ static const struct { unsigned char pops, in[3], out; unsigned short where; unsi
     /* LOOP takes its low and high, two numbers or two i64s (the operands are its argument's). */
     [PURE_OP_LOOP] = {0, {0}, 0, IN_HANDLER | IN_COMPUTE, A_LOOP, O_ANY},
     [PURE_OP_BREAK] = {0, {0}, 0, IN_HANDLER | IN_COMPUTE, A_NONE, O_ANY},
-    [PURE_OP_FLOOR] = NUMS(1), [PURE_OP_MOD] = NUMS(2),
+    [PURE_OP_FLOOR] = NUMS(1), [PURE_OP_MOD] = NUMS(2), [PURE_OP_FLOORDIV] = NUMS(2),
     [PURE_OP_I64_ADD] = I64S(2), [PURE_OP_I64_SUB] = I64S(2), [PURE_OP_I64_MUL] = I64S(2), [PURE_OP_I64_DIV] = I64S(2),
     [PURE_OP_I64_MOD] = I64S(2), [PURE_OP_I64_NEG] = I64S(1), [PURE_OP_I64_MIN] = I64S(2), [PURE_OP_I64_MAX] = I64S(2),
     [PURE_OP_I64_COMPARE] = {2, {T_I64, T_I64}, T_BOOL, READ, A_RELATION, O_ANY},
@@ -1524,6 +1524,16 @@ static uint32_t nesting_of(const PureModule *m) {
     }
     free(ends);
     return most;
+}
+
+/* a // b for numbers as Python's float floor division: the quotient of a less its floored remainder, rounded to the
+ * nearest whole (it is one but for rounding), a zero with the sign of a / b (027's stage 5). b is not 0. */
+static double floor_divide(double a, double b) {
+    double mod = fmod(a, b), quotient = (a - mod) / b;
+    if (mod != 0 && (b < 0) != (mod < 0)) quotient -= 1.0;
+    if (quotient == 0) return copysign(0.0, a / b);
+    double whole = floor(quotient);
+    return quotient - whole > 0.5 ? whole + 1.0 : whole;
 }
 
 /* A name and its place among those of one namespace, in order of name and then of place. */
@@ -4509,6 +4519,10 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         value = fmod(a, b);
         if (value != 0 && (value < 0) != (b < 0)) value += b;
         else if (value == 0) value = copysign(0.0, b);
+        break;
+    case PURE_OP_FLOORDIV: /* MOD's quotient, exactly (027's stage 5): a less its remainder, divided, as Python's // */
+        if (b == 0) { kind = PURE_FAULT_DIVIDE; FAILED; }
+        value = floor_divide(a, b);
         break;
     default: value = maximum(a, b); break;
     }

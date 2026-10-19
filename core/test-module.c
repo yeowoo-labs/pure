@@ -6962,6 +6962,33 @@ static void timers(void) {
     CHECK(load(bad, &module_b) == PURE_INVALID && strstr(error, "view with an effect"));
 }
 
+/* Floor division of numbers (027's stage 5): as Python's //, the quotient MOD's remainder leaves, exactly (1 // 0.1 is 9:
+ * 0.1 is a little more than a tenth), its zero signed as a / b; by zero it fails as divide. */
+static void floor_division(void) {
+    enum { FDIV = PURE_OP_FLOORDIV };
+    static const S nums[] = {{"a", 0}, {"b", 0}, {"c", 0}, {"d", 0}, {"e", 0}, {"f", 0}};
+    static const I inputs[] = {KEY("go", "KeyG"), KEY("zero", "KeyZ")};
+    static const O code[] = {
+        {C, 0, 7}, {C, 0, 2}, {FDIV, 0, 0}, {ST, 0, 0},       {C, 0, -7}, {C, 0, 2}, {FDIV, 0, 0}, {ST, 1, 0},
+        {C, 0, 7}, {C, 0, -2}, {FDIV, 0, 0}, {ST, 2, 0},      {C, 0, 1}, {C, 0, 0.1}, {FDIV, 0, 0}, {ST, 3, 0},
+        {C, 0, 0}, {C, 0, -3}, {FDIV, 0, 0}, {ST, 4, 0},      {C, 0, 1e300}, {C, 0, 7}, {FDIV, 0, 0}, {ST, 5, 0},
+        {C, 0, 1}, {C, 0, 0}, {FDIV, 0, 0}, {ST, 0, 0},
+    };
+    static const H handlers[] = {{1, 0, 24}, {3, 24, 4}};
+    static const V none[] = {{"v", 0, 1}};
+    Spec spec = SPEC(nums, inputs, none, handlers, code);
+    spec.nv = 0;
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "floor division: %s\n", error); abort(); }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && press(&app, 0) == PURE_OK);
+    double huge = 1e300, quotient = (huge - fmod(huge, 7)) / 7;
+    CHECK(app.values[0].num == 3 && app.values[1].num == -4 && app.values[2].num == -4 && app.values[3].num == 9 &&
+          app.values[4].num == 0 && signbit(app.values[4].num) && app.values[5].num == floor(quotient));
+    CHECK(press(&app, 1) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE && app.values[0].num == 3);
+    pure_app_stop(&app);
+    printf("{\"floor_division\":6}\n");
+}
+
 /* A number is written with the fewest digits that read back as it, the
  * digits %g gives (with its exponent's leading zeros dropped): the same
  * text as that search over precisions, for values of every kind. */
@@ -7312,6 +7339,7 @@ int main(void) {
     bytes_fields();
     anchors();
     list_views();
+    floor_division();
     memory_budget();
     work_budget();
     fold_mutations();

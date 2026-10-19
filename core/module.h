@@ -47,6 +47,7 @@ typedef enum {
     PURE_OP_BYTES_SLICE, PURE_OP_BYTE, PURE_OP_BYTES_LOAD, PURE_OP_BYTES_STORE,
     PURE_OP_LIST_VALUE, PURE_OP_LIST_BIND, PURE_OP_APPEND_IN, PURE_OP_NUM_PARSE,
     PURE_OP_CALL, PURE_OP_RETURN, PURE_OP_CHAR_AT, PURE_OP_CHAR,
+    PURE_OP_FLOORDIV,
     PURE_OP_COUNT
 } PureOpcode;
 /* 027's 4c: an anchor is a place in a text or a list that follows its edits. A text's (a cursor) is a gap between
