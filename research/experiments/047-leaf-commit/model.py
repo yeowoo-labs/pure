@@ -30,6 +30,10 @@ The bars, set before running (today's list bytes, the log and images, by groupin
 - appends: the leaf commit's list bytes a message at most today's (entries: 65.5 / 15.7 / 12.4);
 - sparse updates: at most twice today's (bank: 2 x 122 / 35.6 / 30.1 = 244 / 71.2 / 60.2);
 - snapshot: no in-place write a kept snapshot can see (cow and tail; inplace is there to break it).
+After the run (not in the bars above, so not held to them): delta, the leaf with room for 8 changes after its cells
+(16 B each: its place, field and cell), appended in place, a full room writing the leaf anew with them folded in. One
+object still: the log's records live in the leaf they change. Its readers' price (a read looks at the room) is not
+counted here.
 What it means, said before: if appends pass and updates do not, "one unit" fails as stated: the leaf is the unit for
 appends and bulk, and a sparse change needs a delta form, which is what the log is; the honest design is then two
 units (or the log kept for updates alone), not one.
@@ -42,6 +46,9 @@ import sys
 HEADER, INNER, FANOUT, RECORD, PER_LIST, SLOTS, SLACK = 40, 680, 32, 128, 16, 8192, 1 << 20
 ENTRY = 20  # a child entry written into a parent in place: its pointer (8), count before (4) and key (8)
 KEEP_EVERY, KEPT = 64, 16
+DELTAS, DELTA = 8, 16  # delta: a leaf's room for changes after its cells (u32 place, u8 field, pad, the 8-byte cell)
+import os  # noqa: E402
+DELTAS = int(os.environ.get('MODEL_DELTAS', DELTAS))
 
 
 class List:
@@ -51,6 +58,8 @@ class List:
         self.name, self.cell, self.items = name, cell, items
         self.leaf = HEADER + FANOUT * cell
         self.version = {}  # node (level, index) -> the commit that wrote it
+        self.deltas = {}   # delta: a leaf's changes in its room since it was last written whole
+        self.written = {}  # delta: how often a leaf was written whole (its version: a new one is another object)
 
     def leaves(self):
         return max(1, -(-self.items // FANOUT))
@@ -71,7 +80,7 @@ class List:
         return out
 
     def live(self):
-        n, total, level = self.leaves(), self.leaves() * self.leaf, 0
+        n, total, level = self.leaves(), self.leaves() * (self.leaf + DELTAS * DELTA * (self.way == 'delta')), 0
         while n > 1:
             n = -(-n // FANOUT)
             total += n * INNER
@@ -97,7 +106,11 @@ def workload(name, messages, seed=47):
 
 def run(name, messages, batch, way):
     lists, changes = workload(name, messages)
-    written = {'leaves': 0, 'cells': 0, 'inner': 0, 'entries': 0, 'records': 0, 'compaction': 0}
+    for l in lists.values():
+        l.way = way
+        if way == 'delta':
+            l.leaf += DELTAS * DELTA  # the room is part of the leaf
+    written = {'leaves': 0, 'cells': 0, 'inner': 0, 'entries': 0, 'deltas': 0, 'records': 0, 'compaction': 0}
     end, live0 = SLOTS, sum(l.live() for l in lists.values())
     end += live0  # what the setup loaded (not counted: baseline.py takes it away too)
     kept = []  # snapshots kept: {list name: count it reads}
@@ -106,6 +119,8 @@ def run(name, messages, batch, way):
         group = changes[start:start + batch]
         touched = {n: set() for n in lists}  # leaves to write anew
         tail_cells = {n: 0 for n in lists}
+        delta_writes = {n: 0 for n in lists}
+        delta_leaves = {n: set() for n in lists}
         for message in group:
             for list_name, op, position in message:
                 l = lists[list_name]
@@ -113,7 +128,7 @@ def run(name, messages, batch, way):
                     at = l.items
                     l.items += 1
                     leaf = at // FANOUT
-                    if way in ('tail', 'inplace'):
+                    if way in ('tail', 'inplace', 'delta'):
                         for snapshot in kept:  # a kept snapshot never reads at or past its count
                             if at < snapshot.get(list_name, 0):
                                 violations += 1
@@ -128,6 +143,21 @@ def run(name, messages, batch, way):
                                 index //= FANOUT
                                 written['inner'] += HEADER
                     else:
+                        touched[list_name].add(leaf)
+                elif way == 'delta':  # the change appended into its leaf's room, in place; a full room: the leaf anew
+                    leaf = position // FANOUT
+                    n, version = l.deltas.get(leaf, 0), l.written.get(leaf, 0)
+                    for snapshot in kept:  # a kept snapshot reads no more of its leaf's room than its commit said
+                        seen = snapshot.get((list_name, leaf))
+                        if seen and seen[0] == version and n < seen[1]:
+                            violations += 1
+                    if n < DELTAS:
+                        l.deltas[leaf] = n + 1
+                        delta_writes[list_name] += 1
+                        delta_leaves[list_name].add(leaf)
+                    else:
+                        l.deltas[leaf] = 0
+                        l.written[leaf] = version + 1
                         touched[list_name].add(leaf)
                 elif way == 'inplace':  # the cell written where it is: what a kept snapshot (and a crash) would see
                     for snapshot in kept:
@@ -148,19 +178,24 @@ def run(name, messages, batch, way):
         for n, cells in tail_cells.items():
             written['cells'] += cells * lists[n].cell
             size += cells * lists[n].cell
-        changed = sum(1 for n in lists if touched[n] or tail_cells[n])
+        for n in lists:  # delta: each change's 16 bytes, and each leaf with new ones its 16 in the commit record
+            written['deltas'] += delta_writes[n] * DELTA + PER_LIST * len(delta_leaves[n])
+            size += delta_writes[n] * DELTA + PER_LIST * len(delta_leaves[n])
+        changed = sum(1 for n in lists if touched[n] or tail_cells[n] or delta_writes[n])
         written['records'] += RECORD + PER_LIST * changed
         end += size + RECORD + PER_LIST * changed
         commits += 1
         if commits % KEEP_EVERY == 0:
-            kept.append({n: l.items for n, l in lists.items()})
+            snapshot = {n: l.items for n, l in lists.items()}
+            snapshot.update({(n, leaf): (l.written.get(leaf, 0), c) for n, l in lists.items() for leaf, c in l.deltas.items()})
+            kept.append(snapshot)
             kept = kept[-KEPT:]
         live = sum(l.live() for l in lists.values())
         if end - SLOTS > 4 * live + SLACK:
             written['compaction'] += live
             end = SLOTS + live
     total = sum(written.values())
-    lists_bytes = written['leaves'] + written['cells'] + written['inner'] + written['entries']
+    lists_bytes = written['leaves'] + written['cells'] + written['inner'] + written['entries'] + written['deltas']
     return {'workload': name, 'messages': messages, 'batch': batch, 'way': way, 'commits': commits,
             'list_bytes_per_message': round((lists_bytes + written['records'] - RECORD * commits) / messages, 1),
             'by_part_per_message': {k: round(v / messages, 1) for k, v in written.items()},
@@ -170,7 +205,7 @@ def run(name, messages, batch, way):
 def main():
     name, messages = sys.argv[1], int(sys.argv[2])
     for batch in (1, 16, 256):
-        for way in ('cow', 'tail', 'inplace'):
+        for way in ('cow', 'tail', 'inplace', 'delta'):
             print(json.dumps(run(name, messages, batch, way)), flush=True)
 
 
