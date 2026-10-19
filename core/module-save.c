@@ -1134,7 +1134,7 @@ PureResult pure_save_commit(PureApp *app, const PureValue *values) {
     /* A draft a state at most, and three more: on the stack for a few states (027's 4f-2). */
     PureDraft *few_drafts[FEW_STATES + 3], **drafts = few_drafts;
     uint32_t few_states[FEW_STATES + 3], *states = few_states;
-    if (m->states > FEW_STATES && (!(drafts = malloc((m->states + 3) * sizeof(*drafts))) |
+    if (m->states > FEW_STATES && (!(drafts = malloc((m->states + 3) * sizeof(*drafts))) ||
                                    !(states = malloc((m->states + 3) * sizeof(*states))))) {
         if (drafts != few_drafts) free(drafts);
         if (states != few_states) free(states);
