@@ -101,8 +101,10 @@ typedef enum { PURE_BITS_AND, PURE_BITS_OR, PURE_BITS_XOR, PURE_BITS_LEFT, PURE_
  * NUM_TEXT's argument: bits 0-1 the value's type (as CONST's), 8-15 a width
  * the text is padded to on the left, bit 16 padding with zeros after a sign
  * (else spaces), 17-19 the form (PureFormat), 20-24 one more than the digits
- * after the point of FIXED. A form of an integer takes an i64 or a whole
- * number (else LIMIT), in its base with a sign; FIXED takes a number. */
+ * after the point of FIXED or of DECIMAL (there the integer in minor units:
+ * 1234 at two digits is 12.34, as money's cents). A form of an integer takes
+ * an i64 or a whole number (else LIMIT), in its base with a sign; FIXED
+ * takes a number. */
 enum { PURE_MODULE_HELD = 32, PURE_HELD_TEXT = 16, PURE_HELD_APPEND = 1 << 8 };
 /* 027's stage 2b: lists in records. A record field of type LIST holds a list
  * of the record its default names. In an event's list (and the lists in its

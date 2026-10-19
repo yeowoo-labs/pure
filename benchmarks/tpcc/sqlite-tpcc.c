@@ -16,7 +16,7 @@
  * commit, as pure-serve shows views from the last save (docs/research/106).
  * Departures as in tpcc.aup: customers by number, no texts carried along,
  * a customer's last order kept in c_last_order, Delivery a district a
- * transaction. With TRANSACTIONS each terminal stops after that many; the
+ * transaction; money in cents and rates in ten-thousandths, as INTEGERs. With TRANSACTIONS each terminal stops after that many; the
  * inputs are drawn in tpcc-load's order. SQLITE_PRAGMAS, when set, is run on
  * each connection after its own (mmap_size, cache_size). Prints one JSON line
  * as tpcc-load does, with the CPU seconds of the run, the peak resident
@@ -180,13 +180,13 @@ static bool read_only(Terminal *t, int kind, int w, int d, uint64_t *r) {
         sqlite3_bind_int(s, 1, w), sqlite3_bind_int(s, 2, d), sqlite3_bind_int(s, 3, nurand(r, 1023, 1, 3000, 259));
         if (!step(s, &row) || !row) return false;
         sqlite3_int64 order = sqlite3_column_int64(s, 1);
-        (void)sqlite3_column_double(s, 0);
+        (void)sqlite3_column_int64(s, 0);
         sqlite3_reset(s);
         s = t->lines_of;
         sqlite3_reset(s);
         sqlite3_bind_int(s, 1, w), sqlite3_bind_int(s, 2, d), sqlite3_bind_int64(s, 3, order);
         int result;
-        while ((result = sqlite3_step(s)) == SQLITE_ROW) (void)sqlite3_column_double(s, 3);
+        while ((result = sqlite3_step(s)) == SQLITE_ROW) (void)sqlite3_column_int64(s, 3);
         sqlite3_reset(s);
         return result == SQLITE_DONE;
     }
@@ -239,7 +239,7 @@ static bool body(Terminal *t, int kind, int w, int d, uint64_t *r, bool *undo) {
                 *undo = unused;
                 return unused;
             }
-            double price = sqlite3_column_double(s, 0);
+            sqlite3_int64 price = sqlite3_column_int64(s, 0); /* cents */
             sqlite3_reset(s);
             s = t->stock_of;
             sqlite3_reset(s);
@@ -259,7 +259,7 @@ static bool body(Terminal *t, int kind, int w, int d, uint64_t *r, bool *undo) {
             sqlite3_reset(s);
             sqlite3_bind_int(s, 1, w), sqlite3_bind_int(s, 2, d), sqlite3_bind_int64(s, 3, order), sqlite3_bind_int(s, 4, n);
             sqlite3_bind_int(s, 5, item), sqlite3_bind_int(s, 6, supply), sqlite3_bind_int(s, 7, quantity);
-            sqlite3_bind_double(s, 8, quantity * price);
+            sqlite3_bind_int64(s, 8, quantity * price);
             ok = ok && RUN(s);
         }
         s = t->order_add;
@@ -281,23 +281,23 @@ static bool body(Terminal *t, int kind, int w, int d, uint64_t *r, bool *undo) {
             do cw = uniform(r, 1, warehouses); while (cw == w);
             cd = uniform(r, 1, 10);
         }
-        double amount = uniform(r, 100, 500000) / 100.0;
+        sqlite3_int64 amount = uniform(r, 100, 500000); /* cents */
         sqlite3_stmt *s = t->warehouse_pay;
         sqlite3_reset(s);
-        sqlite3_bind_int(s, 1, w), sqlite3_bind_double(s, 2, amount);
+        sqlite3_bind_int(s, 1, w), sqlite3_bind_int64(s, 2, amount);
         ok = RUN(s);
         s = t->district_pay;
         sqlite3_reset(s);
-        sqlite3_bind_int(s, 1, w), sqlite3_bind_int(s, 2, d), sqlite3_bind_double(s, 3, amount);
+        sqlite3_bind_int(s, 1, w), sqlite3_bind_int(s, 2, d), sqlite3_bind_int64(s, 3, amount);
         ok = ok && RUN(s);
         s = t->customer_pay;
         sqlite3_reset(s);
-        sqlite3_bind_int(s, 1, cw), sqlite3_bind_int(s, 2, cd), sqlite3_bind_int(s, 3, c), sqlite3_bind_double(s, 4, amount);
+        sqlite3_bind_int(s, 1, cw), sqlite3_bind_int(s, 2, cd), sqlite3_bind_int(s, 3, c), sqlite3_bind_int64(s, 4, amount);
         ok = ok && RUN(s) && sqlite3_changes(t->db) == 1;
         s = t->history_add;
         sqlite3_reset(s);
         sqlite3_bind_int(s, 1, cw), sqlite3_bind_int(s, 2, cd), sqlite3_bind_int(s, 3, c), sqlite3_bind_int(s, 4, w);
-        sqlite3_bind_int(s, 5, d), sqlite3_bind_double(s, 6, now_ms()), sqlite3_bind_double(s, 7, amount);
+        sqlite3_bind_int(s, 5, d), sqlite3_bind_double(s, 6, now_ms()), sqlite3_bind_int64(s, 7, amount);
         ok = ok && RUN(s);
     } else { /* DELIVERY, one district */
         int carrier = uniform(r, 1, 10);
@@ -332,11 +332,11 @@ static bool body(Terminal *t, int kind, int w, int d, uint64_t *r, bool *undo) {
             sqlite3_reset(s);
             sqlite3_bind_int(s, 1, w), sqlite3_bind_int(s, 2, d), sqlite3_bind_int64(s, 3, order);
             ok = ok && step(s, &row) && row;
-            double total = ok ? sqlite3_column_double(s, 0) : 0;
+            sqlite3_int64 total = ok ? sqlite3_column_int64(s, 0) : 0;
             sqlite3_reset(s);
             s = t->customer_deliver;
             sqlite3_reset(s);
-            sqlite3_bind_int(s, 1, w), sqlite3_bind_int(s, 2, d), sqlite3_bind_int(s, 3, c), sqlite3_bind_double(s, 4, total);
+            sqlite3_bind_int(s, 1, w), sqlite3_bind_int(s, 2, d), sqlite3_bind_int(s, 3, c), sqlite3_bind_int64(s, 4, total);
             ok = ok && RUN(s);
         }
     }

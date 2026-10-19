@@ -118,8 +118,8 @@ static void prepare(Connection *c) {
             do cw = uniform(r, 1, warehouses); while (cw == w);
             cd = uniform(r, 1, 10);
         }
-        double amount = uniform(r, 100, 500000) / 100.0;
-        length = snprintf(body, sizeof(body), "{\"w\":%d,\"d\":%d,\"cw\":%d,\"cd\":%d,\"c\":%d,\"amount\":%.2f}", w, d, cw,
+        int amount = uniform(r, 100, 500000); /* cents */
+        length = snprintf(body, sizeof(body), "{\"w\":%d,\"d\":%d,\"cw\":%d,\"cd\":%d,\"c\":%d,\"amount\":%d}", w, d, cw,
                           cd, customer, amount);
         path = "/inputs/payment";
     } else if (c->kind == DELIVERY) {

@@ -6166,7 +6166,8 @@ static void bits_and_bytes(void) {
 
 /* ---- Formats, slices and values held by name (docs/design/027, stage 2a) --
  * NUM_TEXT writes a number, a bool or an i64 in a width, with zeros or
- * spaces, in a base or with fixed digits; an integer's form fails as limit
+ * spaces, in a base or with fixed digits, or an integer in minor units
+ * (money's: 1234 at two digits is 12.34); an integer's form fails as limit
  * on a number that is not whole. BYTES_SLICE takes whole positions inside
  * the value; BYTE makes one byte. BYTES_LOAD and BYTES_STORE keep bytes
  * and texts by name for the event (a text's slots hold text alone): set,
@@ -6194,6 +6195,17 @@ static void formats_and_held(void) {
         {0, 42, FMT(0, 0, 0, PURE_FORMAT_HEX, 0), PURE_FAULT_NONE, "2a"},
         {0, 2.5, FMT(0, 0, 0, PURE_FORMAT_HEX, 0), PURE_FAULT_LIMIT, ""},
         {0, 1, FMT(1, 6, 0, PURE_FORMAT_PLAIN, 0), PURE_FAULT_NONE, "  true"},
+        /* Money's form (027's stage 5): an integer in minor units, its last digits after a point. */
+        {1, 1234, FMT(2, 0, 0, PURE_FORMAT_DECIMAL, 3), PURE_FAULT_NONE, "12.34"},
+        {1, -5, FMT(2, 0, 0, PURE_FORMAT_DECIMAL, 3), PURE_FAULT_NONE, "-0.05"},
+        {1, 0, FMT(2, 0, 0, PURE_FORMAT_DECIMAL, 3), PURE_FAULT_NONE, "0.00"},
+        {1, -5, FMT(2, 7, 1, PURE_FORMAT_DECIMAL, 3), PURE_FAULT_NONE, "-000.05"},
+        {1, 100, FMT(2, 6, 0, PURE_FORMAT_DECIMAL, 2), PURE_FAULT_NONE, "  10.0"},
+        {1, 7, FMT(2, 0, 0, PURE_FORMAT_DECIMAL, 1), PURE_FAULT_NONE, "7"},
+        {1, 5, FMT(2, 0, 0, PURE_FORMAT_DECIMAL, 26), PURE_FAULT_NONE, "0.0000000000000000000000005"},
+        {1, -0x1p63, FMT(2, 0, 0, PURE_FORMAT_DECIMAL, 3), PURE_FAULT_NONE, "-92233720368547758.08"},
+        {0, 1234, FMT(0, 0, 0, PURE_FORMAT_DECIMAL, 3), PURE_FAULT_NONE, "12.34"},
+        {0, 12.5, FMT(0, 0, 0, PURE_FORMAT_DECIMAL, 3), PURE_FAULT_LIMIT, ""},
     };
     for (size_t k = 0; k < LEN(shown); ++k) {
         O value = shown[k].i64 ? IC((int64_t)shown[k].value) : (O){C, shown[k].format & 3, shown[k].value};

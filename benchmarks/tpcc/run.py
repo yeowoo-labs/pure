@@ -50,13 +50,13 @@ sys.path.insert(0, str(HERE))
 import data  # noqa: E402
 
 SCHEMA = '''
-CREATE TABLE warehouse (w_id INTEGER PRIMARY KEY, w_tax REAL, w_ytd REAL);
-CREATE TABLE district (d_w_id INTEGER, d_id INTEGER, d_tax REAL, d_ytd REAL, d_next_o_id INTEGER, d_next_delivery INTEGER,
+CREATE TABLE warehouse (w_id INTEGER PRIMARY KEY, w_tax INTEGER, w_ytd INTEGER);
+CREATE TABLE district (d_w_id INTEGER, d_id INTEGER, d_tax INTEGER, d_ytd INTEGER, d_next_o_id INTEGER, d_next_delivery INTEGER,
   PRIMARY KEY (d_w_id, d_id)) WITHOUT ROWID;
-CREATE TABLE customer (c_w_id INTEGER, c_d_id INTEGER, c_id INTEGER, c_discount REAL, c_credit INTEGER, c_balance REAL,
-  c_ytd_payment REAL, c_payment_cnt INTEGER, c_delivery_cnt INTEGER, c_last_order INTEGER,
+CREATE TABLE customer (c_w_id INTEGER, c_d_id INTEGER, c_id INTEGER, c_discount INTEGER, c_credit INTEGER, c_balance INTEGER,
+  c_ytd_payment INTEGER, c_payment_cnt INTEGER, c_delivery_cnt INTEGER, c_last_order INTEGER,
   PRIMARY KEY (c_w_id, c_d_id, c_id)) WITHOUT ROWID;
-CREATE TABLE item (i_id INTEGER PRIMARY KEY, i_price REAL);
+CREATE TABLE item (i_id INTEGER PRIMARY KEY, i_price INTEGER);
 CREATE TABLE stock (s_w_id INTEGER, s_i_id INTEGER, s_quantity INTEGER, s_ytd INTEGER, s_order_cnt INTEGER,
   s_remote_cnt INTEGER, PRIMARY KEY (s_w_id, s_i_id)) WITHOUT ROWID;
 CREATE TABLE orders (o_w_id INTEGER, o_d_id INTEGER, o_id INTEGER, o_c_id INTEGER, o_entry_d REAL, o_carrier_id INTEGER,
@@ -64,10 +64,10 @@ CREATE TABLE orders (o_w_id INTEGER, o_d_id INTEGER, o_id INTEGER, o_c_id INTEGE
 CREATE TABLE new_order (no_w_id INTEGER, no_d_id INTEGER, no_o_id INTEGER,
   PRIMARY KEY (no_w_id, no_d_id, no_o_id)) WITHOUT ROWID;
 CREATE TABLE order_line (ol_w_id INTEGER, ol_d_id INTEGER, ol_o_id INTEGER, ol_number INTEGER, ol_i_id INTEGER,
-  ol_supply_w_id INTEGER, ol_delivery_d REAL, ol_quantity INTEGER, ol_amount REAL,
+  ol_supply_w_id INTEGER, ol_delivery_d REAL, ol_quantity INTEGER, ol_amount INTEGER,
   PRIMARY KEY (ol_w_id, ol_d_id, ol_o_id, ol_number)) WITHOUT ROWID;
 CREATE TABLE history (h_c_w_id INTEGER, h_c_d_id INTEGER, h_c_id INTEGER, h_w_id INTEGER, h_d_id INTEGER, h_date REAL,
-  h_amount REAL);
+  h_amount INTEGER);
 '''
 
 ORDERS = 10000000  # an order's key is its district's times this, plus its number
@@ -142,7 +142,7 @@ class Pure:
                 continue
             chunk = max(1, (1400000 // 8) // len(data.FIELDS[name]) - 1)
             for at in range(0, len(rows), chunk):
-                status, body = self.call('POST', f'/inputs/load_{name}', data.packed(rows[at:at + chunk]),
+                status, body = self.call('POST', f'/inputs/load_{name}', data.packed(name, rows[at:at + chunk]),
                                          'application/octet-stream')
                 assert status == 200, (name, status, body[:200])
 
@@ -254,19 +254,16 @@ def asked(pure, name, page=200000):
             return rows
 
 
-def same(a, b):
-    return a == b or abs(a - b) <= 1e-9 * max(1.0, abs(a), abs(b))
-
-
 def compare(table, pure_rows, sqlite_rows_):
-    """Rows that differ between the two (a table's rows in key order; history's sorted)."""
+    """Rows that differ between the two (a table's rows in key order; history's sorted): every value compared is an
+    integer (money in cents, Pure 027's stage 5), so equal exactly."""
     if table in ('lines',):  # a line's delivery time differs; whether it has one must not
         pure_rows = [(*r[:-1], r[-1] > 0) for r in pure_rows]
         sqlite_rows_ = [(*r[:-1], r[-1] > 0) for r in sqlite_rows_]
     pure_rows, sqlite_rows_ = sorted(pure_rows), sorted(sqlite_rows_)
     if len(pure_rows) != len(sqlite_rows_):
         return [('count', len(pure_rows), len(sqlite_rows_))]
-    return [(p, s) for p, s in zip(pure_rows, sqlite_rows_) if not all(same(x, y) for x, y in zip(p, s))]
+    return [(p, s) for p, s in zip(pure_rows, sqlite_rows_) if p != s]
 
 
 def device_written(directory):
@@ -294,7 +291,7 @@ def consistency(pure, db, sqlite_only=False):
     sides = [] if sqlite_only else [('pure', asked(pure, 'district_check'))]
     for system, districts in sides + [('sqlite', db.execute(DISTRICTS[1]).fetchall())]:
         for key, next_order, newest, newest_new, oldest_new, new_orders, ordered, lines, ytd, district_ytd in districts:
-            if not same(ytd, district_ytd):
+            if ytd != district_ytd:
                 failures.append((system, '3.3.2.1', ytd, district_ytd))
             if not next_order - 1 == newest == newest_new:
                 failures.append((system, '3.3.2.2', key, next_order, newest, newest_new))

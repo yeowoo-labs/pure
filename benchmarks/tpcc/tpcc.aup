@@ -3,6 +3,10 @@
 # w * 10 + d, a customer district * 3000 + c, an order district * 10^7 + o,
 # an order line order * 16 + number, a stock item w * 100000 + i.
 #
+# Money is an i64 of cents and a rate (tax, discount) an i64 of
+# ten-thousandths (the specification's decimals, exactly: Pure 027's
+# stage 5), as SQLite's INTEGER columns hold them.
+#
 # Where this departs from the specification: a customer is always chosen by
 # number (never by last name), texts the transactions only carry along
 # (names, addresses, data) are left out, a customer keeps its last order,
@@ -11,29 +15,29 @@
 
 record Warehouse {
   id = 0
-  tax = 0
-  ytd = 0
+  tax: i64
+  ytd: i64
 }
 record District {
   id = 0
-  tax = 0
-  ytd = 0
+  tax: i64
+  ytd: i64
   next_order = 3001
   next_delivery = 2101
 }
 record Customer {
   id = 0
-  discount = 0
+  discount: i64
   credit = 1
-  balance = -10
-  ytd_payment = 10
+  balance: i64 = -1000
+  ytd_payment: i64 = 1000
   payments = 1
   deliveries = 0
   last_order = 0
 }
 record Item {
   id = 0
-  price = 0
+  price: i64
 }
 record Stock {
   id = 0
@@ -59,13 +63,13 @@ record Line {
   supply = 0
   delivery = 0
   quantity = 0
-  amount = 0
+  amount: i64
 }
 record History {
   customer = 0
   district = 0
   date = 0
-  amount = 0
+  amount: i64
 }
 record Ordered {
   item = 0
@@ -183,7 +187,7 @@ on new_order {
     }
     count = count + 1
     lines.add(Line { id: order * 16 + count, item: l.item, supply: l.supply, quantity: l.quantity,
-                     amount: l.quantity * price })
+                     amount: i64(l.quantity) * price })
   }
   orders.add(Order { id: order, customer: customer.id, entry: now, lines: count, local: local })
   new_orders.add(NewOrder { id: order })
@@ -198,7 +202,7 @@ input payment = message {
   cw: u32
   cd: u32
   c: u32
-  amount: number
+  amount: i64
 }
 on payment {
   let warehouse = warehouses[payment.w]
@@ -227,7 +231,7 @@ on delivery {
     new_orders.remove(new_orders[order])
     let o = orders[order]
     o.carrier = delivery.carrier
-    let total = 0
+    let total = i64(0)
     for l in lines[order * 16 .. order * 16 + 16] {
       l.delivery = now
       total = total + l.amount

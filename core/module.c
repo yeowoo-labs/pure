@@ -453,10 +453,10 @@ PURE_COLD static bool names_arg(const PureModule *m, unsigned kind, uint32_t arg
     case A_POSITION: case A_JOINED: return arg <= 1;
     case A_HELD: return (arg & ~(uint32_t)PURE_HELD_APPEND) < PURE_MODULE_HELD;
     case A_FUNCTION: return arg < m->functions;
-    case A_FORMAT: { /* a type; a width, zeros, a form fitting it and digits for FIXED alone */
+    case A_FORMAT: { /* a type; a width, zeros, a form fitting it and digits for FIXED and DECIMAL alone */
         uint32_t type = arg & 3, form = arg >> PURE_FORMAT_FORM & 7, digits = arg >> PURE_FORMAT_DIGITS & 31;
         return type <= 2 && !(arg & 0xFC) && !(arg >> 25) && form <= PURE_FORMAT_FIXED && (type != 1 || !form) &&
-               (form != PURE_FORMAT_FIXED || type == 0) && (form == PURE_FORMAT_FIXED || !digits);
+               (form != PURE_FORMAT_FIXED || type == 0) && (form == PURE_FORMAT_FIXED || form == PURE_FORMAT_DECIMAL || !digits);
     }
     case A_RELATION: return arg <= PURE_NOT_EQUAL;
     case A_KEYED: return state_of(m, arg, PURE_STATE_LIST) && m->state_key[arg];
@@ -2942,7 +2942,8 @@ static __attribute__((cold, noinline)) int kept_step(PureApp *app, PureArena *ar
 }
 
 /* NUM_TEXT's text of v in a format (the argument past its type, PureFormat): false where an integer's form meets a
- * number that is not a whole one within 2^53. */
+ * number that is not a whole one within 2^53. DECIMAL with digits writes the integer in minor units: its last
+ * digits after a point (money's cents: 1234 at two is 12.34, -5 is -0.05). */
 static bool formatted(Slot v, uint32_t arg, char *out, size_t *length) {
     unsigned type = arg & 3, width = arg >> PURE_FORMAT_WIDTH & 0xFF, form = arg >> PURE_FORMAT_FORM & 7,
              digits = arg >> PURE_FORMAT_DIGITS & 31;
@@ -2960,10 +2961,14 @@ static bool formatted(Slot v, uint32_t arg, char *out, size_t *length) {
         unsigned base = form == PURE_FORMAT_DECIMAL ? 10 : form <= PURE_FORMAT_HEX_UPPER ? 16 : form == PURE_FORMAT_BINARY ? 2 : 8;
         const char *set = form == PURE_FORMAT_HEX_UPPER ? "0123456789ABCDEF" : "0123456789abcdef";
         char reversed[64];
-        unsigned count = 0;
+        unsigned count = 0, places = form == PURE_FORMAT_DECIMAL && digits ? digits - 1 : 0;
         do reversed[count++] = set[magnitude % base], magnitude /= base; while (magnitude);
+        while (count <= places) reversed[count++] = '0'; /* a digit before the point */
         if (i < 0) body[n++] = '-';
-        while (count) body[n++] = reversed[--count];
+        for (; count; --count) {
+            if (count == places) body[n++] = '.';
+            body[n++] = reversed[count - 1];
+        }
     } else
         n = type == 2 ? (size_t)snprintf(body, sizeof(body), "%" PRId64, v.i64)
           : type ? (size_t)snprintf(body, sizeof(body), "%s", v.num ? "true" : "false") : pure_format_number(v.num, body);
