@@ -1,0 +1,101 @@
+40,236 machine instructions a code point, 246,581 samples
+
+by mechanism:
+    12,298   30.6%  dispatch
+     6,953   17.3%  list build
+     5,416   13.5%  compute
+     5,238   13.0%  list read
+     3,601    9.0%  moves
+     2,847    7.1%  call
+     1,609    4.0%  memory
+     1,213    3.0%  unknown
+       947    2.4%  event
+       113    0.3%  loop
+
+in step(), by the case its line is in (code the compiler shares between cases goes to one of them):
+     9,445  (fetch, decode)
+     2,295  LIST_APPEND
+     2,030  LOCAL_LOAD
+     1,152  ARITH
+       869  CONST
+       725  INDEX_AT
+       706  FLOORDIV
+       678  JZ
+       545  LOCAL_STORE
+       399  ITEM_GET
+       393  NE
+       350  LIST_FIND
+       316  JMP
+       208  LIST_BIND
+       205  BYTES_OF
+       171  NOT
+       153  SUB
+       144  TEXT_INSERT
+        95  LIST_VALUE
+        94  PICK
+        80  LIST_COUNT
+        78  LOOP
+        63  SLIDE
+        61  MOD
+        28  CALL
+        24  BREAK
+        19  ROW
+        18  AND
+         9  EACH
+         5  I64_FROM
+         4  OR
+         3  BYTES_SLICE
+
+outside step(), by function as linked:
+     2,853  run_calls
+     2,615  pure_list_get
+     1,581  enter_call
+     1,150  pure_list_insert
+       971  restore_lists
+       884  floor_divide
+       865  pure_list_clear
+       726  fmodf64
+       678  arrays_free
+       488  states_next
+       457  free
+       435  arrays_fit
+       356  pure_list_changes
+       318  ??
+       310  __xpg_strerror_r
+       295  message
+       270  calloc
+       255  pure_list_settle
+       238  clear_rows
+       227  __default_morecore
+       206  pure_list_free
+       199  __aarch64_ldadd8_relax
+       187  pure_list_new
+       183  pure_list_count
+       172  close_burst
+       160  mark_event
+       147  pure_list_copied
+       141  malloc
+       122  reserve
+       112  open_burst
+
+no mechanism:
+       270  ?? (where:0) < ??
+        87  states_count (module.c:4749) < call_keeps
+        69  pure_list_extra (module-list.c:1790) < pure_list_extra
+        62  pure_list_size (module-list.c:2284) < pure_list_size
+        55  pure_undo_size (module-list.c:3054) < pure_undo_size
+        49  decode_cell (module-list.c:2132) < decode_cell
+        48  ?? (??:0) < ??
+        39  prepare_extras (module-list.c:625) < prepare_extras
+        30  decode_item (module-list.c:2344) < pure_list_read
+        16  place (module-list.c:729) < place
+        14  move_items (module-list.c:337) < place
+        14  pure_app_save (module.c:5121) < pure_app_save
+        13  grows (module.c:2451) < grows
+        13  place (module-list.c:689) < place
+        12  decode_cell (module-list.c:2130) < decode_cell
+        11  leaf_bytes (store-tree.c:453) < leaf_bytes
+        10  retire (module-list.c:370) < let_go_tree
+        10  pure_app_checkpoint (module-save.c:725) < pure_app_checkpoint
+        10  pure_app_checkpoint (module-save.c:727) < pure_app_checkpoint
+         9  move_items (module-list.c:336) < place

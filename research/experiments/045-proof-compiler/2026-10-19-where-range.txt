@@ -1,0 +1,95 @@
+16,089 machine instructions a code point, 98,601 samples
+
+by mechanism:
+     6,038   37.5%  dispatch
+     3,697   23.0%  compute
+     2,729   17.0%  list read
+     1,521    9.5%  moves
+       713    4.4%  unknown
+       451    2.8%  list build
+       360    2.2%  call
+       247    1.5%  memory
+       190    1.2%  event
+       144    0.9%  loop
+
+in step(), by the case its line is in (code the compiler shares between cases goes to one of them):
+     4,478  (fetch, decode)
+     1,002  LOCAL_LOAD
+       723  ARITH
+       514  FLOORDIV
+       285  CONST
+       277  INDEX_AT
+       234  LOCAL_STORE
+       189  JZ
+       163  ITEM_GET
+       160  NE
+       145  NOT
+       141  LIST_FIND
+       122  SUB
+       115  JMP
+        78  MOD
+        72  LOOP
+        70  LIST_APPEND
+        52  BREAK
+        35  TEXT_INSERT
+        26  BYTES_OF
+        21  CALL
+        17  EACH
+        17  LIST_COUNT
+         8  I64_FROM
+         6  ROW
+         0  BYTE_AT
+
+outside step(), by function as linked:
+     2,064  pure_list_get
+     1,560  run_calls
+       891  floor_divide
+       716  fmodf64
+       201  enter_call
+       134  ??
+       122  arrays_free
+       101  free
+        99  pure_list_insert
+        89  place
+        71  message
+        64  decode_cell
+        55  pure_list_count
+        55  pure_list_read
+        54  clear_rows
+        51  malloc
+        47  __default_morecore
+        46  prepare_extras
+        44  leave_call
+        42  restore_lists
+        40  __xpg_strerror_r
+        36  open_burst
+        34  call_keeps
+        30  pure_list_clear
+        29  chunk_bytes
+        27  pure_list_settle
+        26  give_back
+        25  collect
+        24  timer_settime
+        23  close_burst
+
+no mechanism:
+        95  ?? (where:0) < ??
+        43  prepare_extras (module-list.c:625) < prepare_extras
+        39  decode_cell (module-list.c:2132) < decode_cell
+        39  ?? (??:0) < ??
+        32  states_count (module.c:4749) < call_keeps
+        24  decode_item (module-list.c:2344) < pure_list_read
+        16  move_items (module-list.c:337) < place
+        13  place (module-list.c:689) < place
+        12  place (module-list.c:729) < place
+        12  sum_path (module-list.c:591) < sum_path
+        11  pure_list_read (module-list.c:2358) < pure_list_read
+        10  leaf_bytes (store-tree.c:453) < leaf_bytes
+         9  take (store-tree.c:602) < chunk_bytes
+         9  own (module-list.c:552) < own
+         9  sum (module-list.c:521) < sum
+         8  own (module-list.c:563) < own
+         8  pure_draft_size (store-tree.c:1530) < pure_draft_size
+         8  decode_cell (module-list.c:2130) < decode_cell
+         8  pure_list_read (module-list.c:2352) < pure_list_read
+         7  pure_app_checkpoint (module-save.c:725) < pure_app_checkpoint
