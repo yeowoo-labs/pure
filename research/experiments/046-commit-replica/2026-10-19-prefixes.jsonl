@@ -1,0 +1,2 @@
+{"run": "prefixes", "events": 20000, "ops": 101464, "journal_bytes": 18144281, "samples": 301, "within_cuts": 195, "failed": 0, "failures": [], "seconds": 3.1}
+{"run": "prefixes", "events": 100000, "ops": 507150, "journal_bytes": 90258606, "renamed_to": {"pure.tree": 34, "image-entries": 2, "image-0heard": 1, "image-0sent": 1}, "samples": 867, "near_renames": 266, "within_cuts": 568, "failed": 0, "failures": [], "seconds": 22.8}
