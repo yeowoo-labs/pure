@@ -3283,9 +3283,11 @@ static bool run_lanes(const PureModule *m, const PureValue *values, PureBlock bl
 typedef struct { uint64_t *keys; size_t capacity, count; bool marked; } Seen;
 
 /* A fold's running value: what count, sum, max, min, first or distinct has
- * so far, over numbers (total) or i64s (whole; a sum past the range
- * overflows and ends the fold). */
-typedef struct { unsigned how; bool integer, overflow; double total; int64_t whole; bool any, done; Seen seen; } Fold;
+ * so far, over numbers (total) or i64s (whole; an i64 sum exactly, in sum:
+ * only the result past the range overflows, so its items' order is none of
+ * its business: 027's stage 5). */
+__extension__ typedef __int128 Wide;
+typedef struct { unsigned how; bool integer; double total; int64_t whole; Wide sum; bool any, done; Seen seen; } Fold;
 
 static size_t seen_slot(uint64_t bits, size_t capacity) {
     bits ^= bits >> 33, bits *= 0xff51afd7ed558ccdu, bits ^= bits >> 33;
@@ -3353,8 +3355,7 @@ static bool fold_number(Fold *fold, size_t row, double value, double counts) {
     return true;
 }
 
-/* One item run as written: a number's, or an i64's (a sum past the range
- * overflows and ends the fold; count and first take no i64). */
+/* One item run as written: a number's, or an i64's (count and first take no i64). */
 static bool fold_in(Fold *fold, size_t row, PureValue value, double counts) {
     if (!fold->integer) return fold_number(fold, row, value.num, counts);
     if (counts == 0) return true;
@@ -3365,9 +3366,8 @@ static bool fold_in(Fold *fold, size_t row, PureValue value, double counts) {
         fold->any = true;
         return !full;
     }
-    if (fold->how == PURE_FOLD_SUM) {
-        if (__builtin_add_overflow(fold->whole, v, &fold->whole)) fold->overflow = fold->done = true;
-    } else if (!fold->any || (fold->how == PURE_FOLD_MAX ? v > fold->whole : v < fold->whole))
+    if (fold->how == PURE_FOLD_SUM) fold->sum += v; /* (a Wide holds 2^64 items' worth) */
+    else if (!fold->any || (fold->how == PURE_FOLD_MAX ? v > fold->whole : v < fold->whole))
         fold->whole = v;
     fold->any = true;
     return true;
@@ -4202,7 +4202,10 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
             free(fold.seen.keys);
             if (status != PURE_OK) STOPPED(status);
         }
-        if (fold.overflow) { kind = PURE_FAULT_OVERFLOW; FAILED; }
+        if (fold.integer && fold.how == PURE_FOLD_SUM) { /* the exact sum, if an i64 holds it */
+            if (fold.sum > INT64_MAX || fold.sum < INT64_MIN) { kind = PURE_FAULT_OVERFLOW; FAILED; }
+            fold.whole = (int64_t)fold.sum;
+        }
         if (!fold.any && (fold.how == PURE_FOLD_MAX || fold.how == PURE_FOLD_MIN || fold.how == PURE_FOLD_FIRST)) {
             kind = PURE_FAULT_NOT_FOUND;
             FAILED;
