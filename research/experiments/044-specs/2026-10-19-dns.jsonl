@@ -1,0 +1,5 @@
+{"messages": 400, "bytes": 148582, "records": 3466, "right": {"batches": 400, "rounds": 400, "all": 400}, "paths_same": true, "damaged": 300, "damaged_refused": 185, "damaged_agreed": 300, "aup_lines": 115, "aup_brace_lines": 21, "python_lines": 72}
+{"messages":400,"bytes":148582,"jit":"0","batch":"","c_ns_per_byte":3.646,"resolver_read_ns_per_byte":4.401,"pure_ns_per_byte":244.424,"to_c":67.0,"to_resolver_read":55.5,"instructions":9444428,"instructions_per_byte":63.6}
+{"messages":400,"bytes":148582,"jit":"0","batch":"0","c_ns_per_byte":3.655,"resolver_read_ns_per_byte":4.404,"pure_ns_per_byte":243.692,"to_c":66.7,"to_resolver_read":55.3,"instructions":9444428,"instructions_per_byte":63.6}
+{"messages":400,"bytes":148582,"jit":"all","batch":"","c_ns_per_byte":3.656,"resolver_read_ns_per_byte":4.401,"pure_ns_per_byte":217.982,"to_c":59.6,"to_resolver_read":49.5,"instructions":9444428,"instructions_per_byte":63.6}
+{"messages":400,"bytes":148582,"python_ns_per_byte":130.9}

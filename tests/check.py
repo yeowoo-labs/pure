@@ -1731,7 +1731,9 @@ def module_specs(aup, pure, work):
     every y_ case taken, every n_ case refused (a refusal: valid false, or
     the event failing as encoding on bytes that are not UTF-8); JSON read into
     a tree (its examples/json_tree.aup); raw deflate streams zlib made inflated
-    by its examples/inflate.aup to the original's bytes, cut ones refused."""
+    by its examples/inflate.aup to the original's bytes, cut ones refused; DNS
+    messages dnspython made (tests/specs/dns) read by its examples/dns.aup and
+    written back by its view to the same records, cut ones refused."""
     import hashlib
     import os
     import random
@@ -1864,6 +1866,36 @@ def module_specs(aup, pure, work):
     for state in shown[len(streams):]:
         assert state['fault'] != 'none' and state['states']['inflated'][-1]['data'] == streams[-1][0].hex(), ('inflate cut', state['fault'])
     runs['inflate'] = {'streams': len(streams), 'bytes': sum(len(d) for d, _ in streams), 'cut': len(cut)}
+    # DNS messages (RFC 1035, its examples/dns.aup): messages dnspython made (tests/specs/dns), each read without fault on
+    # the three paths, what its view wire writes back read to the same records and written again to the same bytes; a
+    # message cut short fails its event.
+    program = work / 'dns.pmod'
+    compile_module(aup, EXAMPLES / 'dns.aup', program)
+    given, wires = (pure / 'tests/specs/dns/messages.bin').read_bytes(), []
+    while given:
+        wires.append(given[2:2 + int.from_bytes(given[:2], 'big')])
+        given = given[2 + len(wires[-1]):]
+
+    def read(messages, env):
+        lines = ''
+        for n, wire in enumerate(messages):
+            (work / f'{n}.dns').write_bytes(wire)
+            lines += f'message read @{work / f"{n}.dns"}\n'
+        return subprocess.run([str(pure / 'build/pure-run'), str(program)], input=lines, capture_output=True, text=True,
+                              timeout=600, env=dict(os.environ, **env)).stdout
+
+    outputs = {name: read(wires, env) for name, env in
+               (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert outputs[name] == outputs['batches'], ('dns', name)
+    first = [json.loads(line) for line in outputs['batches'].splitlines()]
+    assert len(first) == len(wires) and all(state['fault'] == 'none' for state in first), 'dns'
+    written = [bytes.fromhex(state['views']['wire']) for state in first]
+    again = [json.loads(line) for line in read(written, {}).splitlines()]
+    assert [(a['states'], a['views']) for a in again] == [(f['states'], f['views']) for f in first], 'dns written back'
+    cut = [wire[:len(wire) // 2] for wire in wires[::9]]
+    assert all(json.loads(line)['fault'] != 'none' for line in read(cut, {}).splitlines()), 'dns cut'
+    runs['dns'] = {'messages': len(wires), 'records': sum(len(state['states']['records']) for state in first), 'cut': len(cut)}
     return runs
 
 
