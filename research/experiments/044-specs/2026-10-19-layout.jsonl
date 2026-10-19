@@ -1,0 +1,8 @@
+{"what": "check", "tool": "layout_check.py 2000", "trees": 2000, "nodes": 29388, "refused": {}, "floored": {"items": 7659, "trees": 1399}, "taffy_right": 2000, "taffy_worst": 8.33333334639974e-05, "right": {"batches": 2000, "rounds": 2000, "all": 2000}, "paths_same": true, "aup_lines": 116, "aup_brace_lines": 17, "python_lines": 54}
+{"what": "time", "tool": "layout_time.c (ROUNDS 1)", "trees": 2000, "nodes": 29388, "right": 2000, "jit": "0", "batch": "", "pure_ns_per_node": 4754.0, "instructions": 43902659, "instructions_per_node": 1493.9}
+{"what": "time", "tool": "layout_time.c (ROUNDS 1)", "trees": 2000, "nodes": 29388, "right": 2000, "jit": "0", "batch": "0", "pure_ns_per_node": 4916.5, "instructions": 43902659, "instructions_per_node": 1493.9}
+{"what": "time", "tool": "layout_time.c (ROUNDS 1)", "trees": 2000, "nodes": 29388, "right": 2000, "jit": "all", "batch": "", "pure_ns_per_node": 4751.1, "instructions": 43902659, "instructions_per_node": 1493.9}
+{"what": "time", "tool": "layout_taffy --time 3 (each tree built and laid out)", "trees": 2000, "nodes": 29388, "taffy_ns_per_node": 644.1}
+{"what": "time", "tool": "layout.py (median of seven passes)", "trees": 2000, "nodes": 29388, "python_ns_per_node": 5396.1}
+{"what": "time before", "note": "aup before e5a6209: input.rows[k] read a copy of the rows (LIST_VALUE)", "tool": "layout_time.c (ROUNDS 1)", "trees": 2000, "nodes": 29388, "paths": {"batches": 99066.7, "all": 98324.0}, "instructions_per_node": 1539.2}
+{"what": "instructions by stage", "note": "the app cut after each stage, cumulative, a node (batches)", "kids_found_and_boxes_made": 159.2, "items_lists": 488.3, "before_9_7_loop": 508.6, "after_9_7_loop": 1166.3, "whole": 1493.9}

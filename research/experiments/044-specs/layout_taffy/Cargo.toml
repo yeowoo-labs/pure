@@ -1,0 +1,9 @@
+[package]
+name = "layout_taffy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+taffy = { version = "=0.15.0", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
+serde_json = "1"

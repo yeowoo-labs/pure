@@ -1738,7 +1738,9 @@ def module_specs(aup, pure, work):
     at a time, cut anywhere, to the same requests; line breaking (UAX #14) by its
     examples/linebreak.aup on LineBreakTest.txt's lines (tests/specs/linebreak);
     RFC 6298's retransmission timer by its examples/rto.aup on a scenario's
-    events (tests/specs/rto), the model's state after each."""
+    events (tests/specs/rto), the model's state after each; box layout (a
+    subset of CSS Flexbox 1) by its examples/layout.aup on trees
+    (tests/specs/layout), each box bit for bit."""
     import hashlib
     import os
     import random
@@ -1988,6 +1990,27 @@ def module_specs(aup, pure, work):
                                                  len(s['retransmits'])] == want, ('rto', period, want)
         events += len(out)
     runs['rto'] = {'scenarios': 2, 'events': events}
+    # Box layout (a subset of CSS Flexbox 1, its examples/layout.aup): trees as layout.py lays them out (tests/specs/layout,
+    # Taffy's within 0.01), a tree a message of its nodes in preorder, its boxes bit for bit on the three paths.
+    program = work / 'layout.pmod'
+    compile_module(aup, EXAMPLES / 'layout.aup', program)
+    given, trees = (pure / 'tests/specs/layout/trees.bin').read_bytes(), []
+    while given:
+        n = struct.unpack_from('<I', given)[0]
+        trees.append((given[4:4 + 112 * n], [list(struct.unpack_from('<4d', given, 4 + 112 * n + 32 * k)) for k in range(n)]))
+        given = given[4 + 144 * n:]
+    given = ''.join(f'message tree {rows.hex()}\n' for rows, _ in trees)
+    shown = {name: subprocess.run([str(pure / 'build/pure-run'), str(program)], input=given, capture_output=True, text=True,
+                                  timeout=120, env=dict(os.environ, **env)).stdout
+             for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    for name in ('rounds', 'all'):
+        assert shown[name] == shown['batches'], ('layout', name)
+    out = shown['batches'].splitlines()
+    assert len(out) == len(trees), ('layout', len(out))
+    for (_, want), line in zip(trees, out):
+        state = json.loads(line)
+        assert state['fault'] == 'none' and [[b['x'], b['y'], b['w'], b['h']] for b in state['states']['boxes']] == want, want
+    runs['layout'] = {'trees': len(trees), 'nodes': sum(len(w) for _, w in trees)}
     return runs
 
 
