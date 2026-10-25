@@ -26,3 +26,7 @@
 13 f1  18:05:43 up 14:17,  1 user,  load average: 1.39, 1.51, 1.15
 14 f1  18:07:20 up 14:18,  1 user,  load average: 1.45, 1.62, 1.23
 14 f0  18:08:47 up 14:20,  1 user,  load average: 1.33, 1.57, 1.25
+15 z0  19:48:11 up 15:59,  2 users,  load average: 1.30, 1.23, 0.63
+15 z1  19:49:39 up 16:01,  2 users,  load average: 1.44, 1.36, 0.74
+16 z1  19:51:29 up 16:03,  2 users,  load average: 1.39, 1.52, 0.88
+16 z0  19:52:58 up 16:04,  2 users,  load average: 1.39, 1.53, 0.95
