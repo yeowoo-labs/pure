@@ -1897,6 +1897,16 @@ static uint8_t anchor_step(const PureModule *m, uint8_t op, uint32_t arg) {
     }
 }
 
+/* Block's instructions marked in held, as whose (1 a view's, 2 a handler's or a function's): the first of them that is a
+ * handler's or a function's and another block's too (views may share one), else twice as it was. */
+PURE_COLD static uint32_t hold_block(unsigned char *held, PureBlock block, unsigned char whose, uint32_t twice) {
+    for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
+        if ((held[pc] & 2 || (held[pc] && whose == 2)) && twice == UINT32_MAX) twice = pc;
+        held[pc] |= whose;
+    }
+    return twice;
+}
+
 PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule *out,
                             char *error, size_t error_size) {
     const unsigned char *p = bytes;
@@ -2325,25 +2335,28 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             goto refused;
         if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
     }
-    if (!event_sets(out) || !call_keep_lists(out)) {
-        result = PURE_ALLOCATION;
-        REFUSE("out of memory", 0);
-    }
-    lend_values(out);
-    /* An instruction in no handler's, view's or function's block never runs and was never verified: it becomes CONST 0,
-     * so the passes below, which read every instruction's arguments, read only what was verified. */
+    /* A handler's or a function's instruction is its block's alone: what the load proves of it (its height, its plan)
+     * is that block's (one shared gave a function a handler's plan: a list lent there was the call's, emptied at its
+     * return); views may share a block. One in no block never runs and was never verified: it becomes CONST 0, so the
+     * passes below, which read every instruction's arguments, read only what was verified. */
     unsigned char *held = calloc(out->code_count + 1, 1);
     if (!held) {
         result = PURE_ALLOCATION;
         REFUSE("out of memory", 0);
     }
-    for (uint32_t i = 0; i < out->handlers; ++i) memset(held + out->handler[i].code.start, 1, out->handler[i].code.length);
-    for (uint32_t i = 0; i < out->functions; ++i) memset(held + out->function[i].code.start, 1, out->function[i].code.length);
-    for (uint32_t i = 0; i < out->views; ++i)
-        if (out->view_code[i].length) memset(held + out->view_code[i].start, 1, out->view_code[i].length);
+    uint32_t twice = UINT32_MAX;
+    for (uint32_t i = 0; i < out->handlers; ++i) twice = hold_block(held, out->handler[i].code, 2, twice);
+    for (uint32_t i = 0; i < out->functions; ++i) twice = hold_block(held, out->function[i].code, 2, twice);
+    for (uint32_t i = 0; i < out->views; ++i) twice = hold_block(held, out->view_code[i], 1, twice);
     for (uint32_t pc = 0; pc < out->code_count; ++pc)
         if (!held[pc]) out->code[pc] = (PureOp){.op = PURE_OP_CONST};
     free(held);
+    if (twice != UINT32_MAX) REFUSE("instruction in two blocks", twice);
+    if (!event_sets(out) || !call_keep_lists(out)) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
+    lend_values(out);
     for (uint32_t i = 0; i < out->views; ++i) {
         int given = (int)out->view_arguments[i] - 1;
         plan_folds(out, out->view_code[i], given);

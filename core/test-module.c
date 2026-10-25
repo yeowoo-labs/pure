@@ -6744,13 +6744,22 @@ static void functions_and_characters(void) {
     Spec handler_return = {nums, 1, inputs, 1, NULL, 0, &returning, 1, in_view, 3, NULL, 0, others,
                            LEN(others), constants, LEN(constants), NULL, 0, records, 2, NULL, 0};
     CHECK(load_functions(handler_return, &nothing, 1, &module_a) != PURE_OK && strstr(error, "return outside a function"));
+    /* An instruction in two blocks: a handler's block, own.append(7) and its value, inside a function's that returns it
+     * (the handler's plan, a lent list, ran in the function too: the call's list, emptied as it returned). */
+    const O shared[] = {IC(7), {LA, OWN, 0}, {LV, OWN, 0}, {LS_, LIST_LOCAL(0, 0), 0}, {LL_, LIST_LOCAL(0, 0), 0},
+                        {RET, 0, 0}};
+    static const FN sharing = {0, 6, 0, 1, {FN_LIST}, {0}};
+    static const H inside = {1, 0, 4};
+    Spec overlapping = {nums, 1, inputs, 1, NULL, 0, &inside, 1, shared, LEN(shared), NULL, 0, others, LEN(others), constants,
+                        LEN(constants), NULL, 0, records, 2, NULL, 0};
+    CHECK(load_functions(overlapping, &sharing, 1, &module_a) != PURE_OK && strstr(error, "instruction in two blocks"));
     /* A handler's loop above values: its block would begin above them (once past the run's stack). */
     const O above[] = {IC(0), IC(0), IC(1), {PURE_OP_LOOP, PURE_LOOP_INTEGER, 0}, {ST, IV, 0}};
     static const H whole = {1, 0, 5};
     Spec looped = {nums, 1, inputs, 1, NULL, 0, &whole, 1, above, LEN(above), NULL, 0, others, LEN(others), constants,
                    LEN(constants), NULL, 0, records, 2, NULL, 0};
     CHECK(load(looped, &module_a) != PURE_OK && strstr(error, "loop above values"));
-    printf("{\"functions_and_characters\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(refused) + 3);
+    printf("{\"functions_and_characters\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(refused) + 4);
 }
 
 /* 027's stage 3: an event changes a number and the list in a stored list's item's field (APPEND_IN: read in, appended,
