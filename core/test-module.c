@@ -7002,6 +7002,42 @@ static void borrowed_rows(void) {
     printf("{\"borrowed_rows\":{\"messages\":%zu,\"stopped\":2}}\n", LEN(sent));
 }
 
+/* A reader's round begins with no register bound: a view's binding holds what it read, the snapshot before's lists,
+ * which are gone once that snapshot is let go (an executor started again with the same module makes new ones), so a
+ * later unbind must not put them back (pure_app_read forgets them). */
+static void reader_bindings(void) {
+    enum { XS = 1, REG = 2, LV_ = PURE_OP_LIST_VALUE, BIND_ = PURE_OP_LIST_BIND };
+    static const S nums[] = {{"n", 0}};
+    static const RF leaf_fields[] = {{"v", 0, 0}};
+    static const R records[] = {{"Leaf", leaf_fields, 1}};
+    static const T others[] = {{"let.xs", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0},
+                               {"let.r", 3 | (uint32_t)(PURE_LIST_ROWS | PURE_LIST_BOUND) << 8, 0}};
+    static const I inputs[] = {KEY("go", "KeyG")};
+    static const O code[] = {
+        {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0},                                 /* 0 go: n += 1 */
+        {C, 0, 7}, {LA, XS, 0}, {LV_, XS, 0}, {BIND_, REG, 0}, {LC, REG, 0},           /* 4 view: xs.append(7); r = xs; r.count */
+    };
+    static const V views[] = {{"bound", 4, 5}};
+    H handler = {1, 0, 4};
+    Spec spec = {nums, 1, inputs, 1, views, 1, &handler, 1, code, LEN(code), NULL, 0, others, LEN(others), NULL, 0, NULL, 0,
+                 records, 1, NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "reader bindings: %s\n", error); abort(); }
+    PureApp app, reader = {0};
+    double value;
+    for (int round = 0; round < 3; ++round) { /* the executor started again with the same module each round */
+        CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && press(&app, 0) == PURE_OK);
+        PureSnapshot *made = pure_app_snapshot(&app);
+        CHECK(made && pure_app_read(&reader, made));
+        CHECK(!reader.bound_count && !reader.unbound[REG]); /* nothing the round before bound is left */
+        CHECK(pure_app_view(&reader, 0, &value) && value == 1 && reader.bound_count == 1);
+        CHECK(pure_app_view(&reader, 0, &value) && value == 1);
+        pure_snapshot_release(made);
+        pure_app_stop(&app); /* its snapshot let go too: the lists the reader's register held are freed */
+    }
+    pure_app_stop(&reader);
+    printf("{\"reader_bindings\":{\"rounds\":3}}\n");
+}
+
 /* 027's 4b: a record field holding bytes. A message's bytes (any, UTF-8 or not) go into a list's item and come back
  * as they were; a text goes where bytes go only as bytes (BYTES_FROM), and bytes never where a text goes. Replaced, a
  * text field becomes a bytes field keeping its value, and a new bytes field takes its constant. */
@@ -7645,6 +7681,7 @@ int main(void) {
     nested_replace();
     nested_rows();
     borrowed_rows();
+    reader_bindings();
     bytes_fields();
     anchors();
     list_views();

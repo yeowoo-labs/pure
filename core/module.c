@@ -6259,6 +6259,10 @@ bool pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
     reader->module_serial = snapshot->module->serial;
     reader->reading = true;
     reader->changes = snapshot->changes; /* what the row cache is fresh for */
+    /* A register a view bound last time holds what it read then, the snapshot before's lists (one gone once it is let
+     * go): forgotten, not given back, so no later unbind puts it back over this snapshot's. */
+    for (uint32_t k = 0; k < reader->bound_count; ++k) reader->unbound[reader->bound[k]] = NULL;
+    reader->bound_count = 0;
     memcpy(reader->values, snapshot->values, snapshot->states * sizeof(*reader->values));
     memcpy(reader->texts, snapshot->texts, snapshot->states * sizeof(*reader->texts));
     memcpy(reader->lists, snapshot->lists, snapshot->states * sizeof(*reader->lists));
