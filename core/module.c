@@ -3298,6 +3298,11 @@ static PureUndo *undo_for(PureApp *app, uint32_t list) {
 }
 
 static PureResult run(const PureModule *m, PureValue *values, PureBlock block, Event *ev, Slot *result);
+#ifdef PURE_EMITTED
+/* Research 049: a block emitted as C from its verified code, built with this file (research/experiments/049-emitter):
+ * false for any other block, which runs here as ever. */
+static bool emitted_run(const PureModule *m, PureValue *values, PureBlock block, Event *ev, Slot *result, PureResult *out);
+#endif
 
 /* ---- Folds and filters a leaf at a time ------------------------------
  * A block whose instructions all have lane forms (has_lanes) runs for a run
@@ -5215,6 +5220,10 @@ static __attribute__((noinline, aligned(64))) PureResult run_batches(const PureM
 
 /* At a cache line's start: the steps' branches land where they would (research 126: else 10% more cycles, as many instructions). */
 static __attribute__((aligned(64))) PureResult run(const PureModule *m, PureValue *values, PureBlock block, Event *ev, Slot *result) {
+#ifdef PURE_EMITTED
+    PureResult emitted;
+    if (emitted_run(m, values, block, ev, result, &emitted)) return emitted;
+#endif
     PureCompiled code = m->jit ? pure_jit_code(m->jit, block) : NULL;
     if (code) return run_compiled(code, m, values, block, ev, result);
     if (m->runner) return m->runner == 2 ? run_calls(m, values, block, ev, result) : run_batches(m, values, block, ev, result);
