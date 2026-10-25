@@ -343,6 +343,7 @@ typedef struct {
     uint32_t held;
     uint8_t height, locals;
     uint32_t nesting;
+    uint32_t own_lists, own_registers; /* how many of each its calls keep of the caller's (set at load) */
 } PureFunction;
 typedef struct { char name[PURE_MODULE_NAME]; uint8_t type; uint16_t rows; uint32_t offset; } PureField;
 typedef struct {
@@ -401,6 +402,10 @@ typedef struct {
      * nothing changed between: at its code's first instruction, the earlier root + 1 and its code's length (reuse_from,
      * reuse_length; 0: none); at such an earlier root, reuse_from PURE_REUSE_KEPT (its value kept for them). */
     uint32_t *reuse_from, *reuse_length;
+    /* What a call of each function keeps of its caller's (030's step 1, set at load): its own lists and registers in
+     * ascending order of state, a register's with PURE_KEEP_REGISTER, function f's from keep_start[f] up to
+     * keep_start[f + 1]: a call walks them, not its sets' words. */
+    uint32_t *keeps, *keep_start;
     bool reuses;         /* some value of it is planned so (else a batch need not look) */
     struct PureBatchPlan **batch_plans; /* each batch loop's block as the load reads it (module-batch.c, docs/design/025), */
     uint32_t batch_plan_count;          /* in their loops' order */

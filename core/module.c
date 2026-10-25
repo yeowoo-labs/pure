@@ -1672,6 +1672,34 @@ PURE_COLD static bool event_sets(PureModule *m) {
     return true;
 }
 
+/* Each function's keeps (PureModule's keeps, keep_start) and their counts (own_lists, own_registers), from its sets of
+ * lists and registers. false out of memory. */
+#define PURE_KEEP_REGISTER (UINT32_C(1) << 31)
+PURE_COLD static bool call_keep_lists(PureModule *m) {
+    size_t total = 0, words = m->state_words;
+    for (uint32_t f = 0; f < m->functions; ++f)
+        for (size_t w = 0; w < words; ++w)
+            total += (size_t)__builtin_popcountll(m->function_lists[f * words + w] | m->function_registers[f * words + w]);
+    if (!(m->keep_start = calloc((size_t)m->functions + 1, sizeof(*m->keep_start))) ||
+        !(m->keeps = malloc((total ? total : 1) * sizeof(*m->keeps))))
+        return false;
+    uint32_t at = 0;
+    for (uint32_t f = 0; f < m->functions; ++f) {
+        const uint64_t *lists = m->function_lists + f * words, *registers = m->function_registers + f * words;
+        PureFunction *fn = &m->function[f];
+        fn->own_lists = fn->own_registers = 0;
+        m->keep_start[f] = at;
+        for (uint32_t state = 0; state < m->states; ++state) {
+            bool reg = pure_states_has(registers, state);
+            if (!reg && !pure_states_has(lists, state)) continue;
+            m->keeps[at++] = state | (reg ? PURE_KEEP_REGISTER : 0);
+            reg ? ++fn->own_registers : ++fn->own_lists;
+        }
+    }
+    m->keep_start[m->functions] = at;
+    return true;
+}
+
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
     FILE *file = fopen(path, "rb");
     unsigned char *bytes = NULL;
@@ -1764,6 +1792,8 @@ void pure_module_release(PureModule *m) {
     m->height = NULL;
     free(m->reuse_from), free(m->reuse_length);
     m->reuse_from = m->reuse_length = NULL;
+    free(m->keeps), free(m->keep_start);
+    m->keeps = m->keep_start = NULL;
     m->reuses = false;
     pure_batch_plans_free(m);
     free(m->storage);
@@ -2221,7 +2251,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
             goto refused;
         if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
     }
-    if (!event_sets(out)) {
+    if (!event_sets(out) || !call_keep_lists(out)) {
         result = PURE_ALLOCATION;
         REFUSE("out of memory", 0);
     }
@@ -4815,39 +4845,20 @@ static void drop_spares(PureApp *app) {
     }
 }
 
-/* The next state from on in the union of two sets of them (words each; b may be NULL), or UINT32_MAX. */
-static uint32_t states_next(const uint64_t *a, const uint64_t *b, unsigned words, uint32_t from) {
-    for (uint32_t w = from >> 6; w < words; ++w) {
-        uint64_t bits = (a[w] | (b ? b[w] : 0)) & (w == from >> 6 ? ~UINT64_C(0) << (from & 63) : ~UINT64_C(0));
-        if (bits) return w * 64 + (uint32_t)__builtin_ctzll(bits);
-    }
-    return UINT32_MAX;
-}
-static unsigned states_count(const uint64_t *set, unsigned words) {
-    unsigned count = 0;
-    for (unsigned w = 0; w < words; ++w) count += (unsigned)__builtin_popcountll(set[w]);
-    return count;
-}
-
 /* The first count of the lists and registers function's code names given back what a call kept of them (its own lists
  * let go). */
 static void restore_lists(PureApp *app, uint32_t function, PureList **kept, unsigned count) {
     const PureModule *m = app->module;
-    const uint64_t *lists = m->function_lists + (size_t)function * m->state_words,
-                   *registers = m->function_registers + (size_t)function * m->state_words;
-    unsigned k = 0;
-    for (uint32_t state = states_next(lists, registers, m->state_words, 0); state != UINT32_MAX && k < count;
-         state = states_next(lists, registers, m->state_words, state + 1), ++k) {
-        if (!pure_states_has(registers, state)) let_list_go(app, state, app->lists[state]);
+    const uint32_t *keeps = m->keeps + m->keep_start[function];
+    for (unsigned k = 0; k < count; ++k) {
+        uint32_t state = keeps[k] & ~(uint32_t)PURE_KEEP_REGISTER;
+        if (!(keeps[k] & PURE_KEEP_REGISTER)) let_list_go(app, state, app->lists[state]);
         app->lists[state] = kept[k];
     }
 }
 
 /* What a call of function keeps of its caller's: the lists and registers its code names (its own). */
-static unsigned call_keeps(const PureModule *m, uint32_t function) {
-    return states_count(m->function_lists + (size_t)function * m->state_words, m->state_words) +
-           states_count(m->function_registers + (size_t)function * m->state_words, m->state_words);
-}
+static unsigned call_keeps(const PureModule *m, uint32_t function) { return m->keep_start[function + 1] - m->keep_start[function]; }
 
 /* A frame closed: the caller's lists, registers and held values given back (the callee's let go), its locals and walk,
  * the frame's room in the blocks and in the event's room. The frame below. */
@@ -4887,14 +4898,12 @@ static __attribute__((noinline, cold)) int enter_call(Frame *frame, Call **top, 
     Event *ev = frame->ev;
     uint32_t function = m->code[*pc - 1].arg;
     const PureFunction *f = &m->function[function];
-    const uint64_t *lists = m->function_lists + (size_t)function * m->state_words,
-                   *registers = m->function_registers + (size_t)function * m->state_words;
     unsigned keeps = call_keeps(m, function), holds = (unsigned)__builtin_popcount(f->held);
     size_t bytes = (sizeof(Call) + keeps * sizeof(PureList *) + holds * sizeof(Kept) + f->height * sizeof(Slot) +
                     f->locals * sizeof(PureValue) + f->nesting * sizeof(Loop) + 15) & ~(size_t)15;
     size_t counted = PURE_CALL_BYTES + (size_t)f->height * PURE_CALL_VALUE + (size_t)f->locals * PURE_CALL_LOCAL +
-                     (size_t)f->nesting * PURE_CALL_LOOP + (size_t)states_count(lists, m->state_words) * PURE_CALL_LIST +
-                     (size_t)holds * PURE_CALL_HELD + (size_t)states_count(registers, m->state_words) * PURE_CALL_REGISTER;
+                     (size_t)f->nesting * PURE_CALL_LOOP + (size_t)f->own_lists * PURE_CALL_LIST +
+                     (size_t)holds * PURE_CALL_HELD + (size_t)f->own_registers * PURE_CALL_REGISTER;
     frame->fault_pc = *pc - 1;
     if (!charge(app, f->code.length)) { frame->kind = PURE_FAULT_WORK; return STEP_FAULT; }
     if (!grows(app, (Held){0, 0}, (Held){0, counted})) { frame->kind = PURE_FAULT_MEMORY; return STEP_FAULT; }
@@ -4912,10 +4921,11 @@ static __attribute__((noinline, cold)) int enter_call(Frame *frame, Call **top, 
         stack[i] = frame->stack[base + i];
         whole = kept_apart(app, frame->arena, f, m->signature_type[f->first + i], &stack[i].bytes);
     }
-    for (uint32_t state = states_next(lists, registers, m->state_words, 0); whole && state != UINT32_MAX;
-         state = states_next(lists, registers, m->state_words, state + 1), ++k) { /* its own lists, registers */
-        PureList *own = pure_states_has(registers, state) ? (app->unbound[state] ? app->unbound[state] : app->lists[state])
-                                                          : spare_list(app, state);
+    const uint32_t *own_states = m->keeps + m->keep_start[function];
+    for (; whole && k < keeps; ++k) { /* its own lists, registers */
+        uint32_t state = own_states[k] & ~(uint32_t)PURE_KEEP_REGISTER;
+        PureList *own = own_states[k] & PURE_KEEP_REGISTER ? (app->unbound[state] ? app->unbound[state] : app->lists[state])
+                                                           : spare_list(app, state);
         if (!own) {
             restore_lists(app, function, kept, k);
             whole = false;
