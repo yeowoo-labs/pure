@@ -2,7 +2,9 @@
  * again under its own directory, in order (ops.h): the same bytes at the same places, the same names created, renamed
  * and removed. A record that ends its cut is followed by an fsync of every file and directory the cut touched; then the
  * records are said saved (pure_link_done), which is what the owner's sync waits for. Its heard (the last record done)
- * is kept in memory: a follower started again is not this experiment's.
+ * is kept in memory: a follower started again is not this experiment's. FOLLOWER_SYNC=data: it syncs as the owner's
+ * store does instead (research 050): fdatasync a file, and fsync a directory only when the cut made, renamed or removed
+ * a name.
  *
  *   follower keys DIR                                   makes DIR/owner.key and DIR/follower.key, prints both public halves
  *   follower DIR PORT KEY OWNER_PUBLIC_HEX              runs until SIGTERM, then one JSON line of counts */
@@ -19,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static int directory = -1;
@@ -44,14 +47,46 @@ static void touch(const char *path) {
     for (unsigned i = 0; i < touched_count; ++i) if (!strcmp(touched[i], path)) return;
     if (touched_count < 4096) touched[touched_count++] = strdup(path);
 }
+/* Its syncs' time: of files, of directories (the store's own at each cut's end too), and each cut's whole chain. */
+static uint64_t file_syncs, file_sync_ns, directory_syncs, directory_sync_ns, *chain_ns;
+static size_t chains, chain_room;
+static bool as_data, named; /* FOLLOWER_SYNC=data; the cut so far made, renamed or removed a name */
+static uint64_t now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+static void timed_sync(int fd) {
+    struct stat st;
+    bool is_directory = !fstat(fd, &st) && S_ISDIR(st.st_mode);
+    if (as_data && is_directory && !named) return;
+    uint64_t began = now_ns();
+    if (as_data && !is_directory) fdatasync(fd);
+    else fsync(fd);
+    uint64_t took = now_ns() - began;
+    if (is_directory) ++directory_syncs, directory_sync_ns += took;
+    else ++file_syncs, file_sync_ns += took;
+}
 static void sync_touched(void) {
+    uint64_t began = now_ns();
     for (unsigned i = 0; i < touched_count; ++i) {
         int fd = openat(directory, touched[i][0] ? touched[i] : ".", O_RDONLY | O_CLOEXEC);
-        if (fd >= 0) fsync(fd), close(fd); /* one renamed or removed since is synced as its directory is */
+        if (fd >= 0) timed_sync(fd), close(fd); /* one renamed or removed since is synced as its directory is */
         free(touched[i]);
     }
     touched_count = 0;
-    fsync(directory);
+    timed_sync(directory);
+    named = false;
+    if (chains == chain_room) {
+        size_t room = chain_room ? 2 * chain_room : 1024;
+        uint64_t *grown = realloc(chain_ns, room * sizeof(*grown));
+        if (grown) chain_ns = grown, chain_room = room;
+    }
+    if (chains < chain_room) chain_ns[chains++] = now_ns() - began;
+}
+static int by_value(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
 }
 
 static const char *name_of(const unsigned char *p, char *out) {
@@ -110,6 +145,7 @@ static void apply(const unsigned char *p, size_t size) {
         break;
     case OP_SYNC: break;
     }
+    if (p[0] == OP_CREATE || p[0] == OP_RENAME || p[0] == OP_UNLINK || p[0] == OP_MKDIR) named = true;
     if (p[0] != OP_UNLINK && p[0] != OP_RENAME) touch(path);
     ++applied_ops, applied_bytes += size;
 }
@@ -181,6 +217,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc != 5) { fprintf(stderr, "usage: %s DIR PORT KEY OWNER_PUBLIC_HEX | keys DIR\n", argv[0]); return 2; }
+    as_data = getenv("FOLLOWER_SYNC") && !strcmp(getenv("FOLLOWER_SYNC"), "data");
     mkdir(argv[1], 0700);
     if ((directory = open(argv[1], O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) fail("open", argv[1]);
     unsigned char own_public[PURE_SEAL_KEY], owner[PURE_SEAL_KEY];
@@ -202,10 +239,15 @@ int main(int argc, char **argv) {
     pthread_mutex_lock(&lock); /* the worker between records: what it did is whole */
     PureLinkCounts counts;
     pure_link_listener_close(listener, &counts);
-    printf("{\"within_cut\":%s,\"heard\":%llu,\"cuts\":%llu,\"ops\":%llu,\"op_bytes\":%llu,\"received\":%llu,\"deliveries\":%llu,\"stored\":%llu}\n",
+    if (chains) qsort(chain_ns, chains, sizeof(*chain_ns), by_value);
+    printf("{\"within_cut\":%s,\"heard\":%llu,\"cuts\":%llu,\"ops\":%llu,\"op_bytes\":%llu,\"received\":%llu,\"deliveries\":%llu,\"stored\":%llu,"
+           "\"file_syncs\":%llu,\"file_sync_ms\":%.1f,\"directory_syncs\":%llu,\"directory_sync_ms\":%.1f,\"chain_p50_us\":%.0f,"
+           "\"chain_p90_us\":%.0f,\"chain_p99_us\":%.0f}\n",
            within_cut ? "true" : "false", (unsigned long long)heard, (unsigned long long)cuts, (unsigned long long)applied_ops,
            (unsigned long long)applied_bytes, (unsigned long long)counts.received, (unsigned long long)counts.deliveries,
-           (unsigned long long)counts.stored);
+           (unsigned long long)counts.stored, (unsigned long long)file_syncs, file_sync_ns / 1e6,
+           (unsigned long long)directory_syncs, directory_sync_ns / 1e6, chains ? chain_ns[chains / 2] / 1e3 : 0.0,
+           chains ? chain_ns[chains * 9 / 10] / 1e3 : 0.0, chains ? chain_ns[chains * 99 / 100] / 1e3 : 0.0);
     fflush(stdout);
     _exit(0);
 }

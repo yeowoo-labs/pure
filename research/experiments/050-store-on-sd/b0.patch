@@ -1,0 +1,42 @@
+diff --git a/core/module-save.c b/core/module-save.c
+index ff76d83..ca54197 100644
+--- a/core/module-save.c
++++ b/core/module-save.c
+@@ -1193,33 +1193,26 @@ PureResult pure_save_commit(PureApp *app, const PureValue *values) {
+     size_t payload_size = 0;
+     unsigned char *payload = result == PURE_OK ? list_changes(app, &payload_size) : NULL;
+     if (payload_size && !payload) result = PURE_ALLOCATION;
+-    bool tree = count;
++    bool tree = count || payload_size; /* B0: a save of lists alone commits the tree too */
+     uint64_t seq = app->seq + 1;
+-    if (result == PURE_OK && tree && payload_size && app->log) {
++    if (result == PURE_OK && payload_size) { /* B0: the changes as the ".seq" state's bytes, in the tree's commit */
+         result = app->stored_seq ? PURE_OK : open_state(app, "", "seq", &app->stored_seq);
+         if (result == PURE_OK) {
+-            unsigned char number[8];
+-            put_le(number, seq, 8);
+             seq_before = pure_draft_version(app->stored_seq);
+             pure_draft_hold(app->stored_seq, true);
+             seq_written = true;
+-            result = pure_draft_splice(app->stored_seq, 0, pure_draft_size(app->stored_seq), (PureSpan){number, 8});
++            result = pure_draft_splice(app->stored_seq, 0, pure_draft_size(app->stored_seq), (PureSpan){payload, payload_size});
+             states[count] = UINT32_MAX;
+             drafts[count++] = app->stored_seq;
+         }
+     }
+-    if (result == PURE_OK && payload_size) {
+-        result = app->log ? pure_log_append(app->log, seq, tree, (PureSpan){payload, payload_size}) : PURE_STORE_ERROR;
+-        if (result == PURE_UNCERTAIN) app->uncertain = true;
+-    }
+     free(payload);
+     if (result == PURE_OK && tree) {
+         result = app->data.save(app->data.context, drafts, count);
+         /* A commit that may yet be stored leaves the app apart from its store,
+          * whatever the save changed: no save follows until it starts again.
+          * One that failed takes back the logged entry, which is on the device. */
+-        if (result == PURE_UNCERTAIN) app->uncertain = true;
+-        else if (result != PURE_OK && payload_size) pure_log_retract(app->log);
++        if (result == PURE_UNCERTAIN) app->uncertain = true; /* B0: no log entry to take back */
+     }
+     if (result == PURE_OK) {
+         for (size_t k = 0; k < count; ++k)

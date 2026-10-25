@@ -8,8 +8,11 @@
  *
  * SHIM_PAUSE_EVERY=N with SHIM_PAUSE_DIR: after every Nth cut's sync, it writes the cut's number to DIR/paused and
  * waits for a byte from DIR/resume (the harness compares the two stores meanwhile). SHIM_STATS: a file for counts at
- * exit (ops and bytes by kind, cuts, the time waited for acks, the names renamed to). SHIM_JOURNAL: a file that gets
- * every cut's ops as shipped, in order (prefixes.py makes stores of its prefixes).
+ * exit (ops and bytes by kind, cuts, the time waited for acks, the names renamed to, and the owner's own syncs by the
+ * file they sync: count, time, percentiles and those over 10 ms; and the time from one sync of pure.tree to the next,
+ * a save's whole time where each save ends in one). SHIM_JOURNAL: a file that gets every cut's ops as shipped, in order
+ * (prefixes.py makes stores of its prefixes). SHIM_ALONE=1: no cut is sent (no shipper): the owner alone, its syncs
+ * timed as they are.
  *
  *   cc -O2 -std=gnu17 -fPIC -shared shim.c -ldl -pthread -o shim.so */
 #define _GNU_SOURCE
@@ -45,6 +48,13 @@ static uint64_t renamed_count[32];
 static unsigned renamed_names;
 static unsigned pause_every;
 static char pause_dir[PATH_MAX];
+/* The owner's own syncs (after the ack), by what they sync: their durations in ns. */
+enum { SYNC_LOG, SYNC_TREE, SYNC_COMPACTION, SYNC_IMAGE, SYNC_DIRECTORY, SYNC_OTHER, SYNC_KINDS };
+static const char *const sync_names[SYNC_KINDS] = {"log", "tree", "compaction", "image", "directory", "other"};
+static uint64_t *sync_ns[SYNC_KINDS];
+static size_t sync_count[SYNC_KINDS], sync_room[SYNC_KINDS];
+static uint64_t *saves_ns, last_tree_ns; /* from one tree sync's end to the next's */
+static size_t saves, saves_room;
 
 static int (*real_open)(const char *, int, ...);
 static int (*real_openat)(int, const char *, int, ...);
@@ -83,12 +93,39 @@ __attribute__((constructor)) static void start(void) {
     active = true;
 }
 
+static int by_value(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
 __attribute__((destructor)) static void finish(void) {
     const char *at = getenv("SHIM_STATS");
     FILE *f = at && active ? fopen(at, "w") : NULL;
     if (!f) return;
     fprintf(f, "{\"cuts\":%llu,\"shipped_bytes\":%llu,\"waited_ms\":%.1f", (unsigned long long)cuts,
             (unsigned long long)shipped, waited_ns / 1e6);
+    fprintf(f, ",\"syncs\":{");
+    for (int k = 0, first = 1; k < SYNC_KINDS; ++k) {
+        size_t n = sync_count[k];
+        if (!n) continue;
+        uint64_t total = 0;
+        for (size_t i = 0; i < n; ++i) total += sync_ns[k][i];
+        qsort(sync_ns[k], n, sizeof(*sync_ns[k]), by_value);
+        size_t over = 0;
+        uint64_t over_ns = 0;
+        for (size_t i = 0; i < n; ++i)
+            if (sync_ns[k][i] > 10000000) ++over, over_ns += sync_ns[k][i];
+        fprintf(f, "%s\"%s\":{\"n\":%zu,\"ms\":%.1f,\"p50_us\":%.0f,\"p90_us\":%.0f,\"p99_us\":%.0f,\"over_10ms_n\":%zu,"
+                   "\"over_10ms_ms\":%.1f}", first ? "" : ",", sync_names[k], n, total / 1e6, sync_ns[k][n / 2] / 1e3,
+                sync_ns[k][n * 9 / 10] / 1e3, sync_ns[k][n * 99 / 100] / 1e3, over, over_ns / 1e6);
+        first = 0;
+    }
+    fprintf(f, "}");
+    if (saves) {
+        qsort(saves_ns, saves, sizeof(*saves_ns), by_value);
+        fprintf(f, ",\"saves\":{\"n\":%zu,\"p50_us\":%.0f,\"p90_us\":%.0f,\"p99_us\":%.0f}", saves, saves_ns[saves / 2] / 1e3,
+                saves_ns[saves * 9 / 10] / 1e3, saves_ns[saves * 99 / 100] / 1e3);
+    }
     for (int k = 1; k < OP_KINDS; ++k)
         fprintf(f, ",\"%s\":[%llu,%llu]", op_names[k], (unsigned long long)op_count[k], (unsigned long long)op_bytes[k]);
     fprintf(f, ",\"renamed_to\":{");
@@ -168,6 +205,11 @@ static bool whole_read(int fd, void *bytes, size_t size) {
 static void cut(const char *path) {
     (void)op(OP_SYNC, path, 0);
     ++cuts;
+    if (getenv("SHIM_ALONE")) { /* the owner alone: its ops counted, none sent */
+        shipped += used;
+        used = 0;
+        return;
+    }
     if (link_fd < 0) {
         const char *at = getenv("SHIM_SOCKET");
         struct sockaddr_un address = {.sun_family = AF_UNIX};
@@ -326,11 +368,51 @@ int mkdir(const char *path, mode_t mode) {
     return rc;
 }
 
+/* What a sync of fd (its path relative to the store) syncs. */
+static int sync_kind(int fd, const char *path) {
+    struct stat st;
+    if (!fstat(fd, &st) && S_ISDIR(st.st_mode)) return SYNC_DIRECTORY;
+    if (!strncmp(path, "log-", 4)) return SYNC_LOG;
+    if (!strcmp(path, "pure.tree")) return SYNC_TREE;
+    if (!strncmp(path, ".pending", 8)) return SYNC_COMPACTION;
+    if (strstr(path, "image")) return SYNC_IMAGE;
+    return SYNC_OTHER;
+}
+
+static uint64_t now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+
 static int synced(int fd, int (*real)(int)) {
     pthread_mutex_lock(&lock);
     bool due = false;
     if (fd >= 0 && fd < FDS && paths[fd]) cut(paths[fd]), due = true;
+    int kind = due ? sync_kind(fd, paths[fd]) : -1;
+    uint64_t began = now_ns();
     int rc = real(fd);
+    uint64_t took = now_ns() - began;
+    if (kind >= 0) {
+        if (sync_count[kind] == sync_room[kind]) {
+            size_t room_ = sync_room[kind] ? 2 * sync_room[kind] : 1024;
+            uint64_t *grown = realloc(sync_ns[kind], room_ * sizeof(*grown));
+            if (grown) sync_ns[kind] = grown, sync_room[kind] = room_;
+        }
+        if (sync_count[kind] < sync_room[kind]) sync_ns[kind][sync_count[kind]++] = took;
+    }
+    if (kind == SYNC_TREE) { /* a save's end: the time since the last */
+        uint64_t end = began + took;
+        if (last_tree_ns) {
+            if (saves == saves_room) {
+                size_t room_ = saves_room ? 2 * saves_room : 1024;
+                uint64_t *grown = realloc(saves_ns, room_ * sizeof(*grown));
+                if (grown) saves_ns = grown, saves_room = room_;
+            }
+            if (saves < saves_room) saves_ns[saves++] = end - last_tree_ns;
+        }
+        last_tree_ns = end;
+    }
     if (due) pause_if_due();
     pthread_mutex_unlock(&lock);
     return rc;
