@@ -5373,8 +5373,11 @@ PureResult pure_app_save(PureApp *app) {
     settle_links(app, result == PURE_OK);
     close_burst(app, result == PURE_OK);
     /* Images due are written now, unless the host writes them on another thread. */
-    for (PureCheckpoint *c; result == PURE_OK && !app->background_checkpoints && (c = pure_app_checkpoint(app));)
-        pure_app_checkpointed(app, c, pure_checkpoint_write(c));
+    for (PureCheckpoint *c; result == PURE_OK && !app->background_checkpoints && (c = pure_app_checkpoint(app));) {
+        PureResult written = pure_checkpoint_write(c);
+        pure_app_checkpointed(app, c, written);
+        if (written != PURE_OK) break; /* the same list would be due again at once: the next save tries it */
+    }
     return result;
 }
 
@@ -6840,6 +6843,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
             values[i].num = (double)moved[list][(size_t)values[i].num];
     }
     for (uint32_t i = 0; i < module->states; ++i) free(moved[i]);
+    if (!old && result == PURE_OK && lists_stored) result = pure_save_fold_absent(app, module);
     if (!old) pure_save_close_start(app);
     /* Images last, once nothing else can fail: first of the lists the new
      * module drops whose changes are only logged (the log lets them go),

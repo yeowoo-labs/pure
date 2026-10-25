@@ -25,6 +25,9 @@ PureResult pure_save_open_list(PureApp *, const PureModule *m, uint32_t state, P
                                PureSaved *saved);
 PureResult pure_save_image(PureApp *, const PureModule *m, uint32_t state, const PureList *list);
 void pure_save_close_start(PureApp *);
+/* The stored lists the starting module does not open, whose changes after their image only the log holds, folded into
+ * their images (pure_save_close_start lets the log's entries go). */
+PureResult pure_save_fold_absent(PureApp *, const PureModule *);
 /* The log keeps only the entries some list's image does not hold yet. */
 void pure_save_release(PureApp *);
 /* A snapshot's list (module.c): a state's, or a runtime list's (place

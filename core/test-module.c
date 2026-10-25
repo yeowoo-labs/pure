@@ -2746,6 +2746,43 @@ static unsigned consistent(const PureApp *app) {
     return n;
 }
 
+/* A checkpoint whose image cannot be written (its write fails every time) costs each save one try: the save returns
+ * and the next one tries again (it used to pick the same list again at once, forever); once writes succeed the image
+ * is written, and after a start the list is as the saves left it. A list of one item changed in place: what is logged
+ * outgrows its items at once, so a checkpoint is due within a few saves. */
+static void failing_checkpoints(void) {
+    extern unsigned long pure_save_test_checkpoints;
+    enum { TASK_LIST = 1 };
+    static const S nums[] = {{"n", 0}};
+    static const T states[] = {{"tasks", 3, 0}};
+    static const RF fields[] = {{"title", 1, 0}, {"done", 0, 0}};
+    static const R records[] = {{"task", fields, 2}};
+    static const char *const constants[] = {"", "x"};
+    static const I inputs[] = {KEY("add", "KeyA"), KEY("set", "KeyS")};
+    static const O code[] = {
+        {TK, 1, 0}, {L, 0, 0}, {LA, TASK_LIST, 0},                                       /* add: tasks.append(task { "x", n }) */
+        {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, {XF, TASK_LIST, 0}, {L, 0, 0}, {IS, TASK_LIST | 1u << 16, 0}, /* set: n += 1; tasks.first.done = n */
+    };
+    static const H handlers[] = {{1, 0, 3}, {3, 3, 7}};
+    Spec spec = {nums, 1, inputs, 2, NULL, 0, handlers, 2, code, LEN(code), NULL, 0, states, 1, constants, 2, NULL, 0, records, 1,
+                 NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "failing checkpoints: %s\n", error); abort(); }
+    char *path = new_store();
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && press(&app, 0) == PURE_OK);
+    unsigned long before = pure_save_test_checkpoints;
+    fail_stage = PURE_IMAGE_BEFORE_RENAME;
+    for (int k = 0; k < 40; ++k) CHECK(press(&app, 1) == PURE_OK); /* due within a few: every write fails */
+    CHECK(pure_save_test_checkpoints == before);
+    fail_stage = -1;
+    CHECK(press(&app, 1) == PURE_OK && pure_save_test_checkpoints > before);
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK);
+    CHECK(app.values[0].num == 41 && pure_list_count(app.lists[TASK_LIST]) == 1 && pure_list_get(app.lists[TASK_LIST], 0, 1).num == 41);
+    pure_app_stop(&app);
+    remove_store(path);
+    printf("{\"failing_checkpoints\":{\"saves\":42}}\n");
+}
 static void stored_crashes(void) {
     char *path = new_store();
     Spec spec = {crash_nums, 1, crash_inputs, 1, NULL, 0, crash_handlers, 1, crash_code, LEN(crash_code), NULL, 0,
@@ -3080,6 +3117,7 @@ static void stored_states(void) {
     CHECK(pure_save_test_checkpoints > checkpoints + 5); /* images written again as the log grew */
     stored_equivalence(text_spec, text_words, LEN(text_words), 0x7f4a7c15u);
     stored_crashes();
+    failing_checkpoints();
     uncertain_numbers();
     stored_frames();
     stored_messages();

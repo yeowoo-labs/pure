@@ -526,6 +526,55 @@ PureResult pure_save_image(PureApp *app, const PureModule *m, uint32_t state, co
     return result;
 }
 
+/* What a stored list's bytes say before its items: an image's (image), a value the tree kept before images (first: the
+ * first of those), its record graph (stored), its fields (count), where its items begin (at) and how many bytes they take
+ * (items), and the save an image holds (holds). false when the bytes are not one. */
+static bool stored_header(const unsigned char *bytes, size_t size, bool image, bool first, PureLayout *stored, unsigned *count,
+                          size_t *at, uint64_t *holds, size_t *items) {
+    stored->records = 1;
+    const unsigned char *magic = image ? image_magic : first ? list_magic_1 : list_magic;
+    bool ok = size >= 5 && !memcmp(bytes, magic, 4) && bytes[4] <= PURE_RECORD_FIELDS, lists = false;
+    *count = ok ? bytes[4] : 0;
+    *at = 5;
+    ok = ok && read_fields(bytes, size, at, *count, stored, 0, 256, &lists) && (image || !lists);
+    if (ok && lists) { /* the graph's other records */
+        ok = *at < size && pure_layout_room(stored, 1u + bytes[*at]);
+        stored->records = ok ? 1u + bytes[(*at)++] : 1;
+        for (unsigned k = 1; ok && k < stored->records; ++k)
+            ok = *at < size && bytes[*at] <= PURE_RECORD_FIELDS &&
+                 read_fields(bytes, size, &(size_t){*at + 1}, bytes[*at], stored, k, stored->records, &lists) &&
+                 (*at = skip_fields(bytes, size, *at + 1, bytes[*at])) != 0;
+        for (unsigned f = 0; ok && f < *count; ++f) ok = stored->record[0].items[f] < stored->records;
+    }
+    if (ok && image) { /* the save it holds, then its items */
+        ok = size - *at >= 8;
+        *holds = ok ? get_le(bytes + *at, 8) : 0;
+        *at += 8;
+        *items = size - *at;
+    } else if (ok && !first) {
+        ok = size - *at >= 8 && (*items = (size_t)get_le(bytes + *at, 8)) <= size - *at - 8;
+        *at += 8;
+    } else *items = size - *at;
+    return ok;
+}
+
+/* A stored list's items read into a new list of its stored record's cells (a list field's value held as bytes). */
+static PureResult stored_items(const PureLayout *stored, unsigned count, const unsigned char *bytes, size_t items, PureList **out) {
+    uint8_t held[PURE_RECORD_FIELDS];
+    for (unsigned f = 0; f < count; ++f)
+        held[f] = stored->record[0].kinds[f] == PURE_CELL_LIST ? PURE_CELL_BYTES : stored->record[0].kinds[f];
+    *out = pure_list_new(count, held);
+    return *out ? pure_list_read(*out, bytes, items) : PURE_ALLOCATION;
+}
+
+/* A start numbers its saves after every save an image holds too, not only the tree's .seq and the log's last entry:
+ * a save that changed numbers or texts alone writes neither, and an image written after it (a replace's, a
+ * checkpoint's) holds its number; the next start would hand that number out again and the start after it would skip
+ * the change so numbered as the image's. */
+static void held_by_image(PureApp *app, uint64_t holds) {
+    if (holds > app->seq) app->seq = holds;
+}
+
 PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint32_t state, PureList **out,
                                          PureDraft **legacy, PureSaved *saved) {
     uint32_t record = m->state_ref[state];
@@ -549,44 +598,15 @@ PURE_COLD PureResult pure_save_open_list(PureApp *app, const PureModule *m, uint
      * the records of the lists in its fields (an image's alone, 027's stage 3). */
     PureLayout stored_layout, layout;
     pure_layout_begin(&stored_layout), pure_layout_begin(&layout);
-    stored_layout.records = 1;
     unsigned count = 0;
     size_t at = 0, items = 0;
     uint64_t holds = 0;
     bool stored = result == PURE_OK && bytes, first = stored && !image && size >= 4 && !memcmp(bytes, list_magic_1, 4);
-    if (stored) {
-        const unsigned char *magic = image ? image_magic : first ? list_magic_1 : list_magic;
-        bool ok = size >= 5 && !memcmp(bytes, magic, 4) && bytes[4] <= PURE_RECORD_FIELDS, lists = false;
-        count = ok ? bytes[4] : 0;
-        at = 5;
-        ok = ok && read_fields(bytes, size, &at, count, &stored_layout, 0, 256, &lists) && (image || !lists);
-        if (ok && lists) { /* the graph's other records */
-            ok = at < size && pure_layout_room(&stored_layout, 1u + bytes[at]);
-            stored_layout.records = ok ? 1u + bytes[at++] : 1;
-            for (unsigned k = 1; ok && k < stored_layout.records; ++k)
-                ok = at < size && bytes[at] <= PURE_RECORD_FIELDS &&
-                     read_fields(bytes, size, &(size_t){at + 1}, bytes[at], &stored_layout, k, stored_layout.records, &lists) &&
-                     (at = skip_fields(bytes, size, at + 1, bytes[at])) != 0;
-            for (unsigned f = 0; ok && f < count; ++f) ok = stored_layout.record[0].items[f] < stored_layout.records;
-        }
-        if (ok && image) { /* the save it holds, then its items */
-            ok = size - at >= 8;
-            holds = ok ? get_le(bytes + at, 8) : 0;
-            at += 8;
-            items = size - at;
-        } else if (ok && !first) {
-            ok = size - at >= 8 && (items = (size_t)get_le(bytes + at, 8)) <= size - at - 8;
-            at += 8;
-        } else items = size - at;
-        if (!ok) result = PURE_STORE_ERROR;
-    }
+    if (stored && !stored_header(bytes, size, image, first, &stored_layout, &count, &at, &holds, &items)) result = PURE_STORE_ERROR;
+    if (result == PURE_OK && image) held_by_image(app, holds);
     PureList *from = NULL;
     if (result == PURE_OK && stored) {
-        uint8_t held[PURE_RECORD_FIELDS]; /* a list field's value held as bytes */
-        for (unsigned f = 0; f < count; ++f)
-            held[f] = stored_layout.record[0].kinds[f] == PURE_CELL_LIST ? PURE_CELL_BYTES : stored_layout.record[0].kinds[f];
-        from = pure_list_new(count, held);
-        result = from ? pure_list_read(from, bytes + at, items) : PURE_ALLOCATION;
+        result = stored_items(&stored_layout, count, bytes + at, items, &from);
         if (result == PURE_OK && !image) result = pure_list_replay(from, bytes + at + items, size - at - items);
     }
     free(bytes);
@@ -656,6 +676,7 @@ PURE_COLD PureResult pure_save_open_runtime(PureApp *app, uint32_t place, PureLi
     bool formed = image && size >= at && (named || !memcmp(bytes, image_magic, 4)) &&
                   !memcmp(bytes + 4, header + 4, length - 4);
     uint64_t holds = formed ? get_le(bytes + length, 8) : 0;
+    if (formed) held_by_image(app, holds);
     if (formed && named) { /* the outputs its sends were laid out with */
         size_t used = 0;
         int outputs = read_outputs(bytes + at, size - at, NULL, &used);
@@ -696,6 +717,52 @@ PURE_COLD PureResult pure_save_open_runtime(PureApp *app, uint32_t place, PureLi
     if (image) saved->image = holds;
     else saved->rewrite = true;
     return PURE_OK;
+}
+
+/* The stored lists a starting module does not open (dropped by it, transient in it, or another kind of state now)
+ * whose changes after their image the log alone holds: each folded into its image now, its own record graph kept,
+ * so the start may let those entries go and a replace that opens the list later finds them in its image (it reads the
+ * image alone: the start's index is gone by then). */
+PURE_COLD PureResult pure_save_fold_absent(PureApp *app, const PureModule *m) {
+    struct PureStartLog *index = app->start_log;
+    const char *directory = directory_of(app);
+    PureResult result = PURE_OK;
+    for (size_t k = 0; result == PURE_OK && index && directory && k < index->count; ++k) {
+        const struct Named *n = &index->lists[k];
+        bool runtime = false;
+        for (size_t r = 0; r < sizeof(runtime_lists) / sizeof(*runtime_lists); ++r)
+            runtime = runtime || !strcmp(runtime_lists[r].name, n->name);
+        int state = pure_module_state(m, n->name);
+        if (runtime || (state >= 0 && m->state_type[state] == PURE_STATE_LIST && !pure_state_transient(m, (uint32_t)state)))
+            continue; /* opened with the module's states */
+        unsigned char *bytes = NULL;
+        size_t size = 0;
+        if ((result = pure_image_read(directory, n->name, &bytes, &size)) != PURE_OK) {
+            if (result == PURE_NOT_FOUND) result = PURE_STORE_ERROR; /* logged changes, no image: one is written first */
+            break;
+        }
+        PureLayout stored;
+        pure_layout_begin(&stored);
+        unsigned count = 0;
+        size_t at = 0, items = 0;
+        uint64_t holds = 0;
+        bool after = false;
+        if (!stored_header(bytes, size, true, false, &stored, &count, &at, &holds, &items)) result = PURE_STORE_ERROR;
+        else held_by_image(app, holds); /* its new image holds at least what the old one did */
+        for (size_t c = 0; result == PURE_OK && c < n->count; ++c) after = after || n->changes[c].seq > holds;
+        PureList *list = NULL;
+        if (result == PURE_OK && after) result = stored_items(&stored, count, bytes + at, items, &list);
+        for (size_t c = 0; result == PURE_OK && after && c < n->count; ++c)
+            if (n->changes[c].seq > holds) result = pure_list_replay(list, n->changes[c].records.data, n->changes[c].records.size);
+        if (result == PURE_OK && after) { /* the header as it was, holding the start's save */
+            put_le(bytes + at - 8, app->seq, 8);
+            result = write_image(directory, n->name, bytes, at, list);
+        }
+        pure_list_free(list);
+        pure_layout_done(&stored);
+        free(bytes);
+    }
+    return result;
 }
 
 PureResult pure_save_runtime_image(PureApp *app, const PureModule *m, uint32_t place, const PureList *list) {

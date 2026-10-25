@@ -2345,6 +2345,58 @@ def module_moved_values(aup, pure, work):
     return {'events': 8, 'paths': 3}
 
 
+STORE_RESTARTS_SOURCE = """record Item {
+  v = 0
+}
+state items: list of Item
+state n = 0
+input bump = message { k: u32 }
+input add = message { v: number }
+on bump { n = n + 1 }
+on add { items.append(Item { v: add.v }) }
+view count = items.count
+view total = sum(x.v for x in items)
+view bumped = n
+"""
+
+
+def module_store_restarts(aup, pure, work):
+    """A stored list across starts and replaces, each run a pure-run process on one store (two defects found reading
+    the store for 030's step 4, 2026-10-25): a save of numbers alone wrote no .seq, so an image a replace wrote after
+    it held a number the next start handed out again, and the start after that skipped the append so numbered as its
+    image's; and a list the starting module lacked lost, when a replace brought it back, what its log held after its
+    image (the replace read the image alone). Both now keep every append."""
+    import struct
+    a, widened, without = work / 'restarts-a.pmod', work / 'restarts-b.pmod', work / 'restarts-c.pmod'
+    for module, text in ((a, STORE_RESTARTS_SOURCE),
+                         (widened, STORE_RESTARTS_SOURCE.replace('  v = 0\n', '  v = 0\n  w = 0\n', 1)),
+                         (without, STORE_RESTARTS_SOURCE.replace('state items: list of Item\n', '')
+                          .replace('on add { items.append(Item { v: add.v }) }\n', 'on add { n = n + add.v }\n')
+                          .split('view count')[0] + 'view bumped = n\n')):
+        source = module.with_suffix('.aup')
+        source.write_text(text)
+        compile_module(aup, source, module)
+    number = lambda v: struct.pack('<d', float(v)).hex()
+
+    def run(module, store, commands):
+        done = subprocess.run([str(pure / 'build/pure-run'), str(module), '--views', '--store', str(store)],
+                              input=commands + 'show\n', capture_output=True, text=True, timeout=120)
+        assert done.returncode == 0, done.stderr[-500:]
+        return json.loads(done.stdout.splitlines()[-1])['views']
+
+    store = work / 'restarts-1'
+    run(a, store, f'message bump 00000000\nreplace {widened}\n')
+    run(widened, store, f'message add {number(5)}\n')
+    assert run(widened, store, '') == {'count': 1, 'total': 5, 'bumped': 1}, 'the append after a replace and a start'
+    store = work / 'restarts-2'
+    run(a, store, f'message add {number(5)}\n')
+    back = run(without, store, f'message bump 00000000\nreplace {a}\n')
+    assert (back['count'], back['total']) == (1, 5), back
+    assert run(a, store, f'message add {number(7)}\n') == {'count': 2, 'total': 12, 'bumped': 1}
+    assert run(a, store, '') == {'count': 2, 'total': 12, 'bumped': 1}
+    return {'stores': 2, 'runs': 7}
+
+
 LIST_VALUES_SOURCE = """record Item {
   v = 0
 }
@@ -7065,6 +7117,7 @@ def main():
         report['module_lent_values'] = module_lent_values(aup, pure, work)
         report['module_list_values'] = module_list_values(aup, pure, work)
         report['module_moved_values'] = module_moved_values(aup, pure, work)
+        report['module_store_restarts'] = module_store_restarts(aup, pure, work)
         report['module_specs'] = module_specs(aup, pure, work)
         report['module_tier'] = module_tier(aup, pure, work)
         report['server_documents_requests'] = sum(server_documents(aup, pure, work, range(args.seeds), threads=threads)
