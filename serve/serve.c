@@ -1023,8 +1023,13 @@ static const char *convert(Connection *c) {
     unsigned char *tables = c->ingress + 4 + (delivered ? DELIVERY : 0), *prefixes = tables + c->batch * table;
     unsigned char *json = c->body;
     size_t size = c->body_size, at = pure_json_space(json, 0, size);
-    /* A message's rows go after the body: they are encoded, then placed. */
-    PureJsonMessage b = {.module = c->module, .shape = shape, .given = c->given, .rows_base = payload};
+    /* A message's rows go after the body, from an 8-byte boundary of the ingress (malloc's, so of memory): they are
+     * encoded, then placed, each rows field's from a boundary too, so its numbers can be read where they are (030). */
+    size_t pad = 0;
+    for (uint32_t f = 0; f < shape->field_count; ++f)
+        if (c->module->field[shape->field_start + f].type == PURE_FIELD_ROWS)
+            pad = (8 - (size_t)(c->body - c->ingress + c->body_size) % 8) % 8; /* (an empty one's start is there too) */
+    PureJsonMessage b = {.module = c->module, .shape = shape, .given = c->given, .rows_base = payload + pad};
     const char *why = NULL;
     /* A batch is an array of its messages' objects. */
     if (c->batch > 1) {
@@ -1054,19 +1059,20 @@ static const char *convert(Connection *c) {
     }
     if (!why && c->batch > 1 && (at == size || json[at++] != ']')) why = "json";
     if (!why && pure_json_space(json, at, size) != size) why = "json";
-    if (!why && b.rows_size) {
+    if (!why && (b.rows_size || pad)) {
         size_t body = (size_t)(c->body - c->ingress);
-        PureResult grown = pure_runtime_grow(c->ticket, body + c->body_size + b.rows_size);
+        PureResult grown = pure_runtime_grow(c->ticket, body + c->body_size + pad + b.rows_size);
         if (grown != PURE_OK) why = grown == PURE_BUDGET ? "payload_budget" : "memory";
         else {
             c->ingress = pure_runtime_ingress(c->ticket, NULL);
             c->body = c->ingress + body;
-            memcpy(c->body + c->body_size, b.rows, b.rows_size);
+            memset(c->body + c->body_size, 0, pad);
+            if (b.rows_size) memcpy(c->body + c->body_size + pad, b.rows, b.rows_size);
         }
     }
     free(b.rows);
     if (why) return why;
-    put_u32(c->ingress, (uint32_t)(payload + b.rows_size) | PLACED | delivered);
+    put_u32(c->ingress, (uint32_t)(payload + pad + b.rows_size) | PLACED | delivered);
     return NULL;
 }
 

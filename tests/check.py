@@ -717,6 +717,59 @@ view count = orders
 """
 
 
+BORROWED_ROWS_SOURCE = """record One {
+  n = 0
+}
+state seen: list of One
+state total = 0
+input batch = message {
+  rows: list of One
+}
+on batch {
+  for r in batch.rows {
+    seen.append(One { n: r.n })
+    total = total + r.n
+  }
+}
+view count = seen.count
+view sum = total
+"""
+
+
+def server_borrowed_rows(aup, pure, work):
+    """A message's rows of one field read where the payload has them (030's step 1), through the host's JSON, where an
+    empty rows is an address inside the body that is not the list's to free: empty rows twice and then rows, rows with
+    empty ones between, an empty one and then the host stopped, and aup's linebreak example (its line message is such
+    rows) given empty lines between real ones. The host lives through each (a host that freed a body's address would
+    abort), exits cleanly, and its views say what the rows did."""
+    module, source = work / 'borrowed.pmod', work / 'borrowed.aup'
+    source.write_text(BORROWED_ROWS_SOURCE)
+    compile_module(aup, source, module)
+    linebreak = work / 'borrowed-linebreak.pmod'
+    compile_module(aup, EXAMPLES / 'linebreak.aup', linebreak)
+    cases = {'empty_twice_then_rows': [[], [], [1, 2]], 'rows_between_empty': [[3], [], [], [4, 5], []], 'empty_then_stop': [[]]}
+    for name, batches in cases.items():
+        host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / f'borrowed-{name}'])
+        try:
+            for rows in batches:
+                assert post(host.port, '/inputs/batch', {'rows': [{'n': n} for n in rows]}) == (200, 'none'), (name, rows)
+            flat = [n for rows in batches for n in rows]
+            seen = [float(http(host.port, 'GET', f'/views/{view}')[3]) for view in ('count', 'sum')]
+            assert seen == [len(flat), sum(flat)], (name, seen)
+        finally:
+            host.stop()  # exit 0, the app stopped too
+    host = HttpHost([pure / 'build/pure-serve', '--module', linebreak, '--store', work / 'borrowed-linebreak'])
+    lines = ([], [], [0x61, 0x20, 0x62], [], [0x31, 0x2C, 0x32], [])
+    try:  # one range, every code point AL (28)
+        row = {'start': 0, 'class': 28, 'pi': False, 'pf': False, 'east': False, 'pictographic': False}
+        assert post(host.port, '/inputs/load', {'rows': [row]}) == (200, 'none')
+        for points in lines:
+            assert post(host.port, '/inputs/line', {'points': [{'code': c} for c in points]}) == (200, 'none'), points
+    finally:
+        host.stop()
+    return {'hosts': len(cases) + 1, 'messages': sum(map(len, cases.values())) + 1 + len(lines)}
+
+
 def server_links(aup, pure, work):
     """Two served apps, one's output wired to the other's input over HTTP
     (--send). While four clients buy from the sender, the receiver and then
@@ -6694,6 +6747,7 @@ def main():
         report['server_app_owner_requests'], report['server_app_owner_acknowledged_before_kill'] = \
             server_app(aup, pure, work, range(args.seeds), threads=3)
         report['server_json_requests'] = server_json(aup, pure, work)
+        report['server_borrowed_rows'] = server_borrowed_rows(aup, pure, work)
         report['server_timer_beats'] = server_timers(aup, pure, work)
         report['server_clocks'] = server_clocks(aup, pure, work)
         report['server_plain_edit'] = server_plain_edit(aup, pure, work)

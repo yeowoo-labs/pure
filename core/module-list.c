@@ -93,6 +93,7 @@ struct PureList {
      * undone, a record, a share) makes them FLAT, or a tree, first. */
     uint8_t form;
     bool arrays;       /* it may be FLAT or DENSE: an event's list */
+    bool borrowed;     /* FLAT, its one column a message's rows where they are (pure_list_borrow): not its to free or change */
     uint8_t flattened; /* DENSE made FLAT since it was cleared: twice, and it stays FLAT or a tree */
     void *columns[16]; /* each field's cells */
     uint8_t width[16]; /* the bytes of a cell in each: array_width */
@@ -973,9 +974,21 @@ static void array_move(PureList *list, size_t to, size_t from, size_t count) {
                     count * list->width[f]);
 }
 
+/* A borrowed list's column its own (copied) before a change in place; false without memory. Each of the three that
+ * change a column's memory (arrays_room, widen, arrays_free) knows a loan: a message's rows are never freed or grown. */
+static bool unborrow(PureList *list) {
+    if (!list->borrowed) return true;
+    void *mine = malloc(list->room * list->width[0]);
+    if (!mine) return false;
+    memcpy(mine, list->columns[0], list->count * list->width[0]);
+    list->columns[0] = mine, list->borrowed = false;
+    return true;
+}
+
 /* Columns of room rows each; false without memory (each as it was or grown). */
 static bool arrays_room(PureList *list, size_t room) {
     const Layout *l = &list->layout;
+    if (!unborrow(list)) return false;
     for (unsigned f = 0; f < l->fields; ++f) {
         if (!list->width[f]) continue;
         void *grown = realloc(list->columns[f], (room ? room : 1) * list->width[f]);
@@ -988,6 +1001,7 @@ static bool arrays_room(PureList *list, size_t room) {
 
 /* Field f's column bytes wide (wider): false without memory (as it was). */
 static bool widen(PureList *list, unsigned f, uint8_t bytes) {
+    if (!unborrow(list)) return false;
     size_t rows = list->form == DENSE || list->form == HASHED ? list->room : list->count;
     void *made = malloc((list->room ? list->room : 1) * bytes);
     if (!made) return false;
@@ -1014,8 +1028,12 @@ static void arrays_free(PureList *list) {
         pack_release(list->pack);
         list->pack = NULL;
         memset(list->columns, 0, sizeof(list->columns));
+    } else if (list->borrowed) { /* a message's */
+        memset(list->columns, 0, sizeof(list->columns));
+        list->borrowed = false;
     } else
-        for (unsigned f = 0; f < 16; ++f) free(list->columns[f]), list->columns[f] = NULL;
+        for (unsigned f = 0; f < 16; ++f)
+            if (list->columns[f]) free(list->columns[f]), list->columns[f] = NULL; /* (a loan given back left none) */
     list->room = 0;
 }
 
@@ -1573,9 +1591,9 @@ static bool positioned(PureList *list) {
 }
 
 /* The list as a tree, for a change logged to be undone or recorded, or to a
- * packed list (whose arrays never change). */
+ * packed list or a borrowed one (whose arrays never change). */
 static bool logged(PureList *list, const PureUndo *undo) {
-    return list->form == TREE || (!undo && !list->journaled && !list->pack) || make_tree(list);
+    return list->form == TREE || (!undo && !list->journaled && !list->pack && !list->borrowed) || make_tree(list);
 }
 
 /* ---- The list */
@@ -1683,6 +1701,10 @@ void pure_list_free(PureList *list) {
 }
 
 void pure_list_clear(PureList *list) {
+    if (list->borrowed) { /* a message's rows go with their event: no column of theirs is kept */
+        arrays_free(list);
+        widths_start(list);
+    }
     bool had = list->count != 0;
     if (had) {
         if (list->pack) let_go_packed(list), arrays_free(list), list->form = TREE;
@@ -1800,6 +1822,29 @@ bool pure_list_arrays(PureList *list) {
 
 unsigned pure_list_form(const PureList *list) { return list->form; }
 
+static bool fits(const Layout *l, unsigned field, double value);
+
+bool pure_list_borrow(PureList *list, const unsigned char *rows, size_t size) {
+    const Layout *l = &list->layout;
+    if (!list->arrays || list->form != FLAT || list->count || l->fields != 1 || l->key >= 0 || list->text_key >= 0 ||
+        pure_cell_text(l->kinds[0]) || l->kinds[0] == PURE_CELL_LIST || !size || size % 8 || size / 8 > PURE_LIST_ITEMS ||
+        (uintptr_t)rows % 8 || __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
+        return false; /* none: nothing to lend (an empty slice's address is inside the payload, not the list's); rows not on
+                       * an 8-byte boundary are read in (the column is read as doubles), as are a big-endian host's */
+    size_t n = size / 8;
+    if (l->kinds[0] != PURE_CELL_INTEGER) /* as decode_cell checks a cell: a number finite, a bool 0 or 1 */
+        for (size_t i = 0; i < n; ++i) {
+            double v;
+            memcpy(&v, rows + 8 * i, 8);
+            if (!fits(l, 0, v)) return false;
+        }
+    arrays_free(list);
+    list->columns[0] = (void *)rows, list->width[0] = 8, list->borrowed = true; /* the loan and its mark in one statement */
+    list->count = list->room = n, list->bytes = n * l->number_bytes;
+    ++list->version;
+    return true;
+}
+
 PureList *pure_list_copied(const PureList *from) {
     const Layout *l = &from->layout;
     if (from->form != FLAT || !from->arrays || from->pack || from->copy || l->key >= 0) return NULL;
@@ -1828,7 +1873,7 @@ bool pure_list_cells(PureList *list, PureCells *out) {
     if (list->form != FLAT && !(list->form == DENSE && pure_list_full(list))) return false;
     const Layout *l = &list->layout;
     out->count = list->count;
-    out->owned = list->arrays && !list->pack && !list->copy;
+    out->owned = list->arrays && !list->pack && !list->copy && !list->borrowed;
     for (unsigned f = 0; f < l->fields; ++f) {
         out->columns[f] = list->columns[f];
         out->width[f] = list->width[f] == 0 || ((l->kinds[f] == PURE_CELL_NUMBER || l->kinds[f] == PURE_CELL_BOOL) &&
@@ -1907,6 +1952,7 @@ static void column_out(void *column, uint8_t bytes, size_t at, const double *val
 
 size_t pure_list_add_many(PureList *list, size_t n, const double *const *fields) {
     const Layout *l = &list->layout;
+    if (!unborrow(list)) return SIZE_MAX;
     for (unsigned f = 0; f < l->fields; ++f) { /* every column wide enough for them all first: widths only grow, as arrays_fit grows them */
         uint8_t now = list->width[f], need = now;
         if ((now != 1 && now != 4) || !narrows(l->kinds[f])) continue;

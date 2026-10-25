@@ -6934,6 +6934,72 @@ static void nested_rows(void) {
     printf("{\"nested_rows\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(cuts) + 1);
 }
 
+/* 030's step 1: a message's rows of one number field read where the payload has them (pure_list_borrow), the list
+ * holding the payload's address until its event ends. An empty slice inside a payload (an address there, not the list's
+ * to free) is not lent, an event's end gives the loan back whatever its size, and a change makes the rows the list's
+ * own first. Messages of rows, empty slices placed inside a payload, rows placed there, then the app stopped: under the
+ * sanitizer a free or a growth of a payload's address stops the test. */
+static void borrowed_rows(void) {
+    enum { SEEN = 1, ROWS = 2 };
+    static const S nums[] = {{"n", 0}};
+    static const RF one_fields[] = {{"n", 0, 0}};
+    static const R records[] = {{"One", one_fields, 1}};
+    static const T others[] = {{"seen", 3, 0}, {"batch.rows", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}};
+    static const F fields[] = {{"rows", PURE_FIELD_ROWS | ROWS << 8}};
+    static const I inputs[] = {{"batch", NULL, PURE_KIND_MESSAGE, fields, 1}};
+    static const O code[] = { /* for r in batch.rows { seen.append(One { n: r.n }); n += r.n } */
+        {EACH, WALKING(ROWS, 8), 0}, {ROW, ROWS, 0}, {IG, ITEM(ROWS, 0), 0}, {LA, SEEN, 0},
+        {L, 0, 0}, {ROW, ROWS, 0}, {IG, ITEM(ROWS, 0), 0}, {ADD, 0, 0}, {ST, 0, 0},
+    };
+    H handler = {1, 0, LEN(code)};
+    Spec spec = {nums, 1, inputs, 1, NULL, 0, &handler, 1, code, LEN(code), NULL, 0, others, LEN(others), NULL, 0, NULL, 0,
+                 records, 1, NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "borrowed rows: %s\n", error); abort(); }
+    unsigned char body[32];
+    for (int k = 0; k < 4; ++k) put_double(body + 8 * k, k + 2); /* rows 2, 3, 4, 5 */
+    /* each message: its payload's size, where its rows are placed (none: after the prefix), and n and seen after it */
+    static const struct { size_t size; uint32_t start, rows; bool placed; double n; size_t seen; } sent[] = {
+        {8, 0, 0, false, 2, 1}, {16, 8, 0, true, 2, 1}, {16, 8, 0, true, 2, 1}, {32, 8, 16, true, 9, 3},
+        {32, 32, 0, true, 9, 3}, {32, 0, 0, false, 23, 7}, {32, 0, 0, true, 23, 7}, {24, 16, 8, true, 27, 8},
+    };
+    PureApp app;
+    for (int stop_after = 2; stop_after <= (int)LEN(sent); stop_after += (int)LEN(sent) - 2) { /* stopped after an empty one too */
+        CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+        for (int k = 0; k < stop_after; ++k) {
+            uint32_t placed[2] = {sent[k].start, sent[k].rows};
+            PureSpan payload = {body, sent[k].size};
+            CHECK((sent[k].placed ? pure_app_message_fields(&app, 0, payload, placed) : pure_app_message(&app, 0, payload)) == PURE_OK);
+            CHECK(app.values[0].num == sent[k].n && pure_list_count(app.lists[SEEN]) == sent[k].seen);
+            PureCells cells; /* the event is over: its rows are gone, and no address of the payload is kept */
+            CHECK(pure_list_count(app.lists[ROWS]) == 0 && (!pure_list_cells(app.lists[ROWS], &cells) ||
+                  (uintptr_t)cells.columns[0] < (uintptr_t)body || (uintptr_t)cells.columns[0] > (uintptr_t)(body + 32)));
+        }
+        pure_app_stop(&app);
+    }
+    /* The list's loans as such: none of an empty slice (nothing done), the payload's address while lent, given back by
+     * clear, and its own before it grows. */
+    static const uint8_t kinds[] = {PURE_CELL_NUMBER};
+    PureList *list = pure_list_new(1, kinds);
+    CHECK(list && pure_list_arrays(list));
+    PureCells cells;
+    CHECK(pure_list_cells(list, &cells));
+    void *own = cells.columns[0];
+    CHECK(!pure_list_borrow(list, body + 8, 0) && pure_list_count(list) == 0 && pure_list_cells(list, &cells) && cells.columns[0] == own);
+    CHECK(pure_list_borrow(list, body + 8, 16) && pure_list_count(list) == 2 && pure_list_cells(list, &cells) &&
+          cells.columns[0] == (void *)(body + 8) && !cells.owned && pure_list_get(list, 1, 0).num == 4);
+    pure_list_clear(list);
+    CHECK(pure_list_count(list) == 0 && pure_list_cells(list, &cells) && cells.columns[0] != (void *)(body + 8));
+    CHECK(pure_list_borrow(list, body, 32));
+    const double six = 6, *column = &six;
+    CHECK(pure_list_add_many(list, 1, &column) != SIZE_MAX && pure_list_count(list) == 5 && pure_list_cells(list, &cells) &&
+          cells.columns[0] != (void *)body && pure_list_get(list, 0, 0).num == 2 && pure_list_get(list, 4, 0).num == 6);
+    double first;
+    memcpy(&first, body, 8);
+    CHECK(first == 2); /* the payload as it was */
+    pure_list_free(list);
+    printf("{\"borrowed_rows\":{\"messages\":%zu,\"stopped\":2}}\n", LEN(sent));
+}
+
 /* 027's 4b: a record field holding bytes. A message's bytes (any, UTF-8 or not) go into a list's item and come back
  * as they were; a text goes where bytes go only as bytes (BYTES_FROM), and bytes never where a text goes. Replaced, a
  * text field becomes a bytes field keeping its value, and a new bytes field takes its constant. */
@@ -7576,6 +7642,7 @@ int main(void) {
     nested_crashes();
     nested_replace();
     nested_rows();
+    borrowed_rows();
     bytes_fields();
     anchors();
     list_views();

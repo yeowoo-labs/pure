@@ -218,6 +218,12 @@ unsigned pure_list_form(const PureList *);
  * columns copied whole (what inserting its items one by one into a new list gives, in its form). NULL for any other
  * list (copy it item by item) or without memory. */
 PureList *pure_list_copied(const PureList *);
+/* An empty event's list of one field (a number, a bool or an integer, not keyed) given a message's rows of it where
+ * they are: each 8 bytes, the cells as the stored form has them (each checked as reading it would check it), its FLAT
+ * column (030's step 1: read, not copied). It is not its own: a change makes it its own first, and it must be emptied
+ * (pure_list_clear, which gives the rows back whatever their size) before the rows go. false when it is not such a list,
+ * the rows are none or not on an 8-byte boundary, the host is not little-endian, or a cell does not fit (nothing done). */
+bool pure_list_borrow(PureList *, const unsigned char *rows, size_t size);
 /* Field of the item whose key_field is key, in a list ordered by key_field
  * (seek, then get, as one: a DENSE list reads it at its key); false when no
  * item has key. */

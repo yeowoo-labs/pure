@@ -421,7 +421,10 @@ static const char *items_of(PureJsonMessage *b, unsigned char *json, size_t size
 static const char *rows_of(PureJsonMessage *b, unsigned char *json, size_t size, size_t *at, uint32_t f, unsigned depth) {
     const PureModule *m = b->module;
     const PureField *field = &m->field[b->shape->field_start + f];
-    size_t start = b->rows_size;
+    size_t start = (b->rows_size + 7) & ~(size_t)7; /* from a boundary (rows_base is one): its cells read where they are */
+    if (!rows_room(b, start - b->rows_size)) return "memory";
+    memset(b->rows + b->rows_size, 0, start - b->rows_size);
+    b->rows_size = start;
     const char *why = items_of(b, json, size, at, m->state_ref[field->rows], depth);
     if (why) return why;
     if (b->rows_base + b->rows_size > UINT32_MAX >> 2) return "limit";

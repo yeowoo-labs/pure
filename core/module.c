@@ -5600,8 +5600,9 @@ static PureResult message(PureApp *app, uint32_t input, PureSpan payload, const 
             bool made, bad = false;
             value_take(app, record, rows, spans[f][1], app->lists[field->rows], &made, &bad);
             filled = made ? PURE_OK : bad ? PURE_STORE_ERROR : PURE_ALLOCATION;
-        } else
-            filled = pure_list_read(app->lists[field->rows], rows, spans[f][1]);
+        } else /* rows of one field read where the payload has them (030's step 1), else read in */
+            filled = pure_list_borrow(app->lists[field->rows], rows, spans[f][1]) ? PURE_OK
+                                                                                  : pure_list_read(app->lists[field->rows], rows, spans[f][1]);
         if (filled == PURE_OK) continue;
         clear_rows(app, input);
         if (nested) drop_nested(app);
