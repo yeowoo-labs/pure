@@ -16,7 +16,14 @@ Written before the emitted code ran (what would break the stage):
   app), the lists' reads and writes (some 450 a block through the generic list API) staying as they are.
 - Covered: every instruction inside the block loop written out (none handed to the executor's step); what is handed
   on is the message's once (the constants' appends, the padding, the digest's text).
-Not a bar of 049 (T_b against T_a): this is T_a's first rung, its absolute numbers."""
+Not a bar of 049 (T_b against T_a): this is T_a's first rung, its absolute numbers.
+
+Found after the first runs (2026-10-25): of the 56k machine instructions a block that writing the i64 conversions out
+took away (109,671 to 53,238), some 35.5k were the call to pure_cell_as and some 21k cc's folding of the constants it
+then saw (a shift's count, 32 - n, the guards on them): with every constant hidden from cc (EMIT_OPAQUE=1, an empty asm
+on each), 74,114 and 22,537 cycles. An emitter that folds nothing meets the hidden number; the folded one needs the
+constants as facts (the verifier's, as its heights are) or folding of its own. Which one T_b is held to is written
+before T_b runs."""
 import json
 import os
 import subprocess
@@ -56,6 +63,7 @@ def main():
         line = {'stage': 1, 'way': way, **lines[way]}
         if way == 'emitted':
             line['covered'] = covered
+            line['constants_hidden'] = bool(os.environ.get('EMIT_OPAQUE'))  # emit.py's EMIT_OPAQUE: cc folds none
         with open(out, 'a') as f:
             f.write(json.dumps(line) + '\n')
         print(json.dumps(line), flush=True)

@@ -31,6 +31,7 @@ NUMBER_OPS = {'ADD': 'a + b', 'SUB': 'a - b', 'MUL': 'a * b', 'LT': 'a < b', 'LE
               'EQ': 'a == b', 'NE': 'a != b', 'AND': 'a != 0 && b != 0', 'OR': 'a != 0 || b != 0', 'MIN': 'minimum(a, b)',
               'MAX': 'maximum(a, b)'}
 REFUSED = {'EACH', 'FOLD', 'CALL', 'RETURN', 'LIST_BIND', 'ROW', 'OUTER_ROW'}  # they need the executor's frame around them
+OPAQUE = bool(__import__('os').environ.get('EMIT_OPAQUE'))  # EMIT_OPAQUE=1: constants hidden from cc (no folding)
 
 
 def literal(bits):
@@ -95,6 +96,8 @@ class Emitter:
             native = True
             if name == 'CONST':
                 self.out(f'{s(0)}.i64 = {literal(self.code[pc][3])};', indent)
+                if OPAQUE:  # the constant hidden from cc: what an emitter that folds nothing knows at the next instruction
+                    self.out(f'__asm__("" : "+r"({s(0)}.i64));', indent)
             elif name == 'LOAD':
                 self.out(f'{s(0)}.i64 = values[{arg}].i64;', indent)
             elif name in ('STORE', 'CUR_STORE'):
