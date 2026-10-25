@@ -7327,7 +7327,51 @@ static void floor_division(void) {
           app.values[4].num == 0 && signbit(app.values[4].num) && app.values[5].num == floor(quotient));
     CHECK(press(&app, 1) == PURE_INVALID && app.fault == PURE_FAULT_DIVIDE && app.values[0].num == 3);
     pure_app_stop(&app);
-    printf("{\"floor_division\":6}\n");
+    /* Wholes are divided as integers (no fmod): each pair's quotient and remainder are what binary64 gives, bit for bit,
+     * zeros signed alike, for pairs of every sign and size, those past 2^53 and fractions too (left to binary64). */
+    static const S two[] = {{"q", 0}, {"r", 0}};
+    static const F pair_fields[] = {{"a", PURE_FIELD_NUMBER}, {"b", PURE_FIELD_NUMBER}};
+    static const I pair_in[] = {{"pair", NULL, PURE_KIND_MESSAGE, pair_fields, 2}};
+    static const O pair_code[] = {{FIELD, 0, 0}, {FIELD, 1, 0}, {FDIV, 0, 0}, {ST, 0, 0},
+                                  {FIELD, 0, 0}, {FIELD, 1, 0}, {PURE_OP_MOD, 0, 0}, {ST, 1, 0}};
+    static const H pair_handler[] = {{1, 0, 8}};
+    Spec pairs = SPEC(two, pair_in, none, pair_handler, pair_code);
+    pairs.nv = 0;
+    if (load(pairs, &module_b) != PURE_OK) { fprintf(stderr, "floor division pairs: %s\n", error); abort(); }
+    CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
+    static const double edges[] = {0.0, -0.0, 1, -1, 2, -2, 3, -3, 7, -7, 0x1p53 - 1, -0x1p53 + 1, 0x1p53, -0x1p53, 0x1p53 + 2,
+                                   0x1p62, -0x1p63, 1e300, -1e300, 0.5, -2.5, 4503599627370495.5};
+    uint32_t seed = 0x6469763fu;
+    size_t pairs_checked = 0;
+    for (unsigned k = 0; k < 200000; ++k) {
+        double a, b;
+        if (k < LEN(edges) * LEN(edges)) a = edges[k / LEN(edges)], b = edges[k % LEN(edges)];
+        else {
+            uint64_t r = (uint64_t)next_random(&seed) << 32 | next_random(&seed);
+            int shift = (int)(r % 64); /* sizes from 1 up to past 2^63 */
+            a = (double)((int64_t)(r >> 1) >> shift) * (r & 1 ? -1 : 1);
+            r = (uint64_t)next_random(&seed) << 32 | next_random(&seed);
+            b = (double)((int64_t)(r >> 1) >> (r % 64 < 40 ? 40 + r % 23 : r % 64)) * (r & 1 ? -1 : 1);
+        }
+        if (b == 0) continue;
+        unsigned char payload[16];
+        memcpy(payload, &a, 8), memcpy(payload + 8, &b, 8);
+        double mod = fmod(a, b), want_r = mod;
+        if (want_r != 0 && (want_r < 0) != (b < 0)) want_r += b;
+        else if (want_r == 0) want_r = copysign(0.0, b);
+        double quotient = (a - mod) / b, want_q;
+        if (mod != 0 && (b < 0) != (mod < 0)) quotient -= 1.0;
+        if (quotient == 0) want_q = copysign(0.0, a / b);
+        else want_q = quotient - floor(quotient) > 0.5 ? floor(quotient) + 1.0 : floor(quotient);
+        bool finite = isfinite(want_q) && isfinite(want_r);
+        PureResult got = pure_app_message(&app, 0, (PureSpan){payload, 16});
+        CHECK(finite ? got == PURE_OK : got != PURE_OK);
+        if (!finite) continue;
+        CHECK(!memcmp(&app.values[0].num, &want_q, 8) && !memcmp(&app.values[1].num, &want_r, 8));
+        ++pairs_checked;
+    }
+    pure_app_stop(&app);
+    printf("{\"floor_division\":{\"cases\":6,\"pairs\":%zu}}\n", pairs_checked);
 }
 
 /* A number is written with the fewest digits that read back as it, the

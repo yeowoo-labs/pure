@@ -1541,12 +1541,41 @@ static uint32_t nesting_of(const PureModule *m) {
 
 /* a // b for numbers as Python's float floor division: the quotient of a less its floored remainder, rounded to the
  * nearest whole (it is one but for rounding), a zero with the sign of a / b (027's stage 5). b is not 0. */
+/* Whole a and b, each below 2^53 in size (so every step is exact in an i64): a // b and a % b as floor_divide and MOD
+ * give them in binary64, bit for bit, zeros signed alike (030: the executor divides wholes as integers, no fmod; whole
+ * is checked here, as a proof (N1) would only spare these few compares). false otherwise. */
+static inline bool whole_pair(double a, double b) {
+    return fabs(a) < 0x1p53 && fabs(b) < 0x1p53 && a == (double)(int64_t)a && b == (double)(int64_t)b;
+}
+static inline double whole_divide(double a, double b) {
+    int64_t x = (int64_t)a, y = (int64_t)b, q = x / y;
+    if (x % y && (x < 0) != (y < 0)) --q;
+    return q ? (double)q : copysign(0.0, a / b);
+}
+static inline double whole_mod(double a, double b) {
+    int64_t x = (int64_t)a, y = (int64_t)b, r = x % y;
+    if (r && (r < 0) != (y < 0)) r += y;
+    return r ? (double)r : copysign(0.0, b);
+}
+
 static double floor_divide(double a, double b) {
     double mod = fmod(a, b), quotient = (a - mod) / b;
     if (mod != 0 && (b < 0) != (mod < 0)) quotient -= 1.0;
     if (quotient == 0) return copysign(0.0, a / b);
     double whole = floor(quotient);
     return quotient - whole > 0.5 ? whole + 1.0 : whole;
+}
+
+/* FLOORDIV's and MOD's values, out of the step (its code and registers as they were: a branch in there costs every op). */
+static __attribute__((noinline)) double floor_quotient(double a, double b) {
+    return whole_pair(a, b) ? whole_divide(a, b) : floor_divide(a, b);
+}
+static __attribute__((noinline)) double modulo(double a, double b) { /* the divisor's sign, as floor division leaves it */
+    if (whole_pair(a, b)) return whole_mod(a, b);
+    double value = fmod(a, b);
+    if (value != 0 && (value < 0) != (b < 0)) value += b;
+    else if (value == 0) value = copysign(0.0, b);
+    return value;
 }
 
 /* A name and its place among those of one namespace, in order of name and then of place. */
@@ -4731,13 +4760,11 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
     case PURE_OP_MIN: value = minimum(a, b); break;
     case PURE_OP_MOD: /* the divisor's sign, as floor division leaves it (a zero too) */
         if (b == 0) { kind = PURE_FAULT_DIVIDE; FAILED; }
-        value = fmod(a, b);
-        if (value != 0 && (value < 0) != (b < 0)) value += b;
-        else if (value == 0) value = copysign(0.0, b);
+        value = modulo(a, b);
         break;
     case PURE_OP_FLOORDIV: /* MOD's quotient, exactly (027's stage 5): a less its remainder, divided, as Python's // */
         if (b == 0) { kind = PURE_FAULT_DIVIDE; FAILED; }
-        value = floor_divide(a, b);
+        value = floor_quotient(a, b);
         break;
     default: value = maximum(a, b); break;
     }
