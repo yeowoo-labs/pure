@@ -2213,6 +2213,56 @@ def module_lent_values(aup, pure, work):
     return {'events': 6, 'paths': 3}
 
 
+LIST_VALUES_SOURCE = """record Item {
+  v = 0
+}
+record Bag {
+  items: list of Item
+}
+state kept = 0
+state seen = 0
+input go = message { k: u32 }
+fn total(b) = sum(x.v for x in b.items)
+on go {
+  let ws: list of Item
+  ws.append(Item { v: 5 })
+  let d = Bag { items: ws }
+  ws.append(Item { v: 1 })
+  let bags: list of Bag
+  bags.append(d)
+  bags[0].items.append(Item { v: 7 })
+  let e = Bag { items: bags[0].items }
+  bags[0].items.append(Item { v: 9 })
+  bags.append(e)
+  bags[1].items.append(Item { v: 100 })
+  for i in 0 .. go.k { bags[0].items.append(Item { v: 1000 }) }
+  kept = total(d) * 1000000 + total(e) * 1000 + total(bags[0]) - go.k * 1000
+  seen = total(bags[1])
+}
+"""
+
+
+def module_list_values(aup, pure, work):
+    """A list in a record is a value: an append into a cell's list (APPEND_IN) leaves every other holder of it as it
+    was, a local's (d, e) as much as another cell's (bags[1]) or a register's. The holders it counted were cells and
+    registers, not values (one made, d; one read from a cell, e), so d and e changed with bags[0] (with k 3, kept was
+    3,024,021,021 and seen 121). The three paths."""
+    import os
+    import struct
+    source, module = work / 'list_values.aup', work / 'list_values.pmod'
+    source.write_text(LIST_VALUES_SOURCE)
+    compile_module(aup, source, module)
+    for k in (0, 3):
+        commands = f'message go {struct.pack("<I", k).hex()}\n' * 2
+        for env in ({'PURE_JIT': 'all'}, {'PURE_JIT': '0'}, {'PURE_JIT': '0', 'PURE_BATCH': '0'}):
+            done = subprocess.run([str(pure / 'build/pure-run'), str(module)], input=commands, capture_output=True, text=True,
+                                  timeout=120, env=dict(os.environ, **env))
+            assert done.returncode == 0, (k, env, done.returncode, done.stderr[-500:])
+            states = json.loads(done.stdout.splitlines()[-1])['states']
+            assert (states['kept'], states['seen']) == (5012021, 112), (k, env, states)  # d [5], e [5, 7], bags[0] [5, 7, 9, ...]
+    return {'events': 4, 'paths': 3}
+
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -6881,6 +6931,7 @@ def main():
         report['module_assumptions'] = module_assumptions(aup, pure, work)
         report['module_event_lists'] = module_event_lists(aup, pure, work)
         report['module_lent_values'] = module_lent_values(aup, pure, work)
+        report['module_list_values'] = module_list_values(aup, pure, work)
         report['module_specs'] = module_specs(aup, pure, work)
         report['module_tier'] = module_tier(aup, pure, work)
         report['server_documents_requests'] = sum(server_documents(aup, pure, work, range(args.seeds), threads=threads)

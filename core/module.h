@@ -643,9 +643,11 @@ typedef struct {
     /* The values an event or a view's body holds by name (BYTES_STORE): emptied as it begins. */
     /* A value of the event's payload, arguments or constants is held as it is (by_ref: ref, nothing copied). */
     struct { unsigned char *data; size_t size, capacity; PureBytes ref; bool by_ref; } held[PURE_MODULE_HELD];
-    /* The lists in records an event or a view's body made (LIST fields: a value is a number here, 1 on), how many
-     * values share each (PURE_NESTED_LENT: an event's list itself, lent by LIST_VALUE: shared, so a change copies it
-     * first, and never freed here), and the bound lists' own (a register's list while another is bound to it). */
+    /* The lists in records an event or a view's body made (LIST fields: a value is a number here, 1 on), how many hold
+     * each (cells and registers, counted up and down, and values: one made holds its list, and one read from a cell, for
+     * good, as a value's end is not seen; APPEND_IN appends in place only into a list its cell alone holds), with
+     * PURE_NESTED_LENT for an event's list itself, lent by LIST_VALUE (030's N4: shared, never freed here); and the bound
+     * lists' own (a register's list while another is bound to it). */
     struct { PureList **list; uint32_t *shared; size_t count, capacity; } nested;
     PureList **unbound;
     uint32_t *bound, bound_count; /* the registers bound since the last unbind (each once): what unbind gives back */

@@ -6521,7 +6521,9 @@ static void formats_and_held(void) {
  * A Node's kids are a list of Leaf. A list made a value (LIST_VALUE) is a
  * copy; a value stored in a second cell shares the list, and an append into
  * either (APPEND_IN) makes that cell's own first; a register (LIST_BIND)
- * reads the list as it was bound, appends after it go to a copy. */
+ * reads the list as it was bound, appends after it go to a copy. A value
+ * holds its list too (one made, and one read from a cell): an append into a
+ * cell another value holds goes to a copy (check.py's module_list_values). */
 enum { LV = PURE_OP_LIST_VALUE, BIND = PURE_OP_LIST_BIND, AIN = PURE_OP_APPEND_IN };
 #define NEXT_DIGIT(list) {L, 0, 0}, {C, 0, 10}, {MUL, 0, 0}, {LC, list, 0}, {ADD, 0, 0}, {ST, 0, 0}
 

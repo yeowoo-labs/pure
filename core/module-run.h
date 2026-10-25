@@ -66,13 +66,14 @@ static inline bool number_op(uint8_t op, double a, double b, double *out) {
     return isfinite(value);
 }
 
-/* An item's or a key's op->plan: its cell a text; a FIND joined to the ITEM_GET after it; a FIND whose row an ITEM_SET
+/* An item's or a key's op->plan: its cell a text; an ITEM_GET of an event's list's list field (PLAN_HOLDS, JOINED's bit:
+ * the value read holds that list, so it is counted, 030); a FIND joined to the ITEM_GET after it; a FIND whose row an ITEM_SET
  * takes; a LOOP whose block a batch may run (module-batch.c); a LOCAL_STORE ending x = e of a recurrence in such a block;
  * such a LOOP whose block begins if slot >= L.count { break } (L only grows in it: a batch runs to L's count as it opens);
  * an EACH in a batch's block whose items' rounds may run apart (spread: no break, its locals its items' own or reductions);
  * a HAS in a batch's block beginning if !L.has(k) { ... } whose code only adds to L (a filter: L only grows, so a batch asks
  * each round as it opens and again, in the rounds' order, at its end). */
-enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_ROW = 4, PLAN_BATCH = 8, PLAN_RECUR = 16, PLAN_GUARD = 32, PLAN_SPREAD = 64, PLAN_FILTER = 128 };
+enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_HOLDS = 2, PLAN_ROW = 4, PLAN_BATCH = 8, PLAN_RECUR = 16, PLAN_GUARD = 32, PLAN_SPREAD = 64, PLAN_FILTER = 128 };
 #define PURE_REUSE_KEPT UINT32_MAX /* reuse_from at a root whose value later copies of its code take */
 
 /* An item instruction's argument: its list and its field. */

@@ -2339,6 +2339,9 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t pc = 0; pc < out->code_count; ++pc) {
         PureOp *op = &out->code[pc];
         if (op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET) op->plan = bytes_field(out, list_of(op->arg), item_field(op->arg));
+        if (op->op == PURE_OP_ITEM_GET && !op->plan &&
+            out->record_field_type[out->record[out->state_ref[list_of(op->arg)]].first + item_field(op->arg)] == PURE_RECORD_LIST)
+            op->plan = PLAN_HOLDS; /* an event's list's list field: the value read holds that list */
         else if (op->op == PURE_OP_LIST_FIND || op->op == PURE_OP_LIST_HAS)
             op->plan = (op->plan & PLAN_FILTER) | text_field(out, op->arg, out->state_key[op->arg] - 1u);
     }
@@ -2848,7 +2851,7 @@ static uint64_t nest(PureApp *app, uint32_t record, const PureList *from) {
         if (m->record_nested[record]) share_cells(app, m, record, cells);
     }
     app->nested.list[app->nested.count] = list;
-    app->nested.shared[app->nested.count] = 0;
+    app->nested.shared[app->nested.count] = 1; /* the value made holds it (a value is never counted again: so for good) */
     return ++app->nested.count;
 }
 
@@ -4340,8 +4343,11 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (at >= pure_list_count(app->lists[list])) { kind = PURE_FAULT_NOT_FOUND; FAILED; }
         PureCell cell = pure_list_get(app->lists[list], at, field);
         /* A text is copied: the item may change or go before the value is used. */
-        if (!(op->plan & PLAN_TEXT)) top->i64 = cell.i64; /* the bits: a number's, a bool's or an i64's (else a text) */
-        else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) STOPPED(status);
+        if (!(op->plan & (PLAN_TEXT | PLAN_HOLDS))) top->i64 = cell.i64; /* the bits: a number's, a bool's or an i64's */
+        else if (op->plan & PLAN_HOLDS) { /* a list's number: the value holds it too, so an append into the cell copies */
+            top->i64 = cell.i64;
+            if (cell.i64) ++app->nested.shared[cell.i64 - 1];
+        } else if ((status = keep_bytes(arena, cell.text, cell.size, &top->bytes)) != PURE_OK) STOPPED(status);
         NEXT;
     }
     case PURE_OP_ITEM_SET: {
