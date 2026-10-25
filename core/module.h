@@ -449,6 +449,11 @@ typedef struct {
     /* Each function's sets of states (state_words each): the event's lists and the registers its code names, each
      * call's own, and the lists not an event's it changes (or a function it calls does). */
     uint64_t *function_lists, *function_registers, *function_changes;
+    /* Each input's sets of states (state_words each), from its handlers' code and the functions they call (set at load):
+     * the event's lists to empty as its event ends (those its handlers name, not the registers, and its message's rows),
+     * and the stored lists they name (to settle as it ends: docs/design/022). What an event never touches is never
+     * walked for it (030's step 1). */
+    uint64_t *event_clears, *event_settles;
     uint8_t *signature_type;
     uint16_t *signature_record;
     bool calls; /* it has functions: its blocks run in the executor that calls (module.c) */
@@ -634,6 +639,7 @@ typedef struct {
      * values share each, and the bound lists' own (a register's list while another is bound to it). */
     struct { PureList **list; uint32_t *shared; size_t count, capacity; } nested;
     PureList **unbound;
+    uint32_t *bound, bound_count; /* the registers bound since the last unbind (each once): what unbind gives back */
     /* Calls (027's 2c): the frames of those open, in blocks that never move (code points into a frame), the block in
      * use and how much of it; and the event's lists calls let go, emptied, each state's for its next calls. */
     struct { unsigned char **blocks; size_t *sizes; unsigned count, at; size_t used; } calls;

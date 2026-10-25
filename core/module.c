@@ -1603,6 +1603,74 @@ PURE_COLD static bool function_names(PureModule *m, uint32_t fn, uint64_t *calls
     return true;
 }
 
+/* The lists a verified block names (as function_names reads them): the event's lists into events (not the registers),
+ * the stored ones into stored (an index's list with it), the functions it calls into calls. */
+PURE_COLD static void block_names(const PureModule *m, PureBlock block, uint64_t *events, uint64_t *stored, uint64_t *calls) {
+    for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
+        const PureOp *op = &m->code[pc];
+        uint32_t arg = op->arg, list = UINT32_MAX;
+        switch (op->op) {
+        case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: case PURE_OP_LIST_COUNT:
+        case PURE_OP_LIST_VALUE: case PURE_OP_LIST_BIND: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_INDEX_AT:
+        case PURE_OP_BYTES_OF: case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS:
+            list = arg;
+            break;
+        case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: case PURE_OP_APPEND_IN: case PURE_OP_KEPT_GET: case PURE_OP_KEPT_SET:
+        case PURE_OP_KEPT_APPEND: case PURE_OP_KEPT_INSERT: case PURE_OP_KEPT_APPEND_IN:
+            list = list_of(arg);
+            break;
+        case PURE_OP_EACH: case PURE_OP_FOLD: list = arg >> 8 & 0xFF; break;
+        case PURE_OP_LOCAL_LOAD: case PURE_OP_LOCAL_STORE: if ((arg >> 8 & 0xFF) == 1) list = arg >> 16; break;
+        case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: case PURE_OP_INDEX_MOVE: case PURE_OP_INDEX_NUM:
+            if (arg < m->states) list = m->state_ref[arg];
+            break;
+        case PURE_OP_CALL: if (arg < PURE_MODULE_FUNCTIONS) *calls |= UINT64_C(1) << arg; break;
+        default: break;
+        }
+        if (event_list_state(m, list)) {
+            if (events && !bound_list(m, list)) states_add(events, list);
+        } else if (state_of(m, list, PURE_STATE_LIST)) states_add(stored, list);
+    }
+}
+
+/* 030's step 1: each input's lists to empty and to settle as its event ends (event_clears, event_settles): what its
+ * handlers name, with the stored lists the functions they call name (theirs and their calls', until none adds), and
+ * its message's rows. false out of memory. */
+PURE_COLD static bool event_sets(PureModule *m) {
+    size_t words = m->state_words;
+    uint64_t *named = calloc((size_t)m->functions * words + 1, sizeof(*named)), calls[PURE_MODULE_FUNCTIONS] = {0};
+    if (!named) return false;
+    for (uint32_t f = 0; f < m->functions; ++f) block_names(m, m->function[f].code, NULL, named + f * words, &calls[f]);
+    for (bool more = m->functions > 0; more;) {
+        more = false;
+        for (uint32_t f = 0; f < m->functions; ++f)
+            for (uint64_t left = calls[f]; left; left &= left - 1)
+                for (size_t w = 0; w < words; ++w) {
+                    uint64_t was = named[f * words + w];
+                    named[f * words + w] |= named[(size_t)__builtin_ctzll(left) * words + w];
+                    more = more || named[f * words + w] != was;
+                }
+    }
+    for (uint32_t h = 0; h < m->handlers; ++h) {
+        uint32_t input = m->handler[h].event;
+        if (input >= m->inputs) continue;
+        uint64_t called = 0, *clears = m->event_clears + (size_t)input * words, *settles = m->event_settles + (size_t)input * words;
+        block_names(m, m->handler[h].code, clears, settles, &called);
+        for (uint64_t left = called; left; left &= left - 1)
+            for (size_t w = 0; w < words; ++w) settles[w] |= named[(size_t)__builtin_ctzll(left) * words + w];
+    }
+    for (uint32_t input = 0; input < m->inputs; ++input) { /* its message's rows fill lists of their own */
+        const PureInputShape *shape = &m->input[input];
+        for (uint32_t f = 0; f < shape->field_count; ++f) {
+            const PureField *field = &m->field[shape->field_start + f];
+            if (field->type == PURE_FIELD_ROWS && field->rows < m->states)
+                states_add(m->event_clears + (size_t)input * words, field->rows);
+        }
+    }
+    free(named);
+    return true;
+}
+
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
     FILE *file = fopen(path, "rb");
     unsigned char *bytes = NULL;
@@ -1654,6 +1722,7 @@ static size_t lay_tables(PureModule *m, uintptr_t base, size_t views, size_t sig
     LAY(function, m->functions), LAY(signature_type, signatures), LAY(signature_record, signatures);
     LAY(function_lists, (size_t)m->functions * m->state_words), LAY(function_registers, (size_t)m->functions * m->state_words);
     LAY(function_changes, (size_t)m->functions * m->state_words);
+    LAY(event_clears, (size_t)m->inputs * m->state_words), LAY(event_settles, (size_t)m->inputs * m->state_words);
 #undef LAY
     return at;
 }
@@ -1674,6 +1743,7 @@ static bool make_tables(PureModule *m, size_t views, size_t signatures) {
         GAP(view_range) GAP(handler) GAP(record_names) GAP(record) GAP(record_nested) GAP(record_held) GAP(record_field_names)
         GAP(record_field_type) GAP(record_field_default) GAP(function) GAP(signature_type) GAP(signature_record)
         GAP(state_transient) GAP(state_counted) GAP(function_lists) GAP(function_registers) GAP(function_changes)
+        GAP(event_clears) GAP(event_settles)
 #undef GAP
         ASAN_POISON_MEMORY_REGION(next - TABLE_GAP, TABLE_GAP);
         at = (size_t)(next - base);
@@ -2149,6 +2219,10 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event + 1, true, 0, NULL, 0, -1, &bad)))
             goto refused;
         if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
+    }
+    if (!event_sets(out)) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
     }
     /* An instruction in no handler's, view's or function's block never runs and was never verified: it becomes CONST 0,
      * so the passes below, which read every instruction's arguments, read only what was verified. */
@@ -2685,10 +2759,14 @@ static uint64_t nest(PureApp *app, uint32_t record, const PureList *from) {
     return ++app->nested.count;
 }
 
-/* The bound lists given back their own, and the event's lists in records let go (an event or a view begins). */
+/* The bound lists given back their own, and the event's lists in records let go (an event or a view begins): those
+ * bound since the last time (LIST_BIND keeps them), not every state. */
 static void unbind(PureApp *app) {
-    for (uint32_t i = 0; i < app->laid; ++i) /* (a start that failed laid none, or none for a module) */
+    for (uint32_t k = 0; k < app->bound_count; ++k) {
+        uint32_t i = app->bound[k];
         if (app->unbound[i]) app->lists[i] = app->unbound[i], app->unbound[i] = NULL;
+    }
+    app->bound_count = 0;
 }
 static void drop_nested(PureApp *app) {
     for (size_t i = 0; i < app->nested.count; ++i) pure_list_free(app->nested.list[i]);
@@ -4436,7 +4514,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
     }
     case PURE_OP_LIST_BIND: { /* the register reads the list (shared: no one changes it in place from now) */
         uint64_t list = (uint64_t)stack[--sp].i64;
-        if (!app->unbound[arg]) app->unbound[arg] = app->lists[arg];
+        if (!app->unbound[arg]) app->unbound[arg] = app->lists[arg], app->bound[app->bound_count++] = arg;
         app->lists[arg] = list ? app->nested.list[list - 1] : app->unbound[arg];
         if (list) ++app->nested.shared[list - 1];
         NEXT;
@@ -5210,7 +5288,7 @@ static size_t lay_states(PureApp *app, uint32_t states, uintptr_t base) {
     LAY(values, states), LAY(texts, states), LAY(lists, states), LAY(list_drafts, states);
     LAY(image_seq, slots), LAY(logged_since, slots), LAY(logged, slots);
     LAY(saved, states), LAY(durable_values, states), LAY(durable_texts, states), LAY(durable_lists, states);
-    LAY(own, states), LAY(unbound, states), LAY(spare, states), LAY(pending, states);
+    LAY(own, states), LAY(unbound, states), LAY(bound, states), LAY(spare, states), LAY(pending, states);
     LAY(marked_texts, states), LAY(marked_lists, states);
 #undef LAY
     return at;
@@ -5224,7 +5302,7 @@ static bool lay_app(PureApp *app, uint32_t states) {
     unsigned char *base = calloc(1, size ? size : 1);
     if (!base) return false;
     lay_states(app, states, (uintptr_t)base);
-    app->states = base, app->laid = states;
+    app->states = base, app->laid = states, app->bound_count = 0;
     return true;
 }
 
@@ -5350,11 +5428,14 @@ static PureResult let_sends_go(PureApp *app, uint32_t output, uint64_t through) 
 static PureResult keep_reply(PureApp *app);
 
 /* Every list of a message's rows emptied: an event's rows are its own. */
-static void clear_rows(PureApp *app) {
+/* An event's end (input's): the registers given back their own, and the event's lists it may have filled emptied
+ * (event_clears: its handlers' and its message's rows; no other event's list holds an item). */
+static void clear_rows(PureApp *app, uint32_t input) {
     const PureModule *m = app->module;
     unbind(app);
-    for (uint32_t i = 0; i < m->states; ++i)
-        if (m->state_type[i] == PURE_STATE_LIST && m->state_flags[i] & PURE_LIST_ROWS >> 8) pure_list_clear(app->lists[i]);
+    const uint64_t *clears = m->event_clears + (size_t)input * m->state_words;
+    for (uint32_t w = 0; w < m->state_words; ++w)
+        for (uint64_t left = clears[w]; left; left &= left - 1) pure_list_clear(app->lists[w * 64 + (uint32_t)__builtin_ctzll(left)]);
 }
 
 void pure_app_memory(PureApp *app, size_t bytes) { app->memory = bytes; }
@@ -5414,14 +5495,18 @@ static PureResult dispatch(PureApp *app, uint32_t event, Event *ev) {
     }
     if (result != PURE_OK) {
         undo_event(app, &mark);
-        clear_rows(app);
+        clear_rows(app, event);
         return result;
     }
-    clear_rows(app);
+    clear_rows(app, event);
     /* No run of a list is open between events: one searched often since it
-     * last changed is packed now (docs/design/022). */
-    for (uint32_t i = 0; i < m->states; ++i)
-        if (app->lists[i]) (void)pure_list_settle(app->lists[i]);
+     * last changed is packed now (docs/design/022): of those the event names. */
+    const uint64_t *settles = m->event_settles + (size_t)event * m->state_words;
+    for (uint32_t w = 0; w < m->state_words; ++w)
+        for (uint64_t left = settles[w]; left; left &= left - 1) {
+            PureList *list = app->lists[w * 64 + (uint32_t)__builtin_ctzll(left)];
+            if (list) (void)pure_list_settle(list);
+        }
     memcpy(app->values, pending, m->states * sizeof(*pending));
     ++app->events;
     ++app->changes;
@@ -5518,7 +5603,7 @@ static PureResult message(PureApp *app, uint32_t input, PureSpan payload, const 
         } else
             filled = pure_list_read(app->lists[field->rows], rows, spans[f][1]);
         if (filled == PURE_OK) continue;
-        clear_rows(app);
+        clear_rows(app, input);
         if (nested) drop_nested(app);
         pure_app_finish(app);
         return filled == PURE_ALLOCATION ? filled : fault(app, PURE_FAULT_LIMIT, UINT32_MAX);
@@ -6060,6 +6145,7 @@ static void let_own_go(PureApp *app) {
         pure_list_free(app->own[i]);
         app->own[i] = app->unbound[i] = NULL;
     }
+    app->bound_count = 0;
 }
 
 bool pure_app_read(PureApp *reader, const PureSnapshot *snapshot) {
@@ -6440,6 +6526,7 @@ static void take_states(PureApp *app, const PureApp *next) {
     app->image_seq = next->image_seq, app->logged_since = next->logged_since, app->logged = next->logged;
     app->saved = next->saved, app->durable_values = next->durable_values, app->durable_texts = next->durable_texts;
     app->durable_lists = next->durable_lists, app->own = next->own, app->unbound = next->unbound, app->spare = next->spare;
+    app->bound = next->bound, app->bound_count = 0;
     app->pending = next->pending, app->marked_texts = next->marked_texts;
     app->marked_lists = next->marked_lists;
 }
