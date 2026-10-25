@@ -4237,7 +4237,10 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
                 STOPPED(status);
             cells[f] = (PureCell){.i64 = stack[base + f].i64, .text = (unsigned char *)span.data, .size = span.size};
         }
-        Held before = list_held(app, list);
+        /* An event's list without a key keeps nothing besides its items (no undo, no journal, no members): what an
+         * item adds is its stored bytes alone (030's step 1: not the eight calls list_held makes). */
+        bool plain = m->state_flags[arg] & PURE_LIST_ROWS >> 8 && !m->state_key[arg];
+        Held before = plain ? (Held){pure_list_size(list), 0} : list_held(app, list);
         status = PURE_INVALID;
         if (m->state_key[arg]) { /* a keyed list places the item by its key: found and placed at once when kept by a number */
             bool found;
@@ -4254,7 +4257,7 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (status != PURE_OK) REFUSED;
         if (m->record_nested[m->state_ref[arg]]) share_cells(app, m, m->state_ref[arg], cells);
         if (m->state_indexed[arg]) move_indices(m, values, arg, pure_list_count(list), at, true);
-        if (!grows(app, before, list_held(app, list))) { kind = PURE_FAULT_MEMORY; FAILED; }
+        if (!grows(app, before, plain ? (Held){pure_list_size(list), 0} : list_held(app, list))) { kind = PURE_FAULT_MEMORY; FAILED; }
         NEXT;
     }
     case PURE_OP_LIST_REMOVE: {
