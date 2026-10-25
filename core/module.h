@@ -373,7 +373,9 @@ typedef struct { uint8_t form, relation; uint16_t field; uint32_t test; PureBloc
  * leaves the rest out anyway, and a fold's or walk's other parts cannot
  * fault (what the skipped items would have run). */
 enum { PURE_MODULE_RANGES = 64 };
-typedef struct { uint8_t lower_relation, upper_relation; PureBlock lower, upper; } PureRange;
+/* whole: the test is those comparisons alone (an item in bounds passes it): a count is the range's length, a first its
+ * first (030's step 1: the tree's order holds what a pass would find). */
+typedef struct { uint8_t lower_relation, upper_relation, whole; PureBlock lower, upper; } PureRange;
 
 
 typedef struct {

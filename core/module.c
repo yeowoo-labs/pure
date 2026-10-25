@@ -1410,6 +1410,7 @@ PURE_COLD static bool block_range(const PureModule *m, PureBlock block, int list
               conjuncts(m, block, nodes, roots[count - 1], tests, &tested) &&
               (faults || count == 1 || faultless(m, block, nodes, roots[0]));
     PureRange range = {0};
+    unsigned bounds = 0;
     for (unsigned k = 0; ok && k < tested; ++k) {
         const Node *node = &nodes[tests[k]];
         uint8_t op = m->code[block.start + tests[k]].op;
@@ -1431,10 +1432,12 @@ PURE_COLD static bool block_range(const PureModule *m, PureBlock block, int list
             if (upper) range.upper_relation = relation == PURE_OP_EQ ? PURE_OP_LE : relation, range.upper = bound;
             bounded = true;
         }
+        bounds += bounded;
         if (!bounded && !faults && !faultless(m, block, nodes, tests[k])) ok = false;
     }
     free(nodes);
     if (!ok || (!range.lower_relation && !range.upper_relation)) return false;
+    range.whole = count == 1 && bounds == tested; /* nothing but the comparisons: the test is the range */
     *out = range;
     return true;
 }
@@ -4327,10 +4330,17 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         }
         if (!charge(app, (uint64_t)inner.length * (to - from))) { kind = PURE_FAULT_WORK; FAILED; } /* as written */
         if (!op->shape || !fold_shaped(m, values, op, list, &per, &fold)) {
-            if (op->range) /* only the items a range of keys allows can count */
-                range_bounds(m, values, &m->range[op->range - 1], list, m->state_key[arg >> 8 & 0xFF] - 1u, &per, &from, &to);
-            status = op->plan ? fold_runs(m, values, inner, list, &per, &fold, from, to)
-                              : fold_rows(m, values, inner, &per, from, to, &fold);
+            const PureRange *range = op->range ? &m->range[op->range - 1] : NULL;
+            bool bounded = range && /* only the items a range of keys allows can count */
+                           range_bounds(m, values, range, list, m->state_key[arg >> 8 & 0xFF] - 1u, &per, &from, &to);
+            if (bounded && range->whole && (fold.how == PURE_FOLD_FIRST || fold.how == PURE_FOLD_COUNT)) {
+                /* every item in bounds passes the test (it is the bounds): the first is theirs, the count their number */
+                fold.any = from < to;
+                fold.total = fold.how == PURE_FOLD_FIRST ? (double)from : (double)(to - from);
+                status = PURE_OK;
+            } else
+                status = op->plan ? fold_runs(m, values, inner, list, &per, &fold, from, to)
+                                  : fold_rows(m, values, inner, &per, from, to, &fold);
             free(fold.seen.keys);
             if (status != PURE_OK) STOPPED(status);
         }
