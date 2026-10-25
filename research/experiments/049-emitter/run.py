@@ -23,7 +23,14 @@ took away (109,671 to 53,238), some 35.5k were the call to pure_cell_as and some
 then saw (a shift's count, 32 - n, the guards on them): with every constant hidden from cc (EMIT_OPAQUE=1, an empty asm
 on each), 74,114 and 22,537 cycles. An emitter that folds nothing meets the hidden number; the folded one needs the
 constants as facts (the verifier's, as its heights are) or folding of its own. Which one T_b is held to is written
-before T_b runs."""
+before T_b runs.
+
+Stage 2's bars, written before T_b ran (T_b: Pure's own one-pass emitter over the same walk, the exact rung):
+- Answers: the 307 digests and the six cut events alike with the executor's, as for T_a.
+- Quality (049's bar): T_b at most 1.25 times the folded T_a's machine instructions and cycles a block (53,238 and
+  16,857). The user chose (2026-10-25) that the verifier keep the constant a slot holds as a fact, as it keeps the
+  slot's height, and that the emitter read it and fold nothing of its own; so T_b is held to the C that cc folded.
+- Covered: every instruction T_a writes out written out by T_b too (handed to the executor's step only what T_a hands)."""
 import json
 import os
 import subprocess
