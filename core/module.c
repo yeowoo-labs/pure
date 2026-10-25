@@ -1703,6 +1703,48 @@ PURE_COLD static bool call_keep_lists(PureModule *m) {
     return true;
 }
 
+/* Whether op changes list (an event's): its items (append, insert, remove), a cell (ITEM_SET), or a cell's list
+ * (APPEND_IN, which may put a new list in the cell). */
+static bool changes_list(const PureModule *m, const PureOp *op, uint32_t list) {
+    switch (op->op) {
+    case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: return op->arg == list;
+    case PURE_OP_ITEM_SET: case PURE_OP_APPEND_IN: return list_of(op->arg) == list;
+    default: (void)m; return false;
+    }
+}
+
+/* 030's N4, proved here: a LIST_VALUE in a handler whose list (an event's, not a register, its record holding no lists)
+ * nothing changes once it ran, so the value can be the list itself (plan 1: lent, not copied). What runs after it in
+ * its event is the rest of its block from the outermost loop around it (jumps go forward only, loops are EACH, LOOP and
+ * a FOLD's block), and the event's later handlers; a function's lists are its own (a call never changes its caller's).
+ * The value's own changes copy it first (a lent value counts as shared). */
+PURE_COLD static void lend_values(PureModule *m) {
+    for (uint32_t h = 0; h < m->handlers; ++h) {
+        PureBlock block = m->handler[h].code;
+        uint32_t end = block.start + block.length;
+        for (uint32_t p = block.start; p < end; ++p) {
+            PureOp *op = &m->code[p];
+            if (op->op != PURE_OP_LIST_VALUE) continue;
+            uint32_t list = op->arg;
+            op->plan = 0;
+            if (!event_list_state(m, list) || bound_list(m, list) || m->record_nested[m->state_ref[list]]) continue;
+            uint32_t from = p + 1; /* the outermost loop around it runs again from its start */
+            for (uint32_t q = block.start; q < p; ++q) {
+                uint8_t o = m->code[q].op;
+                if ((o == PURE_OP_EACH || o == PURE_OP_LOOP || o == PURE_OP_FOLD) && q + 1 + (m->code[q].arg >> 16) > p && q < from)
+                    from = q;
+            }
+            bool changed = false;
+            for (uint32_t q = from; q < end && !changed; ++q) changed = changes_list(m, &m->code[q], list);
+            for (uint32_t later = h + 1; later < m->handlers && !changed; ++later)
+                if (m->handler[later].event == m->handler[h].event)
+                    for (uint32_t q = m->handler[later].code.start; q < m->handler[later].code.start + m->handler[later].code.length && !changed; ++q)
+                        changed = changes_list(m, &m->code[q], list);
+            op->plan = !changed;
+        }
+    }
+}
+
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
     FILE *file = fopen(path, "rb");
     unsigned char *bytes = NULL;
@@ -2258,6 +2300,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         result = PURE_ALLOCATION;
         REFUSE("out of memory", 0);
     }
+    lend_values(out);
     /* An instruction in no handler's, view's or function's block never runs and was never verified: it becomes CONST 0,
      * so the passes below, which read every instruction's arguments, read only what was verified. */
     unsigned char *held = calloc(out->code_count + 1, 1);
@@ -2766,18 +2809,34 @@ static void share_cells(PureApp *app, const PureModule *m, uint32_t record, cons
         if (m->record_field_type[r->first + f] == PURE_RECORD_LIST && cells[f].i64) ++app->nested.shared[cells[f].i64 - 1];
 }
 
+/* Room for one more of the event's lists in records; false out of memory. */
+static bool nested_room(PureApp *app) {
+    if (app->nested.count < app->nested.capacity) return true;
+    size_t capacity = app->nested.capacity ? app->nested.capacity * 2 : 16;
+    PureList **lists = realloc(app->nested.list, capacity * sizeof(*lists));
+    if (lists) app->nested.list = lists;
+    uint32_t *shared = lists ? realloc(app->nested.shared, capacity * sizeof(*shared)) : NULL;
+    if (!shared) return false;
+    app->nested.shared = shared;
+    app->nested.capacity = capacity;
+    return true;
+}
+
+/* An event's list as a value, itself (030's N4: nothing changes it after this, which the load proved): its number, or 0
+ * out of memory. The event's list holds it too (its 1, never given back), so it is always shared and APPEND_IN copies it
+ * before a change; it stays the event's to empty (drop_nested leaves it). */
+#define PURE_NESTED_LENT (UINT32_C(1) << 31)
+static uint64_t lend(PureApp *app, PureList *list) {
+    if (!nested_room(app)) return 0;
+    app->nested.list[app->nested.count] = list;
+    app->nested.shared[app->nested.count] = PURE_NESTED_LENT | 1;
+    return ++app->nested.count;
+}
+
 /* A new list of record's items among the event's (empty, or a copy of from's items): its number, or 0 out of memory. */
 static uint64_t nest(PureApp *app, uint32_t record, const PureList *from) {
     const PureModule *m = app->module;
-    if (app->nested.count == app->nested.capacity) {
-        size_t capacity = app->nested.capacity ? app->nested.capacity * 2 : 16;
-        PureList **lists = realloc(app->nested.list, capacity * sizeof(*lists));
-        if (lists) app->nested.list = lists;
-        uint32_t *shared = lists ? realloc(app->nested.shared, capacity * sizeof(*shared)) : NULL;
-        if (!shared) return 0;
-        app->nested.shared = shared;
-        app->nested.capacity = capacity;
-    }
+    if (!nested_room(app)) return 0;
     PureList *list = from && !m->record_nested[record] ? pure_list_copied(from) : NULL; /* numbers in arrays: at once */
     size_t at = list ? pure_list_count(from) : 0;
     if (!list && !(list = new_list(m, record, false))) return 0;
@@ -2803,7 +2862,8 @@ static void unbind(PureApp *app) {
     app->bound_count = 0;
 }
 static void drop_nested(PureApp *app) {
-    for (size_t i = 0; i < app->nested.count; ++i) pure_list_free(app->nested.list[i]);
+    for (size_t i = 0; i < app->nested.count; ++i)
+        if (!(app->nested.shared[i] & PURE_NESTED_LENT)) pure_list_free(app->nested.list[i]); /* a lent one is its event's */
     app->nested.count = 0;
 }
 
@@ -4548,9 +4608,10 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         top->num = number;
         NEXT;
     }
-    case PURE_OP_LIST_VALUE: { /* a copy of an event's list's items (an empty one is 0, made of nothing) */
+    case PURE_OP_LIST_VALUE: { /* a copy of an event's list's items (an empty one is 0, made of nothing), or the list
+                                  * itself, lent, where nothing changes it after this (plan, N4): its size counted alike */
         if (!pure_list_count(app->lists[arg])) { stack[sp++].i64 = 0; NEXT; }
-        uint64_t made = nest(app, m->state_ref[arg], app->lists[arg]);
+        uint64_t made = op->plan ? lend(app, app->lists[arg]) : nest(app, m->state_ref[arg], app->lists[arg]);
         if (!made) STOPPED(PURE_ALLOCATION);
         if (!grows(app, (Held){0, 0}, (Held){0, pure_list_size(app->nested.list[made - 1])})) { kind = PURE_FAULT_MEMORY; FAILED; }
         stack[sp++].i64 = (int64_t)made;

@@ -328,7 +328,8 @@ const char *pure_fault_name(PureFault);
  * whether it is a text), one in a column may be answered for every row from one
  * pass over its list (shape: its PureShape + 1), and a fold or a walk whose
  * test bounds a keyed list's key reads only the items in bounds (range: its
- * PureRange + 1). */
+ * PureRange + 1). A LIST_VALUE's plan 1: nothing changes its list after it
+ * (030's N4), so the value is that list itself, lent. */
 typedef struct { union { double value; int64_t integer; }; uint32_t arg; uint8_t op, plan, shape, range; } PureOp;
 typedef struct { uint32_t start, length; } PureBlock;
 typedef struct { uint32_t event; PureBlock code; } PureHandler; /* event: the message input it handles (027's 4d) */
@@ -643,7 +644,8 @@ typedef struct {
     /* A value of the event's payload, arguments or constants is held as it is (by_ref: ref, nothing copied). */
     struct { unsigned char *data; size_t size, capacity; PureBytes ref; bool by_ref; } held[PURE_MODULE_HELD];
     /* The lists in records an event or a view's body made (LIST fields: a value is a number here, 1 on), how many
-     * values share each, and the bound lists' own (a register's list while another is bound to it). */
+     * values share each (PURE_NESTED_LENT: an event's list itself, lent by LIST_VALUE: shared, so a change copies it
+     * first, and never freed here), and the bound lists' own (a register's list while another is bound to it). */
     struct { PureList **list; uint32_t *shared; size_t count, capacity; } nested;
     PureList **unbound;
     uint32_t *bound, bound_count; /* the registers bound since the last unbind (each once): what unbind gives back */

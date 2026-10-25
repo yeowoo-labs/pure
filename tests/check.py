@@ -2147,6 +2147,72 @@ def module_event_lists(aup, pure, work):
     return {'events': 10, 'paths': 3}
 
 
+LENT_VALUES_SOURCE = """record Item {
+  v = 0
+}
+record Bag {
+  items: list of Item
+}
+state n1 = 0
+state n2 = 0
+state n3 = 0
+state n4 = 0
+state n5 = 0
+input go = message { k: u32 }
+fn size(b) = b.items.count
+fn total(b) = sum(x.v for x in b.items)
+on go {
+  let xs: list of Item
+  for i in 0 .. go.k { xs.append(Item { v: i }) }
+  let a = Bag { items: xs }
+  n1 = size(a) * 1000 + total(a)
+  let ys: list of Item
+  ys.append(Item { v: 1 })
+  let b = Bag { items: ys }
+  ys.append(Item { v: 2 })
+  n2 = size(b) * 10 + ys.count
+  let zs: list of Item
+  let t = 0
+  for i in 0 .. go.k {
+    zs.append(Item { v: i })
+    let c = Bag { items: zs }
+    t = t + size(c)
+  }
+  n3 = t
+  let ws: list of Item
+  ws.append(Item { v: 5 })
+  let d = Bag { items: ws }
+  let bags: list of Bag
+  bags.append(d)
+  bags[0].items.append(Item { v: 7 })
+  n4 = bags[0].items.count * 10 + ws.count
+  n5 = total(d) * 100 + total(bags[0])
+}
+"""
+
+
+def module_lent_values(aup, pure, work):
+    """030's N4: a list put in a record (LIST_VALUE) is the list itself, lent, where nothing changes it after (a in this
+    app's handler, and d), else a copy: b's list changes after it is taken, c's in the loop around it, and d's value,
+    put in a list of records, is appended to there (which copies it first). The values are what a copy gives each time,
+    on the three paths."""
+    import os
+    import struct
+    source, module = work / 'lent_values.aup', work / 'lent_values.pmod'
+    source.write_text(LENT_VALUES_SOURCE)
+    compile_module(aup, source, module)
+    for k in (0, 3, 5):
+        commands = f'message go {struct.pack("<I", k).hex()}\nmessage go {struct.pack("<I", k).hex()}\n'
+        want = {'n1': k * 1000 + k * (k - 1) // 2, 'n2': 12, 'n3': k * (k + 1) // 2, 'n4': 21, 'n5': 512}
+        for env in ({'PURE_JIT': 'all'}, {'PURE_JIT': '0'}, {'PURE_JIT': '0', 'PURE_BATCH': '0'}):
+            done = subprocess.run([str(pure / 'build/pure-run'), str(module)], input=commands, capture_output=True, text=True,
+                                  timeout=120, env=dict(os.environ, **env))
+            assert done.returncode == 0, (k, env, done.returncode, done.stderr[-500:])
+            states = json.loads(done.stdout.splitlines()[-1])['states']
+            assert {name: states[name] for name in want} == want, (k, env, states)
+    return {'events': 6, 'paths': 3}
+
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -6814,6 +6880,7 @@ def main():
         report['module_ranges'] = module_ranges(aup, pure, work)
         report['module_assumptions'] = module_assumptions(aup, pure, work)
         report['module_event_lists'] = module_event_lists(aup, pure, work)
+        report['module_lent_values'] = module_lent_values(aup, pure, work)
         report['module_specs'] = module_specs(aup, pure, work)
         report['module_tier'] = module_tier(aup, pure, work)
         report['server_documents_requests'] = sum(server_documents(aup, pure, work, range(args.seeds), threads=threads)
