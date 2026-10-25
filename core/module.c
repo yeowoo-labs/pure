@@ -1621,9 +1621,10 @@ PURE_COLD static void block_names(const PureModule *m, PureBlock block, uint64_t
             break;
         case PURE_OP_EACH: case PURE_OP_FOLD: list = arg >> 8 & 0xFF; break;
         case PURE_OP_LOCAL_LOAD: case PURE_OP_LOCAL_STORE: if ((arg >> 8 & 0xFF) == 1) list = arg >> 16; break;
-        case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: case PURE_OP_INDEX_MOVE: case PURE_OP_INDEX_NUM:
+        case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: /* an index state: its list */
             if (arg < m->states) list = m->state_ref[arg];
             break;
+        case PURE_OP_INDEX_MOVE: case PURE_OP_INDEX_NUM: list = arg; break; /* the list itself */
         case PURE_OP_CALL: if (arg < PURE_MODULE_FUNCTIONS) *calls |= UINT64_C(1) << arg; break;
         default: break;
         }
@@ -5723,10 +5724,11 @@ static bool argue(const PureApp *app, uint32_t view, Event *ev) {
 /* The event's lists a view's body changes, empty: a reader's own (its
  * states are a snapshot's, which other readers read), the app's otherwise
  * (empty between events). */
-static bool own_lists(PureApp *app, uint32_t lists) {
+static bool own_lists(PureApp *app, const uint64_t *lists) {
     const PureModule *m = app->module;
-    for (uint32_t left = lists; app->reading && left; left &= left - 1) {
-        unsigned i = (unsigned)__builtin_ctz(left);
+    for (uint32_t w = 0; app->reading && w < m->state_words; ++w)
+    for (uint64_t left = lists[w]; left; left &= left - 1) {
+        unsigned i = w * 64 + (unsigned)__builtin_ctzll(left);
         if (!app->own[i]) {
             if (!(app->own[i] = new_list(m, m->state_ref[i], false))) return false;
             (void)pure_list_keyed(app->own[i], m->state_key[i] ? (int)m->state_key[i] - 1 : -1);
@@ -5749,7 +5751,7 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     if (m->view_body[view]) { /* a body computes: its locals from 0, its lists its own, its additions counted */
         memset(locals, 0, sizeof(locals));
         ev.locals = locals;
-        if (!own_lists(app, m->view_lists[view])) return PURE_ALLOCATION;
+        if (!own_lists(app, m->view_lists + (size_t)view * m->state_words)) return PURE_ALLOCATION;
         app->grown = app->spent = 0;
         app->room = app->memory > PURE_GROWTH_DEFAULT ? app->memory : PURE_GROWTH_DEFAULT;
         for (unsigned i = 0; m->held && i < PURE_MODULE_HELD; ++i) app->held[i].size = 0, app->held[i].by_ref = false;
@@ -5766,7 +5768,13 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
     if (result != PURE_OK) app->view_fault = counted ? app->fault : PURE_FAULT_WORK; /* why it has no value */
     app->fault = fault;
     app->fault_pc = fault_pc;
-    for (uint32_t left = m->view_lists[view]; left; left &= left - 1) pure_list_clear(app->lists[__builtin_ctz(left)]);
+    if (m->view_body[view]) { /* its lists emptied, every word of its set (a view's lists go with its evaluation: no
+                                * event's end empties them); only a body has any (a table's columns, a row at a time, none) */
+        const uint64_t *lists = m->view_lists + (size_t)view * m->state_words;
+        for (uint32_t w = 0; w < m->state_words; ++w)
+            for (uint64_t left = lists[w]; left; left &= left - 1)
+                pure_list_clear(app->lists[w * 64 + (uint32_t)__builtin_ctzll(left)]);
+    }
     return result;
 }
 

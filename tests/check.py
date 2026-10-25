@@ -2067,6 +2067,86 @@ def module_specs(aup, pure, work):
     return runs
 
 
+# 030's step 1: an event's lists by its handlers' code (event_clears), a message's rows of one field borrowed, a view's
+# own lists by every word of its set. Past 64 states, so a set takes two words; registers there too.
+MANY_STATES = ''.join(f'state s{i} = 0\n' for i in range(70))
+EVENT_LISTS_SOURCE = """record Point {
+  code = 0
+}
+record T {
+  a = 0
+}
+record Box {
+  xs: list of number
+}
+""" + MANY_STATES + """state n = 0
+state total = 0
+state last = 0
+state firsts = 0
+state base = 0
+input line = message { points: list of Point }
+input fill = message { k: u32 }
+input bump = message { step: number }
+fn first_of(b) {
+  return b.xs[0] + b.xs.count
+}
+on line {
+  n = n + line.points.count
+  for p in line.points { total = total + p.code }
+}
+on fill {
+  let ys: list of number
+  for i in 0 .. fill.k { ys.append(i) }
+  let b = Box { xs: ys }
+  last = ys.count
+  if fill.k > 0 { firsts = firsts + first_of(b) }
+}
+on bump { base = base + bump.step }
+view counted {
+  let zs: list of T
+  for i in 0 .. 3 { zs.append(T { a: base + i }) }
+  return zs.count
+}
+view summed {
+  let ws: list of T
+  for i in 0 .. 4 { ws.append(T { a: i }) }
+  return sum(w.a for w in ws)
+}
+"""
+
+
+def module_event_lists(aup, pure, work):
+    """030's step 1 where it could go wrong: a message's rows of one field read where the payload has them, with empty
+    messages between (the list must own no column of an empty one), an event's lists past the 64th state emptied by its
+    own end and a register there bound again each event, and a view's own lists past the 64th state emptied by its own
+    evaluation (its set read by every word: a view of this module crashed the executor before). Each path (compiled,
+    batches, the executor alone) gives the same states and views, and they are what they should be."""
+    import os
+    import struct
+    source, module = work / 'event_lists.aup', work / 'event_lists.pmod'
+    source.write_text(EVENT_LISTS_SOURCE)
+    compile_module(aup, source, module)
+    rows = lambda *xs: b''.join(struct.pack('<d', float(x)) for x in xs).hex() or '-'
+    commands = (f'message line {rows(5, 6)}\nmessage line -\nmessage line {rows(1, 2, 3)}\nmessage line -\nmessage line {rows(9)}\n'
+                + ''.join(f'message fill {struct.pack("<I", k).hex()}\n' for k in (4, 0, 7, 1))
+                + f'message bump {rows(10)}\nshow\nshow\n')
+    outputs = {}
+    for name, env in (('all', {'PURE_JIT': 'all'}), ('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'})):
+        done = subprocess.run([str(pure / 'build/pure-run'), str(module), '--views'], input=commands, capture_output=True, text=True,
+                              timeout=120, env=dict(os.environ, **env))
+        assert done.returncode == 0, (name, done.returncode, done.stderr[-500:])
+        outputs[name] = done.stdout
+    assert outputs['all'] == outputs['batches'] == outputs['rounds']
+    shown = [json.loads(line) for line in outputs['rounds'].splitlines()]
+    assert all(s['fault'] == 'none' for s in shown), shown
+    assert [s['views'] for s in shown[-2:]] == [{'counted': 3, 'summed': 6}] * 2, shown[-2:]
+    full = subprocess.run([str(pure / 'build/pure-run'), str(module)], input=commands, capture_output=True, text=True, timeout=120)
+    states = json.loads(full.stdout.splitlines()[-1])['states']
+    want = {'n': 6, 'total': 26, 'last': 1, 'firsts': (0 + 4) + (0 + 7) + (0 + 1), 'base': 10}
+    assert {k: states[k] for k in want} == want, states
+    return {'events': 10, 'paths': 3}
+
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -6733,6 +6813,7 @@ def main():
         work = Path(directory)
         report['module_ranges'] = module_ranges(aup, pure, work)
         report['module_assumptions'] = module_assumptions(aup, pure, work)
+        report['module_event_lists'] = module_event_lists(aup, pure, work)
         report['module_specs'] = module_specs(aup, pure, work)
         report['module_tier'] = module_tier(aup, pure, work)
         report['server_documents_requests'] = sum(server_documents(aup, pure, work, range(args.seeds), threads=threads)
