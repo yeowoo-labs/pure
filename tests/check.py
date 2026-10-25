@@ -2213,6 +2213,138 @@ def module_lent_values(aup, pure, work):
     return {'events': 6, 'paths': 3}
 
 
+MOVED_VALUES_SOURCE = """record Leaf {
+  v = 0
+}
+record Node {
+  v = 0
+  kids: list of Leaf
+}
+record Bag {
+  items: list of Node
+}
+record Field {
+  name: text
+  value: text
+}
+variant Tree {
+  leaf(number)
+  node(list of Tree)
+}
+state n1 = 0
+state n2 = 0
+state n3 = 0
+state n4 = 0
+state n5 = 0
+state leaves = 0
+state weight = 0
+input go = message { k: u32 }
+fn kids(i) {
+  let ks: list of Leaf
+  for j in 0 .. i + 1 { ks.append(Leaf { v: j }) }
+  return ks
+}
+fn make(k) {
+  let xs: list of Node
+  for i in 0 .. k { xs.append(Node { v: i, kids: kids(i) }) }
+  return xs
+}
+fn total(xs) {
+  let t = 0
+  for x in xs { t = t + x.v + x.kids.count }
+  return t
+}
+fn peek(k) {
+  let xs: list of Node
+  for i in 0 .. k { xs.append(Node { v: i }) }
+  let b = Bag { items: xs }
+  return b, xs.count
+}
+fn looped(k) {
+  let xs: list of Node
+  let t = 0
+  for i in 0 .. k {
+    xs.append(Node { v: i })
+    let b = Bag { items: xs }
+    t = t + total(b.items)
+  }
+  return t
+}
+fn words(n) {
+  let out: list of Field
+  for i in 0 .. n { out.append(Field { name: "key", value: "value" }) }
+  return out
+}
+fn size(ws) {
+  let t = 0
+  for w in ws { t = t + w.name.bytes + w.value.bytes }
+  return t
+}
+fn grow(d, w) -> Tree {
+  if d == 0 { return Tree.leaf(w) }
+  let branches: list of Tree
+  for i in 0 .. w { branches.append(grow(d - 1, i)) }
+  return Tree.node(branches)
+}
+fn walk(t) {
+  match t {
+    leaf(n) => {
+      leaves = leaves + 1
+      weight = weight + n
+    }
+    node(bs) => {
+      for b in bs { walk(b) }
+    }
+  }
+}
+on go {
+  let a = make(go.k)
+  let b = make(go.k + 1)
+  n1 = total(a) * 1000 + total(b)
+  let bags: list of Bag
+  bags.append(Bag { items: a })
+  bags[0].items.append(Node { v: 100 })
+  n2 = total(a) * 1000 + total(bags[0].items)
+  let p, c = peek(go.k)
+  n3 = total(p.items) * 10 + c
+  n4 = looped(go.k)
+  let w = words(go.k)
+  n5 = w.count * 1000 + size(w)
+  leaves, weight = 0, 0
+  walk(grow(3, go.k + 1))
+}
+"""
+
+
+def module_moved_values(aup, pure, work):
+    """030's N4 in functions: a list a call made and returns is moved to the value (nothing in the call names it after),
+    the call going on with an empty one: make's nodes, each holding the kids its own call made (moved at both levels),
+    a whole after b's call used the calls' lists again and after its value was appended to through a list of records (a
+    copy first), a tree grown by recursion as json_tree's is and walked, records of texts; copied: peek's list, read after
+    its value is taken, and looped's, taken in a loop. The values are what copies give, on the three paths."""
+    import os
+    import struct
+    source, module = work / 'moved_values.aup', work / 'moved_values.pmod'
+    source.write_text(MOVED_VALUES_SOURCE)
+    compile_module(aup, source, module)
+
+    def grow(d, w):  # the leaves' values, in order
+        return [w] if d == 0 else [leaf for i in range(w) for leaf in grow(d - 1, i)]
+
+    for k in (0, 1, 3, 5):
+        grown = grow(3, k + 1)
+        want = {'n1': k * k * 1000 + (k + 1) ** 2, 'n2': k * k * 1000 + k * k + 100, 'n3': k * (k - 1) // 2 * 10 + k,
+                'n4': sum(i * (i + 1) // 2 for i in range(k)), 'n5': k * 1008, 'leaves': len(grown), 'weight': sum(grown)}
+        commands = f'message go {struct.pack("<I", k).hex()}\n' * 2
+        for env in ({'PURE_JIT': 'all'}, {'PURE_JIT': '0'}, {'PURE_JIT': '0', 'PURE_BATCH': '0'}):
+            done = subprocess.run([str(pure / 'build/pure-run'), str(module)], input=commands, capture_output=True, text=True,
+                                  timeout=120, env=dict(os.environ, **env))
+            assert done.returncode == 0, (k, env, done.returncode, done.stderr[-500:])
+            states = json.loads(done.stdout.splitlines()[-1])['states']
+            assert {name: states[name] for name in want} == want, (k, env, states)
+    return {'events': 8, 'paths': 3}
+
+
 LIST_VALUES_SOURCE = """record Item {
   v = 0
 }
@@ -6932,6 +7064,7 @@ def main():
         report['module_event_lists'] = module_event_lists(aup, pure, work)
         report['module_lent_values'] = module_lent_values(aup, pure, work)
         report['module_list_values'] = module_list_values(aup, pure, work)
+        report['module_moved_values'] = module_moved_values(aup, pure, work)
         report['module_specs'] = module_specs(aup, pure, work)
         report['module_tier'] = module_tier(aup, pure, work)
         report['server_documents_requests'] = sum(server_documents(aup, pure, work, range(args.seeds), threads=threads)

@@ -18,3 +18,7 @@
 9 s3v  08:22:11 up  4:33,  1 user,  load average: 1.38, 1.58, 1.53
 10 s3v  08:23:58 up  4:35,  1 user,  load average: 1.34, 1.65, 1.57
 10 s1z3  08:25:25 up  4:37,  1 user,  load average: 1.37, 1.61, 1.57
+11 a1  11:09:13 up  7:20,  1 user,  load average: 1.21, 1.25, 1.13
+11 m2  11:10:40 up  7:22,  1 user,  load average: 1.44, 1.37, 1.18
+12 m2  11:12:06 up  7:23,  1 user,  load average: 1.49, 1.45, 1.23
+12 a1  11:13:42 up  7:25,  1 user,  load average: 1.39, 1.50, 1.27

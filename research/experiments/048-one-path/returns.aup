@@ -1,0 +1,48 @@
+record P {
+  a = 0
+  b = 0
+}
+record F {
+  name: text
+  value: text
+}
+record N {
+  v = 0
+  kids: list of P
+}
+state s = 0
+input go = message { k: u32, kind: u32 }
+fn nums(i) {
+  let xs: list of P
+  xs.append(P { a: i, b: i + 1 })
+  xs.append(P { a: i + 2, b: i + 3 })
+  return xs
+}
+fn texts(i) {
+  let ws: list of F
+  ws.append(F { name: "alpha", value: "beta" })
+  ws.append(F { name: "gamma", value: "delta" })
+  return ws
+}
+fn nested(i) {
+  let ns: list of N
+  ns.append(N { v: i, kids: nums(i) })
+  ns.append(N { v: i, kids: nums(i + 1) })
+  return ns
+}
+on go {
+  let t = 0
+  for i in 0 .. go.k {
+    if go.kind == 0 {
+      let v = nums(i)
+      t = t + v.count
+    } else if go.kind == 1 {
+      let v = texts(i)
+      t = t + v.count
+    } else {
+      let v = nested(i)
+      t = t + v.count
+    }
+  }
+  s = t
+}

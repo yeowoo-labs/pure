@@ -1,0 +1,3 @@
+{"items": "numbers", "calls": 10000, "base": {"instructions_a_call": 5799.0, "answer": 20000}, "new": {"instructions_a_call": 4651.9, "answer": 20000}, "change": -0.1978}
+{"items": "texts", "calls": 10000, "base": {"instructions_a_call": 8753.5, "answer": 20000}, "new": {"instructions_a_call": 6594.2, "answer": 20000}, "change": -0.2467}
+{"items": "records holding lists", "calls": 10000, "base": {"instructions_a_call": 16387.5, "answer": 20000}, "new": {"instructions_a_call": 12857.0, "answer": 20000}, "change": -0.2154}

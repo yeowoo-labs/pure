@@ -1635,31 +1635,32 @@ PURE_COLD static bool function_names(PureModule *m, uint32_t fn, uint64_t *calls
     return true;
 }
 
-/* The lists a verified block names (as function_names reads them): the event's lists into events (not the registers),
- * the stored ones into stored (an index's list with it), the functions it calls into calls. */
+/* The list a verified instruction names (as the runtime holds it), or UINT32_MAX. */
+PURE_COLD static uint32_t named_list(const PureModule *m, const PureOp *op) {
+    uint32_t arg = op->arg;
+    switch (op->op) {
+    case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: case PURE_OP_LIST_COUNT:
+    case PURE_OP_LIST_VALUE: case PURE_OP_LIST_BIND: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_INDEX_AT:
+    case PURE_OP_BYTES_OF: case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS:
+    case PURE_OP_INDEX_MOVE: case PURE_OP_INDEX_NUM: /* the list itself */
+        return arg;
+    case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: case PURE_OP_APPEND_IN: case PURE_OP_KEPT_GET: case PURE_OP_KEPT_SET:
+    case PURE_OP_KEPT_APPEND: case PURE_OP_KEPT_INSERT: case PURE_OP_KEPT_APPEND_IN:
+        return list_of(arg);
+    case PURE_OP_EACH: case PURE_OP_FOLD: return arg >> 8 & 0xFF;
+    case PURE_OP_LOCAL_LOAD: case PURE_OP_LOCAL_STORE: return (arg >> 8 & 0xFF) == 1 ? arg >> 16 : UINT32_MAX; /* an index's */
+    case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: return arg < m->states ? m->state_ref[arg] : UINT32_MAX; /* its list */
+    default: return UINT32_MAX;
+    }
+}
+
+/* The lists a verified block names (named_list): the event's lists into events (not the registers), the stored ones
+ * into stored (an index's list with it), the functions it calls into calls. */
 PURE_COLD static void block_names(const PureModule *m, PureBlock block, uint64_t *events, uint64_t *stored, uint64_t *calls) {
     for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
         const PureOp *op = &m->code[pc];
-        uint32_t arg = op->arg, list = UINT32_MAX;
-        switch (op->op) {
-        case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE: case PURE_OP_LIST_COUNT:
-        case PURE_OP_LIST_VALUE: case PURE_OP_LIST_BIND: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: case PURE_OP_INDEX_AT:
-        case PURE_OP_BYTES_OF: case PURE_OP_ROW: case PURE_OP_OUTER_ROW: case PURE_OP_LIST_FIND: case PURE_OP_LIST_HAS:
-            list = arg;
-            break;
-        case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: case PURE_OP_APPEND_IN: case PURE_OP_KEPT_GET: case PURE_OP_KEPT_SET:
-        case PURE_OP_KEPT_APPEND: case PURE_OP_KEPT_INSERT: case PURE_OP_KEPT_APPEND_IN:
-            list = list_of(arg);
-            break;
-        case PURE_OP_EACH: case PURE_OP_FOLD: list = arg >> 8 & 0xFF; break;
-        case PURE_OP_LOCAL_LOAD: case PURE_OP_LOCAL_STORE: if ((arg >> 8 & 0xFF) == 1) list = arg >> 16; break;
-        case PURE_OP_INDEX_LOAD: case PURE_OP_INDEX_STORE: /* an index state: its list */
-            if (arg < m->states) list = m->state_ref[arg];
-            break;
-        case PURE_OP_INDEX_MOVE: case PURE_OP_INDEX_NUM: list = arg; break; /* the list itself */
-        case PURE_OP_CALL: if (arg < PURE_MODULE_FUNCTIONS) *calls |= UINT64_C(1) << arg; break;
-        default: break;
-        }
+        uint32_t list = named_list(m, op);
+        if (op->op == PURE_OP_CALL && op->arg < PURE_MODULE_FUNCTIONS) *calls |= UINT64_C(1) << op->arg;
         if (event_list_state(m, list)) {
             if (events && !bound_list(m, list)) states_add(events, list);
         } else if (state_of(m, list, PURE_STATE_LIST)) states_add(stored, list);
@@ -1746,7 +1747,10 @@ static bool changes_list(const PureModule *m, const PureOp *op, uint32_t list) {
  * nothing changes once it ran, so the value can be the list itself (plan 1: lent, not copied). What runs after it in
  * its event is the rest of its block from the outermost loop around it (jumps go forward only, loops are EACH, LOOP and
  * a FOLD's block), and the event's later handlers; a function's lists are its own (a call never changes its caller's).
- * The value's own changes copy it first (a lent value counts as shared). */
+ * The value's own changes copy it first (a lent value counts as shared). In a function the list is the call's own,
+ * let go as it returns: one with no key (a copy has none) that nothing in the call names after it (no instruction of
+ * the function past it, and it in no loop of the function) is moved to the value (plan 2), the call going on with an
+ * empty one; its record may hold lists (each item's were counted where it was put, and the items are the same). */
 PURE_COLD static void lend_values(PureModule *m) {
     for (uint32_t h = 0; h < m->handlers; ++h) {
         PureBlock block = m->handler[h].code;
@@ -1770,6 +1774,22 @@ PURE_COLD static void lend_values(PureModule *m) {
                     for (uint32_t q = m->handler[later].code.start; q < m->handler[later].code.start + m->handler[later].code.length && !changed; ++q)
                         changed = changes_list(m, &m->code[q], list);
             op->plan = !changed;
+        }
+    }
+    for (uint32_t f = 0; f < m->functions; ++f) {
+        PureBlock block = m->function[f].code;
+        uint32_t end = block.start + block.length;
+        for (uint32_t p = block.start; p < end; ++p) {
+            PureOp *op = &m->code[p];
+            if (op->op != PURE_OP_LIST_VALUE) continue;
+            uint32_t list = op->arg;
+            bool moves = event_list_state(m, list) && !bound_list(m, list) && !m->state_key[list];
+            for (uint32_t q = block.start; moves && q < p; ++q) {
+                uint8_t o = m->code[q].op;
+                moves = !((o == PURE_OP_EACH || o == PURE_OP_LOOP || o == PURE_OP_FOLD) && q + 1 + (m->code[q].arg >> 16) > p);
+            }
+            for (uint32_t q = p + 1; moves && q < end; ++q) moves = named_list(m, &m->code[q]) != list;
+            op->plan = moves ? 2 : 0;
         }
     }
 }
@@ -2875,6 +2895,20 @@ static uint64_t lend(PureApp *app, PureList *list) {
     if (!nested_room(app)) return 0;
     app->nested.list[app->nested.count] = list;
     app->nested.shared[app->nested.count] = PURE_NESTED_LENT | 1;
+    return ++app->nested.count;
+}
+
+/* A call's own list as a value, itself (030's N4: nothing in the call names it after this, which the load proved): its
+ * number, or 0 out of memory. The call goes on with an empty list, one of its spares, which its return lets go; the
+ * list moved is let go of as the call's here (the value counts its size, as a copy's), and the event's values free it. */
+static inline __attribute__((always_inline)) PureList *spare_list(PureApp *app, uint32_t state);
+static __attribute__((noinline)) uint64_t moved(PureApp *app, uint32_t state) {
+    PureList *list = app->lists[state], *empty = nested_room(app) ? spare_list(app, state) : NULL;
+    if (!empty) return 0;
+    (void)grows(app, list_held(app, list), list_held(app, empty));
+    app->lists[state] = empty;
+    app->nested.list[app->nested.count] = list;
+    app->nested.shared[app->nested.count] = 1; /* the value made holds it, as a copy */
     return ++app->nested.count;
 }
 
@@ -4657,9 +4691,11 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         NEXT;
     }
     case PURE_OP_LIST_VALUE: { /* a copy of an event's list's items (an empty one is 0, made of nothing), or the list
-                                  * itself, lent, where nothing changes it after this (plan, N4): its size counted alike */
+                                  * itself where nothing changes it after this (N4): lent (plan 1), or moved from its call
+                                  * (plan 2); its size counted alike */
         if (!pure_list_count(app->lists[arg])) { stack[sp++].i64 = 0; NEXT; }
-        uint64_t made = op->plan ? lend(app, app->lists[arg]) : nest(app, m->state_ref[arg], app->lists[arg]);
+        uint64_t made = op->plan == 2 ? moved(app, arg) : op->plan ? lend(app, app->lists[arg])
+                                                                  : nest(app, m->state_ref[arg], app->lists[arg]);
         if (!made) STOPPED(PURE_ALLOCATION);
         if (!grows(app, (Held){0, 0}, (Held){0, pure_list_size(app->nested.list[made - 1])})) { kind = PURE_FAULT_MEMORY; FAILED; }
         stack[sp++].i64 = (int64_t)made;
@@ -4934,8 +4970,9 @@ static void *frame_room(PureApp *app, size_t bytes, unsigned *block, size_t *use
     return c->blocks[next];
 }
 
-/* An empty list of an event's list state for a call: one a call let go, or a new one (NULL: out of memory). */
-static PureList *spare_list(PureApp *app, uint32_t state) {
+/* An empty list of an event's list state for a call: one a call let go, or a new one (NULL: out of memory). Inline where
+ * a call opens: with moved() its second caller, the compiler called it there, and UAX #14's executor ran 0.15% more. */
+static inline __attribute__((always_inline)) PureList *spare_list(PureApp *app, uint32_t state) {
     __typeof__(app->spare[0]) *spare = &app->spare[state];
     return spare->count ? spare->lists[--spare->count] : new_list(app->module, app->module->state_ref[state], false);
 }

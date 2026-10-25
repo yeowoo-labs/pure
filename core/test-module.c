@@ -6762,6 +6762,75 @@ static void functions_and_characters(void) {
     printf("{\"functions_and_characters\":{\"rounds\":3,\"refused\":%zu}}\n", LEN(refused) + 4);
 }
 
+/* 030's N4 in functions: a list a call made and returns (LIST_VALUE, nothing in the call naming it after) is moved to
+ * the value, the call going on with an empty one: kids(i) returns i + 1 leaves, make(k) k nodes, each holding the kids
+ * of its own call (a record holding lists, moved at both levels). Copied: a list read after its value is taken (peek), a
+ * value taken in a loop (looped), a keyed list's (keyed). a = make(2) is whole after b = make(3) has used the calls'
+ * spare lists again, each event alike; under ASan, nothing is freed twice nor kept past the app. */
+static void moved_values(void) {
+    enum { N1, N2, N3, N4, N5, KS, NODES_, NONE_, KEYED_, RK, RN, LOOP_ = PURE_OP_LOOP, LL_ = PURE_OP_LOCAL_LOAD,
+           LS_ = PURE_OP_LOCAL_STORE, LEAF = 0, NODE = 1 };
+    static const S nums[] = {{"n1", 0}, {"n2", 0}, {"n3", 0}, {"n4", 0}, {"n5", 0}};
+    static const RF leaf_fields[] = {{"v", 0, 0}};
+    static const RF node_fields[] = {{"v", 0, 0}, {"kids", 4, LEAF}};
+    static const R records[] = {{"Leaf", leaf_fields, 1}, {"Node", node_fields, 2}};
+    static const T others[] = {{"let.ks", 3 | (uint32_t)PURE_LIST_ROWS << 8, LEAF}, {"let.nodes", 3 | (uint32_t)PURE_LIST_ROWS << 8, NODE},
+                               {"let.none", 3 | (uint32_t)PURE_LIST_ROWS << 8, LEAF},
+                               {"let.keyed", 3 | (uint32_t)(PURE_LIST_ROWS | 1) << 8, LEAF},
+                               {"let.rk", 3 | (uint32_t)(PURE_LIST_ROWS | PURE_LIST_BOUND) << 8, LEAF},
+                               {"let.rn", 3 | (uint32_t)(PURE_LIST_ROWS | PURE_LIST_BOUND) << 8, NODE}};
+    static const I inputs[] = {KEY("go", "KeyG")};
+    static const O code[] = {
+        /* 0 kids(i): for j in 0 .. i + 1 { ks.append(Leaf { j }) }; ks */
+        {LS_, 0, 0}, {C, 0, 0}, {LL_, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {LOOP_, 1 | 2u << 16, 0}, {LL_, 1, 0}, {LA, KS, 0},
+        {LV, KS, 0}, {RET, 0, 0},
+        /* 10 make(k): for i in 0 .. k { nodes.append(Node { i, kids(i) }) }; nodes */
+        {LS_, 0, 0}, {C, 0, 0}, {LL_, 0, 0}, {LOOP_, 1 | 4u << 16, 0}, {LL_, 1, 0}, {LL_, 1, 0}, {CALL, 0, 0}, {LA, NODES_, 0},
+        {LV, NODES_, 0}, {RET, 1, 0},
+        /* 20 peek(): nodes.append(Node { 7, [] }); nodes, nodes.count */
+        {C, 0, 7}, {LV, NONE_, 0}, {LA, NODES_, 0}, {LV, NODES_, 0}, {LC, NODES_, 0}, {RET, 2, 0},
+        /* 26 looped(k): for i in 0 .. k { nodes.append(Node { i, [] }); v = nodes }; v */
+        {LS_, 0, 0}, {C, 0, 0}, {LL_, 0, 0}, {LOOP_, 1 | 5u << 16, 0}, {LL_, 1, 0}, {LV, NONE_, 0}, {LA, NODES_, 0},
+        {LV, NODES_, 0}, {LS_, LIST_LOCAL(2, NODE), 0}, {LL_, LIST_LOCAL(2, NODE), 0}, {RET, 3, 0},
+        /* 37 keyed(): keyed.add(Leaf { 5 }); keyed */
+        {C, 0, 5}, {LA, KEYED_, 0}, {LV, KEYED_, 0}, {RET, 4, 0},
+        /* 41 size(l): l.count */
+        {BIND, RK, 0}, {LC, RK, 0}, {RET, 5, 0},
+        /* 44 total(l): the sum of each node's v and its kids' count */
+        {BIND, RN, 0}, {C, 0, 0}, {LS_, 0, 0}, {EACH, WALK_OF(RN, 9), 0},
+        {LL_, 0, 0}, {ROW, RN, 0}, {IG, ITEM(RN, 0), 0}, {ADD, 0, 0}, {ROW, RN, 0}, {IG, ITEM(RN, 1), 0}, {CALL, 5, 0},
+        {ADD, 0, 0}, {LS_, 0, 0},
+        {LL_, 0, 0}, {RET, 6, 0},
+        /* 59 handler go: a = make(2); b = make(3); n1 = total(a); n2 = total(b); p, c = peek(); n3 = total(p) * 10 + c;
+         * n4 = total(looped(3)); n5 = size(keyed()) */
+        {C, 0, 2}, {CALL, 1, 0}, {LS_, LIST_LOCAL(0, NODE), 0}, {C, 0, 3}, {CALL, 1, 0}, {LS_, LIST_LOCAL(1, NODE), 0},
+        {LL_, LIST_LOCAL(0, NODE), 0}, {CALL, 6, 0}, {ST, N1, 0}, {LL_, LIST_LOCAL(1, NODE), 0}, {CALL, 6, 0}, {ST, N2, 0},
+        {CALL, 2, 0}, {LS_, 2, 0}, {CALL, 6, 0}, {C, 0, 10}, {MUL, 0, 0}, {LL_, 2, 0}, {ADD, 0, 0}, {ST, N3, 0},
+        {C, 0, 3}, {CALL, 3, 0}, {CALL, 6, 0}, {ST, N4, 0}, {CALL, 4, 0}, {CALL, 5, 0}, {ST, N5, 0},
+    };
+    static const FN fns[] = {{0, 10, 1, 1, {0, FN_LIST}, {0, LEAF}}, {10, 10, 1, 1, {0, FN_LIST}, {0, NODE}},
+                             {20, 6, 0, 2, {FN_LIST, 0}, {NODE, 0}}, {26, 11, 1, 1, {0, FN_LIST}, {0, NODE}},
+                             {37, 4, 0, 1, {FN_LIST}, {LEAF}}, {41, 3, 1, 1, {FN_LIST, 0}, {LEAF, 0}},
+                             {44, 15, 1, 1, {FN_LIST, 0}, {NODE, 0}}};
+    static const H go = {1, 59, 27};
+    CHECK(LEN(code) == 86);
+    Spec spec = {nums, LEN(nums), inputs, 1, NULL, 0, &go, 1, code, LEN(code), NULL, 0, others, LEN(others), NULL, 0, NULL, 0,
+                 records, 2, NULL, 0};
+    if (load_functions(spec, fns, LEN(fns), &module_b) != PURE_OK) { fprintf(stderr, "moved values: %s\n", error); abort(); }
+    CHECK(module_b.code[8].plan == 2 && module_b.code[18].plan == 2); /* kids', make's: moved */
+    CHECK(!module_b.code[23].plan && !module_b.code[33].plan && !module_b.code[39].plan); /* peek's, looped's, keyed's */
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_b, (PureData){0}) == PURE_OK);
+    for (int round = 0; round < 3; ++round) {
+        CHECK(press(&app, 0) == PURE_OK);
+        CHECK(app.values[N1].num == 4 && app.values[N2].num == 9 && app.values[N3].num == 71 && app.values[N4].num == 3 &&
+              app.values[N5].num == 1);
+    }
+    pure_app_stop(&app);
+    pure_module_release(&module_b);
+    printf("{\"moved_values\":{\"rounds\":3,\"moved\":2,\"copied\":3}}\n");
+}
+
 /* 027's stage 3: an event changes a number and the list in a stored list's item's field (APPEND_IN: read in, appended,
  * written back); the process dies at each commit stage, or the commit fails. Starting again finds both as before or
  * both as after. */
@@ -7730,6 +7799,7 @@ int main(void) {
     formats_and_held();
     lists_in_records();
     functions_and_characters();
+    moved_values();
     nested_crashes();
     nested_replace();
     nested_rows();
