@@ -527,6 +527,11 @@ typedef struct {
      * kept, their images and the log of their changes (core/log.h); without
      * one, list states are not stored. */
     const char *(*directory)(void *context);
+    /* Optional: the host's data held for the app while it runs, taken before
+     * anything else at its start (it does not start without it) and given
+     * back at its stop (whether or not it started). */
+    PureResult (*hold)(void *context);
+    void (*release)(void *context);
 } PureData;
 
 /* A byte or text value inside one event or view: a range of the payload, a

@@ -5528,6 +5528,7 @@ void pure_app_stop(PureApp *app) {
     free(app->arena.bytes);
     free(app->view_arena.bytes);
     free(app->states);
+    if (app->data.release) app->data.release(app->data.context); /* after every draft it lent */
     memset(app, 0, sizeof(*app));
 }
 
@@ -6951,7 +6952,8 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
 
 PURE_COLD PureResult pure_app_start(PureApp *app, const PureModule *module, PureData data) {
     *app = (PureApp){.data = data, .fault_pc = UINT32_MAX};
-    PureResult result = open_module(app, module);
+    PureResult result = data.hold ? data.hold(data.context) : PURE_OK;
+    if (result == PURE_OK) result = open_module(app, module);
     if (result == PURE_OK) result = pure_app_save(app);
     if (result != PURE_OK) { /* stopped, saying why when it can */
         char why[sizeof(app->why)];

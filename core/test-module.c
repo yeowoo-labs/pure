@@ -2844,6 +2844,58 @@ static void checkpoints_beside_texts(void) {
            most[0]);
 }
 
+/* A file's bytes (NULL when it cannot be read). */
+static unsigned char *read_file(const char *name, size_t *size) {
+    FILE *file = fopen(name, "rb");
+    unsigned char *bytes = NULL;
+    long length = file && !fseek(file, 0, SEEK_END) ? ftell(file) : -1;
+    if (length >= 0 && !fseek(file, 0, SEEK_SET) && (bytes = malloc((size_t)length + 1)) &&
+        fread(bytes, 1, (size_t)length, file) != (size_t)length) free(bytes), bytes = NULL;
+    if (file) fclose(file);
+    *size = length > 0 ? (size_t)length : 0;
+    return bytes;
+}
+
+/* An app holds its store while it runs: another process's app on it does not
+ * start (busy) and leaves the log as it was, the first goes on saving, and
+ * once it stops the other starts on what it saved. */
+static void one_app_a_store(void) {
+    char *path = new_store();
+    Spec spec = {crash_nums, 1, crash_inputs, 1, NULL, 0, crash_handlers, 1, crash_code, LEN(crash_code), NULL, 0,
+                 crash_states, 4, crash_constants, 2, NULL, 0, crash_records, 1, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && press(&app, 0) == PURE_OK);
+    char log[512];
+    snprintf(log, sizeof(log), "%s/log-0", path);
+    size_t size, again;
+    unsigned char *before = read_file(log, &size), *after;
+    CHECK(before);
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (!child) {
+        PureApp other;
+        _exit(pure_app_start(&other, &module_a, pure_tree_data(path)) == PURE_BUSY ? 0 : 1);
+    }
+    int status;
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK((after = read_file(log, &again)) && again == size && !memcmp(after, before, size));
+    free(before), free(after);
+    CHECK(press(&app, 0) == PURE_OK && consistent(&app) == 2);
+    pure_app_stop(&app);
+    child = fork();
+    CHECK(child >= 0);
+    if (!child) {
+        PureApp other;
+        bool started = pure_app_start(&other, &module_a, pure_tree_data(path)) == PURE_OK && consistent(&other) == 2;
+        pure_app_stop(&other);
+        _exit(started ? 0 : 1);
+    }
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    remove_store(path);
+    printf("{\"one_app_a_store\":{\"refused\":1}}\n");
+}
+
 static void stored_crashes(void) {
     char *path = new_store();
     Spec spec = {crash_nums, 1, crash_inputs, 1, NULL, 0, crash_handlers, 1, crash_code, LEN(crash_code), NULL, 0,
@@ -3218,6 +3270,7 @@ static void stored_states(void) {
     stored_crashes();
     failing_checkpoints();
     checkpoints_beside_texts();
+    one_app_a_store();
     uncertain_numbers();
     uncertain_on_a_handle();
     stored_frames();
