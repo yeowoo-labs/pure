@@ -157,7 +157,8 @@ class Pure:
         return None
 
     def threads_cpu(self):
-        """The CPU seconds of the server's threads by name (its owner is pure-owner)."""
+        """The CPU seconds of the server's threads by name (its owner is pure-owner), and their user and kernel parts
+        (name:user, name:sys)."""
         seconds = {}
         for task in Path(f'/proc/{self.process.pid}/task').iterdir():
             try:
@@ -166,6 +167,8 @@ class Pure:
             except OSError:  # gone meanwhile
                 continue
             seconds[name] = seconds.get(name, 0) + (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+            seconds[name + ':user'] = seconds.get(name + ':user', 0) + int(fields[11]) / os.sysconf('SC_CLK_TCK')
+            seconds[name + ':sys'] = seconds.get(name + ':sys', 0) + int(fields[12]) / os.sysconf('SC_CLK_TCK')
         return seconds
 
     def written(self):
@@ -401,7 +404,7 @@ def main():
             took = time.perf_counter() - began
             used = pure.cpu_seconds() - used
             share = {name: round((seconds - threads_used.get(name, 0)) / took, 2)
-                     for name, seconds in pure.threads_cpu().items() if name in ('pure-owner', 'pure-checkpoint')}
+                     for name, seconds in pure.threads_cpu().items() if name.split(':')[0] in ('pure-owner', 'pure-checkpoint')}
             done = sum(result[k]['done'] for k in kinds)
             device = None if device is None else device_written(place) - device
             print(json.dumps({'step': 'run', **result, 'server_threads': args.threads,
