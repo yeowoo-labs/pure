@@ -1,0 +1,4 @@
+{"query": "per_branch", "rows": 10, "accounts": 100000, "pure_median_ms": 5.25, "pure_fastest_ms": 5.17, "sqlite_median_ms": 44.95, "sqlite_fastest_ms": 44.79, "sqlite_indexed_median_ms": 14.06, "sqlite_indexed_fastest_ms": 14.03}
+{"query": "in_credit", "rows": 1, "accounts": 100000, "pure_median_ms": 0.93, "pure_fastest_ms": 0.83, "sqlite_median_ms": 5.94, "sqlite_fastest_ms": 5.91, "sqlite_indexed_median_ms": 0.16, "sqlite_indexed_fastest_ms": 0.16}
+{"query": "large", "rows": 212, "accounts": 100000, "pure_median_ms": 0.4, "pure_fastest_ms": 0.37, "sqlite_median_ms": 1.49, "sqlite_fastest_ms": 1.48, "sqlite_indexed_median_ms": 1.5, "sqlite_indexed_fastest_ms": 1.48}
+{"query": "ranks", "rows": 404, "accounts": 100000, "pure_median_ms": 6.68, "pure_fastest_ms": 6.59, "sqlite_median_ms": 2847.39, "sqlite_fastest_ms": 2844.25, "sqlite_indexed_median_ms": 7.69, "sqlite_indexed_fastest_ms": 7.6}

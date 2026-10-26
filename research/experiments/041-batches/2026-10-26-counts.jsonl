@@ -18,3 +18,13 @@
 {"version":"z6s","way":"rounds","work":"matmul","instructions":21187633017,"cycles":7120458697}
 {"version":"z6s","way":"batches","work":"bfs","instructions":3353560091,"cycles":1682991697}
 {"version":"z6s","way":"rounds","work":"bfs","instructions":4685837390,"cycles":2120942028}
+{"version":"z8s","way":"batches","work":"roots","instructions":157249143,"cycles":109619606}
+{"version":"z8s","way":"rounds","work":"roots","instructions":2715506627,"cycles":1081372805}
+{"version":"z8s","way":"batches","work":"knapsack","instructions":348124278,"cycles":105125511}
+{"version":"z8s","way":"rounds","work":"knapsack","instructions":22151124246,"cycles":8143985645}
+{"version":"z8s","way":"batches","work":"join","instructions":1783759298,"cycles":1070676188}
+{"version":"z8s","way":"rounds","work":"join","instructions":7700807363,"cycles":3562365141}
+{"version":"z8s","way":"batches","work":"matmul","instructions":702249412,"cycles":227368434}
+{"version":"z8s","way":"rounds","work":"matmul","instructions":21187631745,"cycles":7119460823}
+{"version":"z8s","way":"batches","work":"bfs","instructions":3357558630,"cycles":1684856006}
+{"version":"z8s","way":"rounds","work":"bfs","instructions":4685835359,"cycles":2121268330}

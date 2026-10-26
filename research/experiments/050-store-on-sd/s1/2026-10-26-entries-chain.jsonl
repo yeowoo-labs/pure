@@ -1,0 +1,2 @@
+{"build": "today", "chain": {"commits": 18, "links": 0, "earlier_records": 18, "bytes_a_commit": 347.0, "record_a_commit": 128.0, "newest_seq": 20008}}
+{"build": "s1", "chain": {"commits": 20, "links": 20, "earlier_records": 0, "bytes_a_commit": 259.0, "record_a_commit": 40.0, "newest_seq": 20006}}
