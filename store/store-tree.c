@@ -1340,6 +1340,11 @@ static PureResult load_draft(PureDraft *draft) {
                    &document, &revision);
     close(fd);
     if (!ok) { release_tree(&tree); return PURE_STORE_ERROR; }
+    /* Its mapping is shared as a handle's is: the draft can be frozen and lend it. */
+    Mapping *mapping = malloc(sizeof(*mapping));
+    if (!mapping) { release_tree(&tree); return PURE_ALLOCATION; }
+    *mapping = (Mapping){tree.map, tree.end, 1};
+    tree.shared = mapping;
     release_tree(&draft->tree);
     draft->tree = tree;
     draft->device = info.st_dev;

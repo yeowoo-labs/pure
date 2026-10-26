@@ -6287,12 +6287,15 @@ PureSnapshot *pure_save_snapshot(PureApp *app, uint32_t runtime) {
     made->epoch = all->epoch + 1; /* the app's thread alone makes them */
     memcpy(made->values, app->values, m->states * sizeof(*made->values));
     bool ok = true;
-    for (uint32_t i = 0; i < m->states && ok; ++i) {
-        /* A stored text is shared as its store holds it; a transient one, never stored, is copied. */
+    /* A stored text is shared as its store holds it; a transient one, never stored, is copied. Every text first: a
+     * list's sharing marks it (its items let go from then on are retired for the snapshot), so a snapshot that cannot
+     * be made must fail before any is shared. */
+    for (uint32_t i = 0; i < m->states && ok; ++i)
         if (app->texts[i])
             ok = (made->texts[i] = pure_state_transient(m, i) ? text_copy(app->texts[i]) : pure_draft_freeze(app->texts[i])) !=
                  NULL;
-        if (!ok || !app->lists[i]) continue;
+    for (uint32_t i = 0; i < m->states && ok; ++i) {
+        if (!app->lists[i]) continue;
         if (last && i < last->states && last->lists[i] && pure_list_current(last->lists[i], app->lists[i])) {
             pure_list_hold(last->lists[i]);
             made->lists[i] = last->lists[i];

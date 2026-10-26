@@ -2783,6 +2783,67 @@ static void failing_checkpoints(void) {
     remove_store(path);
     printf("{\"failing_checkpoints\":{\"saves\":42}}\n");
 }
+
+/* A stored text does not hold a list's image back: a checkpoint's snapshot
+ * shares each stored text as its store holds it, and a draft opened by path
+ * (pure_tree_data: pure-run's and Vega's) shared none, so no checkpoint ever
+ * began and the log kept every change; and since the snapshot shared the
+ * lists before it came to the text, each failed one left them marked, and
+ * the items they let go piled up as retired, one more each save. The list of
+ * one item changed in place (as above) beside a text "x", on a path and
+ * through a handle: as many checkpoints both ways, none of that piling up, a
+ * snapshot that reads the text, and a start that finds the saves. */
+static void checkpoints_beside_texts(void) {
+    extern unsigned long pure_save_test_checkpoints;
+    enum { TASK_LIST = 1, NOTE_TEXT = 2 };
+    static const S nums[] = {{"n", 0}};
+    static const T states[] = {{"tasks", 3, 0}, {"note", 1, 1}};
+    static const RF fields[] = {{"title", 1, 0}, {"done", 0, 0}};
+    static const R records[] = {{"task", fields, 2}};
+    static const char *const constants[] = {"", "x"};
+    static const I inputs[] = {KEY("add", "KeyA"), KEY("set", "KeyS")};
+    static const O code[] = {
+        {TK, 1, 0}, {L, 0, 0}, {LA, TASK_LIST, 0},                                       /* add: tasks.append(task { "x", n }) */
+        {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, {XF, TASK_LIST, 0}, {L, 0, 0}, {IS, TASK_LIST | 1u << 16, 0}, /* set: n += 1; tasks.first.done = n */
+    };
+    static const H handlers[] = {{1, 0, 3}, {3, 3, 7}};
+    Spec spec = {nums, 1, inputs, 2, NULL, 0, handlers, 2, code, LEN(code), NULL, 0, states, 2, constants, 2, NULL, 0, records, 1,
+                 NULL, 0};
+    if (load(spec, &module_a) != PURE_OK) { fprintf(stderr, "checkpoints beside texts: %s\n", error); abort(); }
+    unsigned long written[2];
+    size_t most[2] = {0, 0};
+    for (int handle = 0; handle < 2; ++handle) {
+        char *path = new_store();
+        PureStore *store = NULL;
+        PureApp app;
+        CHECK(!handle || pure_store_open(path, &store) == PURE_OK);
+        CHECK(pure_app_start(&app, &module_a, handle ? pure_store_data(store) : pure_tree_data(path)) == PURE_OK &&
+              press(&app, 0) == PURE_OK);
+        unsigned long before = pure_save_test_checkpoints;
+        for (int k = 0; k < 40; ++k) {
+            CHECK(press(&app, 1) == PURE_OK);
+            if (app.retired.count > most[handle]) most[handle] = app.retired.count;
+        }
+        written[handle] = pure_save_test_checkpoints - before;
+        PureSnapshot *snapshot = pure_app_snapshot(&app);
+        PureApp reader = {0};
+        CHECK(snapshot && pure_app_read(&reader, snapshot) && !strcmp(state_text(&reader, NOTE_TEXT), "x"));
+        pure_app_stop(&reader);
+        pure_snapshot_release(snapshot);
+        pure_app_stop(&app);
+        CHECK(pure_app_start(&app, &module_a, handle ? pure_store_data(store) : pure_tree_data(path)) == PURE_OK);
+        CHECK(app.values[0].num == 40 && pure_list_count(app.lists[TASK_LIST]) == 1 &&
+              pure_list_get(app.lists[TASK_LIST], 0, 1).num == 40);
+        pure_app_stop(&app);
+        pure_store_close(store);
+        remove_store(path);
+    }
+    /* Between two snapshots the retired hold the items let go since the newer: a few here, not one a save. */
+    CHECK(written[0] && written[0] == written[1] && most[0] == most[1] && most[0] < 10);
+    printf("{\"checkpoints_beside_texts\":{\"path\":%lu,\"handle\":%lu,\"retired_at_most\":%zu}}\n", written[0], written[1],
+           most[0]);
+}
+
 static void stored_crashes(void) {
     char *path = new_store();
     Spec spec = {crash_nums, 1, crash_inputs, 1, NULL, 0, crash_handlers, 1, crash_code, LEN(crash_code), NULL, 0,
@@ -3118,6 +3179,7 @@ static void stored_states(void) {
     stored_equivalence(text_spec, text_words, LEN(text_words), 0x7f4a7c15u);
     stored_crashes();
     failing_checkpoints();
+    checkpoints_beside_texts();
     uncertain_numbers();
     stored_frames();
     stored_messages();
