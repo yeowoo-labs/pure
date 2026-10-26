@@ -328,7 +328,8 @@ static struct {
     pthread_mutex_t lock;
     Known heads[KNOWN];
     unsigned next;
-    Known publishing; /* written here, not durable yet */
+    Known *publishing; /* written here, not durable yet: a head a file at most */
+    size_t publishing_count, publishing_room;
     Newest newest[NEWEST];
     unsigned next_newest;
 } known = {.lock = PTHREAD_MUTEX_INITIALIZER};
@@ -341,20 +342,36 @@ static bool names(const Known *known_head, const struct stat *file, const Head *
 static int recall(const struct stat *file, const Head *head) {
     int state = UNKNOWN;
     pthread_mutex_lock(&known.lock);
-    if (names(&known.publishing, file, head)) state = PUBLISHING;
+    for (size_t i = 0; i < known.publishing_count && state == UNKNOWN; ++i)
+        if (names(&known.publishing[i], file, head)) state = PUBLISHING;
     for (unsigned i = 0; i < KNOWN && state == UNKNOWN; ++i)
         if (names(&known.heads[i], file, head)) state = known.heads[i].state;
     pthread_mutex_unlock(&known.lock);
     return state;
 }
 
-/* PUBLISHING marks the one head being made durable; any other state ends
- * that mark (UNKNOWN only ends it). */
-static void remember(const struct stat *file, const Head *head, int state) {
+/* PUBLISHING marks a file's head being made durable (one a file: its
+ * writer's commit), whatever other files publish meanwhile; any other state
+ * ends that mark (UNKNOWN only ends it). False when there is no room left to
+ * mark it. */
+static bool remember(const struct stat *file, const Head *head, int state) {
     Known entry = {file->st_dev, file->st_ino, head->seq, head->check, state};
+    bool kept = true;
     pthread_mutex_lock(&known.lock);
-    if (state == PUBLISHING) known.publishing = entry;
-    else if (names(&known.publishing, file, head)) known.publishing.state = UNKNOWN;
+    size_t mark = 0;
+    while (mark < known.publishing_count &&
+           (known.publishing[mark].device != file->st_dev || known.publishing[mark].inode != file->st_ino)) ++mark;
+    if (state == PUBLISHING && mark == known.publishing_count && mark == known.publishing_room) {
+        size_t room = known.publishing_room ? 2 * known.publishing_room : 4;
+        Known *grown = realloc(known.publishing, room * sizeof(*grown));
+        if (grown) known.publishing = grown, known.publishing_room = room;
+        else kept = false;
+    }
+    if (state == PUBLISHING && kept) {
+        known.publishing[mark] = entry;
+        if (mark == known.publishing_count) ++known.publishing_count;
+    } else if (state != PUBLISHING && mark < known.publishing_count && names(&known.publishing[mark], file, head))
+        known.publishing[mark] = known.publishing[--known.publishing_count];
     if (state != PUBLISHING && state != UNKNOWN) {
         Known *at = NULL;
         for (unsigned i = 0; i < KNOWN && !at; ++i)
@@ -372,6 +389,7 @@ static void remember(const struct stat *file, const Head *head, int state) {
         if (at) *at = (Newest){file->st_dev, file->st_ino, *head};
     }
     pthread_mutex_unlock(&known.lock);
+    return kept;
 }
 
 static bool newest_known(const struct stat *file, Head *out) {
@@ -392,7 +410,7 @@ void pure_tree_test_forget(void) {
     pthread_mutex_lock(&known.lock);
     memset(known.heads, 0, sizeof(known.heads));
     memset(known.newest, 0, sizeof(known.newest));
-    known.publishing.state = UNKNOWN;
+    known.publishing_count = 0;
     pthread_mutex_unlock(&known.lock);
     /* and the writers this process holds read their heads again */
     pthread_mutex_lock(&stores.lock);
@@ -1470,8 +1488,8 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
     uint64_t newer = session->slots[0] > session->slots[1] ? session->slots[0] : session->slots[1];
     unsigned older = session->slots[0] > session->slots[1];
     bool checkpoint = published.seq - newer >= CHECKPOINT;
+    if (!remember(&session->file, &published, PUBLISHING)) return PURE_ALLOCATION; /* nothing written */
     for (size_t i = 0; i < count; ++i) ++revisions[i]; /* Past this point the head may already be visible. */
-    remember(&session->file, &published, PUBLISHING);
     bool durable = write_at(session->fd, record, SLOT, published.start - SLOT) &&
                    (!checkpoint || write_at(session->fd, slot, SLOT, older * BLOCK)) &&
                    !fault(PURE_BEFORE_DIR_SYNC) && sync_data(session->fd);

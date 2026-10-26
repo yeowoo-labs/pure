@@ -1246,6 +1246,26 @@ static void pending_head(const char *path) {
 typedef struct { const char *path, *key; int64_t expected; int done; } Commit;
 static void clean(const char *path);
 
+/* The head a commit makes durable is its store's own mark: while one store's
+ * commit waits for its sync, another store's commit leaves that mark alone,
+ * and this process still reads the first store's previous version. */
+static void publishing_apart(const char *path) {
+    char other[] = "/tmp/pure-tree-apart-XXXXXX";
+    CHECK(mkdtemp(other) && pure_store_init(other) == PURE_OK);
+    int64_t revision;
+    CHECK(pure_store_put(path, "pending", 0, (PureSpan){(const unsigned char *)"old", 3}, &revision) == PURE_OK);
+    __atomic_store_n(&held_sync, 1, __ATOMIC_SEQ_CST);
+    pthread_t writer;
+    CHECK(pthread_create(&writer, NULL, commit_held, (void *)path) == 0);
+    while (__atomic_load_n(&held_sync, __ATOMIC_SEQ_CST) != 2) pause_ms(1);
+    CHECK(pure_store_put(other, "x", 0, (PureSpan){(const unsigned char *)"w", 1}, &revision) == PURE_OK);
+    expect(path, "pending", &(Oracle){(unsigned char *)"old", 3, 1});
+    __atomic_store_n(&held_sync, 0, __ATOMIC_SEQ_CST);
+    CHECK(pthread_join(writer, NULL) == 0);
+    expect(path, "pending", &(Oracle){(unsigned char *)"new", 3, 2});
+    clean(other);
+}
+
 static void *put_one(void *context) {
     Commit *c = context;
     int64_t revision;
@@ -1359,7 +1379,7 @@ int main(void) {
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, frozen_path_draft, owner_lock, unsynced_compaction, threads, grouped,
-                                      lost_commit, pending_head, stores_apart, one_sync, records, torn_head_held, records_held, cycles};
+                                      lost_commit, pending_head, publishing_apart, stores_apart, one_sync, records, torn_head_held, records_held, cycles};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -1370,7 +1390,7 @@ int main(void) {
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
-         "atomic-batch-runtime-keys-store-handle-frozen-path-draft-owner-lock-unsynced-compaction-threads-group-commit-lost-commit-pending-head-stores-apart-one-sync-records-"
+         "atomic-batch-runtime-keys-store-handle-frozen-path-draft-owner-lock-unsynced-compaction-threads-group-commit-lost-commit-pending-head-publishing-apart-stores-apart-one-sync-records-"
          "held-torn-head-held-records-cycles\"}");
     return 0;
 }
