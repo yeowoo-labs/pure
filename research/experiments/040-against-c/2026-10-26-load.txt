@@ -1,0 +1,52 @@
+1 z0  04:45:51 up 1 day, 57 min,  1 user,  load average: 1.33, 1.40, 1.22
+1 z3  04:47:50 up 1 day, 59 min,  1 user,  load average: 1.37, 1.58, 1.33
+2 z3  04:49:48 up 1 day,  1:01,  1 user,  load average: 1.31, 1.62, 1.38
+2 z0  04:51:17 up 1 day,  1:02,  1 user,  load average: 1.41, 1.64, 1.41
+3 z0  05:31:25 up 1 day,  1:43,  1 user,  load average: 1.36, 2.08, 1.68
+3 z5  05:34:03 up 1 day,  1:45,  1 user,  load average: 1.30, 1.92, 1.70
+4 z5  05:38:43 up 1 day,  1:50,  1 user,  load average: 1.35, 1.93, 1.79
+4 z0  05:40:22 up 1 day,  1:52,  1 user,  load average: 1.47, 1.93, 1.81
+5 z0  05:42:00 up 1 day,  1:53,  1 user,  load average: 1.39, 1.87, 1.81
+5 z5  05:43:28 up 1 day,  1:55,  1 user,  load average: 1.41, 1.80, 1.79
+6 z5  05:45:17 up 1 day,  1:56,  1 user,  load average: 1.31, 1.82, 1.81
+6 z0  05:46:45 up 1 day,  1:58,  1 user,  load average: 1.27, 1.74, 1.79
+7 z0  05:48:14 up 1 day,  1:59,  1 user,  load average: 1.41, 1.71, 1.78
+7 z5  05:49:52 up 1 day,  2:01,  1 user,  load average: 1.32, 1.71, 1.77
+8 z5  05:51:30 up 1 day,  2:03,  1 user,  load average: 1.35, 1.72, 1.78
+8 z0  05:53:06 up 1 day,  2:04,  1 user,  load average: 1.42, 1.70, 1.77
+9 z0  06:52:14 up 1 day,  3:03,  1 user,  load average: 1.34, 2.76, 2.67
+9 z6  06:53:42 up 1 day,  3:05,  1 user,  load average: 1.44, 2.49, 2.59
+10 z6  06:55:11 up 1 day,  3:06,  1 user,  load average: 1.46, 2.28, 2.51
+10 z0  06:56:49 up 1 day,  3:08,  1 user,  load average: 1.30, 2.10, 2.43
+11 z0  06:58:17 up 1 day,  3:09,  1 user,  load average: 1.27, 1.93, 2.34
+11 z6  06:59:56 up 1 day,  3:11,  1 user,  load average: 1.26, 1.82, 2.26
+12 z6  07:01:34 up 1 day,  3:13,  1 user,  load average: 1.34, 1.80, 2.22
+12 z0  07:03:02 up 1 day,  3:14,  1 user,  load average: 1.42, 1.76, 2.17
+13 z0  07:04:30 up 1 day,  3:16,  1 user,  load average: 1.33, 1.65, 2.08
+13 z6  07:05:58 up 1 day,  3:17,  1 user,  load average: 1.49, 1.71, 2.07
+14 z6  07:07:37 up 1 day,  3:19,  1 user,  load average: 1.46, 1.74, 2.05
+14 z0  07:09:05 up 1 day,  3:20,  1 user,  load average: 1.47, 1.72, 2.02
+15 z0  07:19:47 up 1 day,  3:31,  1 user,  load average: 1.31, 1.47, 1.70
+15 z7  07:21:35 up 1 day,  3:33,  1 user,  load average: 1.42, 1.64, 1.75
+16 z7  07:23:13 up 1 day,  3:34,  1 user,  load average: 1.48, 1.73, 1.78
+16 z0  07:25:01 up 1 day,  3:36,  1 user,  load average: 1.33, 1.76, 1.79
+17 z0  07:26:39 up 1 day,  3:38,  1 user,  load average: 1.44, 1.77, 1.80
+17 z7  07:28:17 up 1 day,  3:39,  1 user,  load average: 1.32, 1.72, 1.78
+18 z7  07:29:56 up 1 day,  3:41,  1 user,  load average: 1.30, 1.70, 1.77
+18 z0  07:31:24 up 1 day,  3:43,  1 user,  load average: 1.43, 1.69, 1.77
+19 z0  07:33:11 up 1 day,  3:44,  1 user,  load average: 1.33, 1.70, 1.77
+19 z7nc  07:34:40 up 1 day,  3:46,  1 user,  load average: 1.36, 1.66, 1.75
+20 z7nc  07:36:08 up 1 day,  3:47,  1 user,  load average: 1.38, 1.63, 1.73
+20 z0  07:37:37 up 1 day,  3:49,  1 user,  load average: 1.40, 1.62, 1.72
+21 z0 queries  07:39:23 up 1 day,  3:51,  1 user,  load average: 1.33, 1.64, 1.72
+21 z6 queries  07:40:26 up 1 day,  3:52,  1 user,  load average: 1.39, 1.63, 1.71
+22 z6 queries  07:41:28 up 1 day,  3:53,  1 user,  load average: 1.39, 1.58, 1.69
+22 z0 queries  07:42:31 up 1 day,  3:54,  1 user,  load average: 1.35, 1.55, 1.67
+23 z0 queries  07:43:35 up 1 day,  3:55,  1 user,  load average: 1.32, 1.53, 1.66
+23 z6 queries  07:44:38 up 1 day,  3:56,  1 user,  load average: 1.23, 1.47, 1.63
+24 z6 queries  07:45:41 up 1 day,  3:57,  1 user,  load average: 1.26, 1.45, 1.61
+24 z0 queries  07:46:44 up 1 day,  3:58,  1 user,  load average: 1.23, 1.42, 1.59
+25 z0 queries  07:47:47 up 1 day,  3:59,  1 user,  load average: 1.27, 1.41, 1.58
+25 z6 queries  07:48:50 up 1 day,  4:00,  1 user,  load average: 1.27, 1.40, 1.56
+26 z6 queries  07:49:53 up 1 day,  4:01,  1 user,  load average: 1.32, 1.42, 1.56
+26 z0 queries  07:51:13 up 1 day,  4:02,  1 user,  load average: 1.33, 1.47, 1.57
