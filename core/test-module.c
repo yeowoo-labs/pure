@@ -2959,6 +2959,44 @@ static void uncertain_numbers(void) {
     remove_store(path);
 }
 
+/* The same through a handle the host keeps open while the app starts again:
+ * the writer it holds reads its head again at once after the uncertain
+ * commit (and makes it durable), so the new start finds what the store has
+ * there too. */
+static void uncertain_on_a_handle(void) {
+    char *path = new_store();
+    static const S nums[] = {{"n", 0}};
+    static const T states[] = {{"rows", 3, 0}};
+    static const RF fields[] = {{"value", 0, 0}};
+    static const R records[] = {{"row", fields, 1}};
+    static const I inputs[] = {KEY("inc", "KeyI"), KEY("add", "KeyA")};
+    static const O code[] = {
+        {L, 0, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, 0, 0}, /* n = n + 1 */
+        {L, 0, 0}, {LA, 1, 0},                         /* rows.append(row { n }) */
+    };
+    static const H handlers[] = {{1, 0, 4}, {3, 4, 2}};
+    Spec spec = {nums, 1, inputs, 2, NULL, 0, handlers, 2, code, LEN(code), NULL, 0, states, 1, NULL, 0, NULL, 0,
+                 records, 1, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    PureStore *store;
+    PureApp app;
+    CHECK(pure_store_open(path, &store) == PURE_OK && pure_app_start(&app, &module_a, pure_store_data(store)) == PURE_OK);
+    fail_stage = PURE_BEFORE_DIR_SYNC;
+    CHECK(press(&app, 0) == PURE_UNCERTAIN && app.uncertain && app.values[0].num == 0);
+    fail_stage = -1;
+    CHECK(press(&app, 1) == PURE_CONFLICT && !pure_list_count(app.lists[1]));
+    pure_app_stop(&app);
+    CHECK(pure_app_start(&app, &module_a, pure_store_data(store)) == PURE_OK && app.values[0].num == 1 &&
+          !pure_list_count(app.lists[1]));
+    CHECK(press(&app, 1) == PURE_OK && pure_list_get(app.lists[1], 0, 0).num == 1);
+    pure_app_stop(&app);
+    pure_store_close(store);
+    CHECK(pure_app_start(&app, &module_a, pure_tree_data(path)) == PURE_OK && app.values[0].num == 1 &&
+          pure_list_count(app.lists[1]) == 1 && pure_list_get(app.lists[1], 0, 0).num == 1);
+    pure_app_stop(&app);
+    remove_store(path);
+}
+
 /* Frames a host defers (027's 4d: a frame is a message, saved as each is unless deferred) are stored by a save or by
  * the next event it does not defer; a stop alone leaves them out. */
 static void stored_frames(void) {
@@ -3181,6 +3219,7 @@ static void stored_states(void) {
     failing_checkpoints();
     checkpoints_beside_texts();
     uncertain_numbers();
+    uncertain_on_a_handle();
     stored_frames();
     stored_messages();
     stored_migration();

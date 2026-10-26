@@ -21,10 +21,12 @@ PureResult pure_draft_open(const char *path, const char *key, PureDraft **out);
  * under a name that is never a document key (hosts listing documents do not
  * see it). name is a valid key of at most 63 bytes. */
 PureResult pure_state_open(const char *path, const char *name, PureDraft **out);
-/* A store kept open by one owner thread. Drafts opened through it share one
- * mapping of the newest version, and opening one checks only whether the file
- * changed; commits of its drafts map the new version once. It must outlive
- * its drafts. */
+/* A store kept open by one owner thread. While a handle is open this process
+ * is the store's writer (it holds the writer lock: another process's handle
+ * or commit is PURE_BUSY until the last handle here closes), so the newest
+ * version is the one this process made or read: drafts opened through a
+ * handle share its mapping and open without looking at the file, and a
+ * commit neither locks nor reads its head. It must outlive its drafts. */
 typedef struct PureStore PureStore;
 PureResult pure_store_open(const char *path, PureStore **out);
 const char *pure_store_path(const PureStore *);

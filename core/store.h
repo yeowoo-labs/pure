@@ -17,6 +17,8 @@ typedef struct {
     int64_t revision;
 } PureStoredView;
 
+/* Makes the store at path if it is not there (PURE_BUSY when another process
+ * is making it); a store that is there is only read, never waited on. */
 PureResult pure_store_init(const char *path);
 PureResult pure_store_get(const char *path, const char *key, size_t available,
                           PureStoredView *out);
@@ -51,7 +53,8 @@ PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *k
 /* Fault hooks exist only in the separately built unit-test binary. */
 typedef enum {
     PURE_AFTER_HEADER, PURE_BEFORE_FILE_SYNC, PURE_BEFORE_RENAME, PURE_BEFORE_DIR_SYNC,
-    PURE_COPY_RANGE_UNSUPPORTED_AFTER_PARTIAL, PURE_LOG_BEFORE_WRITE, PURE_LOG_BEFORE_SYNC, PURE_IMAGE_BEFORE_RENAME
+    PURE_COPY_RANGE_UNSUPPORTED_AFTER_PARTIAL, PURE_LOG_BEFORE_WRITE, PURE_LOG_BEFORE_SYNC, PURE_IMAGE_BEFORE_RENAME,
+    PURE_INSTALL_BEFORE_DIR_SYNC
 } PureStoreStage;
 #ifdef PURE_STORE_TEST
 int pure_store_test_fault(PureStoreStage stage);

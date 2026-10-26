@@ -119,12 +119,21 @@ $(BUILD)/test-tree-store: store/test-tree-store.c $(STORE) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -DPURE_STORE_TEST store/test-tree-store.c $(STORE) $(LDFLAGS) $(LDLIBS) -o $@
 
+# The same with ASan and UBSan: a store's mappings are counted and let go on
+# any thread (threads, grouped), and its writer outlives each commit.
+$(BUILD)/test-tree-store-sanitized: store/test-tree-store.c $(STORE) $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) -std=c17 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
+		-fsanitize=address,undefined -fno-sanitize-recover=all $(INCLUDES) -DPURE_STORE_TEST store/test-tree-store.c \
+		$(STORE) $(LDFLAGS) -pthread $(LDLIBS) -o $@
+
 # The HTTP host's checks build their apps with aup (the sibling checkout) and
 # compare documents with the earlier document server.
 AUP ?= ../aup
-check: all $(BUILD)/test-module $(BUILD)/test-module-sanitized $(BUILD)/test-tree-store $(BUILD)/test-log \
-		$(BUILD)/test-link $(BUILD)/test-message-json $(BUILD)/module-probe $(BUILD)/clock-back.so
+check: all $(BUILD)/test-module $(BUILD)/test-module-sanitized $(BUILD)/test-tree-store $(BUILD)/test-tree-store-sanitized \
+		$(BUILD)/test-log $(BUILD)/test-link $(BUILD)/test-message-json $(BUILD)/module-probe $(BUILD)/clock-back.so
 	$(BUILD)/test-tree-store
+	ASAN_OPTIONS=detect_leaks=1 $(BUILD)/test-tree-store-sanitized > /dev/null
 	$(BUILD)/test-log
 	$(BUILD)/test-module
 	ASAN_OPTIONS=detect_leaks=1 $(BUILD)/test-module-sanitized > /dev/null

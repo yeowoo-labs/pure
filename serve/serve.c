@@ -3555,8 +3555,9 @@ static void take_moved(Host *host) {
  * when the store does not open or the module does not start on it. */
 static bool start_executor(Executor *ex, App *app) {
     ex->module = app->module;
-    if (pure_store_open(app->store, &ex->store) != PURE_OK) {
-        snprintf(app->why, sizeof(app->why), "Cannot open the store");
+    PureResult opened = pure_store_open(app->store, &ex->store);
+    if (opened != PURE_OK) { /* busy: another process writes it (an app's store is its owner's while it runs) */
+        snprintf(app->why, sizeof(app->why), opened == PURE_BUSY ? "The store is another process's" : "Cannot open the store");
         return false;
     }
     if (pure_app_start(&ex->app, app->module, pure_store_data(ex->store)) != PURE_OK || !pure_app_defer(&ex->app, true)) {

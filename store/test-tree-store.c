@@ -929,6 +929,140 @@ static void store_handle(const char *path) {
     pure_store_close(store);
 }
 
+/* A draft opened by path shares a counted mapping, as a handle's draft does:
+ * once its version is all stored it can be frozen, and the frozen copy reads
+ * that version after the draft moves on. */
+static void frozen_path_draft(const char *path) {
+    unsigned char scratch[64];
+    int64_t revision;
+    CHECK(pure_store_put(path, "frozen", 0, (PureSpan){(const unsigned char *)"one", 3}, &revision) == PURE_OK);
+    PureDraft *draft, *frozen, *again;
+    CHECK(pure_draft_open(path, "frozen", &draft) == PURE_OK && (frozen = pure_draft_freeze(draft)));
+    CHECK(pure_draft_splice(draft, 3, 0, (PureSpan){(const unsigned char *)"!", 1}) == PURE_OK && !pure_draft_freeze(draft));
+    CHECK(pure_draft_commit(draft, &revision) == PURE_OK && (again = pure_draft_freeze(draft)));
+    expect_draft(frozen, &(Oracle){(unsigned char *)"one", 3, 1}, scratch);
+    expect_draft(again, &(Oracle){(unsigned char *)"one!", 4, 2}, scratch);
+    pure_draft_close(frozen);
+    pure_draft_close(again);
+    pure_draft_close(draft);
+}
+
+/* What another process gets for a commit to the store at path. */
+static PureResult elsewhere_put(const char *path, const char *key, int64_t expected) {
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (!child) {
+        int64_t at;
+        _exit((int)pure_store_put(path, key, expected, (PureSpan){(const unsigned char *)"z", 1}, &at));
+    }
+    int status;
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status));
+    return (PureResult)WEXITSTATUS(status);
+}
+
+/* While a handle is open its process is the store's writer: another process
+ * can neither commit (by path, through a handle, or with a draft it
+ * inherited) nor open a handle (busy), and still reads and makes the store
+ * (it is there); in the holding process a commit by path goes through the
+ * handle's writer, and neither it, nor making the store again, nor a stray
+ * descriptor of the lock file opened and closed (Linux) lets the lock go;
+ * once the last handle closes another process writes again, though a child
+ * forked meanwhile still lives. */
+static void owner_lock(const char *path) {
+    int64_t revision;
+    int status;
+    CHECK(pure_store_put(path, "owned", 0, (PureSpan){(const unsigned char *)"a", 1}, &revision) == PURE_OK);
+    PureStore *store;
+    PureDraft *inherited;
+    CHECK(pure_store_open(path, &store) == PURE_OK && pure_store_draft(store, "owned", &inherited) == PURE_OK);
+    CHECK(pure_draft_splice(inherited, 0, 1, (PureSpan){(const unsigned char *)"i", 1}) == PURE_OK);
+    CHECK(pure_store_init(path) == PURE_OK);
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (!child) {
+        PureStore *other;
+        PureDraft *draft;
+        PureStoredView view;
+        int64_t at;
+        bool refused = pure_store_put(path, "owned", 1, (PureSpan){(const unsigned char *)"b", 1}, &at) == PURE_BUSY &&
+                       pure_store_open(path, &other) == PURE_BUSY && !other &&
+                       pure_draft_open(path, "owned", &draft) == PURE_OK &&
+                       pure_draft_splice(draft, 0, 1, (PureSpan){(const unsigned char *)"p", 1}) == PURE_OK &&
+                       pure_draft_commit(draft, &at) == PURE_BUSY && pure_draft_commit(inherited, &at) == PURE_BUSY;
+        bool read = pure_store_init(path) == PURE_OK && pure_store_get(path, "owned", 16, &view) == PURE_OK &&
+                    view.body.size == 1 && view.revision == 1;
+        _exit(refused && read ? 0 : 1);
+    }
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(pure_store_put(path, "owned", 1, (PureSpan){(const unsigned char *)"c", 1}, &revision) == PURE_OK && revision == 2);
+    CHECK(pure_store_init(path) == PURE_OK);
+#ifdef __linux__
+    char name[512];
+    snprintf(name, sizeof(name), "%s/.writer.lock", path);
+    int stray = open(name, O_RDWR);
+    CHECK(stray >= 0 && close(stray) == 0);
+#endif
+    CHECK(elsewhere_put(path, "owned", 2) == PURE_BUSY);
+    pure_draft_close(inherited);
+    PureDraft *draft;
+    CHECK(pure_store_draft(store, "owned", &draft) == PURE_OK && pure_draft_revision(draft) == 2);
+    pure_draft_close(draft);
+    /* A child forked while the handle is open and still alive, not touching
+     * the store, when the parent closes it: the lock goes with the parent's
+     * close all the same (the child let its copies of the descriptors go). */
+    int gate[2];
+    CHECK(pipe(gate) == 0);
+    pid_t lingering = fork();
+    CHECK(lingering >= 0);
+    if (!lingering) {
+        char byte;
+        close(gate[1]);
+        _exit(read(gate[0], &byte, 1) == 1 ? 0 : 1);
+    }
+    CHECK(close(gate[0]) == 0);
+    pure_store_close(store);
+    CHECK(elsewhere_put(path, "owned", 2) == PURE_OK);
+    CHECK(write(gate[1], "x", 1) == 1 && close(gate[1]) == 0);
+    CHECK(waitpid(lingering, &status, 0) == lingering && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    expect(path, "owned", &(Oracle){(unsigned char *)"z", 1, 3});
+}
+
+/* A compaction whose new name could not be synced: the writer syncs the
+ * directory and builds on the new file (it does not stay on the old one,
+ * compacting it again at every commit), and what it builds there is what a
+ * new process finds. */
+static void unsynced_compaction(const char *path) {
+    unsigned char *big = malloc(100000);
+    uint32_t seed = 11;
+    CHECK(big);
+    fill(big, 100000, &seed);
+    char name[512];
+    struct stat before, after;
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    PureStore *store;
+    PureDraft *draft;
+    int64_t revision;
+    CHECK(pure_store_open(path, &store) == PURE_OK && pure_store_draft(store, "big", &draft) == PURE_OK);
+    CHECK(stat(name, &before) == 0);
+    fail_stage = PURE_INSTALL_BEFORE_DIR_SYNC;
+    unsigned commits = 0;
+    do {
+        CHECK(pure_draft_splice(draft, 0, pure_draft_size(draft), (PureSpan){big, 100000}) == PURE_OK);
+        CHECK(pure_draft_commit(draft, &revision) == PURE_OK && stat(name, &after) == 0);
+    } while (after.st_ino == before.st_ino && ++commits < 40);
+    fail_stage = -1;
+    CHECK(after.st_ino != before.st_ino);
+    big[0] ^= 0xff;
+    struct stat again;
+    CHECK(pure_draft_splice(draft, 0, 1, (PureSpan){big, 1}) == PURE_OK && pure_draft_commit(draft, &revision) == PURE_OK);
+    CHECK(stat(name, &again) == 0 && again.st_ino == after.st_ino);
+    pure_draft_close(draft);
+    pure_store_close(store);
+    pure_tree_test_forget();
+    expect(path, "big", &(Oracle){big, 100000, revision});
+    free(big);
+}
+
 /* Threads of one process commit through their own handles at once: none is
  * refused as busy, every commit lands, and edits of one shared key conflict
  * instead of overwriting each other. */
@@ -1060,6 +1194,23 @@ static void lost_commit(const char *path) {
     expect(path, "lost", &o);
 }
 
+/* torn_head and records with a handle open throughout: the commits go
+ * through the writer it holds, which moves the slots on as it commits and
+ * reads its head again after a forget, as a new process would. */
+static void torn_head_held(const char *path) {
+    PureStore *store;
+    CHECK(pure_store_open(path, &store) == PURE_OK);
+    torn_head(path);
+    pure_store_close(store);
+}
+
+static void records_held(const char *path) {
+    PureStore *store;
+    CHECK(pure_store_open(path, &store) == PURE_OK);
+    records(path);
+    pure_store_close(store);
+}
+
 /* While a commit's sync is pending, this process keeps reading the previous
  * version: a crash could still take the new one back. */
 static void *commit_held(void *context) {
@@ -1136,6 +1287,17 @@ static void one_sync(const char *path) {
     for (unsigned i = 0; i < 20; ++i)
         CHECK(pure_store_put(path, "sync", revision, (PureSpan){(const unsigned char *)"x", 1}, &revision) == PURE_OK);
     CHECK(pure_tree_test_syncs() - syncs == 20 && file_size(path) == size);
+    /* Through a handle, whose writer stays open between commits, the same. */
+    PureStore *store;
+    PureDraft *draft;
+    CHECK(pure_store_open(path, &store) == PURE_OK && pure_store_draft(store, "sync", &draft) == PURE_OK);
+    syncs = pure_tree_test_syncs();
+    for (unsigned i = 0; i < 20; ++i)
+        CHECK(pure_draft_splice(draft, 0, 0, (PureSpan){(const unsigned char *)"y", 1}) == PURE_OK &&
+              pure_draft_commit(draft, &revision) == PURE_OK);
+    CHECK(pure_tree_test_syncs() - syncs == 20 && file_size(path) == size);
+    pure_draft_close(draft);
+    pure_store_close(store);
 }
 
 /* A compacted file carries written zeros for its whole cycle: once the sizes
@@ -1196,8 +1358,8 @@ int main(void) {
     void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
-                                      draft_versions, anonymous_draft, batch, store_handle, threads, grouped,
-                                      lost_commit, pending_head, stores_apart, one_sync, records, cycles};
+                                      draft_versions, anonymous_draft, batch, store_handle, frozen_path_draft, owner_lock, unsynced_compaction, threads, grouped,
+                                      lost_commit, pending_head, stores_apart, one_sync, records, torn_head_held, records_held, cycles};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -1208,7 +1370,7 @@ int main(void) {
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
          "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
-         "atomic-batch-runtime-keys-store-handle-threads-group-commit-lost-commit-pending-head-stores-apart-one-sync-records-"
-         "cycles\"}");
+         "atomic-batch-runtime-keys-store-handle-frozen-path-draft-owner-lock-unsynced-compaction-threads-group-commit-lost-commit-pending-head-stores-apart-one-sync-records-"
+         "held-torn-head-held-records-cycles\"}");
     return 0;
 }

@@ -313,10 +313,14 @@ view size = note.bytes
 def server_lent_views(aup, pure, work, threads=1):
     """A view that shows a text state as it is lends the state's stored
     extents. Answers pipelined on one connection and left waiting hold the
-    store mapping they were read from while the note is replaced: each comes
-    out whole in one version. When a reader goes without reading, the
-    mappings its answers held are unmapped and nothing stays charged. With
-    several threads the owner lends and a connection thread gives back."""
+    store mapping they were read from while the note is replaced, past a
+    compaction (the replaced file stays mapped while they are lent): each
+    comes out whole in one version. When the reader reads, or goes without
+    reading, the replaced file's mapping is let go and nothing stays charged.
+    With several threads the owner lends and a connection thread gives back.
+    (Versions of one file share its mapping, so what is counted is mappings
+    of replaced files, "(deleted)": drafts the commits did not touch keep
+    one from the start.)"""
     import socket
     import time
     module, source = work / 'note.pmod', work / 'note.aup'
@@ -333,16 +337,16 @@ def server_lent_views(aup, pure, work, threads=1):
         assert connection.getresponse().status == 200
         connection.close()
 
-    def mappings():
+    def replaced():
         # A compaction replaces the file: a mapping of the old one shows as "(deleted)".
         path = str((store / 'pure.tree').resolve())
-        return sum(1 for line in open(f'/proc/{host.process.pid}/maps') if path in line)
+        return sum(1 for line in open(f'/proc/{host.process.pid}/maps') if path in line and '(deleted)' in line)
 
     def settle(to):
         for _ in range(100):  # an answer's ticket is released on its thread
-            if mappings() <= to: return mappings()
+            if replaced() <= to: return replaced()
             time.sleep(0.02)
-        return mappings()
+        return replaced()
 
     def pipeline(count):
         # Far more than the kernel's buffers take (a few MiB): an answer waits, lent.
@@ -355,12 +359,13 @@ def server_lent_views(aup, pure, work, threads=1):
     try:
         write('x' * size)
         assert http(host.port, 'GET', '/views/size')[3] == str(size).encode()
-        alone = mappings()
-        # Whole versions, however the note changes while answers wait.
+        alone = replaced()
+        # Whole versions, however the note changes while answers wait (six
+        # notes: past the next compaction).
         sock = pipeline(32)
-        for round_ in range(5):
+        for round_ in range(6):
             write(chr(ord('A') + round_) * size)
-        held = mappings()
+        held = replaced()
         data = b''
         while data.count(b'HTTP/1.1 200') < 32 or len(data) < 32 * size:
             chunk = sock.recv(1 << 20)
@@ -374,18 +379,18 @@ def server_lent_views(aup, pure, work, threads=1):
         after_reading = settle(alone)
         # A reader that goes without reading gives back what its answers held.
         sock = pipeline(32)
-        for round_ in range(3):
+        for round_ in range(6):
             write(chr(ord('a') + round_) * size)
-        held_again = mappings()
+        held_again = replaced()
         sock.close()
         after_leaving = settle(alone)
         assert held > alone and held_again > alone and after_reading <= alone and after_leaving <= alone, \
             (alone, held, after_reading, held_again, after_leaving)
-        assert http(host.port, 'GET', '/views/page')[3] == b'c' * size
+        assert http(host.port, 'GET', '/views/page')[3] == b'f' * size
     finally:
         stats = host.stop()
     assert stats[0]['active'] == 0 and stats[0]['retained_payload_bytes'] == 0, stats
-    return {'alone': alone, 'while_lent': max(held, held_again), 'after': after_leaving}
+    return {'replaced_alone': alone, 'while_lent': max(held, held_again), 'after': after_leaving}
 
 
 def server_bursts(aup, pure, work, clients=8, edits=30, shards=1):
@@ -5803,9 +5808,10 @@ def server_apps(aup, pure, work):
     alone (503 stopped) while the others run; past an app's queue budget its
     requests are refused (503 busy) and another app answers meanwhile; past
     its work budget an event is refused (422 work) where the same event runs
-    in an app without one; an app whose store another process holds cannot
-    save (503 store_busy, nothing applied) while the others save; and after a
-    restart each app has its states back."""
+    in an app without one; an app's store is the app's while it runs (another
+    process cannot take its writer's lock, and the app saves on); after a
+    restart each app has its states back; and an app whose store another
+    process holds does not start (why says so) while the others run."""
     import fcntl
     import socket
     source = work / 'apps.aup'
@@ -5831,11 +5837,22 @@ twin   {work / 'apps.pmod'}   {work / 'store-a'}
         status, why, _, _ = http(port, 'POST', path)
         return status, why
 
+    def taken(store):
+        """Whether some process holds the store's writer lock (this one cannot take it)."""
+        with open(store / '.writer.lock', 'r+b') as lock:
+            try:
+                fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.lockf(lock, fcntl.LOCK_UN)
+            return False
+
     host = HttpHost([serve, '--apps', manifest, '--workers', 2])
     try:
         running = {app['name']: app for app in host.info['apps']}
         assert [name for name, app in running.items() if app['running']] == ['a', 'b', 'busy', 'tight'], running
         assert running['broken']['why'].startswith('Module:') and running['twin']['why'] == "The store is a's", running
+        assert taken(work / 'store-a')  # twin's start left a's lock with a
         port = host.port
         assert post(port, '/a/inputs/add?step=2') == (200, 'none')
         assert get(port, '/a/views/total')[::2] == (200, b'2') and get(port, '/b/views/total')[::2] == (200, b'0')
@@ -5865,14 +5882,10 @@ twin   {work / 'apps.pmod'}   {work / 'store-a'}
         ok, busy = answers.count(b'200'), answers.count(b'503')
         assert ok + busy == len(flood) and busy > 0 and ok > 0, (ok, busy)
         assert get(port, '/busy/views/total')[::2] == (200, str(ok).encode())  # the refused changed nothing
-        # The store of b held by another process: b cannot save, a can.
-        with open(work / 'store-b' / '.writer.lock', 'r+b') as held:
-            fcntl.lockf(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            assert post(port, '/b/inputs/add?step=1') == (503, 'store_busy')
-            assert post(port, '/a/inputs/add?step=1') == (200, 'none')
-            assert get(port, '/b/views/total')[::2] == (200, b'5')
-            fcntl.lockf(held, fcntl.LOCK_UN)
-        assert post(port, '/b/inputs/add?step=1') == (200, 'none')
+        # The store of b is b's while b runs: another process cannot take its writer's lock, and b saves on.
+        assert taken(work / 'store-b')
+        assert post(port, '/b/inputs/add?step=1') == (200, 'none') and post(port, '/a/inputs/add?step=1') == (200, 'none')
+        assert get(port, '/b/views/total')[::2] == (200, b'6')
     finally:
         stats = host.stop()[-1]
     by_name = {app['name']: app for app in stats['apps']}
@@ -5891,6 +5904,18 @@ twin   {work / 'apps.pmod'}   {work / 'store-a'}
     finally:
         moved = host.stop()[-1]['moved_home']
     assert moved > 0, moved
+    # Its store held by another process, an app does not start; the others do.
+    with open(work / 'store-a' / '.writer.lock', 'r+b') as held:
+        fcntl.lockf(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        host = HttpHost([serve, '--apps', manifest])
+        try:
+            started = {app['name']: app for app in host.info['apps']}
+            assert not started['a']['running'] and started['a']['why'] == "The store is another process's", started['a']
+            assert get(host.port, '/a/views/total')[:2] == (503, 'stopped')
+            assert get(host.port, '/b/views/total')[::2] == (200, b'6')
+        finally:
+            host.stop()
+        fcntl.lockf(held, fcntl.LOCK_UN)
     return {'apps': len(running), 'stopped': 2, 'flooded': len(flood), 'busy': busy, 'moved_home': moved}
 
 

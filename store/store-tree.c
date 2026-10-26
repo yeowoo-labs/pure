@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 enum { FREE = 0xffff };
@@ -54,10 +55,10 @@ static const unsigned char branch_magic[4] = {'P','T','B','1'};
 static const char tree_name[] = "pure.tree";
 /* A store's turns in this process, one for each store directory (known by
  * its identity: two paths to one directory share them). Threads take turns
- * as its writer: the file lock arbitrates only between processes (it is the
- * process's, and closing any descriptor of the lock file drops it). And
- * their commits to it group (Group commits, below). Stores apart wait for
- * nothing of each other's, a sync least of all. */
+ * as its writer: the file lock arbitrates only between processes, and the
+ * process's one writer on the store holds it (Holding, below). And their
+ * commits to it group (Group commits, below). Stores apart wait for nothing
+ * of each other's, a sync least of all. */
 typedef struct Turns {
     dev_t device;
     ino_t inode;
@@ -68,9 +69,11 @@ typedef struct Turns {
     size_t queued, expected; /* expected: how many requests groups have held lately */
     bool leading;
     unsigned long groups, requests;
+    struct Holding *holding; /* the process's writer on the store (below) */
     struct Turns *next;
 } Turns;
 static struct { pthread_mutex_t lock; Turns *first; } stores = {PTHREAD_MUTEX_INITIALIZER, NULL};
+
 
 /* The turns of the store whose directory is info, made the first time;
  * NULL without memory. */
@@ -110,13 +113,14 @@ typedef struct {
     size_t size;          /* leaf bytes, child count, or next free slot + 1 */
     unsigned height;      /* FREE for a reclaimed slot */
 } Node;
-/* One mapped version of the file, shared by the drafts of a store handle
- * and by whoever still sends extents from it. */
-typedef struct PureMapping { const unsigned char *map; uint64_t end; unsigned refs; } Mapping;
+/* One mapping of a file from its start, length bytes: shared by the versions
+ * read from it (each a head whose bytes end at or before length) and by
+ * whoever still sends extents from it. */
+typedef struct PureMapping { const unsigned char *map; uint64_t length; unsigned refs; } Mapping;
 typedef struct {
     const unsigned char *map;
     uint64_t end;
-    Mapping *shared; /* map belongs to this shared mapping, not to the tree */
+    Mapping *shared; /* the mapping map is of (counted; NULL with no map) */
     Node *nodes;
     size_t count, capacity, free_head, free_count; /* free_head is slot + 1 */
     size_t bytes; /* payload held by arena nodes, including unreachable ones */
@@ -133,6 +137,66 @@ typedef struct {
     unsigned char buffer[BUFFER];
 } Writer;
 typedef struct { PureSpan part[3]; size_t index, offset; } Source;
+
+/* A locked writer over the current published file. Its tree maps the file
+ * from its start, at least to the head's end, and holds a commit's catalog
+ * edits until the commit ends. file.st_size: what the file has at least. */
+typedef struct {
+    int directory, lock, fd;
+    Head head;
+    uint64_t slots[2]; /* the sequences of the slots' heads */
+    Tree tree;
+    struct stat file;
+} Session;
+
+/* The process's one writer on a store, opened by its first holder and closed
+ * by its last: a store handle holds it while open, a commit while it
+ * publishes. So while a handle is open the writer lock is this process's,
+ * and a commit neither locks nor reads its head: the file changes only
+ * through this session. The session is guarded by the turns' writer; the
+ * holders, and the newest version it published or read (what handles see),
+ * by the turns' lock. */
+typedef struct Holding {
+    Session session;
+    unsigned holders;
+    unsigned forks; /* the process's forks when it opened: a forked child's copy holds no lock */
+    bool stale;     /* a commit left it unsure of its head: read again before the next */
+    Writer *buffer; /* the commits' writer */
+    Head newest;
+    Mapping *mapping; /* newest's (a reference) */
+    dev_t device;     /* newest's file */
+    ino_t inode;
+} Holding;
+
+/* Forks in this process's line. Around a fork the stores' list and every
+ * store's lock are taken, so the child's copies are whole; the child closes
+ * its copies of every writer's descriptors at once (on Linux the lock is the
+ * open file description's, which the child's copies would keep after the
+ * parent let it go) and counts the fork: a writer opened before is the
+ * parent's. */
+static unsigned forks;
+static void before_fork(void) {
+    pthread_mutex_lock(&stores.lock);
+    for (Turns *t = stores.first; t; t = t->next) pthread_mutex_lock(&t->lock);
+}
+static void after_fork(void) {
+    for (Turns *t = stores.first; t; t = t->next) pthread_mutex_unlock(&t->lock);
+    pthread_mutex_unlock(&stores.lock);
+}
+static void in_child(void) {
+    for (Turns *t = stores.first; t; t = t->next) {
+        Session *s = t->holding ? &t->holding->session : NULL;
+        if (s && s->lock >= 0) close(s->lock);
+        if (s && s->fd >= 0) close(s->fd);
+        if (s && s->directory >= 0) close(s->directory);
+        if (s) s->lock = s->fd = s->directory = -1;
+        pthread_mutex_unlock(&t->lock);
+    }
+    ++forks;
+    pthread_mutex_unlock(&stores.lock);
+}
+static pthread_once_t fork_watch = PTHREAD_ONCE_INIT;
+static void watch_forks(void) { pthread_atfork(before_fork, after_fork, in_child); }
 
 static bool fault(PureStoreStage stage) {
 #ifdef PURE_STORE_TEST
@@ -330,6 +394,14 @@ void pure_tree_test_forget(void) {
     memset(known.newest, 0, sizeof(known.newest));
     known.publishing.state = UNKNOWN;
     pthread_mutex_unlock(&known.lock);
+    /* and the writers this process holds read their heads again */
+    pthread_mutex_lock(&stores.lock);
+    for (Turns *t = stores.first; t; t = t->next) {
+        pthread_mutex_lock(&t->writer);
+        if (t->holding) t->holding->stale = true;
+        pthread_mutex_unlock(&t->writer);
+    }
+    pthread_mutex_unlock(&stores.lock);
 }
 #endif
 
@@ -416,12 +488,16 @@ static bool read_head(int fd, struct stat *file, bool writer, Head *out, uint64_
     return true;
 }
 
+/* The file mapped to the head's end, a mapping counted as every one is: a
+ * draft opened by path can be frozen and lend it as a handle's draft can. */
 static bool map_tree(int fd, const struct stat *file, const Head *head, Tree *tree) {
     *tree = (Tree){0};
     if ((uint64_t)file->st_size < head->end) return false;
-    void *map = mmap(NULL, (size_t)head->end, PROT_READ, MAP_SHARED, fd, 0);
-    if (map == MAP_FAILED) return false;
-    *tree = (Tree){.map = map, .end = head->end};
+    Mapping *mapping = malloc(sizeof(*mapping));
+    void *map = mapping ? mmap(NULL, (size_t)head->end, PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+    if (map == MAP_FAILED) { free(mapping); return false; }
+    *mapping = (Mapping){map, head->end, 1};
+    *tree = (Tree){.map = map, .end = head->end, .shared = mapping};
     return true;
 }
 
@@ -429,13 +505,12 @@ static bool map_tree(int fd, const struct stat *file, const Head *head, Tree *tr
  * its connection threads): its count is atomic. */
 static void release_mapping(Mapping *mapping) {
     if (!mapping || __atomic_sub_fetch(&mapping->refs, 1, __ATOMIC_ACQ_REL)) return;
-    munmap((void *)mapping->map, (size_t)mapping->end);
+    munmap((void *)mapping->map, (size_t)mapping->length);
     free(mapping);
 }
 
 static void release_tree(Tree *tree) {
-    if (tree->shared) release_mapping(tree->shared);
-    else if (tree->map) munmap((void *)tree->map, (size_t)tree->end);
+    release_mapping(tree->shared);
     for (size_t i = 0; i < tree->count; ++i) {
         free(tree->nodes[i].bytes);
         free(tree->nodes[i].children);
@@ -932,16 +1007,18 @@ static bool install(int directory, char temporary[96], int fd, Head *head, uint6
     if (close(fd)) ok = false;
     ok = ok && !renameat(directory, temporary, directory, tree_name);
     if (ok) temporary[0] = 0;
-    ok = ok && sync_fd(directory);
+    ok = ok && !fault(PURE_INSTALL_BEFORE_DIR_SYNC) && sync_fd(directory);
     if (ok) remember(&file, head, DURABLE);
     return ok;
 }
 
-/* Rewrite only reachable nodes. Open readers keep their mapping of the
- * previous file. A failure leaves the published file untouched. */
-static void compact(int directory, int source, const struct stat *file, const Head *head) {
-    Tree tree;
-    if (!map_tree(source, file, head, &tree)) return;
+/* Rewrite only reachable nodes, read through the writer's mapping of the
+ * file (replaced: its size). Open readers keep their mapping of the previous
+ * file. A failure leaves the published file untouched; true when the new
+ * file is in place. */
+static bool compact(int directory, Mapping *mapping, uint64_t replaced, const Head *head) {
+    __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
+    Tree tree = {.map = mapping->map, .end = head->end, .shared = mapping};
     char temporary[96];
     int fd = create_temporary(directory, temporary);
     Writer *writer = fd >= 0 ? malloc(sizeof(*writer)) : NULL;
@@ -965,7 +1042,7 @@ static void compact(int directory, int source, const struct stat *file, const He
          write_root(&tree, writer, &fresh, false) && flush(writer);
     if (ok) {
         Head compacted = {head->seq + 1, writer->at, fresh.ref, fresh.bytes, writer->at - DATA, 0, 0};
-        ok = install(directory, temporary, fd, &compacted, (uint64_t)file->st_size);
+        ok = install(directory, temporary, fd, &compacted, replaced);
         fd = -1;
     }
     if (fd >= 0) close(fd);
@@ -973,13 +1050,22 @@ static void compact(int directory, int source, const struct stat *file, const He
     free(records);
     free(writer);
     release_tree(&tree);
+    return ok;
 }
 
-static bool lock_writer(int lock, bool wait) {
+/* The writer's lock, without waiting. On Linux it is the open file
+ * description's: no other descriptor of the lock file, opened and closed in
+ * this process, lets it go (a process's POSIX lock goes with any). */
+#if defined(__linux__) && !defined(F_OFD_SETLK)
+#define F_OFD_SETLK 37
+#endif
+static bool lock_writer(int lock) {
     struct flock hold = {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0};
-    int rc;
-    do { rc = fcntl(lock, wait ? F_SETLKW : F_SETLK, &hold); } while (rc && wait && errno == EINTR);
-    return rc == 0;
+#ifdef F_OFD_SETLK
+    return fcntl(lock, F_OFD_SETLK, &hold) == 0;
+#else
+    return fcntl(lock, F_SETLK, &hold) == 0;
+#endif
 }
 
 PureResult pure_store_init(const char *path) {
@@ -994,29 +1080,57 @@ PureResult pure_store_init(const char *path) {
         return PURE_STORE_ERROR;
     }
     pthread_mutex_lock(&turns->writer);
+    /* A store this process writes is there, and its lock file is the
+     * writer's: closing any descriptor of it would drop the lock. */
+    pthread_mutex_lock(&turns->lock);
+    bool writing = turns->holding && turns->holding->holders && turns->holding->forks == forks;
+    pthread_mutex_unlock(&turns->lock);
+    if (writing) {
+        pthread_mutex_unlock(&turns->writer);
+        close(directory);
+        return PURE_OK;
+    }
     int lock = openat(directory, ".writer.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     struct stat info;
-    bool ok = lock >= 0 && fstat(lock, &info) == 0 && S_ISREG(info.st_mode) && lock_writer(lock, true);
+    bool ok = lock >= 0 && fstat(lock, &info) == 0 && S_ISREG(info.st_mode);
+    /* A file there is read as readers read it, without the lock (a store's
+     * writer holds it for its life). A missing one is made under the lock,
+     * looking again once it is held: another may have made it. While the file
+     * is missing only another process making it can hold the lock (a writer
+     * needs the file): it is waited for a little, looking again. */
+    PureResult made = PURE_STORE_ERROR;
     if (ok) {
-        Head head;
-        struct stat file;
         int fd = openat(directory, tree_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        for (int tries = 0; fd < 0 && errno == ENOENT; ++tries) {
+            if (lock_writer(lock)) {
+                if ((fd = openat(directory, tree_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)) < 0 && errno == ENOENT) {
+                    char temporary[96];
+                    int created_fd = create_temporary(directory, temporary);
+                    Head head = {.seq = 1, .end = DATA};
+                    if (created_fd >= 0 && install(directory, temporary, created_fd, &head, 0)) made = PURE_OK;
+                    if (*temporary) unlinkat(directory, temporary, 0);
+                }
+                break;
+            }
+            if ((errno != EACCES && errno != EAGAIN) || tries == 200) {
+                made = errno == EACCES || errno == EAGAIN ? PURE_BUSY : PURE_STORE_ERROR;
+                break;
+            }
+            nanosleep(&(struct timespec){0, 10000000}, NULL);
+            fd = openat(directory, tree_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        }
         if (fd >= 0) {
-            ok = read_head(fd, &file, true, &head, NULL); /* An unreadable file is never replaced. */
+            Head head;
+            struct stat file;
+            if (read_head(fd, &file, false, &head, NULL)) made = PURE_OK; /* An unreadable file is never replaced. */
             close(fd);
-        } else if (errno != ENOENT) ok = false;
-        else {
-            char temporary[96];
-            int created_fd = create_temporary(directory, temporary);
-            head = (Head){.seq = 1, .end = DATA};
-            ok = created_fd >= 0 && install(directory, temporary, created_fd, &head, 0);
-            if (*temporary) unlinkat(directory, temporary, 0);
         }
     }
-    ok = ok && sync_fd(lock) && sync_fd(directory);
+    ok = made == PURE_OK && sync_fd(lock) && sync_fd(directory);
     if (lock >= 0) close(lock);
     pthread_mutex_unlock(&turns->writer);
     close(directory);
+    if (made == PURE_BUSY) return PURE_BUSY;
     if (ok && created) {
         char *parent = strdup(path);
         if (!parent) return PURE_STORE_ERROR;
@@ -1114,16 +1228,6 @@ PureResult pure_store_get_range(const char *path, const char *key, size_t offset
     return pure_store_select(path, key, offset, length, false, 0, available, out);
 }
 
-/* A locked writer over the current published file. */
-typedef struct {
-    int directory, lock, fd;
-    Head head;
-    uint64_t slots[2]; /* the sequences of the slots' heads */
-    Tree tree;
-    struct stat file;
-    Turns *turns; /* whose writer's turn it holds, once it does */
-} Session;
-
 /* Keep written zeros after the published end, where commits and their
  * unpublished leftovers go. A sync of blocks the file already has writes
  * only them; a new size or new blocks add a journal commit (on an SD card
@@ -1131,62 +1235,210 @@ typedef struct {
  * commit's sync. */
 static void prepare_tail(Session *session) {
     uint64_t size = (uint64_t)session->file.st_size, end = session->head.end;
-    if (size < end + TAIL_MIN) zero_fill(session->fd, size > end ? size : end, tail_end(end));
+    if (size >= end + TAIL_MIN) return;
+    zero_fill(session->fd, size > end ? size : end, tail_end(end));
+    struct stat file;
+    if (!fstat(session->fd, &file)) session->file.st_size = file.st_size;
+}
+
+/* A commit's edits, written or given up: the arena's nodes go, the mapping stays. */
+static void clear_arena(Tree *tree) {
+    for (size_t i = 0; i < tree->count; ++i) {
+        free(tree->nodes[i].bytes);
+        free(tree->nodes[i].children);
+    }
+    tree->count = tree->free_head = tree->free_count = tree->bytes = 0;
+}
+
+/* Map the file to its size when the mapping ends before the head's bytes do
+ * (a new file, a grown tail): one mapping serves every version until then. */
+static bool cover(Session *session) {
+    Mapping *mapping = session->tree.shared;
+    if (!mapping || mapping->length < session->head.end) {
+        struct stat file;
+        if (fstat(session->fd, &file) || (uint64_t)file.st_size < session->head.end) return false;
+        session->file.st_size = file.st_size;
+        Mapping *fresh = malloc(sizeof(*fresh));
+        void *map = fresh ? mmap(NULL, (size_t)file.st_size, PROT_READ, MAP_SHARED, session->fd, 0) : MAP_FAILED;
+        if (map == MAP_FAILED) { free(fresh); return false; }
+        *fresh = (Mapping){map, (uint64_t)file.st_size, 1};
+        release_mapping(mapping);
+        session->tree.map = map;
+        session->tree.shared = fresh;
+    }
+    session->tree.end = session->head.end;
+    return true;
 }
 
 static void close_session(Session *session) {
     release_tree(&session->tree);
     if (session->fd >= 0) close(session->fd);
-    if (session->lock >= 0) close(session->lock);
+    if (session->lock >= 0) close(session->lock); /* the process's writer lock goes with it */
     if (session->directory >= 0) close(session->directory);
-    if (session->turns) pthread_mutex_unlock(&session->turns->writer);
-    session->turns = NULL;
+    *session = (Session){.directory = -1, .lock = -1, .fd = -1};
 }
 
-static PureResult open_session(const char *path, Session *session) {
-    *session = (Session){.directory = -1, .lock = -1, .fd = -1};
-    session->directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (session->directory < 0) return PURE_STORE_ERROR;
-    Turns *turns = turns_of(session->directory);
-    if (!turns) return PURE_STORE_ERROR;
-    pthread_mutex_lock(&turns->writer); /* another thread of this process waits, not fails */
-    session->turns = turns;
-    session->lock = openat(session->directory, ".writer.lock", O_RDWR | O_NOFOLLOW | O_CLOEXEC);
-    struct stat info;
-    if (session->lock < 0 || fstat(session->lock, &info) || !S_ISREG(info.st_mode)) return PURE_STORE_ERROR;
-    if (!lock_writer(session->lock, false))
-        return errno == EACCES || errno == EAGAIN ? PURE_BUSY : PURE_STORE_ERROR;
-    session->fd = openat(session->directory, tree_name, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
-    if (session->fd < 0 || !read_head(session->fd, &session->file, true, &session->head, session->slots))
+/* Read the head of the file at the store's name, and map it. A head this
+ * process did not make durable may be the last write of a writer that died
+ * before its sync: it is made durable before anything builds on it. So is
+ * the name of a new file (compaction's) unless it is known to be (synced):
+ * a crash would bring back the file it replaced, and drop what was built on
+ * the new one. */
+static PureResult reopen(Session *session, bool synced) {
+    int fd = openat(session->directory, tree_name, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    struct stat file;
+    if (fd < 0 || fstat(fd, &file) ||
+        (!synced && session->fd >= 0 && (file.st_dev != session->file.st_dev || file.st_ino != session->file.st_ino) &&
+         !sync_fd(session->directory))) {
+        if (fd >= 0) close(fd);
         return PURE_STORE_ERROR;
-    /* A head this process did not make durable may be the last write of a
-     * writer that died before its sync: make it durable before building on it. */
+    }
+    if (session->fd >= 0) close(session->fd);
+    session->fd = fd;
+    release_tree(&session->tree); /* its mapping may be of a file compaction replaced */
+    if (!read_head(fd, &session->file, true, &session->head, session->slots)) return PURE_STORE_ERROR;
     if (recall(&session->file, &session->head) != DURABLE) {
-        if (!sync_data(session->fd)) return PURE_STORE_ERROR;
+        if (!sync_data(fd)) return PURE_STORE_ERROR;
         remember(&session->file, &session->head, DURABLE);
     }
     prepare_tail(session);
-    return map_tree(session->fd, &session->file, &session->head, &session->tree) ? PURE_OK : PURE_STORE_ERROR;
+    return cover(session) ? PURE_OK : PURE_STORE_ERROR;
 }
 
-/* A commit's bytes start after room for its record at the published end. */
-static uint64_t commit_start(const Session *session) { return session->head.end + SLOT; }
+/* Handles see the session's head from now on. */
+static void show_newest(Turns *turns, Holding *holding) {
+    Mapping *mapping = holding->session.tree.shared;
+    __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
+    pthread_mutex_lock(&turns->lock);
+    Mapping *old = holding->mapping;
+    holding->newest = holding->session.head;
+    holding->mapping = mapping;
+    holding->device = holding->session.file.st_dev;
+    holding->inode = holding->session.file.st_ino;
+    pthread_mutex_unlock(&turns->lock);
+    release_mapping(old);
+}
+
+/* One more holder of an open writer, without waiting for a commit in it: a
+ * handle opened meanwhile can join that commit's group. */
+static bool join(Turns *turns) {
+    pthread_mutex_lock(&turns->lock);
+    Holding *holding = turns->holding;
+    bool joined = holding && holding->holders && holding->forks == forks;
+    if (joined) ++holding->holders;
+    pthread_mutex_unlock(&turns->lock);
+    return joined;
+}
+
+/* After a commit that may or may not be stored: the head the file has now,
+ * made durable (the commit's, when its bytes are whole), read at once, so
+ * that what handles see, and what an app starting again on one finds, is
+ * what the store has. Left unsure when it cannot. */
+static void settle_uncertain(Turns *turns, Holding *holding) {
+    if (reopen(&holding->session, false) != PURE_OK) return;
+    holding->stale = false;
+    show_newest(turns, holding);
+}
+
+/* With turns->writer held: one more holder of the process's writer on the
+ * store at path, which opens it, or reads its head again when a commit left
+ * it unsure. A forked child lets its copy of the parent's go first (the lock
+ * is the parent's) and opens its own. */
+static PureResult hold(Turns *turns, const char *path) {
+    if (!turns->holding) {
+        Holding *made = calloc(1, sizeof(*made));
+        if (!made) return PURE_ALLOCATION;
+        made->session = (Session){.directory = -1, .lock = -1, .fd = -1};
+        pthread_mutex_lock(&turns->lock);
+        turns->holding = made;
+        pthread_mutex_unlock(&turns->lock);
+    }
+    Holding *holding = turns->holding;
+    if (join(turns)) {
+        if (!holding->stale) return PURE_OK;
+        PureResult result = reopen(&holding->session, false);
+        if (result == PURE_OK) {
+            holding->stale = false;
+            show_newest(turns, holding);
+            return PURE_OK;
+        }
+        pthread_mutex_lock(&turns->lock);
+        --holding->holders; /* others hold it still: it stays open, unsure */
+        pthread_mutex_unlock(&turns->lock);
+        return result;
+    }
+    Session *session = &holding->session;
+    pthread_once(&fork_watch, watch_forks);
+    close_session(session); /* none, or a forked child's copy of its parent's */
+    struct stat info;
+    session->directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (session->directory < 0 || fstat(session->directory, &info) || info.st_dev != turns->device ||
+        info.st_ino != turns->inode) { close_session(session); return PURE_STORE_ERROR; }
+    session->lock = openat(session->directory, ".writer.lock", O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    PureResult result = PURE_STORE_ERROR;
+    if (session->lock >= 0 && !fstat(session->lock, &info) && S_ISREG(info.st_mode))
+        result = lock_writer(session->lock) ? reopen(session, false) :
+                 errno == EACCES || errno == EAGAIN ? PURE_BUSY : PURE_STORE_ERROR;
+    if (result != PURE_OK) { close_session(session); return result; }
+    holding->stale = false;
+    show_newest(turns, holding);
+    pthread_mutex_lock(&turns->lock);
+    holding->forks = forks;
+    holding->holders = 1;
+    pthread_mutex_unlock(&turns->lock);
+    return PURE_OK;
+}
+
+/* With turns->writer held: the last holder closes the writer (and its lock). */
+static void let_go(Turns *turns) {
+    Holding *holding = turns->holding;
+    clear_arena(&holding->session.tree);
+    pthread_mutex_lock(&turns->lock);
+    bool last = !--holding->holders;
+    Mapping *old = last ? holding->mapping : NULL;
+    if (last) {
+        holding->mapping = NULL;
+        holding->newest = (Head){0};
+    }
+    pthread_mutex_unlock(&turns->lock);
+    release_mapping(old);
+    if (!last) return;
+    close_session(&holding->session);
+    free(holding->buffer);
+    holding->buffer = NULL;
+}
+
+/* The writer's buffer, at the start of a commit's bytes. */
+static Writer *writer_of(Holding *holding) {
+    Writer *writer = holding->buffer ? holding->buffer : (holding->buffer = malloc(sizeof(*writer)));
+    if (!writer) return NULL;
+    writer->fd = holding->session.fd;
+    writer->at = holding->session.head.end + SLOT; /* a commit's bytes start after room for its record */
+    writer->used = 0;
+    writer->failed = false;
+    writer->digest = (Digest){0};
+    return writer;
+}
 
 /* The documents' new nodes are already written at writer. Record each in
  * the catalog (revisions come in as the base and leave as the new one), then
  * write the head as the record before them and sync once: every document
  * becomes visible at once, or none does. Readers of this process see the
- * head only once it is durable. */
+ * head only once it is durable. The session then stands at the new head; a
+ * compaction leaves it on the new file (compacted), and when it cannot
+ * follow it is stale. */
 #ifdef PURE_STORE_TEST
 static unsigned long publications;
 unsigned long pure_tree_test_publications(void) { return publications; }
 #endif
 
-static PureResult publish(Session *session, Writer *writer, size_t count, const char *const *keys,
-                          const Entry *documents, int64_t *revisions) {
+static PureResult publish(Holding *holding, Writer *writer, size_t count, const char *const *keys,
+                          const Entry *documents, int64_t *revisions, bool *compacted) {
 #ifdef PURE_STORE_TEST
     ++publications;
 #endif
+    Session *session = &holding->session;
+    *compacted = false;
     Entry catalog = {session->head.catalog, session->head.catalog_bytes};
     bool written = true;
     for (size_t i = 0; written && i < count; ++i) {
@@ -1209,7 +1461,7 @@ static PureResult publish(Session *session, Writer *writer, size_t count, const 
     if (!written || fault(PURE_AFTER_HEADER) || fault(PURE_BEFORE_FILE_SYNC) || fault(PURE_BEFORE_RENAME))
         return PURE_STORE_ERROR;
     Head published = {session->head.seq + 1, writer->at, catalog.ref, catalog.bytes, session->head.live,
-                      commit_start(session), digest_end(&writer->digest)};
+                      session->head.end + SLOT, digest_end(&writer->digest)};
     unsigned char record[SLOT], slot[SLOT];
     encode_head(record, record_magic, &published);
     encode_head(slot, head_magic, &published);
@@ -1224,9 +1476,30 @@ static PureResult publish(Session *session, Writer *writer, size_t count, const 
                    (!checkpoint || write_at(session->fd, slot, SLOT, older * BLOCK)) &&
                    !fault(PURE_BEFORE_DIR_SYNC) && sync_data(session->fd);
     remember(&session->file, &published, durable ? DURABLE : CHECKED);
-    if (!durable) return PURE_UNCERTAIN;
-    if (published.end - DATA > 4 * published.live + COMPACT_SLACK && !fstat(session->fd, &session->file))
-        compact(session->directory, session->fd, &session->file, &published);
+    if (!durable) {
+        holding->stale = true;
+        return PURE_UNCERTAIN;
+    }
+    session->head = published;
+    if (checkpoint) session->slots[older] = published.seq;
+    clear_arena(&session->tree);
+    if (!cover(session)) {
+        holding->stale = true;
+        return PURE_OK;
+    }
+    if (published.end - DATA > 4 * published.live + COMPACT_SLACK && !fstat(session->fd, &session->file)) {
+        /* The name decides, not compact's result: its rename may be in place
+         * though the directory's sync after it failed. */
+        bool synced = compact(session->directory, session->tree.shared, (uint64_t)session->file.st_size, &published);
+        struct stat named;
+        if (!fstatat(session->directory, tree_name, &named, AT_SYMLINK_NOFOLLOW) &&
+            (named.st_dev != session->file.st_dev || named.st_ino != session->file.st_ino)) {
+            *compacted = true;
+            if (reopen(session, synced) != PURE_OK) holding->stale = true;
+            return PURE_OK;
+        }
+    }
+    prepare_tail(session);
     return PURE_OK;
 }
 
@@ -1236,15 +1509,24 @@ static PureResult mutate(const char *path, const char *key, int64_t expected,
     *revision = 0;
     if (!valid_key(key) || (body.size && !body.data)) return PURE_STORE_ERROR;
     if (body.size > PURE_OBJECT_LIMIT || max_size > PURE_OBJECT_LIMIT || expected < 0) return PURE_LIMIT;
-    Session session;
-    Writer *writer = NULL;
+    int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Turns *turns = directory >= 0 ? turns_of(directory) : NULL;
+    if (directory >= 0) close(directory);
+    if (!turns) return PURE_STORE_ERROR;
+    pthread_mutex_lock(&turns->writer);
+    PureResult result = hold(turns, path);
+    if (result != PURE_OK) {
+        pthread_mutex_unlock(&turns->writer);
+        return result;
+    }
+    Holding *holding = turns->holding;
+    Session *session = &holding->session;
+    Writer *writer;
     Entry document, next;
     uint64_t index;
-    bool found;
-    PureResult result = open_session(path, &session);
-    if (result != PURE_OK) goto finish;
+    bool found, compacted;
     result = PURE_STORE_ERROR;
-    if (!find(&session.tree, (Entry){session.head.catalog, session.head.catalog_bytes}, key,
+    if (!find(&session->tree, (Entry){session->head.catalog, session->head.catalog_bytes}, key,
               &index, &found, &document, revision)) goto finish;
     if (*revision != expected) { result = PURE_CONFLICT; goto finish; }
     if (*revision == INT64_MAX) { result = PURE_LIMIT; goto finish; }
@@ -1252,15 +1534,15 @@ static PureResult mutate(const char *path, const char *key, int64_t expected,
     if (splice && (offset > old_size || remove > old_size - offset ||
                    old_size - remove > max_size ||
                    body.size > max_size - (old_size - remove))) { result = PURE_LIMIT; goto finish; }
-    writer = malloc(sizeof(*writer));
-    if (!writer || !rebuild(&session.tree, splice ? document : (Entry){0}, splice ? offset : 0,
-                            splice ? remove : 0, body, &next)) goto finish;
-    *writer = (Writer){.fd = session.fd, .at = commit_start(&session)};
-    if (!write_root(&session.tree, writer, &next, false)) goto finish;
-    result = publish(&session, writer, 1, &key, &next, revision);
+    if (!(writer = writer_of(holding)) || !rebuild(&session->tree, splice ? document : (Entry){0}, splice ? offset : 0,
+                                                   splice ? remove : 0, body, &next) ||
+        !write_root(&session->tree, writer, &next, false)) goto finish;
+    result = publish(holding, writer, 1, &key, &next, revision, &compacted);
+    if (result == PURE_OK && !holding->stale) show_newest(turns, holding);
+    else if (result == PURE_UNCERTAIN) settle_uncertain(turns, holding);
 finish:
-    free(writer);
-    close_session(&session);
+    let_go(turns);
+    pthread_mutex_unlock(&turns->writer);
     return result;
 }
 
@@ -1296,15 +1578,16 @@ PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *k
     return result;
 }
 
-/* A store kept open by one owner thread: its current file and a mapping of
- * its newest version, shared by the drafts opened through it. */
+/* A store kept open by one owner thread: a holder of the process's writer on
+ * it, and the version its drafts open at (the newest when it last looked),
+ * whose mapping they share. */
 struct PureStore {
     char *path;
-    int directory, fd;
-    dev_t device;
-    ino_t inode;
+    Turns *turns;
     Head head;
     Mapping *mapping;
+    dev_t device; /* the version's file */
+    ino_t inode;
     bool pinned; /* drafts open at the version of the last check */
 };
 
@@ -1340,11 +1623,6 @@ static PureResult load_draft(PureDraft *draft) {
                    &document, &revision);
     close(fd);
     if (!ok) { release_tree(&tree); return PURE_STORE_ERROR; }
-    /* Its mapping is shared as a handle's is: the draft can be frozen and lend it. */
-    Mapping *mapping = malloc(sizeof(*mapping));
-    if (!mapping) { release_tree(&tree); return PURE_ALLOCATION; }
-    *mapping = (Mapping){tree.map, tree.end, 1};
-    tree.shared = mapping;
     release_tree(&draft->tree);
     draft->tree = tree;
     draft->device = info.st_dev;
@@ -1385,7 +1663,7 @@ PureDraft *pure_draft_freeze(const PureDraft *draft) {
     if (!frozen) return NULL;
     Mapping *mapping = draft->tree.shared;
     __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
-    *frozen = (PureDraft){.tree = {.map = mapping->map, .end = mapping->end, .shared = mapping},
+    *frozen = (PureDraft){.tree = {.map = mapping->map, .end = draft->tree.end, .shared = mapping},
                           .device = draft->device, .inode = draft->inode, .root = draft->root,
                           .revision = draft->revision};
     memcpy(frozen->key, draft->key, sizeof(frozen->key));
@@ -1399,44 +1677,25 @@ void pure_draft_close(PureDraft *draft) {
     free(draft);
 }
 
-/* Bring the handle to the newest published version: an unchanged store costs
- * one system call (the mapping shows the head slots); a new commit maps
- * again, a compaction reopens. */
+/* Bring the handle to the newest version: the writer it holds made or read
+ * every one, so this looks at no file. */
 static PureResult refresh(PureStore *store) {
-    struct stat info;
-    if (fstatat(store->directory, tree_name, &info, AT_SYMLINK_NOFOLLOW) || !S_ISREG(info.st_mode))
-        return PURE_STORE_ERROR;
-    if (store->fd < 0 || info.st_dev != store->device || info.st_ino != store->inode) {
-        int fd = openat(store->directory, tree_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd < 0 || fstat(fd, &info)) { if (fd >= 0) close(fd); return PURE_STORE_ERROR; }
-        if (store->fd >= 0) close(store->fd);
-        store->fd = fd;
-        store->device = info.st_dev;
-        store->inode = info.st_ino;
-        store->head = (Head){0};
+    Turns *turns = store->turns;
+    Holding *holding = turns->holding;
+    Mapping *old = NULL;
+    pthread_mutex_lock(&turns->lock);
+    if (holding->mapping && (holding->mapping != store->mapping || holding->newest.seq != store->head.seq ||
+                             holding->newest.check != store->head.check)) {
+        __atomic_add_fetch(&holding->mapping->refs, 1, __ATOMIC_RELAXED);
+        old = store->mapping;
+        store->mapping = holding->mapping;
+        store->head = holding->newest;
+        store->device = holding->device;
+        store->inode = holding->inode;
     }
-    if (store->head.seq) {
-        /* The next commit's record follows the head's bytes; a slot shows a
-         * newer head only for a commit of the earlier format. */
-        const unsigned char *map = store->mapping->map;
-        unsigned char next[16];
-        bool newer = decode64(map + 8) > store->head.seq || decode64(map + BLOCK + 8) > store->head.seq ||
-                     (read_at(store->fd, next, sizeof(next), store->head.end) && !memcmp(next, record_magic, 8) &&
-                      decode64(next + 8) == store->head.seq + 1);
-        if (!newer) return PURE_OK;
-    }
-    Head head;
-    if (!read_head(store->fd, &info, false, &head, NULL)) return PURE_STORE_ERROR;
-    if (store->mapping && head.seq == store->head.seq && head.check == store->head.check) return PURE_OK;
-    Tree tree;
-    Mapping *mapping = malloc(sizeof(*mapping));
-    if (!mapping) return PURE_ALLOCATION;
-    if (!map_tree(store->fd, &info, &head, &tree)) { free(mapping); return PURE_STORE_ERROR; }
-    *mapping = (Mapping){tree.map, tree.end, 1};
-    release_mapping(store->mapping);
-    store->mapping = mapping;
-    store->head = head;
-    return PURE_OK;
+    pthread_mutex_unlock(&turns->lock);
+    release_mapping(old);
+    return store->mapping ? PURE_OK : PURE_STORE_ERROR;
 }
 
 /* Base a draft on the handle's newest version of its key, sharing the mapping.
@@ -1444,7 +1703,7 @@ static PureResult refresh(PureStore *store) {
 static PureResult rebase(PureDraft *draft) {
     PureStore *store = draft->store;
     Mapping *mapping = store->mapping;
-    Tree tree = {.map = mapping->map, .end = mapping->end, .shared = mapping};
+    Tree tree = {.map = mapping->map, .end = store->head.end, .shared = mapping};
     Entry document;
     uint64_t index;
     int64_t revision;
@@ -1462,13 +1721,28 @@ static PureResult rebase(PureDraft *draft) {
     return PURE_OK;
 }
 
+/* A handle holds the process's writer on the store while it is open: busy
+ * when another process writes it. */
 PureResult pure_store_open(const char *path, PureStore **out) {
     *out = NULL;
     PureStore *store = calloc(1, sizeof(*store));
     if (!store || !path || !(store->path = strdup(path))) { free(store); return PURE_ALLOCATION; }
-    store->fd = -1;
-    store->directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    PureResult result = store->directory < 0 ? PURE_STORE_ERROR : refresh(store);
+    int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Turns *turns = directory >= 0 ? turns_of(directory) : NULL;
+    if (directory >= 0) close(directory);
+    PureResult result = turns ? PURE_OK : PURE_STORE_ERROR;
+    if (turns && !join(turns)) {
+        pthread_mutex_lock(&turns->writer);
+        result = hold(turns, path);
+        pthread_mutex_unlock(&turns->writer);
+    }
+    if (result != PURE_OK) {
+        free(store->path);
+        free(store);
+        return result;
+    }
+    store->turns = turns;
+    result = refresh(store);
     if (result != PURE_OK) { pure_store_close(store); return result; }
     *out = store;
     return PURE_OK;
@@ -1479,8 +1753,9 @@ const char *pure_store_path(const PureStore *store) { return store->path; }
 void pure_store_close(PureStore *store) {
     if (!store) return;
     release_mapping(store->mapping);
-    if (store->fd >= 0) close(store->fd);
-    if (store->directory >= 0) close(store->directory);
+    pthread_mutex_lock(&store->turns->writer);
+    let_go(store->turns);
+    pthread_mutex_unlock(&store->turns->writer);
     free(store->path);
     free(store);
 }
@@ -1493,7 +1768,7 @@ PureMapping *pure_draft_mapping(const PureDraft *draft) {
 
 bool pure_mapping_holds(const PureMapping *mapping, PureSpan span) {
     uintptr_t base = (uintptr_t)mapping->map, at = (uintptr_t)span.data;
-    return !span.size || (span.data && at >= base && at - base <= mapping->end && span.size <= mapping->end - (at - base));
+    return !span.size || (span.data && at >= base && at - base <= mapping->length && span.size <= mapping->length - (at - base));
 }
 
 void pure_mapping_release(PureMapping *mapping) { release_mapping(mapping); }
@@ -1645,25 +1920,42 @@ void pure_store_group_counts(unsigned long *groups, unsigned long *requests) {
 
 enum { GATHER_NS = 2000000 };
 
-/* Publish the queued requests of the store at path in one session. */
-static void commit_group(const char *path, Waiter *first) {
+/* A committed draft continues from what its commit published: the root it
+ * wrote and the revision it took, on the writer's mapping. */
+static void settle_draft(PureDraft *draft, const Session *session, Entry root, int64_t revision) {
+    Mapping *mapping = session->tree.shared;
+    __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
+    release_tree(&draft->tree);
+    draft->tree = (Tree){.map = mapping->map, .end = session->head.end, .shared = mapping};
+    draft->device = session->file.st_dev;
+    draft->inode = session->file.st_ino;
+    draft->root = root;
+    draft->revision = revision;
+    draft->live = 0;
+}
+
+/* Publish the queued requests of a store in one commit of the process's
+ * writer on it (whatever the spelling of each one's path: they are all this
+ * store's), opened by the first one's path when nothing holds it. */
+static void commit_group(Turns *turns, Waiter *first) {
+    const char *path = first->drafts[0]->path;
     size_t total = 0;
-    for (Waiter *w = first; w; w = w->next)
-        if (!strcmp(w->drafts[0]->path, path)) { total += w->count; w->accepted = false; }
-    Session session;
-    Writer *writer = NULL;
+    for (Waiter *w = first; w; w = w->next) { total += w->count; w->accepted = false; }
     Entry *roots = malloc(total * sizeof(*roots));
     const char **keys = malloc(total * sizeof(*keys));
     int64_t *revisions = malloc(total * sizeof(*revisions));
     PureDraft **drafts = malloc(total * sizeof(*drafts));
     bool allocated = roots && keys && revisions && drafts, checked = false;
-    PureResult result = allocated ? open_session(path, &session) : PURE_ALLOCATION;
+    pthread_mutex_lock(&turns->writer);
+    PureResult result = allocated ? hold(turns, path) : PURE_ALLOCATION;
+    bool held = result == PURE_OK;
+    Holding *holding = turns->holding;
     size_t count = 0;
-    if (result == PURE_OK) {
+    if (held) {
+        Session *session = &holding->session;
         /* A request holds when each of its keys is at its draft's base
          * revision and no earlier request of this group changes it. */
         for (Waiter *w = first; w; w = w->next) {
-            if (strcmp(w->drafts[0]->path, path)) continue;
             w->result = PURE_OK;
             for (size_t i = 0; i < w->count && w->result == PURE_OK; ++i) {
                 PureDraft *d = w->drafts[i];
@@ -1671,7 +1963,7 @@ static void commit_group(const char *path, Waiter *first) {
                 uint64_t index;
                 int64_t stored;
                 bool found;
-                if (!find(&session.tree, (Entry){session.head.catalog, session.head.catalog_bytes}, d->key, &index,
+                if (!find(&session->tree, (Entry){session->head.catalog, session->head.catalog_bytes}, d->key, &index,
                           &found, &current, &stored)) { w->result = PURE_STORE_ERROR; break; }
                 for (size_t k = 0; k < count; ++k)
                     if (!strcmp(keys[k], d->key)) { ++stored; break; } /* it moves with the earlier request */
@@ -1689,55 +1981,58 @@ static void commit_group(const char *path, Waiter *first) {
         }
         checked = true;
         if (count) {
-            result = PURE_ALLOCATION;
-            if ((writer = malloc(sizeof(*writer)))) {
-                *writer = (Writer){.fd = session.fd, .at = commit_start(&session)};
-                bool written = true;
-                for (size_t i = 0; i < count && written; ++i) {
-                    /* After compaction a draft's stored references name the old file. */
-                    bool relocate = session.file.st_dev != drafts[i]->device || session.file.st_ino != drafts[i]->inode;
-                    written = write_root(&drafts[i]->tree, writer, &roots[i], relocate);
+            Writer *writer = writer_of(holding);
+            bool written = writer != NULL, compacted = false;
+            for (size_t i = 0; i < count && written; ++i) {
+                /* After compaction a draft's stored references name the old file. */
+                bool relocate = session->file.st_dev != drafts[i]->device || session->file.st_ino != drafts[i]->inode;
+                written = write_root(&drafts[i]->tree, writer, &roots[i], relocate);
+            }
+            result = !writer ? PURE_ALLOCATION : written ? publish(holding, writer, count, keys, roots, revisions, &compacted) :
+                                                           PURE_STORE_ERROR;
+            /* The drafts go on from the published version while the writer is
+             * still held; their arenas are no longer needed. A compaction's
+             * new file has each root elsewhere: found there. A writer that
+             * could not follow its commit leaves each draft with equal content
+             * at its new revision. */
+            if (result == PURE_OK && !holding->stale) show_newest(turns, holding);
+            else if (result == PURE_UNCERTAIN) settle_uncertain(turns, holding);
+            PureStore *refreshed[8] = {NULL};
+            size_t fresh = 0;
+            for (size_t i = 0; result == PURE_OK && i < count; ++i) {
+                PureDraft *d = drafts[i];
+                Entry document = roots[i];
+                uint64_t index;
+                int64_t revision = revisions[i];
+                bool found;
+                if (holding->stale || (compacted && !find(&session->tree, (Entry){session->head.catalog, session->head.catalog_bytes},
+                                                         d->key, &index, &found, &document, &revision))) {
+                    d->revision = revisions[i];
+                    continue;
                 }
-                result = written ? publish(&session, writer, count, keys, roots, revisions) : PURE_STORE_ERROR;
+                settle_draft(d, session, document, revision);
+                bool seen = !d->store;
+                for (size_t k = 0; k < fresh && !seen; ++k) seen = refreshed[k] == d->store;
+                if (!seen && refresh(d->store) == PURE_OK && fresh < 8) refreshed[fresh++] = d->store;
             }
         }
-        /* Rebase while still holding the writer lock; the arenas are no longer
-         * needed. Drafts of a store handle share one new mapping. If remapping
-         * fails a draft keeps equal content at its new revision. */
-        PureStore *refreshed[8] = {NULL};
-        size_t fresh = 0;
-        for (size_t i = 0; result == PURE_OK && i < count; ++i) {
-            PureStore *store = drafts[i]->store;
-            bool rebased;
-            if (store) {
-                bool seen = false;
-                for (size_t k = 0; k < fresh && !seen; ++k) seen = refreshed[k] == store;
-                if (!seen && refresh(store) == PURE_OK) {
-                    seen = true;
-                    if (fresh < 8) refreshed[fresh++] = store;
-                }
-                rebased = seen && rebase(drafts[i]) == PURE_OK;
-            } else rebased = load_draft(drafts[i]) == PURE_OK;
-            if (!rebased) drafts[i]->revision = revisions[i];
-        }
+        let_go(turns);
     }
+    pthread_mutex_unlock(&turns->writer);
     /* Before the checks every request shares the failure; after them an
      * accepted request takes the publication's result and new revisions, and
      * a refused one keeps its own result. */
     size_t at = 0;
     for (Waiter *w = first; w; w = w->next) {
-        if (strcmp(w->drafts[0]->path, path)) continue;
         if (!checked) { w->result = result; continue; }
         if (!w->accepted) continue;
         for (size_t i = 0; i < w->count; ++i) w->revisions[i] = revisions[at++];
         w->result = result;
     }
-    free(writer);
     free(roots);
     free((void *)keys);
     free(revisions);
     free(drafts);
-    if (allocated) close_session(&session);
 }
 
 PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t *revisions) {
@@ -1748,7 +2043,7 @@ PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t
     }
     if (!count) return PURE_OK;
     struct stat info;
-    Turns *group = stat(drafts[0]->path, &info) ? NULL : turns_for(&info);
+    Turns *group = drafts[0]->store ? drafts[0]->store->turns : stat(drafts[0]->path, &info) ? NULL : turns_for(&info);
     if (!group) return PURE_STORE_ERROR;
     Waiter me = {.drafts = drafts, .count = count, .revisions = revisions};
     pthread_mutex_lock(&group->lock);
@@ -1777,12 +2072,7 @@ PureResult pure_draft_commit_all(PureDraft *const *drafts, size_t count, int64_t
         group->expected = size > group->expected - 1 ? size : group->expected - 1;
         if (!group->expected) group->expected = 1;
         pthread_mutex_unlock(&group->lock);
-        /* One session per path among the queued requests (two paths may name the store). */
-        for (Waiter *w = batch; w; w = w->next) {
-            bool earlier = false;
-            for (Waiter *v = batch; v != w && !earlier; v = v->next) earlier = !strcmp(v->drafts[0]->path, w->drafts[0]->path);
-            if (!earlier) commit_group(w->drafts[0]->path, batch);
-        }
+        commit_group(group, batch); /* one for every queued request, whatever path names the store */
         pthread_mutex_lock(&group->lock);
         for (Waiter *w = batch, *next; w; w = next) { next = w->next; w->done = true; }
         group->leading = false;
