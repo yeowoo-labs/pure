@@ -3,9 +3,11 @@
 #define _DARWIN_C_SOURCE /* mkdtemp, which _POSIX_C_SOURCE hides there */
 #endif
 #include "store.h"
+#include "digest.h"
 #include "state.h"
 #include <assert.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,11 +45,13 @@ void pure_draft_test_arena(const PureDraft *draft, size_t *nodes, size_t *bytes)
 unsigned long pure_tree_test_publications(void);
 unsigned long pure_tree_test_syncs(void);
 void pure_tree_test_forget(void);
+void pure_tree_test_earlier_records(bool earlier);
 
 /* The file: head slots in blocks 0 and 1 (sequence at +8, end at +16,
- * catalog at +24), commits from DATA_START, each a 128-byte record (its head)
- * and then its bytes. */
-enum { KEYS = 4, CAPACITY = 1 << 20, SLOT_BLOCK = 4096, DATA_START = 8192, RECORD_SIZE = 128 };
+ * catalog at +24), commits from DATA_START, each a 40-byte link (magic, its
+ * catalog's record count, end at +8, catalog at +16, check at +24, and a
+ * digest of the seq it takes and those) and then its bytes. */
+enum { KEYS = 4, CAPACITY = 1 << 20, SLOT_BLOCK = 4096, DATA_START = 8192, RECORD_SIZE = 40 };
 typedef struct { unsigned char *bytes; size_t size; int64_t revision; } Oracle;
 
 static uint32_t random_value(uint32_t *state) {
@@ -91,15 +95,20 @@ static uint64_t field_at(int fd, uint64_t at) {
 
 static uint64_t slot_field(int fd, unsigned slot, unsigned offset) { return field_at(fd, slot * SLOT_BLOCK + offset); }
 
-/* Where the newest head is: the newer slot's, or the last record after it. */
-static uint64_t newest_head(int fd) {
+/* The newest head's catalog: the newer slot's, or the last link's after it
+ * (each the next seq's: its digest says so). */
+static uint64_t newest_catalog(int fd) {
     uint64_t at = slot_field(fd, 0, 8) > slot_field(fd, 1, 8) ? 0 : SLOT_BLOCK;
+    uint64_t seq = field_at(fd, at + 8), end = field_at(fd, at + 16), catalog = field_at(fd, at + 24);
     for (;;) {
-        uint64_t end = field_at(fd, at + 16);
-        unsigned char magic[8];
-        if (pread(fd, magic, 8, (off_t)end) != 8 || memcmp(magic, "PUREREC1", 8) ||
-            field_at(fd, end + 8) != field_at(fd, at + 8) + 1) return at;
-        at = end;
+        unsigned char link[RECORD_SIZE], bound[8 + RECORD_SIZE - 8];
+        if (pread(fd, link, sizeof(link), (off_t)end) != (ssize_t)sizeof(link) || memcmp(link, "PRL1", 4)) return catalog;
+        for (unsigned i = 0; i < 8; ++i) bound[i] = (unsigned char)((seq + 1) >> (8 * i));
+        memcpy(bound + 8, link, RECORD_SIZE - 8);
+        if (field_at(fd, end + 32) != digest_of(bound, sizeof(bound))) return catalog;
+        ++seq;
+        catalog = field_at(fd, end + 16);
+        end = field_at(fd, end + 8);
     }
 }
 
@@ -351,6 +360,43 @@ static void records(const char *path) {
     expect(path, "walk", &(Oracle){(unsigned char *)"x", 1, 38});
 }
 
+/* A store whose last commits have records of the format before links (as
+ * today's stores end) opens to its last commit, with links after them as well,
+ * and its next writer goes on from there. */
+static void earlier_records(const char *path) {
+    int64_t revision;
+    char text[16];
+    pure_tree_test_earlier_records(true);
+    CHECK(pure_store_put(path, "chain", 0, (PureSpan){(const unsigned char *)"0", 1}, &revision) == PURE_OK);
+    for (unsigned i = 1; i < 5; ++i) {
+        snprintf(text, sizeof(text), "%u", i);
+        CHECK(pure_store_put(path, "chain", revision, (PureSpan){(const unsigned char *)text, strlen(text)}, &revision) == PURE_OK);
+    }
+    pure_tree_test_earlier_records(false);
+    pure_tree_test_forget();
+    expect(path, "chain", &(Oracle){(unsigned char *)"4", 1, 5});
+    for (unsigned i = 5; i < 8; ++i) {
+        snprintf(text, sizeof(text), "%u", i);
+        CHECK(pure_store_put(path, "chain", revision, (PureSpan){(const unsigned char *)text, strlen(text)}, &revision) == PURE_OK);
+    }
+    pure_tree_test_forget();
+    expect(path, "chain", &(Oracle){(unsigned char *)"7", 1, 8});
+}
+
+/* What a dead writer's compaction left goes when this process's writer first
+ * takes the lock; other names stay. */
+static void swept_pending(const char *path) {
+    char name[512], other[512];
+    snprintf(name, sizeof(name), "%s/.pending-999999-1", path);
+    snprintf(other, sizeof(other), "%s/pending-999999-1", path);
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0600), kept = open(other, O_RDWR | O_CREAT | O_EXCL, 0600);
+    CHECK(fd >= 0 && close(fd) == 0 && kept >= 0 && close(kept) == 0);
+    int64_t revision;
+    CHECK(pure_store_put(path, "swept", 0, (PureSpan){(const unsigned char *)"s", 1}, &revision) == PURE_OK);
+    struct stat info;
+    CHECK(stat(name, &info) && errno == ENOENT && !stat(other, &info) && !unlink(other));
+}
+
 /* A reader's view stays byte-identical while another process commits and
  * compacts; readers take no lock. */
 static void isolation(const char *path) {
@@ -444,7 +490,7 @@ static void revision_limit(const char *path) {
     snprintf(name, sizeof(name), "%s/pure.tree", path);
     int fd = open(name, O_RDWR);
     CHECK(fd >= 0);
-    uint64_t catalog = field_at(fd, newest_head(fd) + 24);
+    uint64_t catalog = newest_catalog(fd);
     CHECK(catalog >> 63);
     const unsigned char maximum[] = {255,255,255,255,255,255,255,127};
     off_t record = (off_t)(catalog & ((UINT64_C(1) << 62) - 1));
@@ -1375,7 +1421,7 @@ static void clean(const char *path) {
 }
 
 int main(void) {
-    void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head,
+    void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head, earlier_records, swept_pending,
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, frozen_path_draft, owner_lock, unsynced_compaction, threads, grouped,
@@ -1388,7 +1434,7 @@ int main(void) {
         clean(path);
     }
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
-         "process-crash-torn-head-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
+         "process-crash-torn-head-earlier-records-swept-pending-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
          "atomic-batch-runtime-keys-store-handle-frozen-path-draft-owner-lock-unsynced-compaction-threads-group-commit-lost-commit-pending-head-publishing-apart-stores-apart-one-sync-records-"
          "held-torn-head-held-records-cycles\"}");

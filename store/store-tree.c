@@ -17,6 +17,7 @@
 #include "wait.h"
 #include "state.h"
 #include "digest.h"
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -48,7 +49,13 @@ enum { COMPACT_SLACK = 1048576 };
 /* Slots of this format, and of the one before tail records (still read). */
 static const unsigned char head_magic[8] = {'P','U','R','E','T','R','E','3'};
 static const unsigned char earlier_magic[8] = {'P','U','R','E','T','R','E','2'};
+/* A commit's record of the format before links (a whole head; still read). */
 static const unsigned char record_magic[8] = {'P','U','R','E','R','E','C','1'};
+/* A commit's record, the chain's link: only what the head before it does not
+ * say. Its seq is that head's + 1, its bytes start right after it, its live
+ * is that head's; its digest binds the seq it takes. */
+enum { LINK = 40 };
+static const unsigned char link_magic[4] = {'P','R','L','1'};
 /* Commits between two heads written to a slot. */
 enum { CHECKPOINT = 16 };
 static const unsigned char branch_magic[4] = {'P','T','B','1'};
@@ -70,6 +77,7 @@ typedef struct Turns {
     bool leading;
     unsigned long groups, requests;
     struct Holding *holding; /* the process's writer on the store (below) */
+    bool swept; /* this process cleared what dead writers left (sweep, below) */
     struct Turns *next;
 } Turns;
 static struct { pthread_mutex_t lock; Turns *first; } stores = {PTHREAD_MUTEX_INITIALIZER, NULL};
@@ -299,6 +307,35 @@ static void encode_head(unsigned char out[SLOT], const unsigned char magic[8], c
     encode64(out + SLOT - 8, digest_of(out, SLOT - 8));
 }
 
+/* A commit's link after previous: its record count, end, catalog and check,
+ * and a digest of them with the seq it takes. */
+static uint64_t link_digest(const unsigned char in[LINK], uint64_t seq) {
+    unsigned char bound[8 + LINK - 8];
+    encode64(bound, seq);
+    memcpy(bound + 8, in, LINK - 8);
+    return digest_of(bound, sizeof(bound));
+}
+
+static void encode_link(unsigned char out[LINK], const Head *head) {
+    memcpy(out, link_magic, 4);
+    uint64_t records = head->catalog_bytes / RECORD;
+    for (unsigned i = 0; i < 4; ++i) out[4 + i] = (unsigned char)(records >> (8 * i));
+    encode64(out + 8, head->end);
+    encode64(out + 16, head->catalog);
+    encode64(out + 24, head->check);
+    encode64(out + 32, link_digest(out, head->seq));
+}
+
+/* The commit a link after previous names, if it is one (not a torn one). */
+static bool decode_link(const unsigned char in[LINK], const Head *previous, Head *next) {
+    if (memcmp(in, link_magic, 4) || decode64(in + 32) != link_digest(in, previous->seq + 1)) return false;
+    uint64_t records = (uint64_t)in[4] | (uint64_t)in[5] << 8 | (uint64_t)in[6] << 16 | (uint64_t)in[7] << 24;
+    *next = (Head){previous->seq + 1, decode64(in + 8), decode64(in + 16), records * RECORD, previous->live,
+                   previous->end + LINK, decode64(in + 24)};
+    return next->end <= (uint64_t)INT64_MAX && next->end <= SIZE_MAX && next->start <= next->end &&
+           !next->catalog == !next->catalog_bytes;
+}
+
 /* A slot's head (record false) or a commit record's. */
 static bool decode_head(const unsigned char in[SLOT], bool record, Head *head) {
     bool magic = record ? !memcmp(in, record_magic, 8) : !memcmp(in, head_magic, 8) || !memcmp(in, earlier_magic, 8);
@@ -465,14 +502,17 @@ static bool pick(int fd, const struct stat *file, const unsigned char *slots[2],
     return false;
 }
 
-/* The commit whose record follows head's bytes, if its own bytes are whole. */
+/* The commit whose record follows head's bytes, if its own bytes are whole:
+ * a link, or a record of the format before. */
 static bool follow(int fd, const struct stat *file, bool writer, const Head *head, Head *out) {
     unsigned char record[SLOT];
     uint64_t size = (uint64_t)file->st_size;
     Head next;
-    if (head->end > size || size - head->end < SLOT || !read_at(fd, record, SLOT, head->end) ||
-        !decode_head(record, true, &next) || next.seq != head->seq + 1 || next.start != head->end + SLOT ||
-        next.end > size) return false;
+    if (head->end > size || size - head->end < LINK || !read_at(fd, record, LINK, head->end)) return false;
+    if (!decode_link(record, head, &next) &&
+        (size - head->end < SLOT || !read_at(fd, record, SLOT, head->end) || !decode_head(record, true, &next) ||
+         next.seq != head->seq + 1 || next.start != head->end + SLOT)) return false;
+    if (next.end > size) return false;
     int state = recall(file, &next);
     if (state == BROKEN || (state == PUBLISHING && !writer)) return false;
     if (state == UNKNOWN) {
@@ -484,10 +524,14 @@ static bool follow(int fd, const struct stat *file, bool writer, const Head *hea
     return true;
 }
 
-/* Whether head's record is in the file as it was made. */
+/* Whether head's record (its link, or a record of the format before) is in
+ * the file as it was made. */
 static bool recorded(int fd, const struct stat *file, const Head *head) {
     unsigned char stored[SLOT], made[SLOT];
-    if (head->start < DATA + SLOT || head->end > (uint64_t)file->st_size) return false;
+    if (head->start < DATA + LINK || head->end > (uint64_t)file->st_size) return false;
+    encode_link(made, head);
+    if (read_at(fd, stored, LINK, head->start - LINK) && !memcmp(stored, made, LINK)) return true;
+    if (head->start < DATA + SLOT) return false;
     encode_head(made, record_magic, head);
     return read_at(fd, stored, SLOT, head->start - SLOT) && !memcmp(stored, made, SLOT);
 }
@@ -1358,6 +1402,20 @@ static void settle_uncertain(Turns *turns, Holding *holding) {
     show_newest(turns, holding);
 }
 
+/* What dead writers' compactions left (their temporary files): under the
+ * lock no other writer can be making one. */
+static void sweep(int directory) {
+    int listing = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR *entries = listing >= 0 ? fdopendir(listing) : NULL;
+    if (!entries) {
+        if (listing >= 0) close(listing);
+        return;
+    }
+    for (struct dirent *entry; (entry = readdir(entries));)
+        if (!strncmp(entry->d_name, ".pending-", 9)) unlinkat(directory, entry->d_name, 0);
+    closedir(entries);
+}
+
 /* With turns->writer held: one more holder of the process's writer on the
  * store at path, which opens it, or reads its head again when a commit left
  * it unsure. A forked child lets its copy of the parent's go first (the lock
@@ -1394,9 +1452,13 @@ static PureResult hold(Turns *turns, const char *path) {
         info.st_ino != turns->inode) { close_session(session); return PURE_STORE_ERROR; }
     session->lock = openat(session->directory, ".writer.lock", O_RDWR | O_NOFOLLOW | O_CLOEXEC);
     PureResult result = PURE_STORE_ERROR;
-    if (session->lock >= 0 && !fstat(session->lock, &info) && S_ISREG(info.st_mode))
-        result = lock_writer(session->lock) ? reopen(session, false) :
-                 errno == EACCES || errno == EAGAIN ? PURE_BUSY : PURE_STORE_ERROR;
+    if (session->lock >= 0 && !fstat(session->lock, &info) && S_ISREG(info.st_mode)) {
+        if (lock_writer(session->lock)) {
+            if (!turns->swept) sweep(session->directory); /* once a process (another's crash meanwhile: the next start's) */
+            turns->swept = true;
+            result = reopen(session, false);
+        } else result = errno == EACCES || errno == EAGAIN ? PURE_BUSY : PURE_STORE_ERROR;
+    }
     if (result != PURE_OK) { close_session(session); return result; }
     holding->stale = false;
     show_newest(turns, holding);
@@ -1426,12 +1488,22 @@ static void let_go(Turns *turns) {
     holding->buffer = NULL;
 }
 
+/* Room before a commit's bytes for its record: a link (a test can still
+ * write the format before, to read it). */
+#ifdef PURE_STORE_TEST
+static bool earlier_records;
+void pure_tree_test_earlier_records(bool earlier) { earlier_records = earlier; }
+static uint64_t record_room(void) { return earlier_records ? SLOT : LINK; }
+#else
+static uint64_t record_room(void) { return LINK; }
+#endif
+
 /* The writer's buffer, at the start of a commit's bytes. */
 static Writer *writer_of(Holding *holding) {
     Writer *writer = holding->buffer ? holding->buffer : (holding->buffer = malloc(sizeof(*writer)));
     if (!writer) return NULL;
     writer->fd = holding->session.fd;
-    writer->at = holding->session.head.end + SLOT; /* a commit's bytes start after room for its record */
+    writer->at = holding->session.head.end + record_room(); /* a commit's bytes start after room for its record */
     writer->used = 0;
     writer->failed = false;
     writer->digest = (Digest){0};
@@ -1479,9 +1551,10 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
     if (!written || fault(PURE_AFTER_HEADER) || fault(PURE_BEFORE_FILE_SYNC) || fault(PURE_BEFORE_RENAME))
         return PURE_STORE_ERROR;
     Head published = {session->head.seq + 1, writer->at, catalog.ref, catalog.bytes, session->head.live,
-                      session->head.end + SLOT, digest_end(&writer->digest)};
+                      session->head.end + record_room(), digest_end(&writer->digest)};
     unsigned char record[SLOT], slot[SLOT];
-    encode_head(record, record_magic, &published);
+    if (record_room() == LINK) encode_link(record, &published);
+    else encode_head(record, record_magic, &published);
     encode_head(slot, head_magic, &published);
     /* Every few commits the head goes into the older slot as well: one more
      * range for that sync, and fewer records for a reader to follow. */
@@ -1490,7 +1563,7 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
     bool checkpoint = published.seq - newer >= CHECKPOINT;
     if (!remember(&session->file, &published, PUBLISHING)) return PURE_ALLOCATION; /* nothing written */
     for (size_t i = 0; i < count; ++i) ++revisions[i]; /* Past this point the head may already be visible. */
-    bool durable = write_at(session->fd, record, SLOT, published.start - SLOT) &&
+    bool durable = write_at(session->fd, record, (size_t)record_room(), published.start - record_room()) &&
                    (!checkpoint || write_at(session->fd, slot, SLOT, older * BLOCK)) &&
                    !fault(PURE_BEFORE_DIR_SYNC) && sync_data(session->fd);
     remember(&session->file, &published, durable ? DURABLE : CHECKED);
