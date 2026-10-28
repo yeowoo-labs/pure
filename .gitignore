@@ -13,3 +13,7 @@ __pycache__/
 /benchmarks/http/*.pmod
 /build/
 /benchmarks/http/watch
+
+# lab notes live in ~/work/pure-research (local only)
+/docs/research
+/docs/outside-feedback
