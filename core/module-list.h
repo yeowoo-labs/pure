@@ -15,6 +15,31 @@
 #define PURE_COLD
 #endif
 
+/* The secret the runtime's tables of keys hash with (the keys of a list,
+ * a HASHED list's slots, a fold's distinct values and groups, a batch's
+ * keys): random, drawn from the system once a process before anything runs,
+ * and never written after (the tier's code holds it). A text key past seven
+ * bytes has its SipHash-1-3 under text as its bits (a shorter one its bytes);
+ * a slot (pure_key_slot) takes multiplier. Keys
+ * that would share a slot cannot be chosen from outside the process, and
+ * nothing a process keeps or shows depends on it (slots are read by key, or
+ * in key order once sorted). */
+typedef struct { uint64_t multiplier, text[2]; } PureHashSecret;
+extern PureHashSecret pure_hash_secret;
+
+/* A key's slot in a table of mask + 1 slots (a power of two, two at least)
+ * probed on from it: its bits mixed by a fixed bijection (MurmurHash3's
+ * finalizer's first round, which breaks up runs of keys), times the
+ * secret's odd multiplier, the product's top bits (multiply-shift: any two
+ * keys share a slot with odds at most 2 / slots, whatever keys they are).
+ * The tier makes the same. */
+static inline size_t pure_key_slot(uint64_t bits, size_t mask) {
+    bits ^= bits >> 33;
+    bits *= UINT64_C(0xff51afd7ed558ccd);
+    bits ^= bits >> 33;
+    return (size_t)(bits * pure_hash_secret.multiplier >> __builtin_clzll(mask));
+}
+
 /* Runtime-owned lists of records for the module executor. An item is one
  * cell per field: a number, an integer, or text bytes the list owns. Every
  * change made during an event is logged; a failed event undoes the log in

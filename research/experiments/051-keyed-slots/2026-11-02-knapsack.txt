@@ -1,0 +1,13 @@
+knapsack in the suite, 738b829 (hd) against the keyed slots (keyed), 2026-11-02, Pi 5, quiet (load below 1.5):
+suite-run's 3 rounds under icount (user-mode instructions, the whole process), twice each in turns:
+  hd     385,127,307  385,127,322
+  keyed  385,130,586  385,130,705   (+0.0009%: the same work)
+Pure's median ms of 5 rounds (suite-run DIR 5 knapsack), one build at a time, in turns:
+  hd 7.540 7.533 7.529   keyed 8.662 8.580 8.749 8.777
+One file reverted at a time to 738b829's, the rest keyed (in turns with hd and keyed):
+  module-batch.c 8.608 8.757   module.c 8.728 8.714   module-jit.c 7.554 7.594
+The tier emits a keyed append's HASHED branch even where the list is DENSE when it runs (knapsack's); the branch grew
+by seven instructions (28 bytes) and moved the loop after it. Placement, not work.
+This commit's build (keyed6, the shift by the mask's leading zeros, one instruction fewer in the tier): knapsack 7.9 ms
+against 7.5 (+5.7%, six pairs, 2026-11-02-suite.jsonl) at the same instructions with the tier on (+0.001%,
+2026-11-02-tier-counts.txt) and without it (041's counts, +0.001% and -0.027%).

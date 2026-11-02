@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 
 /* A list's items live in a persistent B+tree: leaves hold up to FANOUT
  * items, inner nodes up to FANOUT children, and every node knows how many
@@ -181,11 +182,13 @@ static uint64_t key_bits(double key) {
 
 static bool small_key(double key) { return key >= 0 && key < BITMAP_KEYS && (double)(uint32_t)key == key; }
 
-static size_t member_slot(uint64_t bits, size_t mask) {
-    bits ^= bits >> 33;
-    bits *= UINT64_C(0xff51afd7ed558ccd);
-    bits ^= bits >> 33;
-    return (size_t)bits & mask;
+PureHashSecret pure_hash_secret;
+
+/* The secret drawn as the process loads, before any table or the tier's
+ * code is made (the process stops when the system gives no randomness). */
+__attribute__((constructor)) static void hash_secret_drawn(void) {
+    if (getentropy(&pure_hash_secret, sizeof(pure_hash_secret))) abort();
+    pure_hash_secret.multiplier |= 1;
 }
 
 /* The set given up (memory ran out growing it): the list is searched without it. */
@@ -207,7 +210,7 @@ static bool members_start(PureList *list) {
 }
 
 static void member_put(PureList *list, uint64_t bits) {
-    size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+    size_t mask = list->member_capacity - 1, at = pure_key_slot(bits, mask);
     while (list->members[at] != VACANT && list->members[at] != bits) at = (at + 1) & mask;
     if (list->members[at] == VACANT) list->members[at] = bits, ++list->member_count;
 }
@@ -265,13 +268,13 @@ static void member_remove(PureList *list, double key) {
         return;
     }
     uint64_t bits = key_bits(key);
-    size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+    size_t mask = list->member_capacity - 1, at = pure_key_slot(bits, mask);
     while (list->members[at] != bits) {
         if (list->members[at] == VACANT) return;
         at = (at + 1) & mask;
     }
     for (size_t next = (at + 1) & mask; list->members[next] != VACANT; next = (next + 1) & mask) {
-        size_t home = member_slot(list->members[next], mask);
+        size_t home = pure_key_slot(list->members[next], mask);
         /* next may fill the gap at when its home is not cyclically within (at, next] */
         bool stays = at <= next ? (home > at && home <= next) : (home > at || home <= next);
         if (!stays) list->members[at] = list->members[next], at = next;
@@ -1206,13 +1209,46 @@ static int order(const Layout *l, unsigned field, PureCell a, PureCell b);
 /* The field a HASHED list is keyed by: its text key, else its number key. */
 static int hashed_field(const PureList *list) { return list->text_key >= 0 ? list->text_key : list->layout.key; }
 
-/* A key's bits in a HASHED list's table: a number's (key_bits), or its
- * text's hash (FNV-1a over its bytes; never VACANT). */
-static uint64_t cell_bits(const PureList *list, PureCell key) {
-    if (list->text_key < 0) return key_bits(key.num);
-    uint64_t h = UINT64_C(0xcbf29ce484222325);
-    for (size_t i = 0; i < key.size; ++i) h = (h ^ key.text[i]) * UINT64_C(0x100000001b3);
+/* SipHash-1-3 of bytes under the process's secret (pure_hash_secret): a
+ * text's 64 bits, which keys chosen outside the process cannot make equal. */
+static uint64_t text_hash(const unsigned char *bytes, size_t size) {
+    uint64_t v0 = pure_hash_secret.text[0] ^ UINT64_C(0x736f6d6570736575), v1 = pure_hash_secret.text[1] ^ UINT64_C(0x646f72616e646f6d),
+             v2 = pure_hash_secret.text[0] ^ UINT64_C(0x6c7967656e657261), v3 = pure_hash_secret.text[1] ^ UINT64_C(0x7465646279746573);
+#define SIP_ROUND                                                                                                  \
+    (v0 += v1, v1 = v1 << 13 | v1 >> 51, v1 ^= v0, v0 = v0 << 32 | v0 >> 32, v2 += v3, v3 = v3 << 16 | v3 >> 48,  \
+     v3 ^= v2, v0 += v3, v3 = v3 << 21 | v3 >> 43, v3 ^= v0, v2 += v1, v1 = v1 << 17 | v1 >> 47, v1 ^= v2,         \
+     v2 = v2 << 32 | v2 >> 32)
+    size_t whole = size & ~(size_t)7;
+    for (size_t at = 0; at < whole; at += 8) {
+        uint64_t m;
+        memcpy(&m, bytes + at, 8);
+        v3 ^= m, SIP_ROUND, v0 ^= m;
+    }
+    uint64_t last = (uint64_t)size << 56;
+    for (size_t at = whole; at < size; ++at) last |= (uint64_t)bytes[at] << 8 * (at - whole);
+    v3 ^= last, SIP_ROUND, v0 ^= last;
+    v2 ^= 0xff, SIP_ROUND, SIP_ROUND, SIP_ROUND;
+#undef SIP_ROUND
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
+/* A text key's bits: up to seven bytes those bytes and its length in the
+ * top byte (one text each: no hash needed, its slot is keyed as a number's
+ * is); a longer one's its hash (text_hash; never VACANT). Out of the line,
+ * so that a number's bits stay inline wherever cell_bits is. */
+__attribute__((noinline)) static uint64_t text_bits(PureCell key) {
+    if (key.size < 8) {
+        uint64_t bits = (uint64_t)key.size << 56;
+        for (size_t at = 0; at < key.size; ++at) bits |= (uint64_t)key.text[at] << 8 * at;
+        return bits;
+    }
+    uint64_t h = text_hash(key.text, key.size);
     return h == VACANT ? h ^ 2 : h;
+}
+
+/* A key's bits in a HASHED list's table: a number's (key_bits), or a text's (text_bits). */
+static uint64_t cell_bits(const PureList *list, PureCell key) {
+    return list->text_key < 0 ? key_bits(key.num) : text_bits(key);
 }
 
 /* Cell from of a column of cells w bytes wide copied to cell to of another. */
@@ -1230,18 +1266,28 @@ static inline void cell_copy(void *to_column, size_t to, const void *from_column
 /* Whether a HASHED list's table of capacity slots is too full for items: more than four fifths. */
 static bool hashed_full(size_t items, size_t capacity) { return 5 * items > 4 * capacity; }
 
-/* A HASHED list's slot of key (its cells there; a text's where its bytes are the key's too), or SIZE_MAX. */
-static size_t hashed_slot(const PureList *list, PureCell key) {
-    uint64_t bits = cell_bits(list, key);
+/* A HASHED list's slot of a text key (where its bits and its bytes are the key's), or SIZE_MAX: out of the line, as
+ * text_bits is. */
+__attribute__((noinline)) static size_t hashed_text_slot(const PureList *list, PureCell key) {
+    uint64_t bits = text_bits(key);
     size_t mask = list->member_capacity - 1;
-    for (size_t at = member_slot(bits, mask);; at = (at + 1) & mask) {
+    for (size_t at = pure_key_slot(bits, mask);; at = (at + 1) & mask) {
         if (list->members[at] == bits) {
-            if (list->text_key < 0) return at;
             PureCell there = array_cell(list, at, (unsigned)list->text_key);
             if (there.size == key.size && (!key.size || !memcmp(there.text, key.text, key.size))) return at;
         } else if (list->members[at] == VACANT)
             return SIZE_MAX;
     }
+}
+
+/* A HASHED list's slot of key (its cells there), or SIZE_MAX. */
+static size_t hashed_slot(const PureList *list, PureCell key) {
+    if (list->text_key >= 0) return hashed_text_slot(list, key);
+    uint64_t bits = key_bits(key.num);
+    size_t mask = list->member_capacity - 1;
+    for (size_t at = pure_key_slot(bits, mask);; at = (at + 1) & mask)
+        if (list->members[at] == bits) return at;
+        else if (list->members[at] == VACANT) return SIZE_MAX;
 }
 
 /* A HASHED list's table and columns of capacity slots (a power of two
@@ -1265,7 +1311,7 @@ static bool hashed_table(PureList *list, size_t capacity) {
     for (size_t row = 0; row < rows; ++row) {
         if (hashed && list->members[row] == VACANT) continue;
         uint64_t bits = hashed ? list->members[row] : cell_bits(list, array_cell(list, row, (unsigned)hashed_field(list)));
-        size_t at = member_slot(bits, mask);
+        size_t at = pure_key_slot(bits, mask);
         while (table[at] != VACANT) at = (at + 1) & mask;
         table[at] = bits;
         for (unsigned f = 0; f < l->fields; ++f)
@@ -1305,7 +1351,7 @@ static bool hashed_large(const PureList *list) {
 static bool hashed_add(PureList *list, const PureCell *item, uint64_t bits) {
     const Layout *l = &list->layout;
     if (hashed_full(list->count + 1, list->member_capacity) && !hashed_table(list, 2 * list->member_capacity)) return false;
-    size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+    size_t mask = list->member_capacity - 1, at = pure_key_slot(bits, mask);
     while (list->members[at] != VACANT) at = (at + 1) & mask;
     list->members[at] = bits;
     for (unsigned f = 0; f < l->fields; ++f) array_put(list, at, f, item[f]);
@@ -1769,7 +1815,7 @@ bool pure_list_contains(const PureList *list, double key, bool *found) {
     }
     if (list->text_key >= 0) return false; /* a text's hashes (a HASHED list's): pure_list_contains_text */
     uint64_t bits = key_bits(key);
-    size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+    size_t mask = list->member_capacity - 1, at = pure_key_slot(bits, mask);
     while (list->members[at] != VACANT && list->members[at] != bits) at = (at + 1) & mask;
     *found = list->members[at] == bits;
     return true;
@@ -2017,7 +2063,7 @@ size_t pure_list_add_many(PureList *list, size_t n, const double *const *fields)
                 return SIZE_MAX;
             }
             uint64_t bits = key_bits(fields[l->key][done]);
-            size_t mask = list->member_capacity - 1, at = member_slot(bits, mask);
+            size_t mask = list->member_capacity - 1, at = pure_key_slot(bits, mask);
             while (list->members[at] != VACANT && list->members[at] != bits) at = (at + 1) & mask;
             if (list->members[at] == bits) break;
             list->members[at] = bits;

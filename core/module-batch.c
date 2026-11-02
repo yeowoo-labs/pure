@@ -2865,7 +2865,7 @@ static bool list_has(const PureList *list, unsigned key, double k) {
 
 /* Whether k is in (add: put in) decide's keys, mask + 1 slots. */
 static bool added(uint64_t bits, size_t mask, bool add) {
-    size_t at = (size_t)((bits ^ bits >> 33) * UINT64_C(0xff51afd7ed558ccd) >> 20) & mask;
+    size_t at = pure_key_slot(bits, mask);
     for (; added_keys[at] != NO_KEY; at = (at + 1) & mask)
         if (added_keys[at] == bits) return true;
     if (add) added_keys[at] = bits;

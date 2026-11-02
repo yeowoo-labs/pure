@@ -1,0 +1,6 @@
+suite-run's 3 rounds under icount with the tier on (PURE_JIT=1, the default), user-mode instructions, twice each in turns,
+738b829 (hd) against this commit (keyed6), 2026-11-02:
+  join      hd 650,568,200  650,568,049   keyed6 671,558,124  672,048,881   (+3.3%: each find in the tier makes the
+            secret's 64-bit multiplier an immediate, four instructions, then multiplies and shifts)
+  knapsack  hd 385,131,368  385,131,449   keyed6 385,134,674  385,134,723   (+0.001%)
+  sort      hd 563,648,036  563,647,932   keyed6 567,430,675  567,203,143   (+0.65%)

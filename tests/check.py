@@ -748,6 +748,135 @@ view sum = total
 """
 
 
+KEYED_TABLES_SOURCE = """record Item {
+  k = 0
+  v = 0
+}
+record Word {
+  word: text
+}
+record Count {
+  word: text
+  n = 0
+}
+state items: list of Item
+state seen: list of Count
+state total = 0
+state distinct = 0
+state crowded = 0
+input load = message {
+  rows: list of Item
+}
+input words = message {
+  rows: list of Word
+}
+input crowd = message {
+  rows: list of Item
+}
+on load {
+  let byk: list of Item by k
+  for r in load.rows {
+    byk.add(Item { k: r.k, v: r.v })
+  }
+  let s = 0
+  for it in byk {
+    s = s * 0.5 + it.v
+    items.append(Item { k: it.k, v: it.v })
+  }
+  total = s
+  distinct = distinct(r.v for r in load.rows)
+}
+on words {
+  let counts: list of Count by word
+  for w in words.rows {
+    if counts.has(w.word) {
+      counts[w.word].n = counts[w.word].n + 1
+    } else {
+      counts.add(Count { word: w.word, n: 1 })
+    }
+  }
+  for c in counts {
+    seen.append(Count { word: c.word, n: c.n })
+  }
+}
+on crowd {
+  let byk: list of Item by k
+  for r in crowd.rows {
+    byk.add(Item { k: r.k, v: r.v })
+  }
+  crowded = byk.count
+}
+view sum = total
+view kinds = distinct
+view crowd_count = crowded
+view walked = items
+view counted = seen
+"""
+
+
+def colliding_keys(n):
+    """n keys the slot function before the process's secret (one round of MurmurHash3's finalizer of a key's bits, its
+    low bits) put in one slot of any table up to 2^20 slots, as anyone could choose them: that round inverted from
+    outputs whose low 20 bits are 0, NaNs, infinities and -0 left out (no key is one)."""
+    import struct
+    inverse, mask, keys, i = pow(0xff51afd7ed558ccd, -1, 1 << 64), (1 << 64) - 1, [], 1
+    while len(keys) < n:
+        bits = (i << 20) & mask
+        i += 1
+        bits ^= bits >> 33
+        bits = bits * inverse & mask
+        bits ^= bits >> 33
+        if bits >> 52 & 0x7FF != 0x7FF and bits != 1 << 63:
+            keys.append(struct.unpack('<d', struct.pack('<Q', bits))[0])
+    return keys
+
+
+def server_keyed_tables(aup, pure, work):
+    """The runtime's tables of keys hash with a secret each process draws. What a process shows and keeps never
+    depends on it: two hosts (two secrets) given the same messages (an event's list keyed by 5,000 sparse numbers and
+    one by 2,000 texts seen 20,000 times, half of them past seven bytes (hashed) and half not (their bytes are their
+    bits), each walked in its order into a stored list; a float total over the walk,
+    which any other order changes; a distinct fold) show the same views and keep the same store bytes. And keys
+    chosen to share one slot under the hash before the secret (30,000 in one message, a 1.2 MB body that took a host
+    over a second) take no longer than as many keys drawn at random, give or take the bytes."""
+    import time
+    module, source = work / 'keyed.pmod', work / 'keyed.aup'
+    source.write_text(KEYED_TABLES_SOURCE)
+    compile_module(aup, source, module)
+    rng = random.Random(55)
+    numbers = [{'k': k, 'v': rng.uniform(0, 1000)} for k in rng.sample(range(10 ** 9), 5000)]
+    words = [{'word': f'w{n}' if n % 2 else f'word number {n}'} for n in (rng.randrange(2000) for _ in range(20000))]
+    shown = []
+    for host_number in (1, 2):
+        store = work / f'keyed-{host_number}'
+        host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', store])
+        try:
+            assert post(host.port, '/inputs/load', {'rows': numbers}) == (200, 'none')
+            assert post(host.port, '/inputs/words', {'rows': words}) == (200, 'none')
+            shown.append({view: http(host.port, 'GET', f'/views/{view}')[3] for view in ('walked', 'counted', 'sum', 'kinds')})
+        finally:
+            host.stop()
+        shown[-1]['store'] = {f.name: f.read_bytes() for f in sorted(store.iterdir()) if f.is_file()}
+    assert shown[0] == shown[1], [k for k in shown[0] if shown[0][k] != shown[1][k]]
+    walked, counted = json.loads(shown[0]['walked'])['items'], json.loads(shown[0]['counted'])['items']
+    assert [item['k'] for item in walked] == sorted(row['k'] for row in numbers), 'walked in key order'
+    assert [item['word'] for item in counted] == sorted({row['word'] for row in words}), 'words in their order'
+    host = HttpHost([pure / 'build/pure-serve', '--module', module, '--store', work / 'keyed-crowd'])
+    seconds = {}
+    try:
+        for name, keys in (('fair', [rng.uniform(-1e9, 1e9) for _ in range(30000)]), ('crowd', colliding_keys(30000))):
+            for _ in range(2):
+                began = time.time()
+                assert post(host.port, '/inputs/crowd', {'rows': [{'k': k, 'v': 1} for k in keys]}) == (200, 'none')
+                seconds[name] = min(seconds.get(name, 1e9), time.time() - began)
+                assert http(host.port, 'GET', '/views/crowd_count')[3] == b'30000'
+    finally:
+        host.stop()
+    assert seconds['crowd'] < 4 * seconds['fair'] + 0.05, seconds
+    return {'hosts_alike': 2, 'stored_bytes': sum(map(len, shown[0]['store'].values())),
+            'crowd_ms': round(seconds['crowd'] * 1000, 1), 'fair_ms': round(seconds['fair'] * 1000, 1)}
+
+
 def server_borrowed_rows(aup, pure, work):
     """A message's rows of one field read where the payload has them (030's step 1), through the host's JSON, where an
     empty rows is an address inside the body that is not the list's to free: empty rows twice and then rows, rows with
@@ -7198,6 +7327,7 @@ def main():
             server_app(aup, pure, work, range(args.seeds), threads=3)
         report['server_json_requests'] = server_json(aup, pure, work)
         report['server_borrowed_rows'] = server_borrowed_rows(aup, pure, work)
+        report['server_keyed_tables'] = server_keyed_tables(aup, pure, work)
         report['server_timer_beats'] = server_timers(aup, pure, work)
         report['server_clocks'] = server_clocks(aup, pure, work)
         report['server_plain_edit'] = server_plain_edit(aup, pure, work)

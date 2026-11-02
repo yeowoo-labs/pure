@@ -3566,11 +3566,6 @@ typedef struct { uint64_t *keys; size_t capacity, count; bool marked; } Seen;
 __extension__ typedef __int128 Wide;
 typedef struct { unsigned how; bool integer; double total; int64_t whole; Wide sum; bool any, done; Seen seen; } Fold;
 
-static size_t seen_slot(uint64_t bits, size_t capacity) {
-    bits ^= bits >> 33, bits *= 0xff51afd7ed558ccdu, bits ^= bits >> 33;
-    return (size_t)bits & (capacity - 1);
-}
-
 /* Whether a value's bits are new to the set (added); false without memory too (*full). */
 static bool seen_bits(Seen *seen, uint64_t bits, bool *full) {
     if (bits == UINT64_MAX) { /* the free slots' mark: an i64's -1, kept aside */
@@ -3586,7 +3581,7 @@ static bool seen_bits(Seen *seen, uint64_t bits, bool *full) {
         memset(keys, 0xFF, capacity * sizeof(*keys));
         for (size_t i = 0; i < seen->capacity; ++i) {
             if (seen->keys[i] == UINT64_MAX) continue;
-            size_t at = seen_slot(seen->keys[i], capacity);
+            size_t at = pure_key_slot(seen->keys[i], capacity - 1);
             while (keys[at] != UINT64_MAX) at = (at + 1) & (capacity - 1);
             keys[at] = seen->keys[i];
         }
@@ -3594,7 +3589,7 @@ static bool seen_bits(Seen *seen, uint64_t bits, bool *full) {
         seen->keys = keys;
         seen->capacity = capacity;
     }
-    size_t at = seen_slot(bits, seen->capacity);
+    size_t at = pure_key_slot(bits, seen->capacity - 1);
     for (; seen->keys[at] != UINT64_MAX; at = (at + 1) & (seen->capacity - 1))
         if (seen->keys[at] == bits) return false;
     seen->keys[at] = bits;
@@ -3829,16 +3824,11 @@ static uint64_t order_bits(double value) {
     return bits >> 63 ? ~bits : bits | (uint64_t)1 << 63;
 }
 
-static size_t group_slot(uint64_t bits, size_t capacity) {
-    bits ^= bits >> 33, bits *= 0xff51afd7ed558ccdu, bits ^= bits >> 33; /* a finalizer's mixing */
-    return (size_t)bits & (capacity - 1);
-}
-
 /* key's group, added when absent (with add); NULL when absent, or without room. */
 static inline __attribute__((always_inline)) Group *group_of(struct PurePass *pass, double key, unsigned how, bool add) {
     key = key == 0 ? 0 : key;
     if (pass->capacity) {
-        for (size_t at = group_slot(order_bits(key), pass->capacity);; at = (at + 1) & (pass->capacity - 1)) {
+        for (size_t at = pure_key_slot(order_bits(key), pass->capacity - 1);; at = (at + 1) & (pass->capacity - 1)) {
             if (!pass->groups[at].used) break;
             if (pass->groups[at].key == key) return &pass->groups[at];
         }
@@ -3850,7 +3840,7 @@ static inline __attribute__((always_inline)) Group *group_of(struct PurePass *pa
         if (!groups) return NULL;
         for (size_t i = 0; i < pass->capacity; ++i) {
             if (!pass->groups[i].used) continue;
-            size_t at = group_slot(order_bits(pass->groups[i].key), capacity);
+            size_t at = pure_key_slot(order_bits(pass->groups[i].key), capacity - 1);
             while (groups[at].used) at = (at + 1) & (capacity - 1);
             groups[at] = pass->groups[i];
         }
@@ -3858,7 +3848,7 @@ static inline __attribute__((always_inline)) Group *group_of(struct PurePass *pa
         pass->groups = groups;
         pass->capacity = capacity;
     }
-    size_t at = group_slot(order_bits(key), pass->capacity);
+    size_t at = pure_key_slot(order_bits(key), pass->capacity - 1);
     while (pass->groups[at].used) at = (at + 1) & (pass->capacity - 1);
     pass->groups[at] = (Group){key, {.how = how}, true};
     ++pass->count;

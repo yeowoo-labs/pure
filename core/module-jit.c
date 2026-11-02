@@ -1424,6 +1424,20 @@ static void append_books(Block *k, const PureOp *op, uint32_t pc, unsigned heigh
     bind(e, done);
 }
 
+/* pure_key_slot (module-list.h) of the bits in register bits into slot, for a
+ * table whose mask (its slots less one) is in register mask, t a scratch:
+ * the fixed mixing, the process's secret multiplier, the top bits. */
+static void slot_of(Emit *e, unsigned slot, unsigned bits, unsigned mask, unsigned t) {
+    mov_imm(e, t, UINT64_C(0xff51afd7ed558ccd));
+    put(e, 0xCA400000 | bits << 16 | 33u << 10 | bits << 5 | slot); /* EOR slot, bits, bits, LSR #33 */
+    mul_reg(e, slot, slot, t);
+    put(e, 0xCA400000 | slot << 16 | 33u << 10 | slot << 5 | slot); /* EOR slot, slot, slot, LSR #33 */
+    mov_imm(e, t, pure_hash_secret.multiplier);
+    mul_reg(e, slot, slot, t);
+    put(e, 0xDAC01000 | mask << 5 | t); /* CLZ t, mask: 64 - log2 of the slots */
+    lsr_reg(e, slot, slot, t);
+}
+
 /* A key's bits in a HASHED list's table (module-list.c's key_bits: -0 as +0) into x17. */
 static void hashed_bits(Block *k, unsigned h) {
     Emit *e = k->e;
@@ -1474,12 +1488,8 @@ static void append(Block *k, const PureOp *op, uint32_t pc, unsigned height) {
         cmp_lsl(e, X10, X1, 2);       /* against four times the slots */
         b_cond(e, HI, slow);
         hashed_bits(k, base + m->state_key[list] - 1u);
-        mov_imm(e, X10, UINT64_C(0xff51afd7ed558ccd)); /* member_slot */
-        put(e, 0xCA400000 | X17 << 16 | 33u << 10 | X17 << 5 | X0); /* EOR x0, x17, x17, LSR #33 */
-        mul_reg(e, X9, X0, X10);
-        put(e, 0xCA400000 | X9 << 16 | 33u << 10 | X9 << 5 | X9);  /* EOR x9, x9, x9, LSR #33 */
-        sub_imm(e, X1, X1, 1);
-        put(e, 0x8A000000 | X1 << 16 | X9 << 5 | X9);              /* AND x9, x9, x1 (the mask) */
+        sub_imm(e, X1, X1, 1); /* the mask */
+        slot_of(e, X9, X17, X1, X10);
         load64(e, X0, X16, pure_list_layout[LIST_MEMBERS_AT]);
         bind(e, probe);
         load64_index(e, X10, X0, X9);
@@ -4980,15 +4990,11 @@ static void tier_probe(Tier *t, const TVal *v, unsigned r, unsigned key, unsigne
     bind(e, hashed);
     fp2(e, SCVTF_X, D0, key);
     fp2(e, FMOV_XD, X16, D0); /* the key's bits (a whole number's: never -0) */
-    mov_imm(e, X17, UINT64_C(0xff51afd7ed558ccd));
-    put(e, 0xCA400000 | X16 << 16 | 33u << 10 | X16 << 5 | X10); /* EOR x10, x16, x16, LSR #33 */
-    mul_reg(e, X17, X10, X17);
-    put(e, 0xCA400000 | X17 << 16 | 33u << 10 | X17 << 5 | X17); /* EOR x17, x17, x17, LSR #33 */
     load64(e, X9, tbase(t, B_LISTS, X9), (size_t)v->list * sizeof(PureList *));
     load64(e, X10, X9, pure_list_layout[LIST_MEMBER_CAPACITY_AT]);
-    sub_imm(e, X10, X10, 1);
-    put(e, 0x8A000000 | X10 << 16 | X17 << 5 | X17);  /* AND x17, x17, x10: the slot */
     put(e, 0x927EF400 | bits << 5 | X9);               /* AND x9, bits, #~3: the members */
+    sub_imm(e, X10, X10, 1);                           /* the mask */
+    slot_of(e, X17, X16, X10, X1);                     /* the slot */
     mov_imm(e, X1, UINT64_C(0x7FF8000000000001));      /* VACANT */
     bind(e, probe);
     load64_index(e, X0, X9, X17);

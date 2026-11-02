@@ -1,0 +1,8 @@
+The sorted path alone, measured against HASHED (2026-11-02-sorted-path.jsonl): no list is made HASHED, so a keyed
+event list whose keys come out of order goes to a tree (numbers) or is searched and inserted apart (texts).
+--- a/core/module-list.c
++++ b/core/module-list.c
+@@ static bool make_hashed(PureList *list) {
+ static bool make_hashed(PureList *list) {
++    return false; /* measured: the sorted path alone */
+     if (hashed_field(list) < 0 || list->pack || list->flattened >= 2) return false;

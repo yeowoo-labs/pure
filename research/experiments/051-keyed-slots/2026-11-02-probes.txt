@@ -1,0 +1,12 @@
+seq ints as doubles          load 0.5  old  1.35/46    ms  1.28/5     xs+ms  1.35/7     rot+ms 10.49/40    r25,50  1.39/24    mum  2.69/12    fmix+ms  1.31/22  
+seq ints as doubles          load 0.8  old  2.71/219   ms  2.90/248   xs+ms  1.68/16    rot+ms  3.11/34    r25,50  2.75/208   mum  5.16/20    fmix+ms  2.64/188 
+stride 2^20 ints as doubles  load 0.5  old  1.41/42    ms  1.11/12    xs+ms  4.18/18    rot+ms 59.59/257   r25,50  1.35/25    mum  1.18/6     fmix+ms  1.31/21  
+stride 2^20 ints as doubles  load 0.8  old  3.08/224   ms  1.81/19    xs+ms  2.26/55    rot+ms  4.56/73    r25,50  3.33/157   mum  3.25/19    fmix+ms  2.60/172 
+MINSTD ids as doubles        load 0.5  old  1.31/21    ms  1.31/24    xs+ms  1.31/23    rot+ms  1.31/27    r25,50  1.31/20    mum  1.31/22    fmix+ms  1.31/31  
+MINSTD ids as doubles        load 0.8  old  2.60/171   ms  2.64/154   xs+ms  2.61/205   rot+ms  2.62/169   r25,50  2.64/181   mum  2.62/223   fmix+ms  2.64/215 
+raw i64 0..n                 load 0.5  old  1.31/29    ms  2.61/5     xs+ms 43.28/86    rot+ms  1.16/2     r25,50  1.33/11    mum  1.31/33    fmix+ms  1.31/23  
+raw i64 0..n                 load 0.8  old  2.40/118   ms  3.57/7     xs+ms  5.74/11    rot+ms  8.18/35    r25,50  2.85/49    mum  7.63/594   fmix+ms  2.62/158 
+raw i64 stride 2^32          load 0.5  old  1.30/21    ms  1.91/4     xs+ms  1.27/3     rot+ms  1.07/2     r25,50  1.79/16    mum  1.05/3     fmix+ms  1.31/24  
+raw i64 stride 2^32          load 0.8  old  2.71/291   ms  7.94/49    xs+ms 5493.21/28571  rot+ms  5.12/12    r25,50  2.41/48    mum  1.44/13    fmix+ms  2.63/194 
+random doubles               load 0.5  old  1.31/17    ms  1.31/23    xs+ms  1.31/28    rot+ms  1.31/21    r25,50  1.31/25    mum  1.31/26    fmix+ms  1.31/24  
+random doubles               load 0.8  old  2.60/122   ms  2.62/162   xs+ms  2.64/189   rot+ms  2.65/186   r25,50  2.67/181   mum  2.64/158   fmix+ms  2.66/207 
