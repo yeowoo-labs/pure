@@ -67,6 +67,13 @@ class HttpHost:
         self.info = json.loads(line)  # its port, name, public key
         self.port = self.info['port']
 
+    def resident_kib(self):
+        """The host's resident memory (VmRSS), in KiB."""
+        for line in Path(f'/proc/{self.process.pid}/status').read_text().splitlines():
+            if line.startswith('VmRSS:'):
+                return int(line.split()[1])
+        return 0
+
     def stop(self):
         self.process.terminate()
         _, error = self.process.communicate(timeout=30)
@@ -7011,9 +7018,41 @@ def server_tokens(aup, pure, work):
         finally:
             connection.close()
 
+    def unread_body(path, token=None, at_once=1, size=1449984):
+        """A write that announces a body (the most a request may carry, PURE_OBJECT_LIMIT) and sends none
+        of it: answered from its head, the connection closed."""
+        import socket
+        sockets = []
+        for _ in range(at_once):
+            s = socket.create_connection(('127.0.0.1', host.port), timeout=5)
+            head = f'POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {size}\r\nContent-Type: application/json\r\n'
+            if token is not None:
+                head += f'Authorization: Bearer {token}\r\n'
+            s.sendall((head + '\r\n').encode())
+            sockets.append(s)
+        statuses = []
+        for s in sockets:
+            answer = b''
+            while True:  # to the server's close: no body was waited for
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                answer += chunk
+            s.close()
+            statuses.append(int(answer.split(b' ', 2)[1]))
+        return statuses
+
     try:
         none = call('GET', '/t/views/total')
         assert none[:3] == (401, 'unauthorized', 'Bearer'), none
+        # Refused from its head: a body is neither waited for nor held (the most a request may carry
+        # announced, none sent); one past it is refused for its size, also from its head.
+        resident = host.resident_kib()
+        assert unread_body('/t/inputs/add?step=1') == [401] and unread_body('/t/inputs/add?step=1', 'x' * 40) == [401]
+        assert unread_body('/t/inputs/add?step=1', names['read']) == [403]
+        assert unread_body('/t/inputs/add?step=1', at_once=64) == [401] * 64
+        assert unread_body('/t/inputs/add?step=1', names['write'], size=1449985) == [413]
+        assert host.resident_kib() - resident < 8192, (resident, host.resident_kib())
         for method, path in (('POST', '/t/inputs/add?step=1'), ('GET', '/docs/views/body?id=k'), ('PUT', '/t/queries/q'),
                              ('GET', '/t/queries/q')):
             assert call(method, path)[:2] == (401, 'unauthorized'), (method, path)
@@ -7086,7 +7125,8 @@ def server_tokens(aup, pure, work):
         assert call('POST', '/t/inputs/take', w, b'{"k": 5}', delivery)[0] == 200
         stats = host.stop()[-1]
         host = None
-        assert (stats['unauthorized'], stats['forbidden']) == (10, 4), (stats['unauthorized'], stats['forbidden'])
+        # 66 and 1 of them the unread bodies' (the one past the limit is neither)
+        assert (stats['unauthorized'], stats['forbidden']) == (76, 5), (stats['unauthorized'], stats['forbidden'])
         # A sealed delivery from a sender the host names comes with no token.
         keys = {}
         for side in ('sender', 'receiver'):
