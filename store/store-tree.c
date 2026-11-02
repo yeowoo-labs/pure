@@ -133,7 +133,20 @@ typedef struct {
 /* One mapping of a file from its start, length bytes: shared by the versions
  * read from it (each a head whose bytes end at or before length) and by
  * whoever still sends extents from it. */
-typedef struct PureMapping { const unsigned char *map; uint64_t length; unsigned refs; } Mapping;
+/* A ring's reader holds a pin (030 S2): a mapping of its own over the
+ * file's (region), with the version it reads and the key (empty: every key
+ * and the catalog). While it lives the writer reuses no byte that version
+ * holds of that key; each draft, frozen copy and lent extent counts it. */
+typedef struct PureMapping {
+    const unsigned char *map;
+    uint64_t length;
+    unsigned refs;
+    struct PureMapping *region; /* a pin's: the file's mapping it reads through (counted) */
+    struct Turns *turns;        /* a pin's: whose */
+    uint64_t version;
+    struct PureMapping *next;   /* a pin's: the holding's pins */
+    char key[KEY + 1];
+} Mapping;
 typedef struct {
     const unsigned char *map;
     uint64_t end;
@@ -188,6 +201,10 @@ typedef struct Holding {
     Mapping *mapping; /* newest's (a reference) */
     dev_t device;     /* newest's file */
     ino_t inode;
+    struct Turns *turns;
+    Mapping *pins;    /* a ring's readers' (turns->lock), swept by the writer once let go */
+    unsigned held_pins; /* those not let go (turns->lock) */
+    bool closing;     /* its holders are gone, a ring's pins not yet: the session (and its lock) stays */
 } Holding;
 
 /* Forks in this process's line. Around a fork the stores' list and every
@@ -608,15 +625,20 @@ static bool map_tree(int fd, const struct stat *file, const Head *head, Tree *tr
     Mapping *mapping = malloc(sizeof(*mapping));
     void *map = mapping ? mmap(NULL, (size_t)length, PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
     if (map == MAP_FAILED) { free(mapping); return false; }
-    *mapping = (Mapping){map, length, 1};
+    *mapping = (Mapping){.map = map, .length = length, .refs = 1};
     *tree = (Tree){.map = map, .end = length, .shared = mapping};
     return true;
 }
 
 /* A lent mapping may be released on another thread (a host that answers on
  * its connection threads): its count is atomic. */
+static void let_pin_go(Mapping *pin);
 static void release_mapping(Mapping *mapping) {
     if (!mapping || __atomic_sub_fetch(&mapping->refs, 1, __ATOMIC_ACQ_REL)) return;
+    if (mapping->region) { /* a pin: swept by the writer */
+        let_pin_go(mapping);
+        return;
+    }
     munmap((void *)mapping->map, (size_t)mapping->length);
     free(mapping);
 }
@@ -1011,10 +1033,14 @@ static void put_bytes(Writer *writer, const unsigned char *bytes, size_t length)
 enum { SEGMENT = 65536, GROW = 262144, CHECKPOINT_BYTES = 262144 };
 typedef struct { uint64_t start, end; } Extent;
 typedef struct {
-    uint64_t live;   /* bytes of the newest version's nodes in it */
+    uint64_t live;   /* bytes of the newest version's nodes in it, and of dead ones a pin still reads */
     uint64_t newest; /* the newest seq written into it (a commit's link and bytes, a marker) */
+    uint64_t born;   /* no seq before it wrote what is in it (0: unknown, as at an open) */
     bool back;       /* given back whole, nothing written into it since */
 } Segment;
+/* Nodes that died at died while a pin may still read them: of key (empty:
+ * the catalog), written no earlier than born. */
+typedef struct { uint64_t start, end, born, died; char key[KEY + 1]; } Deferred;
 typedef struct Ring {
     Segment *segments;
     size_t segment_count;
@@ -1026,6 +1052,8 @@ typedef struct Ring {
     size_t wrote_count, wrote_room;
     uint64_t *kept; /* the stored nodes its new trees keep */
     size_t kept_count, kept_room;
+    Deferred *deferred;
+    size_t deferred_count, deferred_room;
     bool failed; /* a note it had no memory for: the commit does not publish */
 } Ring;
 
@@ -1328,6 +1356,37 @@ void pure_store_release(PureStoredView *view) {
     *view = (PureStoredView){0};
 }
 
+/* A ring is read only through its owner (030 S2): a path read of one holds
+ * its writer for the read (from another process, its lock: busy while its
+ * owner runs), so that no commit reuses what it reads. *owned stays NULL
+ * for a file of the format before, read as it is. */
+static PureResult hold(Turns *turns, const char *path);
+static void let_go(Turns *turns);
+static PureResult own_ring(const char *path, int fd, Turns **owned) {
+    unsigned char magic[2][8];
+    *owned = NULL;
+    if (!read_at(fd, magic[0], 8, 0) || !read_at(fd, magic[1], 8, BLOCK) ||
+        (memcmp(magic[0], ring_magic, 8) && memcmp(magic[1], ring_magic, 8))) return PURE_OK;
+    int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Turns *turns = directory >= 0 ? turns_of(directory) : NULL;
+    if (directory >= 0) close(directory);
+    if (!turns) return PURE_STORE_ERROR;
+    pthread_mutex_lock(&turns->writer);
+    PureResult result = hold(turns, path);
+    if (result != PURE_OK) {
+        pthread_mutex_unlock(&turns->writer);
+        return result;
+    }
+    *owned = turns;
+    return PURE_OK;
+}
+
+static void disown(Turns *turns) {
+    if (!turns) return;
+    let_go(turns);
+    pthread_mutex_unlock(&turns->writer);
+}
+
 PureResult pure_store_select(const char *path, const char *key, size_t offset,
                              size_t length, bool whole, size_t minimum,
                              size_t available, PureStoredView *out) {
@@ -1346,7 +1405,13 @@ PureResult pure_store_select(const char *path, const char *key, size_t offset,
     int64_t revision;
     bool found;
     unsigned height;
-    PureResult result = PURE_STORE_ERROR;
+    Turns *owned;
+    PureResult result = own_ring(path, fd, &owned);
+    if (result != PURE_OK) {
+        close(fd);
+        return result;
+    }
+    result = PURE_STORE_ERROR;
     if (!read_head(fd, &file, false, &head, NULL) || !map_tree(fd, &file, &head, &tree) ||
         !find(&tree, (Entry){head.catalog, head.catalog_bytes}, key, &index, &found,
               &document, &revision)) goto finish;
@@ -1358,7 +1423,8 @@ PureResult pure_store_select(const char *path, const char *key, size_t offset,
     if (length > available) { result = PURE_BUDGET; goto finish; }
     if (length) {
         if (!root_height(&tree, document, &height)) goto finish;
-        const unsigned char *direct = single_leaf(&tree, document, height, offset, length);
+        /* (a ring's bytes are copied out: they may be reused once the read ends) */
+        const unsigned char *direct = head.ring ? NULL : single_leaf(&tree, document, height, offset, length);
         void *mapping;
         size_t mapped_size, prefix = 0;
         if (direct) {
@@ -1391,6 +1457,7 @@ PureResult pure_store_select(const char *path, const char *key, size_t offset,
 finish:
     release_tree(&tree);
     close(fd);
+    disown(owned);
     return result;
 }
 
@@ -1500,9 +1567,42 @@ static void count_live(Ring *ring, uint64_t start, uint64_t end, bool add) {
 static void count_written(Ring *ring, uint64_t start, uint64_t end, uint64_t seq) {
     for (uint64_t s = start / SEGMENT; s * SEGMENT < end && s < ring->segment_count; ++s) {
         Segment *g = &ring->segments[s];
+        if (g->back) g->born = seq;
         if (g->newest < seq) g->newest = seq;
         g->back = false;
     }
+}
+
+static uint64_t born_in(const Ring *ring, uint64_t start, uint64_t end) {
+    uint64_t born = UINT64_MAX;
+    for (uint64_t s = start / SEGMENT; s * SEGMENT < end && s < ring->segment_count; ++s)
+        if (ring->segments[s].born < born) born = ring->segments[s].born;
+    return born == UINT64_MAX ? 0 : born;
+}
+
+/* Whether a live pin may read what key (empty: the catalog) held from born
+ * until died: one of that key or of every key, of a version between. */
+static bool pinned_in(const Mapping *pins, const char *key, uint64_t born, uint64_t died) {
+    for (const Mapping *p = pins; p; p = p->next)
+        if (__atomic_load_n(&p->refs, __ATOMIC_ACQUIRE) && (!p->key[0] || (key[0] && !strcmp(p->key, key))) &&
+            born <= p->version && p->version < died) return true;
+    return false;
+}
+
+/* Nodes that died: no longer live, or deferred while a pin may read them. */
+static void count_death(Ring *ring, const Mapping *pins, uint64_t start, uint64_t end, const char *key, uint64_t died) {
+    uint64_t born = born_in(ring, start, end);
+    if (!pinned_in(pins, key, born, died)) {
+        count_live(ring, start, end, false);
+        return;
+    }
+    if (!ring_room((void **)&ring->deferred, &ring->deferred_room, ring->deferred_count + 1, sizeof(*ring->deferred))) {
+        ring->failed = true; /* kept live: its segment does not come back until the ring is read again */
+        return;
+    }
+    Deferred *d = &ring->deferred[ring->deferred_count++];
+    *d = (Deferred){start, end, born, died, {0}};
+    memcpy(d->key, key, strlen(key) + 1);
 }
 
 /* Segments that nothing lives in and that no commit from the older slot's
@@ -1540,19 +1640,20 @@ static bool kept_at(const Ring *ring, uint64_t at) {
 
 /* The nodes of a tree a commit replaced that its new trees do not keep: they
  * no longer live (a damaged one stays counted: its segment never comes back). */
-static void count_dead(Ring *ring, const Tree *tree, Entry entry, unsigned height) {
+static void count_dead(Ring *ring, const Mapping *pins, const Tree *tree, Entry entry, unsigned height, const char *key,
+                       uint64_t died) {
     if (!entry.bytes || (entry.ref & MEMORY_BIT)) return;
     uint64_t at = entry.ref & LOCATION;
     if (kept_at(ring, at)) return;
     if (!height) {
-        count_live(ring, at, at + entry.bytes, false);
+        count_death(ring, pins, at, at + entry.bytes, key, died);
         return;
     }
     Entry kids[FAN_MAX];
     size_t count = children(tree, entry, height, kids);
     if (!count) return;
-    count_live(ring, at, at + 8 + 16 * (uint64_t)count, false);
-    for (size_t i = 0; i < count; ++i) count_dead(ring, tree, kids[i], height - 1);
+    count_death(ring, pins, at, at + 8 + 16 * (uint64_t)count, key, died);
+    for (size_t i = 0; i < count; ++i) count_dead(ring, pins, tree, kids[i], height - 1, key, died);
 }
 
 static void free_ring(Ring *ring) {
@@ -1561,6 +1662,7 @@ static void free_ring(Ring *ring) {
     free(ring->free);
     free(ring->wrote);
     free(ring->kept);
+    free(ring->deferred);
     free(ring);
 }
 
@@ -1688,7 +1790,7 @@ static bool cover(Session *session) {
         Mapping *fresh = malloc(sizeof(*fresh));
         void *map = fresh ? mmap(NULL, (size_t)file.st_size, PROT_READ, MAP_SHARED, session->fd, 0) : MAP_FAILED;
         if (map == MAP_FAILED) { free(fresh); return false; }
-        *fresh = (Mapping){map, (uint64_t)file.st_size, 1};
+        *fresh = (Mapping){.map = map, .length = (uint64_t)file.st_size, .refs = 1};
         release_mapping(mapping);
         session->tree.map = map;
         session->tree.shared = fresh;
@@ -1824,11 +1926,17 @@ static PureResult hold(Turns *turns, const char *path) {
         Holding *made = calloc(1, sizeof(*made));
         if (!made) return PURE_ALLOCATION;
         made->session = (Session){.directory = -1, .lock = -1, .fd = -1};
+        made->turns = turns;
         pthread_mutex_lock(&turns->lock);
         turns->holding = made;
         pthread_mutex_unlock(&turns->lock);
     }
     Holding *holding = turns->holding;
+    pthread_mutex_lock(&turns->lock);
+    bool revived = holding->closing && holding->forks == forks; /* its pins kept it open */
+    if (revived) holding->closing = false, holding->holders = 1;
+    pthread_mutex_unlock(&turns->lock);
+    if (revived) return PURE_OK;
     if (join(turns)) {
         if (!holding->stale) return PURE_OK;
         PureResult result = reopen(&holding->session, false);
@@ -1868,23 +1976,73 @@ static PureResult hold(Turns *turns, const char *path) {
     return PURE_OK;
 }
 
-/* With turns->writer held: the last holder closes the writer (and its lock). */
+/* The writer closed (and its lock let go), with turns->writer held and no
+ * holder or live pin left: pins let go meanwhile are freed. */
+static void close_holding(Turns *turns, Holding *holding) {
+    pthread_mutex_lock(&turns->lock);
+    Mapping *old = holding->mapping, *pins = holding->pins;
+    holding->mapping = NULL;
+    holding->newest = (Head){0};
+    holding->pins = NULL;
+    holding->closing = false;
+    pthread_mutex_unlock(&turns->lock);
+    release_mapping(old);
+    while (pins) {
+        Mapping *next = pins->next;
+        release_mapping(pins->region);
+        free(pins);
+        pins = next;
+    }
+    close_session(&holding->session);
+    free(holding->buffer);
+    holding->buffer = NULL;
+}
+
+/* With turns->writer held: the last holder closes the writer (and its lock),
+ * unless a ring's readers still hold pins: then the last of those does. */
 static void let_go(Turns *turns) {
     Holding *holding = turns->holding;
     clear_arena(&holding->session.tree);
     pthread_mutex_lock(&turns->lock);
-    bool last = !--holding->holders;
-    Mapping *old = last ? holding->mapping : NULL;
-    if (last) {
-        holding->mapping = NULL;
-        holding->newest = (Head){0};
-    }
+    bool last = !--holding->holders, pinned = last && holding->held_pins;
+    if (pinned) holding->closing = true;
     pthread_mutex_unlock(&turns->lock);
-    release_mapping(old);
-    if (!last) return;
-    close_session(&holding->session);
-    free(holding->buffer);
-    holding->buffer = NULL;
+    if (last && !pinned) close_holding(turns, holding);
+}
+
+/* A pin on version of a ring (key, or every key when empty), through region,
+ * made with turns->lock held: the version is the newest, or one a pin the
+ * caller holds already keeps. NULL without memory. */
+static Mapping *pin_at(Holding *holding, Mapping *region, uint64_t version, const char *key) {
+    Mapping *pin = calloc(1, sizeof(*pin));
+    if (!pin || !region) {
+        free(pin);
+        return NULL;
+    }
+    __atomic_add_fetch(&region->refs, 1, __ATOMIC_RELAXED);
+    *pin = (Mapping){region->map, region->length, 1, region, holding->turns, version, holding->pins, {0}};
+    memcpy(pin->key, key, strlen(key) + 1);
+    holding->pins = pin;
+    ++holding->held_pins;
+    return pin;
+}
+
+/* A pin no one holds any longer (its deaths go at the writer's next commit);
+ * the last one of a holding whose holders are gone closes it. */
+static void let_pin_go(Mapping *pin) {
+    Turns *turns = pin->turns;
+    pthread_mutex_lock(&turns->lock);
+    Holding *holding = turns->holding;
+    bool close = holding && !--holding->held_pins && !holding->holders && holding->closing;
+    if (close) holding->closing = false;
+    pthread_mutex_unlock(&turns->lock);
+    if (!close) return;
+    pthread_mutex_lock(&turns->writer);
+    pthread_mutex_lock(&turns->lock);
+    close = !holding->holders && !holding->held_pins;
+    pthread_mutex_unlock(&turns->lock);
+    if (close) close_holding(turns, holding);
+    pthread_mutex_unlock(&turns->writer);
 }
 
 #ifdef PURE_STORE_TEST
@@ -2011,10 +2169,12 @@ static bool ring_place(Session *session, Writer *writer, uint64_t need, uint64_t
 
 /* After a ring's commit is durable: its link, bytes and marker are in use,
  * its nodes live, the nodes it replaced dead (each written key's root before
- * and the catalog's, down to what the new trees keep), and segments that
- * came free are back. False without memory (read the ring again). */
-static bool settle_ring(Session *session, const Head *before, uint64_t link_at, bool marked, size_t count,
-                        const Entry *olds, bool checkpoint) {
+ * and the catalog's, down to what the new trees keep), deferred while a pin
+ * may read them; pins let go are swept, deaths they deferred go; segments
+ * that came free are back. False without memory (read the ring again). */
+static bool settle_ring(Holding *holding, const Head *before, uint64_t link_at, bool marked, size_t count,
+                        const char *const *keys, const Entry *olds, bool checkpoint) {
+    Session *session = &holding->session;
     Ring *ring = session->ring;
     const Head *published = &session->head;
     bool ok = free_take(ring, link_at, published->end) && (!marked || free_take(ring, before->end, before->end + LINK));
@@ -2022,14 +2182,41 @@ static bool settle_ring(Session *session, const Head *before, uint64_t link_at, 
     if (marked) count_written(ring, before->end, before->end + LINK, published->seq);
     for (size_t i = 0; i < ring->wrote_count; ++i) count_live(ring, ring->wrote[i].start, ring->wrote[i].end, true);
     if (ring->kept_count) qsort(ring->kept, ring->kept_count, sizeof(*ring->kept), compare_offsets);
+    pthread_mutex_lock(&holding->turns->lock);
+    Mapping **link = &holding->pins, *swept = NULL;
+    while (*link) /* pins let go */
+        if (__atomic_load_n(&(*link)->refs, __ATOMIC_ACQUIRE)) link = &(*link)->next;
+        else {
+            Mapping *pin = *link;
+            *link = pin->next;
+            pin->next = swept;
+            swept = pin;
+        }
+    for (size_t i = 0; i < ring->deferred_count;) {
+        Deferred *d = &ring->deferred[i];
+        if (pinned_in(holding->pins, d->key, d->born, d->died)) ++i;
+        else {
+            count_live(ring, d->start, d->end, false);
+            ring->deferred[i] = ring->deferred[--ring->deferred_count];
+        }
+    }
     unsigned height;
     Entry catalog = {before->catalog, before->catalog_bytes};
-    if (root_height(&session->tree, catalog, &height)) count_dead(ring, &session->tree, catalog, height);
+    if (root_height(&session->tree, catalog, &height))
+        count_dead(ring, holding->pins, &session->tree, catalog, height, "", published->seq);
     for (size_t i = 0; i < count; ++i)
-        if (root_height(&session->tree, olds[i], &height)) count_dead(ring, &session->tree, olds[i], height);
+        if (root_height(&session->tree, olds[i], &height))
+            count_dead(ring, holding->pins, &session->tree, olds[i], height, keys[i], published->seq);
+    pthread_mutex_unlock(&holding->turns->lock);
+    while (swept) {
+        Mapping *next = swept->next;
+        release_mapping(swept->region);
+        free(swept);
+        swept = next;
+    }
     ring->since = (checkpoint ? 0 : ring->since) + published->end - link_at + (marked ? LINK : 0);
     ring->wrote_count = ring->kept_count = 0;
-    return ok && give_back(ring, h_rec(session));
+    return ok && !ring->failed && give_back(ring, h_rec(session));
 }
 
 /* The documents' new nodes are already written at writer, and the catalog
@@ -2048,7 +2235,6 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
 #ifdef PURE_STORE_TEST
     ++publications;
 #endif
-    (void)keys;
     Session *session = &holding->session;
     Ring *ring = session->ring;
     *compacted = false;
@@ -2091,7 +2277,7 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
     Head before = session->head;
     session->head = published;
     if (checkpoint) session->slots[older] = named.seq;
-    if (ring && !settle_ring(session, &before, link_at, marked, count, olds, checkpoint)) holding->stale = true;
+    if (ring && !settle_ring(holding, &before, link_at, marked, count, keys, olds, checkpoint)) holding->stale = true;
     clear_arena(&session->tree);
     if (!cover(session)) {
         holding->stale = true;
@@ -2219,7 +2405,13 @@ PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *k
     Tree tree = {0};
     Head head;
     struct stat file;
-    PureResult result = PURE_STORE_ERROR;
+    Turns *owned;
+    PureResult result = own_ring(path, fd, &owned);
+    if (result != PURE_OK) {
+        close(fd);
+        return result;
+    }
+    result = PURE_STORE_ERROR;
     if (read_head(fd, &file, false, &head, NULL) && map_tree(fd, &file, &head, &tree)) {
         Entry catalog = {head.catalog, head.catalog_bytes}, document;
         unsigned char record[RECORD];
@@ -2236,6 +2428,7 @@ PureResult pure_store_keys(const char *path, bool (*visit)(void *, const char *k
     }
     release_tree(&tree);
     close(fd);
+    disown(owned);
     return result;
 }
 
@@ -2263,6 +2456,8 @@ struct PureDraft {
     int64_t revision;
     size_t live;      /* arena bytes reachable at the last collection */
     bool held;        /* a transaction still reads earlier versions */
+    Mapping **earlier; /* a ring's: the pins of versions it read while held (those versions may still be read) */
+    size_t earlier_count;
 };
 
 /* Rebase the draft on the committed version of its key. */
@@ -2332,8 +2527,10 @@ PureDraft *pure_draft_freeze(const PureDraft *draft) {
     return frozen;
 }
 
+static void release_earlier(PureDraft *draft);
 void pure_draft_close(PureDraft *draft) {
     if (!draft) return;
+    release_earlier(draft);
     release_tree(&draft->tree);
     if (!draft->store) free(draft->path);
     free(draft);
@@ -2346,6 +2543,15 @@ static PureResult refresh(PureStore *store) {
     Holding *holding = turns->holding;
     Mapping *old = NULL;
     pthread_mutex_lock(&turns->lock);
+    if (holding->newest.ring) { /* an unpinned handle holds no version of a ring (it pins one as it opens a draft) */
+        Mapping *pin = store->pinned ? pin_at(holding, holding->mapping, holding->newest.seq, "") : NULL;
+        old = store->mapping;
+        store->head = holding->newest;
+        store->mapping = pin;
+        pthread_mutex_unlock(&turns->lock);
+        release_mapping(old);
+        return !store->pinned || pin ? PURE_OK : PURE_ALLOCATION;
+    }
     if (holding->mapping && (holding->mapping != store->mapping || holding->newest.seq != store->head.seq ||
                              holding->newest.check != store->head.check)) {
         __atomic_add_fetch(&holding->mapping->refs, 1, __ATOMIC_RELAXED);
@@ -2405,8 +2611,6 @@ PureResult pure_store_open(const char *path, PureStore **out) {
     }
     store->turns = turns;
     result = refresh(store);
-    /* A ring's readers hold pins (030 S2), not yet: no handle on one */
-    if (result == PURE_OK && store->head.ring) result = PURE_STORE_ERROR;
     if (result != PURE_OK) { pure_store_close(store); return result; }
     *out = store;
     return PURE_OK;
@@ -2438,14 +2642,55 @@ bool pure_mapping_holds(const PureMapping *mapping, PureSpan span) {
 void pure_mapping_release(PureMapping *mapping) { release_mapping(mapping); }
 
 PureResult pure_store_pin(PureStore *store, bool pinned) {
-    store->pinned = false;
-    PureResult result = pinned ? refresh(store) : PURE_OK;
-    store->pinned = pinned && result == PURE_OK;
+    store->pinned = pinned; /* (a ring's handle holds a pin only while pinned) */
+    PureResult result = pinned || store->head.ring ? refresh(store) : PURE_OK;
+    if (result != PURE_OK) store->pinned = false;
     return result;
+}
+
+/* A ring's draft opens on the pinned handle's version, or the newest, its
+ * key pinned there; the catalog is read under a pin of every key. */
+static PureResult ring_draft(PureStore *store, PureDraft *draft) {
+    Turns *turns = store->turns;
+    Holding *holding = turns->holding;
+    pthread_mutex_lock(&turns->lock);
+    if (!store->pinned) store->head = holding->newest;
+    Mapping *all = store->pinned ? store->mapping : pin_at(holding, holding->mapping, holding->newest.seq, "");
+    Mapping *mine = all ? pin_at(holding, all->region, store->head.seq, draft->key) : NULL;
+    pthread_mutex_unlock(&turns->lock);
+    Tree tree = {.map = all ? all->map : NULL, .end = all ? all->length : 0};
+    Entry document;
+    uint64_t index;
+    int64_t revision;
+    bool found;
+    bool ok = mine && find(&tree, (Entry){store->head.catalog, store->head.catalog_bytes}, draft->key, &index, &found,
+                           &document, &revision);
+    if (!store->pinned) release_mapping(all);
+    if (!ok) {
+        release_mapping(mine);
+        return mine ? PURE_STORE_ERROR : PURE_ALLOCATION;
+    }
+    draft->tree = (Tree){.map = mine->map, .end = mine->length, .shared = mine};
+    draft->device = holding->device;
+    draft->inode = holding->inode;
+    draft->root = document;
+    draft->revision = revision;
+    draft->live = 0;
+    return PURE_OK;
 }
 
 static PureResult open_through(PureStore *store, const char *key, PureDraft **out) {
     *out = NULL;
+    if (store->head.ring) {
+        PureDraft *draft = calloc(1, sizeof(*draft));
+        if (!draft) return PURE_ALLOCATION;
+        *draft = (PureDraft){.store = store, .path = store->path};
+        memcpy(draft->key, key, strlen(key) + 1);
+        PureResult result = ring_draft(store, draft);
+        if (result != PURE_OK) free(draft);
+        else *out = draft;
+        return result;
+    }
     PureResult result = store->pinned ? PURE_OK : refresh(store);
     if (result != PURE_OK) return result;
     PureDraft *draft = calloc(1, sizeof(*draft));
@@ -2547,9 +2792,19 @@ void pure_draft_restore(PureDraft *draft, PureVersion version) {
     draft->root = (Entry){version.ref, version.bytes};
 }
 
+static void release_earlier(PureDraft *draft) {
+    for (size_t i = 0; i < draft->earlier_count; ++i) release_mapping(draft->earlier[i]);
+    free(draft->earlier);
+    draft->earlier = NULL;
+    draft->earlier_count = 0;
+}
+
 void pure_draft_hold(PureDraft *draft, bool held) {
     draft->held = held;
-    if (!held) collect(draft);
+    if (!held) {
+        release_earlier(draft);
+        collect(draft);
+    }
 }
 
 /* ---- Group commits ------------------------------------------------------
@@ -2588,6 +2843,31 @@ enum { GATHER_NS = 2000000 };
  * wrote and the revision it took, on the writer's mapping. */
 static void settle_draft(PureDraft *draft, const Session *session, Entry root, int64_t revision) {
     Mapping *mapping = session->tree.shared;
+    if (session->head.ring) { /* its key pinned at the version its commit made (the newest) */
+        Holding *holding = draft->store->turns->holding;
+        pthread_mutex_lock(&holding->turns->lock);
+        Mapping *pin = pin_at(holding, mapping, session->head.seq, draft->key);
+        pthread_mutex_unlock(&holding->turns->lock);
+        Mapping **earlier = draft->held && draft->tree.shared ?
+                            realloc(draft->earlier, (draft->earlier_count + 1) * sizeof(*earlier)) : NULL;
+        if (earlier) { /* held: what it read may still be read */
+            draft->earlier = earlier;
+            earlier[draft->earlier_count++] = draft->tree.shared;
+            draft->tree.shared = NULL;
+        }
+        if (!pin) { /* no memory: it keeps the version it had (stale: its next commit conflicts) */
+            draft->revision = revision - 1;
+            return;
+        }
+        release_tree(&draft->tree);
+        draft->tree = (Tree){.map = pin->map, .end = pin->length, .shared = pin};
+        draft->device = session->file.st_dev;
+        draft->inode = session->file.st_ino;
+        draft->root = root;
+        draft->revision = revision;
+        draft->live = 0;
+        return;
+    }
     __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
     release_tree(&draft->tree);
     draft->tree = (Tree){.map = mapping->map, .end = session->head.end, .shared = mapping};
@@ -2811,13 +3091,16 @@ bool pure_tree_test_shape(const char *path, const char *key, unsigned *height,
     int64_t revision;
     bool found = false;
     *leaves = *small = 0;
-    bool ok = fd >= 0 && read_head(fd, &file, false, &head, NULL) && map_tree(fd, &file, &head, &tree) &&
+    Turns *owned = NULL;
+    bool ok = fd >= 0 && own_ring(path, fd, &owned) == PURE_OK && read_head(fd, &file, false, &head, NULL) &&
+              map_tree(fd, &file, &head, &tree) &&
               find(&tree, (Entry){head.catalog, head.catalog_bytes}, key, &index, &found,
                    &document, &revision) && found && root_height(&tree, document, height) &&
               (!document.bytes || shape(&tree, document, *height, true, leaves, small));
     if (ok) *file_end = head.end;
     release_tree(&tree);
     if (fd >= 0) close(fd);
+    disown(owned);
     return ok;
 }
 #endif

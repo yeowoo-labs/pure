@@ -809,6 +809,105 @@ static void apply(Oracle *o, size_t offset, size_t remove, const unsigned char *
     o->size = o->size - remove + count;
 }
 
+/* A ring's readers hold pins (030 S2). A draft opened through a handle reads
+ * its version while its key and the others are rewritten again and again and
+ * the ring wraps, and so do its frozen copy and the extents it lent once the
+ * draft is closed; its commit, stale, conflicts. A pinned handle's drafts
+ * open at its version. A draft committing through a handle goes on from each
+ * version it made. The lock outlives the last pin: with the handle closed and
+ * only a lent extent left, another process finds the store busy, and takes
+ * it once that goes. */
+static PureResult elsewhere_put(const char *path, const char *key, int64_t expected);
+typedef struct { const unsigned char *data[64]; size_t sizes[64], count; } Spans;
+
+static bool keep_span(void *context, PureSpan span) {
+    Spans *spans = context;
+    CHECK(spans->count < 64);
+    spans->data[spans->count] = span.data;
+    spans->sizes[spans->count++] = span.size;
+    return true;
+}
+
+static void ring_pins(const char *path) {
+    RingOracle o = {0};
+    uint32_t state = 3;
+    for (unsigned k = 0; k < RING_KEYS; ++k) ring_put(path, &o, k, 3000 + 7000 * k, &state);
+    CHECK(pure_tree_test_ring(path) == PURE_OK);
+    unsigned char *scratch = malloc(400000);
+    CHECK(scratch);
+    PureStore *store;
+    PureDraft *draft, *frozen;
+    CHECK(pure_store_open(path, &store) == PURE_OK && pure_store_draft(store, "ring2", &draft) == PURE_OK);
+    Oracle kept = {malloc(o.sizes[2]), o.sizes[2], o.revisions[2]};
+    CHECK(kept.bytes);
+    memcpy(kept.bytes, o.bytes[2], o.sizes[2]);
+    expect_draft(draft, &kept, scratch);
+    CHECK((frozen = pure_draft_freeze(draft)));
+    PureMapping *lent = pure_draft_mapping(draft);
+    Spans spans = {0};
+    CHECK(lent && pure_draft_read(draft, 0, kept.size, keep_span, &spans) == PURE_OK);
+    for (unsigned i = 0; i < 1500; ++i) ring_put(path, &o, random_value(&state) % RING_KEYS, ring_size(&state), &state);
+    CHECK(o.revisions[2] > kept.revision);
+    expect_draft(draft, &kept, scratch);
+    expect_draft(frozen, &kept, scratch);
+    int64_t at;
+    CHECK(pure_draft_splice(draft, 0, 0, (PureSpan){(const unsigned char *)"x", 1}) == PURE_OK &&
+          pure_draft_commit(draft, &at) == PURE_CONFLICT);
+    pure_draft_close(draft);
+    for (unsigned i = 0; i < 300; ++i) ring_put(path, &o, random_value(&state) % RING_KEYS, ring_size(&state), &state);
+    expect_draft(frozen, &kept, scratch);
+    pure_draft_close(frozen);
+    for (unsigned i = 0; i < 300; ++i) ring_put(path, &o, random_value(&state) % RING_KEYS, ring_size(&state), &state);
+    size_t offset = 0;
+    for (size_t i = 0; i < spans.count; offset += spans.sizes[i++]) /* only the lent extents hold it now */
+        CHECK(pure_mapping_holds(lent, (PureSpan){spans.data[i], spans.sizes[i]}) &&
+              !memcmp(spans.data[i], kept.bytes + offset, spans.sizes[i]));
+    /* a pinned handle's drafts open at its version */
+    RingOracle then = o;
+    for (unsigned k = 0; k < RING_KEYS; ++k) {
+        CHECK((then.bytes[k] = malloc(o.sizes[k] ? o.sizes[k] : 1)));
+        memcpy(then.bytes[k], o.bytes[k], o.sizes[k]);
+    }
+    CHECK(pure_store_pin(store, true) == PURE_OK);
+    for (unsigned i = 0; i < 600; ++i) ring_put(path, &o, random_value(&state) % RING_KEYS, ring_size(&state), &state);
+    char key[16];
+    for (unsigned k = 0; k < RING_KEYS; ++k) {
+        snprintf(key, sizeof(key), "ring%u", k);
+        CHECK(pure_store_draft(store, key, &draft) == PURE_OK);
+        expect_draft(draft, &(Oracle){then.bytes[k], then.sizes[k], then.revisions[k]}, scratch);
+        pure_draft_close(draft);
+    }
+    CHECK(pure_store_pin(store, false) == PURE_OK);
+    /* a draft committing through the handle */
+    CHECK(pure_store_draft(store, "ring4", &draft) == PURE_OK);
+    for (unsigned i = 0; i < 400; ++i) {
+        unsigned char typed[16];
+        size_t n = 1 + random_value(&state) % sizeof(typed), at4 = random_value(&state) % (o.sizes[4] + 1);
+        for (size_t j = 0; j < n; ++j) typed[j] = (unsigned char)random_value(&state);
+        CHECK(pure_draft_splice(draft, at4, 0, (PureSpan){typed, n}) == PURE_OK && pure_draft_commit(draft, &at) == PURE_OK);
+        CHECK((o.bytes[4] = realloc(o.bytes[4], o.sizes[4] + n)));
+        memmove(o.bytes[4] + at4 + n, o.bytes[4] + at4, o.sizes[4] - at4);
+        memcpy(o.bytes[4] + at4, typed, n);
+        o.sizes[4] += n;
+        o.revisions[4] = at;
+        if (i % 4 == 0) ring_put(path, &o, random_value(&state) % 4, ring_size(&state), &state);
+    }
+    expect_draft(draft, &(Oracle){o.bytes[4], o.sizes[4], o.revisions[4]}, scratch);
+    pure_draft_close(draft);
+    ring_expect(path, &o);
+    /* the lock outlives the last pin */
+    pure_store_close(store);
+    CHECK(elsewhere_put(path, "ring0", o.revisions[0]) == PURE_BUSY);
+    pure_mapping_release(lent);
+    CHECK(elsewhere_put(path, "ring0", o.revisions[0]) == PURE_OK);
+    pure_tree_test_forget();
+    expect(path, "ring0", &(Oracle){(unsigned char *)"z", 1, o.revisions[0] + 1});
+    for (unsigned k = 0; k < RING_KEYS; ++k) free(then.bytes[k]);
+    free(kept.bytes);
+    free(scratch);
+    ring_free(&o);
+}
+
 /* Edits live only in the draft until commit; each commit continues from the
  * published version with an empty arena. */
 static void drafts(const char *path) {
@@ -1693,7 +1792,7 @@ int main(void) {
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, frozen_path_draft, owner_lock, unsynced_compaction, threads, grouped,
-                                      lost_commit, pending_head, publishing_apart, stores_apart, one_sync, records, stale_slot, passed_over, slot_before, torn_head_held, records_held, cycles, ring_reuse, ring_twice, ring_torn};
+                                      lost_commit, pending_head, publishing_apart, stores_apart, one_sync, records, stale_slot, passed_over, slot_before, torn_head_held, records_held, cycles, ring_reuse, ring_twice, ring_torn, ring_pins};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -1705,6 +1804,6 @@ int main(void) {
          "process-crash-torn-head-earlier-records-swept-pending-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
          "atomic-batch-runtime-keys-store-handle-frozen-path-draft-owner-lock-unsynced-compaction-threads-group-commit-lost-commit-pending-head-publishing-apart-stores-apart-one-sync-records-"
-         "stale-slot-passed-over-slot-before-held-torn-head-held-records-cycles-ring-reuse-ring-twice-ring-torn\"}");
+         "stale-slot-passed-over-slot-before-held-torn-head-held-records-cycles-ring-reuse-ring-twice-ring-torn-ring-pins\"}");
     return 0;
 }
