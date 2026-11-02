@@ -1,0 +1,18 @@
+ring_model.py, 2026-11-02 (Pi 5): the rules as research/experiments/052-ring/ring_model.py has them (a slot names the commit
+before its own; a writer's start clears the front's 40 bytes and slots that count for nothing; a marker binds its link's digest).
+--commits 600 --seed 1:
+passed seed 1  {'commits': 13823, 'crashes': 81962, 'wraps': 372, 'growths': 21, 'slots': 888, 'resumed': 79, 'damaged_slots': 701, 'size': 786432}
+--commits 3000, seeds 2-5:
+passed seed 2  {'commits': 82251, 'crashes': 447888, 'wraps': 1651, 'growths': 46, 'slots': 5243, 'resumed': 480, 'damaged_slots': 4030, 'size': 1048576}
+passed seed 3  {'commits': 85716, 'crashes': 500729, 'wraps': 2301, 'growths': 48, 'slots': 5422, 'resumed': 492, 'damaged_slots': 4275, 'size': 786432}
+passed seed 4  {'commits': 76047, 'crashes': 423902, 'wraps': 1694, 'growths': 21, 'slots': 4827, 'resumed': 446, 'damaged_slots': 3760, 'size': 786432}
+passed seed 5  {'commits': 75531, 'crashes': 410526, 'wraps': 1518, 'growths': 22, 'slots': 4784, 'resumed': 441, 'damaged_slots': 3731, 'size': 786432}
+Negative controls, --commits 3000 --seed 7, each must fail:
+FAILED resumed after commit 548: commit 561 with the newer slot damaged: opened 538, not [561] seed 7 chain {'commits': 14277, 'crashes': 82754, 'wraps': 367, 'growths': 26, 'slots': 903, 'resumed': 82, 'damaged_slots': 712, 'size': 0}
+FAILED resumed after commit 34: commit 34 cut ['front', 'whole']: version 34 reads wrong seed 7 debris {'commits': 155, 'crashes': 664, 'wraps': 0, 'growths': 0, 'slots': 11, 'resumed': 2, 'damaged_slots': 5, 'size': 0}
+FAILED resumed after commit 50: commit 195 whole: version 195 reads wrong seed 7 live {'commits': 379, 'crashes': 1668, 'wraps': 2, 'growths': 0, 'slots': 24, 'resumed': 3, 'damaged_slots': 17, 'size': 0}
+FAILED resumed after commit 562: commit 670 with the newer slot damaged: opened 643, not [670] seed 7 newer {'commits': 15104, 'crashes': 86225, 'wraps': 367, 'growths': 28, 'slots': 955, 'resumed': 85, 'damaged_slots': 741, 'size': 0}
+Before the rules above (the first runs, seed 1): a commit the first start passed over came back after a second crash
+(resumed after commit 81: cut ['front', 'whole']: version 81 reads wrong; then, with the front cleared, a checkpoint
+naming its own commit opened by its slot while the walk from the older slot stopped short: the chain from the older
+slot (81) breaks after 96, short of 97).
