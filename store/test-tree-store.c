@@ -47,6 +47,8 @@ unsigned long pure_tree_test_syncs(void);
 void pure_tree_test_forget(void);
 void pure_tree_test_earlier_records(bool earlier);
 void pure_tree_test_earlier_slots(bool earlier);
+PureResult pure_tree_test_ring(const char *path);
+void pure_tree_test_ring_space(const char *path, uint64_t *free_bytes, uint64_t *extents, uint64_t *size);
 
 /* The file: head slots in blocks 0 and 1 (sequence at +8, end at +16,
  * catalog at +24), commits from DATA_START, each a 40-byte link (magic, its
@@ -481,6 +483,147 @@ static void slot_before(const char *path) {
     tear(path, newer * SLOT_BLOCK + 20);
     pure_tree_test_forget();
     expect(path, "named", &(Oracle){(unsigned char *)text[1], strlen(text[1]), revision});
+}
+
+/* A ring (030 S2): an app store's one file, reused in place. Values of every
+ * size rewritten again and again keep the file within a few times what lives
+ * in it (it would hold everything ever written), read back after each round,
+ * by a process that never saw them, and by a writer that starts on it. */
+static void clean(const char *path);
+enum { RING_KEYS = 6 };
+typedef struct { unsigned char *bytes[RING_KEYS]; size_t sizes[RING_KEYS]; int64_t revisions[RING_KEYS]; } RingOracle;
+
+static void ring_expect(const char *path, const RingOracle *o) {
+    char key[16];
+    for (unsigned k = 0; k < RING_KEYS; ++k) {
+        snprintf(key, sizeof(key), "ring%u", k);
+        if (o->revisions[k]) expect(path, key, &(Oracle){o->bytes[k], o->sizes[k], o->revisions[k]});
+    }
+}
+
+static void ring_put(const char *path, RingOracle *o, unsigned k, size_t size, uint32_t *state) {
+    char key[16];
+    snprintf(key, sizeof(key), "ring%u", k);
+    unsigned char *bytes = realloc(o->bytes[k], size ? size : 1);
+    CHECK(bytes);
+    for (size_t i = 0; i < size; ++i) bytes[i] = (unsigned char)random_value(state);
+    o->bytes[k] = bytes;
+    o->sizes[k] = size;
+    CHECK(pure_store_put(path, key, o->revisions[k], (PureSpan){bytes, size}, &o->revisions[k]) == PURE_OK);
+}
+
+static size_t ring_size(uint32_t *state) {
+    uint32_t r = random_value(state);
+    return r % 64 == 0 ? 60000 + r % 40000 : r % 4 == 0 ? r % 20000 : r % 600;
+}
+
+static void ring_free(RingOracle *o) {
+    for (unsigned k = 0; k < RING_KEYS; ++k) free(o->bytes[k]);
+}
+
+static void ring_reuse(const char *path) {
+    RingOracle o = {0};
+    uint32_t state = 7;
+    for (unsigned k = 0; k < RING_KEYS; ++k) ring_put(path, &o, k, 100 + k, &state);
+    CHECK(pure_tree_test_ring(path) == PURE_OK);
+    ring_expect(path, &o);
+    uint64_t written = 0, most = 0;
+    for (unsigned round = 0; round < 30; ++round) {
+        for (unsigned i = 0; i < 100; ++i) {
+            size_t size = ring_size(&state);
+            ring_put(path, &o, random_value(&state) % RING_KEYS, size, &state);
+            written += size;
+        }
+        ring_expect(path, &o);
+        uint64_t live = 0;
+        for (unsigned k = 0; k < RING_KEYS; ++k) live += o.sizes[k];
+        if (live > most) most = live;
+        if (round == 14) {
+            pure_tree_test_forget(); /* a process that never saw them, then a writer starting on it */
+            ring_expect(path, &o);
+        }
+    }
+    uint64_t free_bytes, extents, size;
+    pure_tree_test_ring_space(path, &free_bytes, &extents, &size);
+    CHECK(size == file_size(path) && free_bytes < size && extents);
+    CHECK(size < written / 4 && size < 16 * most + 4 * 262144); /* reused: far less than all it took */
+    pure_tree_test_forget();
+    ring_expect(path, &o);
+    ring_free(&o);
+    char name[512];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    FILE *file = fopen(name, "rb");
+    CHECK(file);
+    unsigned markers = 0;
+    for (int c, at = 0; (c = fgetc(file)) != EOF;) { /* markers that wraps left (an undercount: later commits overwrite some) */
+        at = c == "PRW1"[at] ? at + 1 : c == 'P';
+        if (at == 4) ++markers, at = 0;
+    }
+    CHECK(fclose(file) == 0 && markers);
+    printf("{\"ring_reuse\":{\"written\":%llu,\"most_live\":%llu,\"file\":%llu,\"free\":%llu,\"extents\":%llu,\"markers_left\":%u}}\n",
+           (unsigned long long)written, (unsigned long long)most, (unsigned long long)size, (unsigned long long)free_bytes,
+           (unsigned long long)extents, markers);
+}
+
+/* Two rings that take the same commits are the same bytes: where a commit
+ * goes follows from the commits before it alone. */
+static void ring_twice(const char *path) {
+    char other[] = "/tmp/pure-tree-check-XXXXXX";
+    CHECK(mkdtemp(other) && pure_store_init(other) == PURE_OK);
+    RingOracle a = {0}, b = {0};
+    uint32_t state_a = 11, state_b = 11;
+    const char *paths[2] = {path, other};
+    RingOracle *oracles[2] = {&a, &b};
+    uint32_t *states[2] = {&state_a, &state_b};
+    for (unsigned w = 0; w < 2; ++w) {
+        for (unsigned k = 0; k < RING_KEYS; ++k) ring_put(paths[w], oracles[w], k, 50, states[w]);
+        CHECK(pure_tree_test_ring(paths[w]) == PURE_OK);
+        for (unsigned i = 0; i < 1500; ++i) ring_put(paths[w], oracles[w], random_value(states[w]) % RING_KEYS, ring_size(states[w]), states[w]);
+    }
+    char names[2][512];
+    for (unsigned w = 0; w < 2; ++w) snprintf(names[w], sizeof(names[w]), "%s/pure.tree", paths[w]);
+    FILE *files[2] = {fopen(names[0], "rb"), fopen(names[1], "rb")};
+    CHECK(files[0] && files[1]);
+    for (int x, y; (x = fgetc(files[0])), (y = fgetc(files[1])), x != EOF || y != EOF;) CHECK(x == y);
+    CHECK(fclose(files[0]) == 0 && fclose(files[1]) == 0);
+    ring_free(&a);
+    ring_free(&b);
+    clean(other);
+}
+
+/* A ring's newest commit with its link or marker torn is passed over, as in
+ * a file of the format before; a damaged newer slot costs a longer walk,
+ * across the markers, from the older one. */
+static void ring_torn(const char *path) {
+    RingOracle o = {0};
+    uint32_t state = 5;
+    for (unsigned k = 0; k < RING_KEYS; ++k) ring_put(path, &o, k, 10, &state);
+    CHECK(pure_tree_test_ring(path) == PURE_OK);
+    for (unsigned i = 0; i < 800; ++i) ring_put(path, &o, random_value(&state) % RING_KEYS, ring_size(&state), &state);
+    RingOracle before = o;
+    unsigned k = random_value(&state) % RING_KEYS;
+    unsigned char *kept = malloc(o.sizes[k] ? o.sizes[k] : 1);
+    CHECK(kept);
+    memcpy(kept, o.bytes[k], o.sizes[k]);
+    before.bytes[k] = kept;
+    uint64_t front = published_end(path, "ring0"); /* where the next commit's link, or its marker, goes */
+    ring_put(path, &o, k, 30000, &state); /* (before keeps its own copy of key k's bytes) */
+    tear(path, front + 20);
+    pure_tree_test_forget();
+    ring_expect(path, &before);
+    o.revisions[k] = before.revisions[k];
+    for (unsigned i = 0; i < 40; ++i) ring_put(path, &o, random_value(&state) % RING_KEYS, ring_size(&state), &state);
+    char name[512];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    int fd = open(name, O_RDONLY);
+    CHECK(fd >= 0);
+    unsigned newer = slot_field(fd, 1, 8) > slot_field(fd, 0, 8);
+    CHECK(close(fd) == 0);
+    tear(path, newer * SLOT_BLOCK + 20);
+    pure_tree_test_forget();
+    ring_expect(path, &o);
+    free(kept);
+    ring_free(&o);
 }
 
 /* A store whose last commits have records of the format before links (as
@@ -1550,7 +1693,7 @@ int main(void) {
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, frozen_path_draft, owner_lock, unsynced_compaction, threads, grouped,
-                                      lost_commit, pending_head, publishing_apart, stores_apart, one_sync, records, stale_slot, passed_over, slot_before, torn_head_held, records_held, cycles};
+                                      lost_commit, pending_head, publishing_apart, stores_apart, one_sync, records, stale_slot, passed_over, slot_before, torn_head_held, records_held, cycles, ring_reuse, ring_twice, ring_torn};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -1562,6 +1705,6 @@ int main(void) {
          "process-crash-torn-head-earlier-records-swept-pending-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
          "atomic-batch-runtime-keys-store-handle-frozen-path-draft-owner-lock-unsynced-compaction-threads-group-commit-lost-commit-pending-head-publishing-apart-stores-apart-one-sync-records-"
-         "stale-slot-passed-over-slot-before-held-torn-head-held-records-cycles\"}");
+         "stale-slot-passed-over-slot-before-held-torn-head-held-records-cycles-ring-reuse-ring-twice-ring-torn\"}");
     return 0;
 }

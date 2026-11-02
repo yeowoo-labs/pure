@@ -56,6 +56,15 @@ static const unsigned char record_magic[8] = {'P','U','R','E','R','E','C','1'};
  * is that head's; its digest binds the seq it takes. */
 enum { LINK = 40 };
 static const unsigned char link_magic[4] = {'P','R','L','1'};
+/* An app store's file is a ring (030 S2): one file for the store's life, its
+ * bytes reused in place, read only by its owner. Its slots say so. Its live
+ * nodes may lie anywhere in it, so its readers map it whole; a commit's link
+ * is where its bytes start, at the newest commit's end or, when that commit
+ * went elsewhere, where a wrap marker there names it (with its link's own
+ * digest: a link left there before by a commit a start passed over does not
+ * count). */
+static const unsigned char ring_magic[8] = {'P','U','R','E','R','N','G','1'};
+static const unsigned char marker_magic[4] = {'P','R','W','1'};
 /* Commits between two heads written to a slot. */
 enum { CHECKPOINT = 16 };
 static const unsigned char branch_magic[4] = {'P','T','B','1'};
@@ -135,12 +144,16 @@ typedef struct {
 } Tree;
 /* A commit's bytes are start..end (none for a file synced whole before it was
  * published); check is their digest. */
-typedef struct { uint64_t seq, end, catalog, catalog_bytes, live, start, check; } Head;
+typedef struct { uint64_t seq, end, catalog, catalog_bytes, live, start, check; bool ring; } Head; /* ring: below */
+struct Ring;
 typedef struct {
     int fd;
     uint64_t at; /* file offset of the next byte */
     size_t used;
     bool failed;
+    uint64_t limit;    /* a ring's commit: where the free bytes it goes to end (0: no end) */
+    bool over;         /* it reached limit: it is written again where it fits */
+    struct Ring *ring; /* a ring's commit: notes the nodes it writes and the stored ones it keeps */
     Digest digest; /* of every byte written */
     unsigned char buffer[BUFFER];
 } Writer;
@@ -155,6 +168,7 @@ typedef struct {
     uint64_t slots[2]; /* the sequences of the slots' heads */
     Tree tree;
     struct stat file;
+    struct Ring *ring; /* an app store's (030 S2), or NULL */
 } Session;
 
 /* The process's one writer on a store, opened by its first holder and closed
@@ -326,22 +340,41 @@ static void encode_link(unsigned char out[LINK], const Head *head) {
     encode64(out + 32, link_digest(out, head->seq));
 }
 
-/* The commit a link after previous names, if it is one (not a torn one). */
-static bool decode_link(const unsigned char in[LINK], const Head *previous, Head *next) {
+/* The commit a link at at, after previous, names, if it is one (not a torn
+ * one): its bytes start right after it. */
+static bool decode_link(const unsigned char in[LINK], const Head *previous, uint64_t at, Head *next) {
     if (memcmp(in, link_magic, 4) || decode64(in + 32) != link_digest(in, previous->seq + 1)) return false;
     uint64_t records = (uint64_t)in[4] | (uint64_t)in[5] << 8 | (uint64_t)in[6] << 16 | (uint64_t)in[7] << 24;
     *next = (Head){previous->seq + 1, decode64(in + 8), decode64(in + 16), records * RECORD, previous->live,
-                   previous->end + LINK, decode64(in + 24)};
+                   at + LINK, decode64(in + 24), previous->ring};
     return next->end <= (uint64_t)INT64_MAX && next->end <= SIZE_MAX && next->start <= next->end &&
            !next->catalog == !next->catalog_bytes;
 }
 
+/* A ring's wrap marker at its front: the seq of the commit it names, where
+ * that commit's link is, and that link's digest (bound). */
+static void encode_marker(unsigned char out[LINK], uint64_t seq, uint64_t at, const unsigned char bound[8]) {
+    memset(out, 0, LINK);
+    memcpy(out, marker_magic, 4);
+    encode64(out + 8, at);
+    memcpy(out + 16, bound, 8);
+    encode64(out + 32, link_digest(out, seq));
+}
+
+static bool decode_marker(const unsigned char in[LINK], uint64_t seq, uint64_t *at, const unsigned char **bound) {
+    if (memcmp(in, marker_magic, 4) || decode64(in + 32) != link_digest(in, seq)) return false;
+    *at = decode64(in + 8);
+    *bound = in + 16;
+    return true;
+}
+
 /* A slot's head (record false) or a commit record's. */
 static bool decode_head(const unsigned char in[SLOT], bool record, Head *head) {
-    bool magic = record ? !memcmp(in, record_magic, 8) : !memcmp(in, head_magic, 8) || !memcmp(in, earlier_magic, 8);
+    bool ring = !record && !memcmp(in, ring_magic, 8);
+    bool magic = record ? !memcmp(in, record_magic, 8) : ring || !memcmp(in, head_magic, 8) || !memcmp(in, earlier_magic, 8);
     if (!magic || decode64(in + SLOT - 8) != digest_of(in, SLOT - 8)) return false;
     *head = (Head){decode64(in + 8), decode64(in + 16), decode64(in + 24), decode64(in + 32),
-                   decode64(in + 40), decode64(in + 48), decode64(in + 56)};
+                   decode64(in + 40), decode64(in + 48), decode64(in + 56), ring};
     return head->seq && head->end <= (uint64_t)INT64_MAX && head->end <= SIZE_MAX &&
            head->start >= DATA && head->start <= head->end && head->catalog_bytes % RECORD == 0 &&
            !head->catalog == !head->catalog_bytes;
@@ -508,15 +541,25 @@ static bool pick(int fd, const struct stat *file, const unsigned char *slots[2],
     return false;
 }
 
+/* The commit a ring's wrap marker at head's end names: its link where the
+ * marker says, with the digest the marker binds. */
+static bool marked(int fd, uint64_t size, const Head *head, const unsigned char record[LINK], Head *next) {
+    uint64_t at;
+    const unsigned char *bound;
+    unsigned char link[LINK];
+    return decode_marker(record, head->seq + 1, &at, &bound) && at >= DATA && at <= size && size - at >= LINK &&
+           read_at(fd, link, LINK, at) && !memcmp(link + 32, bound, 8) && decode_link(link, head, at, next);
+}
+
 /* The commit whose record follows head's bytes, if its own bytes are whole:
- * a link, or a record of the format before. */
+ * a link, a ring's marker naming one, or a record of the format before. */
 static bool follow(int fd, const struct stat *file, bool writer, const Head *head, Head *out) {
     unsigned char record[SLOT];
     uint64_t size = (uint64_t)file->st_size;
     Head next;
     if (head->end > size || size - head->end < LINK || !read_at(fd, record, LINK, head->end)) return false;
-    if (!decode_link(record, head, &next) &&
-        (size - head->end < SLOT || !read_at(fd, record, SLOT, head->end) || !decode_head(record, true, &next) ||
+    if (!decode_link(record, head, head->end, &next) && !(head->ring && marked(fd, size, head, record, &next)) &&
+        (head->ring || size - head->end < SLOT || !read_at(fd, record, SLOT, head->end) || !decode_head(record, true, &next) ||
          next.seq != head->seq + 1 || next.start != head->end + SLOT)) return false;
     if (next.end > size) return false;
     int state = recall(file, &next);
@@ -561,11 +604,12 @@ static bool read_head(int fd, struct stat *file, bool writer, Head *out, uint64_
 static bool map_tree(int fd, const struct stat *file, const Head *head, Tree *tree) {
     *tree = (Tree){0};
     if ((uint64_t)file->st_size < head->end) return false;
+    uint64_t length = head->ring ? (uint64_t)file->st_size : head->end; /* a ring's live nodes lie anywhere in it */
     Mapping *mapping = malloc(sizeof(*mapping));
-    void *map = mapping ? mmap(NULL, (size_t)head->end, PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+    void *map = mapping ? mmap(NULL, (size_t)length, PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
     if (map == MAP_FAILED) { free(mapping); return false; }
-    *mapping = (Mapping){map, head->end, 1};
-    *tree = (Tree){.map = map, .end = head->end, .shared = mapping};
+    *mapping = (Mapping){map, length, 1};
+    *tree = (Tree){.map = map, .end = length, .shared = mapping};
     return true;
 }
 
@@ -937,6 +981,10 @@ static uint64_t tail_end(uint64_t end) {
 }
 
 static void put_bytes(Writer *writer, const unsigned char *bytes, size_t length) {
+    if (writer->limit && !writer->failed && (writer->at > writer->limit || length > writer->limit - writer->at)) {
+        writer->over = writer->failed = true;
+        return;
+    }
     while (length && !writer->failed) {
         if (writer->used == BUFFER && !flush(writer)) return;
         size_t n = BUFFER - writer->used < length ? BUFFER - writer->used : length;
@@ -948,10 +996,65 @@ static void put_bytes(Writer *writer, const unsigned char *bytes, size_t length)
     }
 }
 
+/* ---- The ring (030 S2) -----------------------------------------------------
+ * An app store's one file, its bytes reused in place. What is free is worked
+ * out, never kept on disk: at an open, every byte that neither a node of the
+ * newest version nor a commit on the chain from the older slot's head (what a
+ * start may follow, with a slot damaged) is in; after, 64 KiB segments come
+ * back whole once no live node is in them and every commit in them is older
+ * than the older slot's head (H_rec). A commit goes at the front (the newest
+ * commit's end) while the bytes there are free; past them it is written
+ * again where the lowest free run holds twice what it wrote, a marker at the
+ * front naming it, or past the end after the file grows by zeros. The 40
+ * bytes after the newest commit are always free: its successor's link or
+ * marker goes there. Its owner alone reads the file (pins: below). */
+enum { SEGMENT = 65536, GROW = 262144, CHECKPOINT_BYTES = 262144 };
+typedef struct { uint64_t start, end; } Extent;
+typedef struct {
+    uint64_t live;   /* bytes of the newest version's nodes in it */
+    uint64_t newest; /* the newest seq written into it (a commit's link and bytes, a marker) */
+    bool back;       /* given back whole, nothing written into it since */
+} Segment;
+typedef struct Ring {
+    Segment *segments;
+    size_t segment_count;
+    Extent *free; /* sorted, apart */
+    size_t free_count, free_room;
+    uint64_t size;  /* the file's */
+    uint64_t since; /* commit bytes since the newer slot's commit */
+    Extent *wrote;  /* a commit's nodes */
+    size_t wrote_count, wrote_room;
+    uint64_t *kept; /* the stored nodes its new trees keep */
+    size_t kept_count, kept_room;
+    bool failed; /* a note it had no memory for: the commit does not publish */
+} Ring;
+
+static bool ring_room(void **array, size_t *room, size_t need, size_t size) {
+    if (need <= *room) return true;
+    size_t next = *room ? 2 * *room : 64;
+    while (next < need) next *= 2;
+    void *grown = realloc(*array, next * size);
+    if (!grown) return false;
+    *array = grown;
+    *room = next;
+    return true;
+}
+
+static void note_wrote(Ring *ring, uint64_t at, uint64_t bytes) {
+    if (!ring_room((void **)&ring->wrote, &ring->wrote_room, ring->wrote_count + 1, sizeof(*ring->wrote))) ring->failed = true;
+    else ring->wrote[ring->wrote_count++] = (Extent){at, at + bytes};
+}
+
+static void note_kept(Ring *ring, uint64_t at) {
+    if (!ring_room((void **)&ring->kept, &ring->kept_room, ring->kept_count + 1, sizeof(*ring->kept))) ring->failed = true;
+    else ring->kept[ring->kept_count++] = at;
+}
+
 static uint64_t put_branch(Writer *writer, const Entry *kids, size_t count, unsigned height) {
     static const unsigned char zero[8];
     put_bytes(writer, zero, (size_t)((8 - writer->at % 8) % 8));
     uint64_t at = writer->at;
+    if (writer->ring) note_wrote(writer->ring, at, 8 + 16 * (uint64_t)count);
     unsigned char header[8];
     memcpy(header, branch_magic, sizeof(branch_magic));
     header[4] = (unsigned char)count;
@@ -974,11 +1077,15 @@ static uint64_t put_branch(Writer *writer, const Entry *kids, size_t count, unsi
  * draft whose base file was replaced by compaction). */
 static bool write_subtree(const Tree *tree, Writer *writer, Entry *entry, unsigned height,
                           bool relocate) {
-    if (!entry->bytes || (!(entry->ref & MEMORY_BIT) && !relocate)) return true;
+    if (!entry->bytes || (!(entry->ref & MEMORY_BIT) && !relocate)) {
+        if (writer->ring && entry->bytes) note_kept(writer->ring, entry->ref & LOCATION);
+        return true;
+    }
     if (!height) {
         const unsigned char *bytes = leaf_bytes(tree, *entry);
         if (!bytes) return false;
         entry->ref = LEAF_BIT | writer->at;
+        if (writer->ring) note_wrote(writer->ring, writer->at, entry->bytes);
         put_bytes(writer, bytes, (size_t)entry->bytes);
         return !writer->failed;
     }
@@ -1069,7 +1176,7 @@ static bool install(int directory, char temporary[96], int fd, Head *head, uint6
     struct stat file;
     head->start = head->end;
     head->check = digest_end(&(Digest){0});
-    encode_head(slot, head_magic, head);
+    encode_head(slot, head->ring ? ring_magic : head_magic, head);
     zero_fill(fd, head->end, cycle_end(head, replaced));
     bool ok = write_at(fd, slot, SLOT, 0) && write_at(fd, slot, SLOT, BLOCK) && sync_fd(fd) && !fstat(fd, &file);
     if (close(fd)) ok = false;
@@ -1084,7 +1191,7 @@ static bool install(int directory, char temporary[96], int fd, Head *head, uint6
  * file (replaced: its size). Open readers keep their mapping of the previous
  * file. A failure leaves the published file untouched; true when the new
  * file is in place. */
-static bool compact(int directory, Mapping *mapping, uint64_t replaced, const Head *head) {
+static bool compact(int directory, Mapping *mapping, uint64_t replaced, const Head *head, bool ring) {
     __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
     Tree tree = {.map = mapping->map, .end = head->end, .shared = mapping};
     char temporary[96];
@@ -1109,7 +1216,7 @@ static bool compact(int directory, Mapping *mapping, uint64_t replaced, const He
     ok = ok && rebuild(&tree, (Entry){0}, 0, 0, (PureSpan){records, (size_t)(count * RECORD)}, &fresh) &&
          write_root(&tree, writer, &fresh, false) && flush(writer);
     if (ok) {
-        Head compacted = {head->seq + 1, writer->at, fresh.ref, fresh.bytes, writer->at - DATA, 0, 0};
+        Head compacted = {head->seq + 1, writer->at, fresh.ref, fresh.bytes, writer->at - DATA, 0, 0, ring};
         ok = install(directory, temporary, fd, &compacted, replaced);
         fd = -1;
     }
@@ -1301,6 +1408,258 @@ PureResult pure_store_get_range(const char *path, const char *key, size_t offset
  * only them; a new size or new blocks add a journal commit (on an SD card
  * 2.4 ms against 6 ms per commit). The zeros become durable with the next
  * commit's sync. */
+/* The ring's free extents: one added (merged with those it meets), one
+ * taken away, the end of the one an offset is in, the lowest part of one
+ * outside avoid that holds need. False without memory. */
+static bool free_add(Ring *ring, uint64_t start, uint64_t end) {
+    if (start >= end) return true;
+    size_t i = 0;
+    while (i < ring->free_count && ring->free[i].end < start) ++i;
+    size_t j = i;
+    while (j < ring->free_count && ring->free[j].start <= end) {
+        if (ring->free[j].start < start) start = ring->free[j].start;
+        if (ring->free[j].end > end) end = ring->free[j].end;
+        ++j;
+    }
+    if (j == i) {
+        if (!ring_room((void **)&ring->free, &ring->free_room, ring->free_count + 1, sizeof(*ring->free))) return false;
+        memmove(&ring->free[i + 1], &ring->free[i], (ring->free_count - i) * sizeof(*ring->free));
+        ++ring->free_count;
+    } else if (j > i + 1) {
+        memmove(&ring->free[i + 1], &ring->free[j], (ring->free_count - j) * sizeof(*ring->free));
+        ring->free_count -= j - i - 1;
+    }
+    ring->free[i] = (Extent){start, end};
+    return true;
+}
+
+static bool free_take(Ring *ring, uint64_t start, uint64_t end) {
+    for (size_t i = 0; i < ring->free_count; ++i) {
+        Extent e = ring->free[i];
+        if (e.end <= start || e.start >= end) continue;
+        if (e.start < start && e.end > end) {
+            if (!ring_room((void **)&ring->free, &ring->free_room, ring->free_count + 1, sizeof(*ring->free))) return false;
+            memmove(&ring->free[i + 2], &ring->free[i + 1], (ring->free_count - i - 1) * sizeof(*ring->free));
+            ++ring->free_count;
+            ring->free[i] = (Extent){e.start, start};
+            ring->free[i + 1] = (Extent){end, e.end};
+            return true;
+        }
+        if (e.start < start) ring->free[i].end = start;
+        else if (e.end > end) ring->free[i].start = end;
+        else {
+            memmove(&ring->free[i], &ring->free[i + 1], (ring->free_count - i - 1) * sizeof(*ring->free));
+            --ring->free_count;
+            --i;
+        }
+    }
+    return true;
+}
+
+static uint64_t free_end(const Ring *ring, uint64_t at) {
+    for (size_t i = 0; i < ring->free_count; ++i)
+        if (ring->free[i].start <= at && at < ring->free[i].end) return ring->free[i].end;
+    return at;
+}
+
+static bool free_lowest(const Ring *ring, uint64_t need, uint64_t avoid, uint64_t avoid_end, Extent *part) {
+    for (size_t i = 0; i < ring->free_count; ++i) {
+        Extent e = ring->free[i];
+        Extent parts[2] = {{e.start, e.end < avoid ? e.end : avoid}, {e.start > avoid_end ? e.start : avoid_end, e.end}};
+        for (unsigned k = 0; k < 2; ++k)
+            if (parts[k].start < parts[k].end && parts[k].end - parts[k].start >= need) {
+                *part = parts[k];
+                return true;
+            }
+    }
+    return false;
+}
+
+/* Segments to the file's size; a range's bytes into or out of their live
+ * counts; a range written by seq. */
+static bool reach(Ring *ring, uint64_t size) {
+    size_t count = (size_t)((size + SEGMENT - 1) / SEGMENT);
+    if (count <= ring->segment_count) return true;
+    Segment *grown = realloc(ring->segments, count * sizeof(*grown));
+    if (!grown) return false;
+    memset(grown + ring->segment_count, 0, (count - ring->segment_count) * sizeof(*grown));
+    ring->segments = grown;
+    ring->segment_count = count;
+    return true;
+}
+
+static void count_live(Ring *ring, uint64_t start, uint64_t end, bool add) {
+    for (uint64_t s = start / SEGMENT; s * SEGMENT < end && s < ring->segment_count; ++s) {
+        uint64_t lo = start > s * SEGMENT ? start : s * SEGMENT, hi = end < (s + 1) * SEGMENT ? end : (s + 1) * SEGMENT;
+        Segment *g = &ring->segments[s];
+        if (add) g->live += hi - lo, g->back = false;
+        else g->live = g->live >= hi - lo ? g->live - (hi - lo) : 0;
+    }
+}
+
+static void count_written(Ring *ring, uint64_t start, uint64_t end, uint64_t seq) {
+    for (uint64_t s = start / SEGMENT; s * SEGMENT < end && s < ring->segment_count; ++s) {
+        Segment *g = &ring->segments[s];
+        if (g->newest < seq) g->newest = seq;
+        g->back = false;
+    }
+}
+
+/* Segments that nothing lives in and that no commit from the older slot's
+ * head on (H_rec) is in come back whole. */
+static uint64_t h_rec(const Session *session) {
+    uint64_t a = session->slots[0], b = session->slots[1];
+    return !a ? b : !b ? a : a < b ? a : b;
+}
+
+static bool give_back(Ring *ring, uint64_t rec) {
+    for (size_t s = 0; s < ring->segment_count; ++s) {
+        Segment *g = &ring->segments[s];
+        if (g->back || g->live || g->newest >= rec) continue;
+        uint64_t lo = s * SEGMENT < DATA ? DATA : s * SEGMENT, hi = (s + 1) * SEGMENT < ring->size ? (s + 1) * SEGMENT : ring->size;
+        if (lo < hi && !free_add(ring, lo, hi)) return false;
+        g->back = true;
+    }
+    return true;
+}
+
+static int compare_offsets(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+static bool kept_at(const Ring *ring, uint64_t at) {
+    size_t lo = 0, hi = ring->kept_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (ring->kept[mid] < at) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < ring->kept_count && ring->kept[lo] == at;
+}
+
+/* The nodes of a tree a commit replaced that its new trees do not keep: they
+ * no longer live (a damaged one stays counted: its segment never comes back). */
+static void count_dead(Ring *ring, const Tree *tree, Entry entry, unsigned height) {
+    if (!entry.bytes || (entry.ref & MEMORY_BIT)) return;
+    uint64_t at = entry.ref & LOCATION;
+    if (kept_at(ring, at)) return;
+    if (!height) {
+        count_live(ring, at, at + entry.bytes, false);
+        return;
+    }
+    Entry kids[FAN_MAX];
+    size_t count = children(tree, entry, height, kids);
+    if (!count) return;
+    count_live(ring, at, at + 8 + 16 * (uint64_t)count, false);
+    for (size_t i = 0; i < count; ++i) count_dead(ring, tree, kids[i], height - 1);
+}
+
+static void free_ring(Ring *ring) {
+    if (!ring) return;
+    free(ring->segments);
+    free(ring->free);
+    free(ring->wrote);
+    free(ring->kept);
+    free(ring);
+}
+
+/* As a ring opens: what lives (the newest version's nodes) and what a start
+ * may follow (the commits from the older slot's head on) are in use, every
+ * other byte of [DATA, size) is free; segments wholly free are back. */
+typedef struct { Ring *ring; Extent *used; size_t count, room; bool failed; } Opening;
+
+static void opening_use(Opening *o, uint64_t start, uint64_t end) {
+    if (!ring_room((void **)&o->used, &o->room, o->count + 1, sizeof(*o->used))) o->failed = true;
+    else o->used[o->count++] = (Extent){start, end};
+}
+
+static bool opening_tree(Opening *o, const Tree *tree, Entry entry, unsigned height) {
+    if (!entry.bytes) return true;
+    if (entry.ref & MEMORY_BIT) return false;
+    uint64_t at = entry.ref & LOCATION;
+    if (!height) {
+        count_live(o->ring, at, at + entry.bytes, true);
+        opening_use(o, at, at + entry.bytes);
+        return true;
+    }
+    Entry kids[FAN_MAX];
+    size_t count = children(tree, entry, height, kids);
+    if (!count) return false;
+    count_live(o->ring, at, at + 8 + 16 * (uint64_t)count, true);
+    opening_use(o, at, at + 8 + 16 * (uint64_t)count);
+    for (size_t i = 0; i < count; ++i)
+        if (!opening_tree(o, tree, kids[i], height - 1)) return false;
+    return true;
+}
+
+static int compare_starts(const void *a, const void *b) {
+    uint64_t x = ((const Extent *)a)->start, y = ((const Extent *)b)->start;
+    return (x > y) - (x < y);
+}
+
+static bool ring_open(Session *session) {
+    Ring *ring = calloc(1, sizeof(*ring));
+    Opening o = {ring, NULL, 0, 0, false};
+    const Tree *tree = &session->tree;
+    Entry catalog = {session->head.catalog, session->head.catalog_bytes};
+    uint64_t count = catalog.bytes / RECORD;
+    unsigned char *records = count ? malloc((size_t)(count * RECORD)) : NULL;
+    unsigned height;
+    bool ok = ring && (!count || records) && (ring->size = (uint64_t)session->file.st_size, reach(ring, ring->size)) &&
+              root_height(tree, catalog, &height) && opening_tree(&o, tree, catalog, height) &&
+              (!count || copy_range(tree, catalog, height, 0, count * RECORD, records));
+    for (uint64_t i = 0; ok && i < count; ++i) {
+        Entry document = {decode64(records + i * RECORD + KEY), decode64(records + i * RECORD + KEY + 8)};
+        ok = root_height(tree, document, &height) && opening_tree(&o, tree, document, height);
+    }
+    free(records);
+    /* the chain from the older slot's head that counts */
+    unsigned char slots[BLOCK + SLOT];
+    uint64_t rec = h_rec(session);
+    Head head = {0};
+    ok = ok && read_at(session->fd, slots, sizeof(slots), 0);
+    for (unsigned i = 0; ok && i < 2 && !head.seq; ++i)
+        if (decode_head(slots + i * BLOCK, false, &head) && head.seq != rec) head = (Head){0};
+    ok = ok && head.seq && head.end <= ring->size;
+    if (ok) {
+        opening_use(&o, head.start, head.end);
+        count_written(ring, head.start, head.end, head.seq);
+    }
+    while (ok && head.seq < session->head.seq) {
+        Head next;
+        ok = follow(session->fd, &session->file, true, &head, &next);
+        if (!ok) break;
+        if (next.start - LINK != head.end) { /* a marker at head's end named it */
+            opening_use(&o, head.end, head.end + LINK);
+            count_written(ring, head.end, head.end + LINK, next.seq);
+        }
+        opening_use(&o, next.start - LINK, next.end);
+        count_written(ring, next.start - LINK, next.end, next.seq);
+        head = next;
+    }
+    ok = ok && !o.failed && head.seq == session->head.seq;
+    if (ok) {
+        if (o.count) qsort(o.used, o.count, sizeof(*o.used), compare_starts);
+        uint64_t at = DATA;
+        for (size_t i = 0; ok && i <= o.count; ++i) {
+            uint64_t until = i < o.count ? o.used[i].start : ring->size;
+            if (until > at) ok = free_add(ring, at, until);
+            if (i < o.count && o.used[i].end > at) at = o.used[i].end;
+        }
+        for (size_t s = 0; s < ring->segment_count; ++s)
+            ring->segments[s].back = !ring->segments[s].live && !ring->segments[s].newest;
+    }
+    free(o.used);
+    if (!ok) {
+        free_ring(ring);
+        return false;
+    }
+    free_ring(session->ring);
+    session->ring = ring;
+    return true;
+}
+
 static void prepare_tail(Session *session) {
     uint64_t size = (uint64_t)session->file.st_size, end = session->head.end;
     if (size >= end + TAIL_MIN) return;
@@ -1334,11 +1693,12 @@ static bool cover(Session *session) {
         session->tree.map = map;
         session->tree.shared = fresh;
     }
-    session->tree.end = session->head.end;
+    session->tree.end = session->head.ring ? session->tree.shared->length : session->head.end;
     return true;
 }
 
 static void close_session(Session *session) {
+    free_ring(session->ring);
     release_tree(&session->tree);
     if (session->fd >= 0) close(session->fd);
     if (session->lock >= 0) close(session->lock); /* the process's writer lock goes with it */
@@ -1401,6 +1761,7 @@ static PureResult reopen(Session *session, bool synced) {
         if (!sync_data(fd)) return PURE_STORE_ERROR;
         remember(&session->file, &session->head, DURABLE);
     }
+    if (session->head.ring) return cover(session) && ring_open(session) ? PURE_OK : PURE_STORE_ERROR;
     prepare_tail(session);
     return cover(session) ? PURE_OK : PURE_STORE_ERROR;
 }
@@ -1526,6 +1887,53 @@ static void let_go(Turns *turns) {
     holding->buffer = NULL;
 }
 
+#ifdef PURE_STORE_TEST
+/* Test-only until apps' stores are rings (030 S2): the store at path becomes
+ * one, by a compaction into the ring's format. */
+PureResult pure_tree_test_ring(const char *path) {
+    int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Turns *turns = directory >= 0 ? turns_of(directory) : NULL;
+    if (directory >= 0) close(directory);
+    if (!turns) return PURE_STORE_ERROR;
+    pthread_mutex_lock(&turns->writer);
+    PureResult result = hold(turns, path);
+    if (result == PURE_OK) {
+        Holding *holding = turns->holding;
+        Session *session = &holding->session;
+        if (!session->head.ring) {
+            result = PURE_STORE_ERROR;
+            if (!fstat(session->fd, &session->file)) {
+                bool synced =
+                    compact(session->directory, session->tree.shared, (uint64_t)session->file.st_size, &session->head, true);
+                result = reopen(session, synced);
+            }
+            if (result == PURE_OK) show_newest(turns, holding);
+            else holding->stale = true;
+        }
+        let_go(turns);
+    }
+    pthread_mutex_unlock(&turns->writer);
+    return result;
+}
+
+/* A ring's free bytes, in extents, and its file's size. */
+void pure_tree_test_ring_space(const char *path, uint64_t *free_bytes, uint64_t *extents, uint64_t *size) {
+    int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    Turns *turns = directory >= 0 ? turns_of(directory) : NULL;
+    if (directory >= 0) close(directory);
+    *free_bytes = *extents = *size = 0;
+    if (!turns) return;
+    pthread_mutex_lock(&turns->writer);
+    if (hold(turns, path) == PURE_OK) {
+        const Ring *ring = turns->holding->session.ring;
+        for (size_t i = 0; ring && i < ring->free_count; ++i) *free_bytes += ring->free[i].end - ring->free[i].start;
+        if (ring) *extents = ring->free_count, *size = ring->size;
+        let_go(turns);
+    }
+    pthread_mutex_unlock(&turns->writer);
+}
+#endif
+
 /* Room before a commit's bytes for its record: a link (a test can still
  * write the format before, to read it). */
 #ifdef PURE_STORE_TEST
@@ -1546,33 +1954,20 @@ static Writer *writer_of(Holding *holding) {
     writer->fd = holding->session.fd;
     writer->at = holding->session.head.end + record_room(); /* a commit's bytes start after room for its record */
     writer->used = 0;
-    writer->failed = false;
+    writer->failed = writer->over = false;
+    writer->limit = 0;
+    writer->ring = NULL;
     writer->digest = (Digest){0};
     return writer;
 }
 
-/* The documents' new nodes are already written at writer. Record each in
- * the catalog (revisions come in as the base and leave as the new one), then
- * write the head as the record before them and sync once: every document
- * becomes visible at once, or none does. Readers of this process see the
- * head only once it is durable. The session then stands at the new head; a
- * compaction leaves it on the new file (compacted), and when it cannot
- * follow it is stale. */
-#ifdef PURE_STORE_TEST
-static unsigned long publications;
-unsigned long pure_tree_test_publications(void) { return publications; }
-#endif
-
-static PureResult publish(Holding *holding, Writer *writer, size_t count, const char *const *keys,
-                          const Entry *documents, int64_t *revisions, bool *compacted) {
-#ifdef PURE_STORE_TEST
-    ++publications;
-#endif
-    Session *session = &holding->session;
-    *compacted = false;
-    Entry catalog = {session->head.catalog, session->head.catalog_bytes};
-    bool written = true;
-    for (size_t i = 0; written && i < count; ++i) {
+/* The catalog with each document's record (revisions come in as the base
+ * and leave as the new one), written at writer; olds gets each document's
+ * root before (0: none). */
+static bool write_catalog(Session *session, Writer *writer, size_t count, const char *const *keys,
+                          const Entry *documents, const int64_t *revisions, Entry *catalog, Entry *olds) {
+    *catalog = (Entry){session->head.catalog, session->head.catalog_bytes};
+    for (size_t i = 0; i < count; ++i) {
         unsigned char record[RECORD] = {0};
         uint64_t index;
         bool found;
@@ -1582,37 +1977,110 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
         encode64(record + KEY, documents[i].ref);
         encode64(record + KEY + 8, documents[i].bytes);
         encode64(record + KEY + 16, (uint64_t)revisions[i] + 1);
-        written = find(&session->tree, catalog, keys[i], &index, &found, &current, &stored) &&
-                  rebuild(&session->tree, catalog, index * RECORD, found ? RECORD : 0,
-                          (PureSpan){record, RECORD}, &updated);
-        if (written) catalog = updated;
+        if (!find(&session->tree, *catalog, keys[i], &index, &found, &current, &stored) ||
+            !rebuild(&session->tree, *catalog, index * RECORD, found ? RECORD : 0, (PureSpan){record, RECORD}, &updated))
+            return false;
+        olds[i] = found ? current : (Entry){0};
+        *catalog = updated;
     }
-    written = written && write_root(&session->tree, writer, &catalog, false) && flush(writer);
-    /* Unpublished bytes stay in the tail; the next commit overwrites them. */
-    if (!written || fault(PURE_AFTER_HEADER) || fault(PURE_BEFORE_FILE_SYNC) || fault(PURE_BEFORE_RENAME))
-        return PURE_STORE_ERROR;
+    return write_root(&session->tree, writer, catalog, false);
+}
+
+/* Where a ring's commit goes, its link at *link_at and its bytes after: at
+ * the front while the free bytes there hold it with the next front's 40
+ * left free; written again (need: twice what it wrote there) at the lowest
+ * free run outside the front's 40 that holds need, else past the end, the
+ * file grown by zeros in this commit's sync. */
+static bool ring_place(Session *session, Writer *writer, uint64_t need, uint64_t *link_at) {
+    Ring *ring = session->ring;
+    uint64_t front = session->head.end;
+    Extent part = {front, free_end(ring, front)}; /* (the front's 40 bytes are free) */
+    if (need && !free_lowest(ring, need, front, front + LINK, &part)) {
+        uint64_t size = ring->size, grown = (size + need) / GROW * GROW + GROW;
+        zero_fill(session->fd, size, grown);
+        if (!reach(ring, grown) || !free_add(ring, size, grown)) return false;
+        ring->size = grown;
+        if (!free_lowest(ring, need, front, front + LINK, &part)) return false;
+    }
+    /* elsewhere, within its part: never over the front's 40 bytes, where its marker goes */
+    *link_at = part.start;
+    writer->at = part.start + LINK;
+    writer->limit = part.end > part.start + 2 * LINK ? part.end - LINK : part.start + LINK;
+    return true;
+}
+
+/* After a ring's commit is durable: its link, bytes and marker are in use,
+ * its nodes live, the nodes it replaced dead (each written key's root before
+ * and the catalog's, down to what the new trees keep), and segments that
+ * came free are back. False without memory (read the ring again). */
+static bool settle_ring(Session *session, const Head *before, uint64_t link_at, bool marked, size_t count,
+                        const Entry *olds, bool checkpoint) {
+    Ring *ring = session->ring;
+    const Head *published = &session->head;
+    bool ok = free_take(ring, link_at, published->end) && (!marked || free_take(ring, before->end, before->end + LINK));
+    count_written(ring, link_at, published->end, published->seq);
+    if (marked) count_written(ring, before->end, before->end + LINK, published->seq);
+    for (size_t i = 0; i < ring->wrote_count; ++i) count_live(ring, ring->wrote[i].start, ring->wrote[i].end, true);
+    if (ring->kept_count) qsort(ring->kept, ring->kept_count, sizeof(*ring->kept), compare_offsets);
+    unsigned height;
+    Entry catalog = {before->catalog, before->catalog_bytes};
+    if (root_height(&session->tree, catalog, &height)) count_dead(ring, &session->tree, catalog, height);
+    for (size_t i = 0; i < count; ++i)
+        if (root_height(&session->tree, olds[i], &height)) count_dead(ring, &session->tree, olds[i], height);
+    ring->since = (checkpoint ? 0 : ring->since) + published->end - link_at + (marked ? LINK : 0);
+    ring->wrote_count = ring->kept_count = 0;
+    return ok && give_back(ring, h_rec(session));
+}
+
+/* The documents' new nodes are already written at writer, and the catalog
+ * after them: write the head as the record before them and sync once: every
+ * document becomes visible at once, or none does. Readers of this process
+ * see the head only once it is durable. The session then stands at the new
+ * head; a compaction leaves it on the new file (compacted), and when it
+ * cannot follow it is stale. A ring's record is at link_at, and a marker at
+ * the front names it when that is elsewhere. */
+#ifdef PURE_STORE_TEST
+static unsigned long publications;
+unsigned long pure_tree_test_publications(void) { return publications; }
+#endif
+static PureResult publish(Holding *holding, Writer *writer, size_t count, const char *const *keys, int64_t *revisions,
+                          Entry catalog, const Entry *olds, uint64_t link_at, bool *compacted) {
+#ifdef PURE_STORE_TEST
+    ++publications;
+#endif
+    (void)keys;
+    Session *session = &holding->session;
+    Ring *ring = session->ring;
+    *compacted = false;
+    /* Unpublished bytes stay in the tail (a ring's in its free bytes); the next commit overwrites them. */
+    if (fault(PURE_AFTER_HEADER) || fault(PURE_BEFORE_FILE_SYNC) || fault(PURE_BEFORE_RENAME)) return PURE_STORE_ERROR;
+    uint64_t room = ring ? LINK : record_room();
     Head published = {session->head.seq + 1, writer->at, catalog.ref, catalog.bytes, session->head.live,
-                      session->head.end + record_room(), digest_end(&writer->digest)};
-    unsigned char record[SLOT], slot[SLOT];
-    if (record_room() == LINK) encode_link(record, &published);
+                      ring ? link_at + LINK : session->head.end + room, digest_end(&writer->digest), session->head.ring};
+    unsigned char record[SLOT], slot[SLOT], marker[LINK];
+    if (room == LINK) encode_link(record, &published);
     else encode_head(record, record_magic, &published);
+    bool marked = ring && link_at != session->head.end;
+    if (marked) encode_marker(marker, published.seq, link_at, record + 32);
     /* Every few commits the head before this commit (durable since its own
      * sync) goes into the older slot: one more range for this sync, and fewer
      * records for a reader to follow. Never this commit's own head: a crash in
      * this sync could keep the slot and lose the commit's bytes (a slot that
      * leads nowhere), or its record (the store would open there by the slot,
-     * while the walk from the other slot stopped short of it). */
+     * while the walk from the other slot stopped short of it). A ring's comes
+     * after 256 KiB of commits too: what a start may follow stays bounded. */
     Head named = session->head;
 #ifdef PURE_STORE_TEST
     if (earlier_slots) named = published;
 #endif
-    encode_head(slot, head_magic, &named);
+    encode_head(slot, named.ring ? ring_magic : head_magic, &named);
     uint64_t newer = session->slots[0] > session->slots[1] ? session->slots[0] : session->slots[1];
     unsigned older = session->slots[0] > session->slots[1];
-    bool checkpoint = named.seq - newer >= CHECKPOINT;
+    bool checkpoint = named.seq - newer >= CHECKPOINT || (ring && ring->since >= CHECKPOINT_BYTES);
     if (!remember(&session->file, &published, PUBLISHING)) return PURE_ALLOCATION; /* nothing written */
     for (size_t i = 0; i < count; ++i) ++revisions[i]; /* Past this point the head may already be visible. */
-    bool durable = write_at(session->fd, record, (size_t)record_room(), published.start - record_room()) &&
+    bool durable = write_at(session->fd, record, (size_t)room, published.start - room) &&
+                   (!marked || write_at(session->fd, marker, LINK, session->head.end)) &&
                    (!checkpoint || write_at(session->fd, slot, SLOT, older * BLOCK)) &&
                    !fault(PURE_BEFORE_DIR_SYNC) && sync_data(session->fd);
     remember(&session->file, &published, durable ? DURABLE : CHECKED);
@@ -1620,17 +2088,20 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
         holding->stale = true;
         return PURE_UNCERTAIN;
     }
+    Head before = session->head;
     session->head = published;
     if (checkpoint) session->slots[older] = named.seq;
+    if (ring && !settle_ring(session, &before, link_at, marked, count, olds, checkpoint)) holding->stale = true;
     clear_arena(&session->tree);
     if (!cover(session)) {
         holding->stale = true;
         return PURE_OK;
     }
+    if (ring) return PURE_OK; /* in place: no compaction, no tail of zeros */
     if (published.end - DATA > 4 * published.live + COMPACT_SLACK && !fstat(session->fd, &session->file)) {
         /* The name decides, not compact's result: its rename may be in place
          * though the directory's sync after it failed. */
-        bool synced = compact(session->directory, session->tree.shared, (uint64_t)session->file.st_size, &published);
+        bool synced = compact(session->directory, session->tree.shared, (uint64_t)session->file.st_size, &published, false);
         struct stat named;
         if (!fstatat(session->directory, tree_name, &named, AT_SYMLINK_NOFOLLOW) &&
             (named.st_dev != session->file.st_dev || named.st_ino != session->file.st_ino)) {
@@ -1643,6 +2114,55 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
     return PURE_OK;
 }
 
+/* A commit of documents: each root's new nodes (in its tree; relocate: its
+ * stored ones too), the catalog's after them, then published. A ring's
+ * commit that the free bytes at its place do not hold is written again
+ * where twice what it wrote fits (a write leaves the trees as they were). */
+static PureResult commit_documents(Holding *holding, size_t count, const char *const *keys, Tree *const *trees,
+                                   const Entry *roots, const bool *relocate, int64_t *revisions, Entry *written,
+                                   bool *compacted) {
+    Session *session = &holding->session;
+    Ring *ring = session->ring;
+    Writer *writer = writer_of(holding);
+    Entry *olds = malloc((count ? count : 1) * sizeof(*olds));
+    if (!writer || !olds) {
+        free(olds);
+        return PURE_ALLOCATION;
+    }
+    uint64_t link_at = session->head.end, need = 0;
+    Entry catalog;
+    PureResult result = PURE_OK;
+    for (;;) {
+        if (ring) {
+            ring->wrote_count = ring->kept_count = 0;
+            ring->failed = false;
+            writer->ring = ring;
+            if (!ring_place(session, writer, need, &link_at)) {
+                result = PURE_STORE_ERROR;
+                break;
+            }
+        }
+        bool ok = true;
+        for (size_t i = 0; ok && i < count; ++i) {
+            written[i] = roots[i];
+            ok = write_root(trees[i], writer, &written[i], relocate[i]);
+        }
+        ok = ok && write_catalog(session, writer, count, keys, written, revisions, &catalog, olds) && flush(writer);
+        if (ok && !(ring && ring->failed)) break;
+        if (!ring || !writer->over || ring->failed) {
+            result = ring && ring->failed ? PURE_ALLOCATION : PURE_STORE_ERROR;
+            break;
+        }
+        uint64_t wrote = writer->at - (link_at + LINK);
+        need = 2 * (wrote > BLOCK ? wrote : BLOCK) + 2 * LINK;
+        writer->used = 0;
+        writer->failed = writer->over = false;
+        writer->digest = (Digest){0};
+    }
+    if (result == PURE_OK) result = publish(holding, writer, count, keys, revisions, catalog, olds, link_at, compacted);
+    free(olds);
+    return result;
+}
 static PureResult mutate(const char *path, const char *key, int64_t expected,
                          PureSpan body, bool splice, size_t offset, size_t remove,
                          size_t max_size, int64_t *revision) {
@@ -1661,7 +2181,6 @@ static PureResult mutate(const char *path, const char *key, int64_t expected,
     }
     Holding *holding = turns->holding;
     Session *session = &holding->session;
-    Writer *writer;
     Entry document, next;
     uint64_t index;
     bool found, compacted;
@@ -1674,10 +2193,12 @@ static PureResult mutate(const char *path, const char *key, int64_t expected,
     if (splice && (offset > old_size || remove > old_size - offset ||
                    old_size - remove > max_size ||
                    body.size > max_size - (old_size - remove))) { result = PURE_LIMIT; goto finish; }
-    if (!(writer = writer_of(holding)) || !rebuild(&session->tree, splice ? document : (Entry){0}, splice ? offset : 0,
-                                                   splice ? remove : 0, body, &next) ||
-        !write_root(&session->tree, writer, &next, false)) goto finish;
-    result = publish(holding, writer, 1, &key, &next, revision, &compacted);
+    if (!rebuild(&session->tree, splice ? document : (Entry){0}, splice ? offset : 0, splice ? remove : 0, body, &next))
+        goto finish;
+    Tree *trees[1] = {&session->tree};
+    bool relocate[1] = {false};
+    Entry written;
+    result = commit_documents(holding, 1, &key, trees, &next, relocate, revision, &written, &compacted);
     if (result == PURE_OK && !holding->stale) show_newest(turns, holding);
     else if (result == PURE_UNCERTAIN) settle_uncertain(turns, holding);
 finish:
@@ -1758,7 +2279,8 @@ static PureResult load_draft(PureDraft *draft) {
     uint64_t index;
     int64_t revision;
     bool found;
-    bool ok = read_head(fd, &info, false, &head, NULL) && map_tree(fd, &info, &head, &tree) &&
+    bool ok = read_head(fd, &info, false, &head, NULL) && !head.ring /* (no draft on a ring yet: pins) */ &&
+              map_tree(fd, &info, &head, &tree) &&
               find(&tree, (Entry){head.catalog, head.catalog_bytes}, draft->key, &index, &found,
                    &document, &revision);
     close(fd);
@@ -1883,6 +2405,8 @@ PureResult pure_store_open(const char *path, PureStore **out) {
     }
     store->turns = turns;
     result = refresh(store);
+    /* A ring's readers hold pins (030 S2), not yet: no handle on one */
+    if (result == PURE_OK && store->head.ring) result = PURE_STORE_ERROR;
     if (result != PURE_OK) { pure_store_close(store); return result; }
     *out = store;
     return PURE_OK;
@@ -2121,15 +2645,23 @@ static void commit_group(Turns *turns, Waiter *first) {
         }
         checked = true;
         if (count) {
-            Writer *writer = writer_of(holding);
-            bool written = writer != NULL, compacted = false;
-            for (size_t i = 0; i < count && written; ++i) {
-                /* After compaction a draft's stored references name the old file. */
-                bool relocate = session->file.st_dev != drafts[i]->device || session->file.st_ino != drafts[i]->inode;
-                written = write_root(&drafts[i]->tree, writer, &roots[i], relocate);
+            bool compacted = false;
+            Tree **trees = malloc(count * sizeof(*trees));
+            bool *relocate = malloc(count * sizeof(*relocate));
+            Entry *written = malloc(count * sizeof(*written));
+            if (!trees || !relocate || !written) result = PURE_ALLOCATION;
+            else {
+                for (size_t i = 0; i < count; ++i) {
+                    trees[i] = &drafts[i]->tree;
+                    /* After compaction a draft's stored references name the old file. */
+                    relocate[i] = session->file.st_dev != drafts[i]->device || session->file.st_ino != drafts[i]->inode;
+                }
+                result = commit_documents(holding, count, keys, trees, roots, relocate, revisions, written, &compacted);
+                memcpy(roots, written, count * sizeof(*roots)); /* each as stored */
             }
-            result = !writer ? PURE_ALLOCATION : written ? publish(holding, writer, count, keys, roots, revisions, &compacted) :
-                                                           PURE_STORE_ERROR;
+            free(trees);
+            free(relocate);
+            free(written);
             /* The drafts go on from the published version while the writer is
              * still held; their arenas are no longer needed. A compaction's
              * new file has each root elsewhere: found there. A writer that

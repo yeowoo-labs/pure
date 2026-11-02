@@ -34,3 +34,15 @@
 5 a1  09:28:06 up 1 day,  5:58,  1 user,  load average: 1.49, 1.65, 1.78
 6 a1  09:29:43 up 1 day,  5:59,  1 user,  load average: 1.28, 1.63, 1.76
 6 t2  09:31:09 up 1 day,  6:01,  1 user,  load average: 1.49, 1.69, 1.78
+1 a1  10:05:34 up 1 day,  6:35,  1 user,  load average: 1.33, 1.41, 1.06
+1 r1  10:07:18 up 1 day,  6:37,  1 user,  load average: 1.41, 1.54, 1.15
+2 r1  10:08:45 up 1 day,  6:38,  1 user,  load average: 1.23, 1.49, 1.17
+2 a1  10:10:11 up 1 day,  6:40,  1 user,  load average: 1.24, 1.47, 1.19
+3 a1  10:11:37 up 1 day,  6:41,  1 user,  load average: 1.45, 1.54, 1.24
+3 r1  10:13:14 up 1 day,  6:43,  1 user,  load average: 1.43, 1.59, 1.29
+4 r1  10:14:47 up 1 day,  6:45,  1 user,  load average: 1.41, 1.64, 1.35
+4 a1  10:16:24 up 1 day,  6:46,  1 user,  load average: 1.44, 1.66, 1.38
+5 a1  10:17:51 up 1 day,  6:48,  1 user,  load average: 1.45, 1.65, 1.41
+5 r1  10:19:17 up 1 day,  6:49,  1 user,  load average: 1.44, 1.65, 1.43
+6 r1  10:20:43 up 1 day,  6:50,  1 user,  load average: 1.45, 1.64, 1.45
+6 a1  10:22:30 up 1 day,  6:52,  1 user,  load average: 1.31, 1.65, 1.48
