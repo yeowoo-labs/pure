@@ -40,7 +40,8 @@ struct PureJit {
 
 /* ---- Emitting instructions */
 
-typedef struct { size_t at; int label; unsigned kind; } Fixup; /* kind: 0 B, 1 B.cond and CBZ/CBNZ, 2 TBZ/TBNZ */
+typedef struct { size_t at; int label; unsigned kind; } Fixup; /* kind: 0 B, 1 B.cond, CBZ/CBNZ and LDR (literal), 2 TBZ/TBNZ */
+typedef struct { uint64_t value; int label; } Constant;
 typedef struct {
     uint32_t *words;
     size_t count, room;
@@ -48,6 +49,8 @@ typedef struct {
     size_t label_count, label_room;
     Fixup *fixups;
     size_t fixup_count, fixup_room;
+    Constant *constants; /* the block's constants that it loads, each once (constants_here) */
+    size_t constant_count, constant_room;
     bool failed;
 } Emit;
 
@@ -123,11 +126,50 @@ enum { X0 = 0, X1 = 1, X2 = 2, X9 = 9, X10 = 10, X11 = 11, X12 = 12, X13 = 13, X
 enum { D0 = 0, D1 = 1, D2 = 2, D3 = 3, D4 = 4, D8 = 8, D9 = 9 };
 enum { EQ = 0, NE = 1, HS = 2, LO = 3, MI = 4, PL = 5, VS = 6, VC = 7, HI = 8, LS = 9, GE = 10, LT = 11, GT = 12, LE = 13 };
 
-/* A 64-bit constant into register d. */
+/* A 64-bit constant into register d: a MOVZ of its first 16 bits that are not all zero and a MOVK of each
+ * other such 16, or, past two of them, a load of it from the block's constants. */
 static void mov_imm(Emit *e, unsigned d, uint64_t value) {
-    put(e, 0xD2800000 | (uint32_t)(value & 0xFFFF) << 5 | d); /* MOVZ */
-    for (unsigned k = 1; k < 4; ++k)
+    unsigned parts = 0;
+    for (unsigned k = 0; k < 4; ++k) parts += (value >> (16 * k) & 0xFFFF) != 0;
+    if (parts > 2) {
+        size_t i = 0;
+        while (i < e->constant_count && e->constants[i].value != value) ++i;
+        if (i == e->constant_count) {
+            int label = new_label(e);
+            if (!grow_array((void **)&e->constants, &e->constant_room, i + 1, sizeof(*e->constants))) {
+                e->failed = true;
+                return;
+            }
+            e->constants[e->constant_count++] = (Constant){value, label};
+        }
+        branch_to(e, 0x58000000 | d, e->constants[i].label, 1); /* LDR Xd, the constant */
+        return;
+    }
+    unsigned first = value ? (unsigned)__builtin_ctzll(value) / 16 : 0;
+    put(e, 0xD2800000 | first << 21 | (uint32_t)(value >> (16 * first) & 0xFFFF) << 5 | d); /* MOVZ */
+    for (unsigned k = first + 1; k < 4; ++k)
         if (value >> (16 * k) & 0xFFFF) put(e, 0xF2800000 | k << 21 | (uint32_t)(value >> (16 * k) & 0xFFFF) << 5 | d); /* MOVK */
+}
+
+/* What follows (a loop's head, label) at the start of a 64-byte line, so that where the code before it ends
+ * does not move it (its time moved with it, research 051: 5%): a branch past the padding when it is more than
+ * one NOP. */
+static void line_start(Emit *e, int label) {
+    unsigned pad = (16 - e->count % 16) % 16;
+    if (pad > 1) branch_to(e, 0x14000000, label, 0), --pad; /* B */
+    while (pad--) put(e, 0xD503201F);                         /* NOP */
+}
+
+/* The block's constants after its code, where no way runs (each ends in a branch or a return), 8-byte aligned
+ * (the code starts a page); a load reaches 1 MiB, as a conditional branch does. */
+static void constants_here(Emit *e) {
+    if (e->constant_count && e->count % 2) put(e, 0); /* UDF */
+    for (size_t i = 0; i < e->constant_count; ++i) {
+        bind(e, e->constants[i].label);
+        put(e, (uint32_t)e->constants[i].value);
+        put(e, (uint32_t)(e->constants[i].value >> 32));
+    }
+    e->constant_count = 0;
 }
 
 /* LDR/STR of 64 bits at base + offset (a multiple of 8 below 32 KiB), or through x16 past it. */
@@ -5422,7 +5464,10 @@ static void tier_emit(Tier *t, int entry, int fallback) {
             if (t->vals[it->value].fused) flags = tcompare(t, &t->vals[it->value]);
             else if (t->vals[it->value].reg >= 0 || t->vals[it->value].op == T_SET) tier_value(t, it->value);
             break;
-        case I_MERGE: bind(e, t->merges[it->merge].label); break;
+        case I_MERGE:
+            if (t->merges[it->merge].back) line_start(e, t->merges[it->merge].label);
+            bind(e, t->merges[it->merge].label);
+            break;
         case I_JUMP:
             if (tbreaks(t, it)) tier_refund(t, it->loop);
             tier_moves(t, it->merge, it->way);
@@ -5713,6 +5758,7 @@ static bool compile_block(const PureModule *m, PureBlock block, unsigned end_hei
         wide_stubs(k);
         has_stubs(k);
         deopt_stubs(k);
+        constants_here(e);
     }
     ok = ok && !e->failed;
     for (unsigned i = 0; i < tier_count; ++i) tier_free(tiers[i]), free(tiers[i]);
@@ -5846,6 +5892,7 @@ struct PureJit *pure_jit_make(const PureModule *m) {
     free(e.words);
     free(e.labels);
     free(e.fixups);
+    free(e.constants);
     free(made);
     if (!ok) {
         pure_jit_free(jit);

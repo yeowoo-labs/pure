@@ -1,0 +1,66 @@
+tier-counts.sh: suite-run's 3 rounds under icount with the tier on, twice each in turns (work version round json), 2026-11-02:
+keyed6 (895fae0) against pool1 (the constant pool alone):
+join keyed6 1 {"instructions":671352456,"cycles":777413519}
+join pool1 1 {"instructions":646040407,"cycles":793885758}
+join pool1 2 {"instructions":646226800,"cycles":743426791}
+join keyed6 2 {"instructions":670924604,"cycles":808378234}
+knapsack keyed6 1 {"instructions":385133159,"cycles":103008517}
+knapsack pool1 1 {"instructions":385134829,"cycles":102723548}
+knapsack pool1 2 {"instructions":385134602,"cycles":102773305}
+knapsack keyed6 2 {"instructions":385133123,"cycles":103260159}
+sort keyed6 1 {"instructions":567734751,"cycles":443709805}
+sort pool1 1 {"instructions":555828379,"cycles":437110436}
+sort pool1 2 {"instructions":555709445,"cycles":441700965}
+sort keyed6 2 {"instructions":567773461,"cycles":441915071}
+words keyed6 1 {"instructions":3987574240,"cycles":1808362963}
+words pool1 1 {"instructions":3987214146,"cycles":1785105099}
+words pool1 2 {"instructions":3988285016,"cycles":1813827201}
+words keyed6 2 {"instructions":3987889664,"cycles":1807265497}
+matmul keyed6 1 {"instructions":578489651,"cycles":167725960}
+matmul pool1 1 {"instructions":576098030,"cycles":156807146}
+matmul pool1 2 {"instructions":576097949,"cycles":157153148}
+matmul keyed6 2 {"instructions":578489685,"cycles":168216650}
+roots keyed6 1 {"instructions":134369864,"cycles":118841764}
+roots pool1 1 {"instructions":134371806,"cycles":118800518}
+roots pool1 2 {"instructions":134371856,"cycles":118820568}
+roots keyed6 2 {"instructions":134369827,"cycles":118864706}
+graph keyed6 1 {"instructions":182807,"cycles":190339}
+graph pool1 1 {"instructions":182807,"cycles":187093}
+graph pool1 2 {"instructions":182811,"cycles":191815}
+graph keyed6 2 {"instructions":182788,"cycles":194079}
+hd (738b829) against pool2 (the pool and loops on 64-byte lines, this commit):
+join hd 1 {"instructions":650566327,"cycles":786929822}
+join pool2 1 {"instructions":644776665,"cycles":762083440}
+join pool2 2 {"instructions":645389660,"cycles":769535755}
+join hd 2 {"instructions":650566570,"cycles":756008227}
+knapsack hd 1 {"instructions":385130184,"cycles":99758511}
+knapsack pool2 1 {"instructions":385135203,"cycles":99862362}
+knapsack pool2 2 {"instructions":385135166,"cycles":99841676}
+knapsack hd 2 {"instructions":385130271,"cycles":99890927}
+sort hd 1 {"instructions":563646933,"cycles":440427516}
+sort pool2 1 {"instructions":555529390,"cycles":435709028}
+sort pool2 2 {"instructions":555650572,"cycles":441152577}
+sort hd 2 {"instructions":563646856,"cycles":428195159}
+words hd 1 {"instructions":4025471341,"cycles":1825061810}
+words pool2 1 {"instructions":3986780891,"cycles":1799162623}
+words pool2 2 {"instructions":3986927836,"cycles":1799905560}
+words hd 2 {"instructions":4025471501,"cycles":1852088135}
+matmul hd 1 {"instructions":578486756,"cycles":168063857}
+matmul pool2 1 {"instructions":576099532,"cycles":158535600}
+matmul pool2 2 {"instructions":576099619,"cycles":158998231}
+matmul hd 2 {"instructions":578486854,"cycles":169841528}
+roots hd 1 {"instructions":134367615,"cycles":118820270}
+roots pool2 1 {"instructions":134672551,"cycles":119047706}
+roots pool2 2 {"instructions":134672631,"cycles":119095280}
+roots hd 2 {"instructions":134367619,"cycles":118846054}
+graph hd 1 {"instructions":181404,"cycles":196583}
+graph pool2 1 {"instructions":182807,"cycles":200277}
+graph pool2 2 {"instructions":182811,"cycles":201415}
+graph hd 2 {"instructions":181385,"cycles":185934}
+align1 (the pool with the loop's line set by PURE_TIER_ALIGN, an experiment), one count each, instructions:
+  roots    none 134,374,065  32 B 135,878,635  64 B 138,278,974 (padding run as NOPs at each loop's entry)
+  knapsack none 385,136,931  32 B 385,142,854  64 B 385,142,781
+  join     none 644,254,944  32 B 645,678,565  64 B 645,567,946
+  sort     none 555,946,876  32 B 555,665,040  64 B 555,848,390
+  matmul   none 576,103,011  32 B 576,110,884  64 B 576,116,021
+  words    none 3,987,793,856  32 B 3,987,743,460  64 B 3,987,789,706
