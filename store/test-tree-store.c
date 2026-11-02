@@ -46,6 +46,7 @@ unsigned long pure_tree_test_publications(void);
 unsigned long pure_tree_test_syncs(void);
 void pure_tree_test_forget(void);
 void pure_tree_test_earlier_records(bool earlier);
+void pure_tree_test_earlier_slots(bool earlier);
 
 /* The file: head slots in blocks 0 and 1 (sequence at +8, end at +16,
  * catalog at +24), commits from DATA_START, each a 40-byte link (magic, its
@@ -360,15 +361,17 @@ static void records(const char *path) {
     expect(path, "walk", &(Oracle){(unsigned char *)"x", 1, 38});
 }
 
-/* A crash in a checkpoint's sync can keep the slot's head and lose the
- * commit's bytes: that slot then leads nowhere, and the next checkpoint goes
- * over it, never over the slot that leads to the commits (were that write
- * torn by a second crash, no head would). */
+/* A store written before checkpoints named the commit before theirs: a crash
+ * in a checkpoint's sync could keep the slot's head and lose the commit's
+ * bytes. That slot leads nowhere: the next writer's start clears it, and the
+ * next checkpoint goes over it, never over the slot that leads to the commits
+ * (were that write torn by a second crash, no head would). */
 static void stale_slot(const char *path) {
     char name[512], text[2][16];
     snprintf(name, sizeof(name), "%s/pure.tree", path);
     int64_t revision, kept;
     uint64_t at, seqs[2];
+    pure_tree_test_earlier_slots(true);
     CHECK(pure_store_put(path, "stale", 0, (PureSpan){(const unsigned char *)"0", 1}, &revision) == PURE_OK);
     snprintf(text[1], sizeof(text[1]), "0");
     for (unsigned i = 1;; ++i) { /* to commit 49, which is in a slot (records) */
@@ -384,6 +387,7 @@ static void stale_slot(const char *path) {
         CHECK(close(fd) == 0 && i < 100);
         if (seqs[0] == 49 || seqs[1] == 49) break;
     }
+    pure_tree_test_earlier_slots(false);
     unsigned stale = seqs[1] == 49;
     uint64_t checks[2];
     int fd = open(name, O_RDONLY);
@@ -400,14 +404,83 @@ static void stale_slot(const char *path) {
         CHECK(pure_store_put(path, "stale", revision, (PureSpan){(const unsigned char *)text[1], strlen(text[1])}, &revision) ==
               PURE_OK);
         CHECK((fd = open(name, O_RDONLY)) >= 0);
-        for (unsigned s = 0; s < 2; ++s)
-            if (slot_field(fd, s, 56) != checks[s]) written = s;
+        if (!i) CHECK(slot_field(fd, stale, 8) == 0); /* cleared as the writer started */
+        for (unsigned s = 0; s < 2; ++s) {
+            uint64_t check = slot_field(fd, s, 56);
+            if (check != checks[s] && check) written = s;
+        }
         CHECK(close(fd) == 0 && i < 40);
     }
     tear(path, written * SLOT_BLOCK + 20);
     pure_tree_test_forget();
     expect(path, "stale", &(Oracle){(unsigned char *)text[1], strlen(text[1]), revision});
     CHECK(written == stale);
+}
+
+/* A commit a crash cut short (its link one part short of counting) is passed
+ * over, and the next writer's start clears what it left before building on
+ * the commit before: else a second crash, landing of the next commit at its
+ * place only bytes equal to its own (its link's first byte), would bring it
+ * back. */
+static void passed_over(const char *path) {
+    int64_t revision;
+    CHECK(pure_store_put(path, "over", 0, (PureSpan){(const unsigned char *)"kept", 4}, &revision) == PURE_OK);
+    uint64_t at = published_end(path, "over"); /* the next commit's link */
+    CHECK(pure_store_put(path, "over", revision, (PureSpan){(const unsigned char *)"passed over", 11}, &revision) == PURE_OK);
+    char name[512];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    int fd = open(name, O_RDWR);
+    unsigned char first;
+    CHECK(fd >= 0 && pread(fd, &first, 1, (off_t)at) == 1 && close(fd) == 0);
+    tear(path, at); /* the crash: its link's first byte did not land */
+    pure_tree_test_forget();
+    expect(path, "over", &(Oracle){(unsigned char *)"kept", 4, revision - 1});
+    PureStore *store;
+    CHECK(pure_store_open(path, &store) == PURE_OK); /* a writer starts on the commit before */
+    pure_store_close(store);
+    CHECK((fd = open(name, O_RDWR)) >= 0 && pwrite(fd, &first, 1, (off_t)at) == 1 && close(fd) == 0);
+    pure_tree_test_forget(); /* the second crash: of the next commit, only its link's first byte landed */
+    expect(path, "over", &(Oracle){(unsigned char *)"kept", 4, revision - 1});
+}
+
+/* A checkpoint names the commit before its own, durable since its sync: a
+ * crash that keeps the checkpoint's slot and bytes but not its link loses
+ * only that commit, and the walk from the other slot still reaches every
+ * commit after, as it must when the newer slot is damaged at rest. */
+static void slot_before(const char *path) {
+    char name[512], text[2][16];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    int64_t revision, kept;
+    uint64_t at, seqs[2] = {0, 0}, now[2];
+    CHECK(pure_store_put(path, "named", 0, (PureSpan){(const unsigned char *)"0", 1}, &revision) == PURE_OK);
+    snprintf(text[1], sizeof(text[1]), "0");
+    for (unsigned i = 1;; ++i) { /* to a commit whose sync wrote a slot */
+        at = published_end(path, "named");
+        kept = revision;
+        memcpy(text[0], text[1], sizeof(text[0]));
+        snprintf(text[1], sizeof(text[1]), "%u", i);
+        CHECK(pure_store_put(path, "named", revision, (PureSpan){(const unsigned char *)text[1], strlen(text[1])}, &revision) ==
+              PURE_OK);
+        int fd = open(name, O_RDONLY);
+        CHECK(fd >= 0);
+        now[0] = slot_field(fd, 0, 8), now[1] = slot_field(fd, 1, 8);
+        CHECK(close(fd) == 0 && i < 100);
+        if (i > 1 && (now[0] != seqs[0] || now[1] != seqs[1])) break;
+        seqs[0] = now[0], seqs[1] = now[1];
+    }
+    unsigned newer = now[1] > now[0];
+    tear(path, at + 20); /* the checkpoint's own link */
+    pure_tree_test_forget();
+    expect(path, "named", &(Oracle){(unsigned char *)text[0], strlen(text[0]), kept});
+    revision = kept;
+    for (unsigned i = 0; i < 4; ++i) { /* fewer than a checkpoint's */
+        snprintf(text[1], sizeof(text[1]), "after %u", i);
+        CHECK(pure_store_put(path, "named", revision, (PureSpan){(const unsigned char *)text[1], strlen(text[1])}, &revision) ==
+              PURE_OK);
+    }
+    tear(path, newer * SLOT_BLOCK + 20);
+    pure_tree_test_forget();
+    expect(path, "named", &(Oracle){(unsigned char *)text[1], strlen(text[1]), revision});
 }
 
 /* A store whose last commits have records of the format before links (as
@@ -1477,7 +1550,7 @@ int main(void) {
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, frozen_path_draft, owner_lock, unsynced_compaction, threads, grouped,
-                                      lost_commit, pending_head, publishing_apart, stores_apart, one_sync, records, stale_slot, torn_head_held, records_held, cycles};
+                                      lost_commit, pending_head, publishing_apart, stores_apart, one_sync, records, stale_slot, passed_over, slot_before, torn_head_held, records_held, cycles};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -1489,6 +1562,6 @@ int main(void) {
          "process-crash-torn-head-earlier-records-swept-pending-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
          "atomic-batch-runtime-keys-store-handle-frozen-path-draft-owner-lock-unsynced-compaction-threads-group-commit-lost-commit-pending-head-publishing-apart-stores-apart-one-sync-records-"
-         "stale-slot-held-torn-head-held-records-cycles\"}");
+         "stale-slot-passed-over-slot-before-held-torn-head-held-records-cycles\"}");
     return 0;
 }

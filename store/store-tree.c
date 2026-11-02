@@ -1346,6 +1346,36 @@ static void close_session(Session *session) {
     *session = (Session){.directory = -1, .lock = -1, .fd = -1};
 }
 
+/* What a crash may have left where the next commit's record goes (a commit
+ * passed over, one part short of counting), and a slot that leads to no
+ * commit, cleared before anything is built on head (and made durable with
+ * it). Else a second crash could bring such a commit back: the next commit
+ * at its place, landing only bytes equal to its own (its record's first
+ * bytes, or the part its bytes lacked), would make it count again, though the
+ * store had passed over it and gone on. */
+static uint64_t record_room(void);
+static bool clear_debris(int fd, const struct stat *file, const Head *head, const uint64_t slots[2], bool *cleared) {
+    static const unsigned char zero[SLOT];
+    unsigned char bytes[SLOT];
+    uint64_t room = record_room();
+    if (head->end + room <= (uint64_t)file->st_size) {
+        if (!read_at(fd, bytes, (size_t)room, head->end)) return false;
+        if (memcmp(bytes, zero, (size_t)room)) {
+            if (!write_at(fd, zero, (size_t)room, head->end)) return false;
+            *cleared = true;
+        }
+    }
+    for (unsigned i = 0; i < 2; ++i) {
+        if (slots[i]) continue;
+        if (!read_at(fd, bytes, SLOT, i * BLOCK)) return false;
+        if (memcmp(bytes, zero, SLOT)) {
+            if (!write_at(fd, zero, SLOT, i * BLOCK)) return false;
+            *cleared = true;
+        }
+    }
+    return true;
+}
+
 /* Read the head of the file at the store's name, and map it. A head this
  * process did not make durable may be the last write of a writer that died
  * before its sync: it is made durable before anything builds on it. So is
@@ -1364,8 +1394,10 @@ static PureResult reopen(Session *session, bool synced) {
     if (session->fd >= 0) close(session->fd);
     session->fd = fd;
     release_tree(&session->tree); /* its mapping may be of a file compaction replaced */
-    if (!read_head(fd, &session->file, true, &session->head, session->slots)) return PURE_STORE_ERROR;
-    if (recall(&session->file, &session->head) != DURABLE) {
+    bool cleared = false;
+    if (!read_head(fd, &session->file, true, &session->head, session->slots) ||
+        !clear_debris(fd, &session->file, &session->head, session->slots, &cleared)) return PURE_STORE_ERROR;
+    if (cleared || recall(&session->file, &session->head) != DURABLE) {
         if (!sync_data(fd)) return PURE_STORE_ERROR;
         remember(&session->file, &session->head, DURABLE);
     }
@@ -1500,6 +1532,9 @@ static void let_go(Turns *turns) {
 static bool earlier_records;
 void pure_tree_test_earlier_records(bool earlier) { earlier_records = earlier; }
 static uint64_t record_room(void) { return earlier_records ? SLOT : LINK; }
+/* and checkpoints of the format before: a slot named its own commit */
+static bool earlier_slots;
+void pure_tree_test_earlier_slots(bool earlier) { earlier_slots = earlier; }
 #else
 static uint64_t record_room(void) { return LINK; }
 #endif
@@ -1561,12 +1596,20 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
     unsigned char record[SLOT], slot[SLOT];
     if (record_room() == LINK) encode_link(record, &published);
     else encode_head(record, record_magic, &published);
-    encode_head(slot, head_magic, &published);
-    /* Every few commits the head goes into the older slot as well: one more
-     * range for that sync, and fewer records for a reader to follow. */
+    /* Every few commits the head before this commit (durable since its own
+     * sync) goes into the older slot: one more range for this sync, and fewer
+     * records for a reader to follow. Never this commit's own head: a crash in
+     * this sync could keep the slot and lose the commit's bytes (a slot that
+     * leads nowhere), or its record (the store would open there by the slot,
+     * while the walk from the other slot stopped short of it). */
+    Head named = session->head;
+#ifdef PURE_STORE_TEST
+    if (earlier_slots) named = published;
+#endif
+    encode_head(slot, head_magic, &named);
     uint64_t newer = session->slots[0] > session->slots[1] ? session->slots[0] : session->slots[1];
     unsigned older = session->slots[0] > session->slots[1];
-    bool checkpoint = published.seq - newer >= CHECKPOINT;
+    bool checkpoint = named.seq - newer >= CHECKPOINT;
     if (!remember(&session->file, &published, PUBLISHING)) return PURE_ALLOCATION; /* nothing written */
     for (size_t i = 0; i < count; ++i) ++revisions[i]; /* Past this point the head may already be visible. */
     bool durable = write_at(session->fd, record, (size_t)record_room(), published.start - record_room()) &&
@@ -1578,7 +1621,7 @@ static PureResult publish(Holding *holding, Writer *writer, size_t count, const 
         return PURE_UNCERTAIN;
     }
     session->head = published;
-    if (checkpoint) session->slots[older] = published.seq;
+    if (checkpoint) session->slots[older] = named.seq;
     clear_arena(&session->tree);
     if (!cover(session)) {
         holding->stale = true;
