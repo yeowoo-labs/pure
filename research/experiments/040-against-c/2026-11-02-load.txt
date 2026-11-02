@@ -22,3 +22,15 @@
 5 pool2  08:25:24 up 1 day,  4:55,  1 user,  load average: 1.31, 1.48, 1.27
 6 pool2  08:26:50 up 1 day,  4:57,  1 user,  load average: 1.29, 1.45, 1.28
 6 k6  08:28:17 up 1 day,  4:58,  1 user,  load average: 1.39, 1.49, 1.31
+1 t2  09:13:51 up 1 day,  5:44,  1 user,  load average: 1.31, 1.50, 1.86
+1 a1  09:15:17 up 1 day,  5:45,  1 user,  load average: 1.41, 1.52, 1.83
+2 a1  09:16:54 up 1 day,  5:47,  1 user,  load average: 1.35, 1.57, 1.83
+2 t2  09:18:40 up 1 day,  5:48,  1 user,  load average: 1.33, 1.65, 1.84
+3 t2  09:20:17 up 1 day,  5:50,  1 user,  load average: 1.41, 1.70, 1.85
+3 a1  09:21:53 up 1 day,  5:52,  1 user,  load average: 1.42, 1.73, 1.85
+4 a1  09:23:29 up 1 day,  5:53,  1 user,  load average: 1.21, 1.64, 1.81
+4 t2  09:25:03 up 1 day,  5:55,  1 user,  load average: 1.42, 1.63, 1.79
+5 t2  09:26:40 up 1 day,  5:56,  1 user,  load average: 1.27, 1.60, 1.77
+5 a1  09:28:06 up 1 day,  5:58,  1 user,  load average: 1.49, 1.65, 1.78
+6 a1  09:29:43 up 1 day,  5:59,  1 user,  load average: 1.28, 1.63, 1.76
+6 t2  09:31:09 up 1 day,  6:01,  1 user,  load average: 1.49, 1.69, 1.78
