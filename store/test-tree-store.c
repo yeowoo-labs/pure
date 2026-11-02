@@ -1106,16 +1106,18 @@ static void owner_lock(const char *path) {
     /* A child forked while the handle is open and still alive, not touching
      * the store, when the parent closes it: the lock goes with the parent's
      * close all the same (the child let its copies of the descriptors go). */
-    int gate[2];
-    CHECK(pipe(gate) == 0);
+    int gate[2], running[2];
+    CHECK(pipe(gate) == 0 && pipe(running) == 0);
     pid_t lingering = fork();
     CHECK(lingering >= 0);
-    if (!lingering) {
+    if (!lingering) { /* running: fork's handler in the child has let its copies go */
         char byte;
         close(gate[1]);
-        _exit(read(gate[0], &byte, 1) == 1 ? 0 : 1);
+        close(running[0]);
+        _exit(write(running[1], "r", 1) == 1 && read(gate[0], &byte, 1) == 1 ? 0 : 1);
     }
-    CHECK(close(gate[0]) == 0);
+    char byte;
+    CHECK(close(gate[0]) == 0 && close(running[1]) == 0 && read(running[0], &byte, 1) == 1 && close(running[0]) == 0);
     pure_store_close(store);
     CHECK(elsewhere_put(path, "owned", 2) == PURE_OK);
     CHECK(write(gate[1], "x", 1) == 1 && close(gate[1]) == 0);
