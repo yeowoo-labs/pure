@@ -475,7 +475,10 @@ static bool whole(int fd, const Head *head) {
 
 /* The newest head that counts. A reader passes over the head this process is
  * still making durable, so the process never answers with a commit that a
- * crash could take back; a writer never meets one (it is the only writer). */
+ * crash could take back; a writer never meets one (it is the only writer).
+ * A slot whose head does not count (a crash in its checkpoint's sync kept
+ * the head, not the commit's bytes) is the one the next checkpoint writes:
+ * its sequence is 0, as an empty slot's. */
 static bool pick(int fd, const struct stat *file, const unsigned char *slots[2], bool writer, Head *out,
                  uint64_t sequences[2]) {
     Head heads[2];
@@ -490,11 +493,14 @@ static bool pick(int fd, const struct stat *file, const unsigned char *slots[2],
         const Head *head = &heads[slot];
         if (!valid[slot]) continue;
         int state = recall(file, head);
-        if (state == BROKEN || (state == PUBLISHING && !writer)) continue;
+        if (state == PUBLISHING && !writer) continue;
         if (state == UNKNOWN) {
-            bool counts = whole(fd, head);
-            remember(file, head, counts ? CHECKED : BROKEN);
-            if (!counts) continue;
+            state = whole(fd, head) ? CHECKED : BROKEN;
+            remember(file, head, state);
+        }
+        if (state == BROKEN) {
+            if (sequences) sequences[slot] = 0;
+            continue;
         }
         *out = *head;
         return true;

@@ -360,6 +360,56 @@ static void records(const char *path) {
     expect(path, "walk", &(Oracle){(unsigned char *)"x", 1, 38});
 }
 
+/* A crash in a checkpoint's sync can keep the slot's head and lose the
+ * commit's bytes: that slot then leads nowhere, and the next checkpoint goes
+ * over it, never over the slot that leads to the commits (were that write
+ * torn by a second crash, no head would). */
+static void stale_slot(const char *path) {
+    char name[512], text[2][16];
+    snprintf(name, sizeof(name), "%s/pure.tree", path);
+    int64_t revision, kept;
+    uint64_t at, seqs[2];
+    CHECK(pure_store_put(path, "stale", 0, (PureSpan){(const unsigned char *)"0", 1}, &revision) == PURE_OK);
+    snprintf(text[1], sizeof(text[1]), "0");
+    for (unsigned i = 1;; ++i) { /* to commit 49, which is in a slot (records) */
+        at = published_end(path, "stale"); /* where its link goes, its bytes after */
+        kept = revision;
+        memcpy(text[0], text[1], sizeof(text[0]));
+        snprintf(text[1], sizeof(text[1]), "%u", i);
+        CHECK(pure_store_put(path, "stale", revision, (PureSpan){(const unsigned char *)text[1], strlen(text[1])}, &revision) ==
+              PURE_OK);
+        int fd = open(name, O_RDONLY);
+        CHECK(fd >= 0);
+        seqs[0] = slot_field(fd, 0, 8), seqs[1] = slot_field(fd, 1, 8);
+        CHECK(close(fd) == 0 && i < 100);
+        if (seqs[0] == 49 || seqs[1] == 49) break;
+    }
+    unsigned stale = seqs[1] == 49;
+    uint64_t checks[2];
+    int fd = open(name, O_RDONLY);
+    CHECK(fd >= 0);
+    checks[0] = slot_field(fd, 0, 56), checks[1] = slot_field(fd, 1, 56); /* the commits' digests */
+    CHECK(close(fd) == 0);
+    tear(path, at + RECORD_SIZE + 8);
+    pure_tree_test_forget();
+    expect(path, "stale", &(Oracle){(unsigned char *)text[0], strlen(text[0]), kept});
+    revision = kept;
+    unsigned written = 2;
+    for (unsigned i = 0; written == 2; ++i) { /* other bytes than the lost commit's */
+        snprintf(text[1], sizeof(text[1]), "after %u", i);
+        CHECK(pure_store_put(path, "stale", revision, (PureSpan){(const unsigned char *)text[1], strlen(text[1])}, &revision) ==
+              PURE_OK);
+        CHECK((fd = open(name, O_RDONLY)) >= 0);
+        for (unsigned s = 0; s < 2; ++s)
+            if (slot_field(fd, s, 56) != checks[s]) written = s;
+        CHECK(close(fd) == 0 && i < 40);
+    }
+    tear(path, written * SLOT_BLOCK + 20);
+    pure_tree_test_forget();
+    expect(path, "stale", &(Oracle){(unsigned char *)text[1], strlen(text[1]), revision});
+    CHECK(written == stale);
+}
+
 /* A store whose last commits have records of the format before links (as
  * today's stores end) opens to its last commit, with links after them as well,
  * and its next writer goes on from there. */
@@ -1425,7 +1475,7 @@ int main(void) {
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, frozen_path_draft, owner_lock, unsynced_compaction, threads, grouped,
-                                      lost_commit, pending_head, publishing_apart, stores_apart, one_sync, records, torn_head_held, records_held, cycles};
+                                      lost_commit, pending_head, publishing_apart, stores_apart, one_sync, records, stale_slot, torn_head_held, records_held, cycles};
     for (size_t i = 0; i < sizeof(checks) / sizeof(*checks); ++i) {
         char path[] = "/tmp/pure-tree-check-XXXXXX";
         CHECK(mkdtemp(path) && pure_store_init(path) == PURE_OK);
@@ -1437,6 +1487,6 @@ int main(void) {
          "process-crash-torn-head-earlier-records-swept-pending-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
          "atomic-batch-runtime-keys-store-handle-frozen-path-draft-owner-lock-unsynced-compaction-threads-group-commit-lost-commit-pending-head-publishing-apart-stores-apart-one-sync-records-"
-         "held-torn-head-held-records-cycles\"}");
+         "stale-slot-held-torn-head-held-records-cycles\"}");
     return 0;
 }
