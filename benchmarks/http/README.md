@@ -1,7 +1,7 @@
 # HTTP 벤치마크
 
 Pure의 문서 서버와 같은 계약의 axum(Rust)·drogon(C++) 서비스를 같은 기기·코어 배정·부하 생성기로 잰다
-([075](../../docs/research/075-http-host-against-axum.md)). 027의 4b부터 pure-serve에는 키별 문서가 없다(키 있는 리스트가
+(075 (lab note, not public)). 027의 4b부터 pure-serve에는 키별 문서가 없다(키 있는 리스트가
 담고, 입력과 보기로 내놓는다). 그래서 문서 묶음은 옛 문서 서버(`prototypes/connections`)와 기준선만 돌고, pure-serve는 앱
 묶음에서 잰다.
 
@@ -22,7 +22,7 @@ python3 run.py --directory /var/tmp   # 저장소를 둘 장치에서
 python3 run.py --workloads put --rounds 5 --seconds 3 --only pure-program,axum-durable,axum-atomic
 ```
 
-앱 벤치마크([077](../../docs/research/077-apps-as-http-services.md))는 aup로 쓴 점수판(`scores.aup`)을 pure-serve가 보기와
+앱 벤치마크(077 (lab note, not public))는 aup로 쓴 점수판(`scores.aup`)을 pure-serve가 보기와
 입력으로 내놓는 것과, 같은 점수판을 axum·drogon으로 손수 쓴 것을 비교한다.
 
 ```sh
@@ -32,10 +32,10 @@ python3 run.py --module scores.pmod --suite app --rounds 3 --seconds 4 \
 ```
 
 JSON 본문의 비용은 상태 없는 앱 [echo.aup](echo.aup)에 `load PORT 연결 초 json 1 keep-alive 본문바이트`로 잰다
-(`{"name":"k","text":"x…"}`를 `POST /inputs/echo`로, [082](../../docs/research/082-json-in-place.md)).
+(`{"name":"k","text":"x…"}`를 `POST /inputs/echo`로, 082 (lab note, not public)).
 
 앱 벤치마크의 마지막 작업(`mixed`)은 내구성 점수 POST 8연결과 합계 GET 56연결을 부하 생성기 둘로 함께 보내, 쓰기가
-동기화하는 동안 읽기가 기다리는지 본다([080](../../docs/research/080-snapshot-reads.md)). 두 행(posts, reads)으로
+동기화하는 동안 읽기가 기다리는지 본다(080 (lab note, not public)). 두 행(posts, reads)으로
 나오고, CPU 1초당 답은 두 행을 합친 것이다.
 
 어디에 시간을 쓰는지는 [sample.c](../sample.c)로 본다. perf가 없는 기기에서 `perf_event_open`으로 명령의 모든 스레드를 사용자

@@ -161,4 +161,4 @@ leave a partial last output frame. Cleanup releases all apparatus-owned buffers;
 it is not an atomic-output or asynchronous backend guarantee.
 
 Measured results and their interpretation are in
-[Korean report 008](../../../docs/research/008-json-fanout-results.md).
+Korean report 008 (lab note, not public).

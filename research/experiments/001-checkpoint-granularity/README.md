@@ -107,4 +107,4 @@ This experiment cannot establish automatic policy quality, novel research,
 editor usability, M3 performance, or universal memory savings.
 
 The first run and its interpretation are available in the
-[Korean research report](../../../docs/research/002-checkpoint-results.md).
+Korean research report (lab note, not public).

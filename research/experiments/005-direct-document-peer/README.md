@@ -57,4 +57,4 @@ captured, so that exact kernel interaction remains an inference. The longer
 post-change runs are for direct-versus-Pure cost, not a claim of Internet or
 Kitex/QUIC performance.
 
-See [the result report](../../../docs/research/055-authenticated-peer-transport-cost.md).
+See the result report (lab note, not public).

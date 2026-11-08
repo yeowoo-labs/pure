@@ -453,7 +453,7 @@ ANCHOR_AT, ANCHOR_STORE)를 만든다. 그래서 인터페이스(Vega)는 앱 �
   해제한다(스냅숏은 다음 것을 붙잡는 사슬이라 오래된 것부터 사라진다). `pure_app_read`는 다른 스레드의 읽기용 앱을
   스냅숏에 묶어 보기 함수를 그대로 쓰게 한다. 참조는 어느 스레드에서나 놓는다. 저장을 기다리는 변경이 있거나 text가
   저장소에 다 있지 않으면(상태를 맡는 저장 호스트 없음) 만들지 않는다. Pi 5에서 항목 1,024개 리스트의 스냅숏은
-  1.2 µs, 65,536개는 87 µs다([연구 080](../research/080-snapshot-reads.md)).
+  1.2 µs, 65,536개는 87 µs다(연구 080 (lab note, not public)).
 
 검증(`test-module`): 같은 무작위 이벤트열을 메모리 앱과 수시로 재시작하는 저장 앱에 주어 매 단계 상태가 비트 단위로
 같다(리스트 앱·text 앱 각 400단계, 재시작 20회 이상). 수·text·리스트를 한꺼번에 바꾸는 이벤트 중 커밋의 모든 단계에서
@@ -468,7 +468,7 @@ ANCHOR_AT, ANCHOR_STORE)를 만든다. 그래서 인터페이스(Vega)는 앱 �
 
 ## 앱 사이의 연결
 
-출력으로 보낸 메시지(outbox)와 보낸 쪽별로 들은 번호(inbox)는 런타임이 소유하는 상태다([078](../research/078-app-connections.md)).
+출력으로 보낸 메시지(outbox)와 보낸 쪽별로 들은 번호(inbox)는 런타임이 소유하는 상태다(078 (lab note, not public)).
 
 - **보냄은 이벤트의 일부다.** `SEND`는 출력마다 1부터 매긴 번호를 붙여 메시지를 둔다. 이벤트가 실패하면 보내지 않았고,
   저장이 실패하면 마지막 저장 뒤의 보냄과 그 번호가 모두 돌아간다. 호스트는 저장된 보냄만 본다(`pure_app_outbox`).
@@ -493,7 +493,7 @@ ANCHOR_AT, ANCHOR_STORE)를 만든다. 그래서 인터페이스(Vega)는 앱 �
 
 | 요청 | 뜻 |
 |---|---|
-| `GET /views/이름` | 보기의 값. 수는 가장 짧은 왕복 10진수, bool은 `true`·`false`, text는 UTF-8 그대로(`text/plain`), 바이트는 그대로(`application/octet-stream`). text 상태를 그대로 보이는 보기(`view page = note`)는 저장된 익스텐트를 빌려준다([079](../research/079-lent-views.md)) |
+| `GET /views/이름` | 보기의 값. 수는 가장 짧은 왕복 10진수, bool은 `true`·`false`, text는 UTF-8 그대로(`text/plain`), 바이트는 그대로(`application/octet-stream`). text 상태를 그대로 보이는 보기(`view page = note`)는 저장된 익스텐트를 빌려준다(079 (lab note, not public)) |
 | `GET /views/표?from=N&count=M` | 리스트 보기의 행: `{"rows":전체,"from":N,"items":[{열: 값}…]}`(`application/json`, bool 열은 `true`·`false`, 바이트는 16진 문자열, 리스트는 그 레코드의 필드를 가진 객체의 배열). 요청한 행의 칸만 계산한다. 값이 없는 칸은 `null` |
 | `GET /views/이름?인자=값…` | 인자를 받는 보기(표라면 `from`·`count`와 함께). 값은 `%XX`를 풀어 읽고, 고정 필드는 메시지의 쿼리 필드와 같다. 빠진 고정 인자, 모르는 이름, 두 번 준 인자, 타입이 다른 값은 400 `invalid`. 등록한 질의도 같다(`GET /queries/이름?인자=값`) |
 | `POST /inputs/이름` | 이벤트. text 입력은 본문이 text, 키의 누름은 누름 뒤 같은 키의 뗌(받는 입력이 있으면). 타이머·frame·가리킴과 출력·인자에는 `no_input`. 메시지는 고정 필드(u32, 수, bool)를 쿼리(`?points=3`, `?done=true`, 그룹 안이면 `?to.zip=7`)로, 가변 필드 하나를 본문으로 받거나, `Content-Type: application/json` 본문의 객체로 필드를 받는다(문자열은 바이트·text, 수는 u32·수, `true`·`false`는 bool, 그룹은 안의 객체). 응답 본문은 핸들러의 `reply`(메시지 필드) |
@@ -510,7 +510,7 @@ ANCHOR_AT, ANCHOR_STORE)를 만든다. 그래서 인터페이스(Vega)는 앱 �
   ingress는 본문 크기에 표만 더하며, 응답은 여전히 요청에서 빌린다. 필드가 빠지거나(`missing_field`), 모르거나 두 번 오거나
   쿼리와 본문에 함께 오거나(`json_field`), 타입이 다르거나(필드 자리에 그룹, 그룹 자리에 값, 배열, `null`, bool 필드의 수나
   문자열, 다른 필드의 `true`·`false`: `json_type`), JSON이 아니면(`json`) 400이고 요청은 실행되지 않는다. 256 KiB 본문의 요청이 CPU 0.25 ms다
-  ([082](../research/082-json-in-place.md)).
+  (082 (lab note, not public)).
 - **행은 객체의 배열이다.** 행 필드의 값은 레코드 필드를 이름으로 가진 객체들의 배열이다(수는 수 필드, `true`·`false`는 bool 필드, 문자열은 text 필드,
   빠진 필드는 기본값). 연결 스레드가 행을 저장 형식으로 옮겨(수는 JSON보다 길 수 있다) 요청의 입력을 그만큼 늘리고
   (`pure_runtime_grow`: 늘린 만큼 예산에 계상, 모자라면 503 `payload_budget`) 본문 뒤에 둔다. 가변 필드가 행 필드 하나뿐인
@@ -553,7 +553,7 @@ ANCHOR_AT, ANCHOR_STORE)를 만든다. 그래서 인터페이스(Vega)는 앱 �
   인증서와 호스트 이름을 검증한다). 저장이 끝날 때마다 소유자가 새 보냄을
   JSON(필드와 그룹)으로 그 출력의 줄에 넣고, 출력마다 전달 스레드가 순서대로 보낸다(`X-Pure-Source: 이름.출력`,
   `X-Pure-Sequence`, `Idempotency-Key`). 2xx 또는 Pure 받는 쪽의 거절이면 전해진 것이고, 소유자가 덜어 낸다. 그 밖에는 쉬었다가
-  다시 보낸다(버리지 않는다). 받는 쪽이 `X-Pure-Batch`를 알리면 밀린 것을 묶어 보낸다([083](../research/083-delivery-over-http.md)).
+  다시 보낸다(버리지 않는다). 받는 쪽이 `X-Pure-Batch`를 알리면 밀린 것을 묶어 보낸다(083 (lab note, not public)).
   출력이 있는 앱은 상태가 없어도 소유자를 둔다. `--reply 출력=입력`이면 각 보냄의 최종 응답(2xx, 408·429를 뺀 4xx)이 입력의
   메시지 이벤트가 된다: 필드는 응답 JSON에서 이름으로(모르는 멤버는 건너뛴다), 없으면 보낸 메시지의 같은 이름·타입 필드에서,
   u32 `http_status`는 상태 코드로. 응답은 보낸 번호로 한 번만 적용되고, 적용한 뒤에 보냄을 덜어 낸다.
@@ -567,17 +567,17 @@ ANCHOR_AT, ANCHOR_STORE)를 만든다. 그래서 인터페이스(Vega)는 앱 �
   런타임 코어에 넘어가, 응답이 소켓에 다 들어갈 때까지 예산을 차지하고 티켓과 함께 풀린다. 그래서 받지 않는
   클라이언트가 붙잡을 수 있는 옛 버전은 예산을 넘지 않는다(넘으면 `503 payload_budget`).
 
-성능과 비교는 [연구 075](../research/075-http-host-against-axum.md). 검증(Pure `make check`의 `tests/check.py`, 앱은 aup가 빌드): 키 있는
+성능과 비교는 연구 075 (lab note, not public). 검증(Pure `make check`의 `tests/check.py`, 앱은 aup가 빌드): 키 있는
 리스트의 문서(`DOCS_SOURCE`)가 무작위 편집과 읽기에 모델과 상태 코드·오류·본문이 같고, 동시 편집이 커밋을 나누어 쓰며, `kill -9`
 뒤에도 확인 응답한 편집이 모두 남는다.
 앱 라우트는 키 있는 리스트 앱에 무작위 POST(쿼리 필드와 본문을 가진 메시지, text, 키)와 GET(수, text, 표의 쪽)을
 800번 보내 상태 코드·오류·본문·JSON 행이 파이썬 모델과 같고, 멈췄다 다시 띄워도, 여섯 클라이언트가 보내는 중에
 `kill -9`로 죽여도 확인 응답한 이벤트(약 4,200개)가 모두 남는다. 그동안 다른 연결의 읽기는 먼저 확인 응답된 쓰기를
 모두 보고, 합계가 뒤로 가지 않으며, 다시 띄운 서버의 합계는 읽기가 본 어떤 합계 이상이다. 연결 스레드 하나와 셋에서
-모두 확인한다. 같은 서비스를 axum·drogon으로 손수 쓴 것과의 비교는 [연구 077](../research/077-apps-as-http-services.md):
+모두 확인한다. 같은 서비스를 axum·drogon으로 손수 쓴 것과의 비교는 연구 077 (lab note, not public):
 내구성 있는 쓰기 약 76배, 읽기는 drogon과 같고 axum보다 빠르며(20행 JSON 145k/s 대 95k/s), CPU와 메모리가 가장 적다.
 쓰기와 읽기를 함께 보내면 읽기가 149k/s(p99 0.6 ms)로, 잠금을 쥔 채 동기화하는 axum·drogon(1.1–1.3k/s, p99
-111–156 ms)과 동기화하지 않는 메모리 판(74–83k/s)보다 많다([연구 080](../research/080-snapshot-reads.md)).
+111–156 ms)과 동기화하지 않는 메모리 판(74–83k/s)보다 많다(연구 080 (lab note, not public)).
 
 아직 모듈 앱을 런타임 코어의 효과 단위로 세분하지는 않았다(`runtime.c`의 `definition`은 앱 전체다). 호스트가 직접 호출한다.
 

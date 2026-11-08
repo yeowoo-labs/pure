@@ -7,7 +7,7 @@
 Pure의 최종 목표는 앱 로직·네트워크·RPC·DB·UI를 다루는 독립 네이티브 애플리케이션 런타임이다.
 UI는 그중 하나의 하위 체계이며, 현재 호스트는 전체 런타임이나 일반 네이티브 UI 스택이 아니다.
 네이티브 코어 검사와 Wasm 크기도 네이티브 UI 완성이나 전체 메모리 효율의 근거가 아니다.
-현재 개발 방향은 [로드맵](../../docs/research/010-roadmap.md)을 따른다.
+현재 개발 방향은 로드맵 (lab note, not public)을 따른다.
 
 CLI에는 기존 작업물을 실제 네이티브 서버·바이트 저장소에 저장하고 새 실행기에서 복원하는
 `connect`·`push`·`pull`이 추가됐다. [서버 실행과 사용법](../connections/README.md)을 따른다.
@@ -16,8 +16,8 @@ CLI에는 기존 작업물을 실제 네이티브 서버·바이트 저장소에
 같은 `.pure`를 **Node·브라우저 없이 실행하는 네이티브 프로그램**으로 빌드하는 경로도 있다.
 빌드 시 기존 컴파일러를 재사용하며, 입력·상태 스냅샷·저장·복원을 C 실행 코어에 연결했다.
 실행 전용 터미널 프로그램, 선택형 GTK 작성 창, 선택형 TLS 피어 호스트가 있다.
-[빌드와 사용법](native/README.md), [작성 창의 비용과 검증](../../docs/research/025-native-authoring-shell.md),
-[피어 연결과 전체 비용](../../docs/research/026-secure-peer-link.md).
+[빌드와 사용법](native/README.md), 작성 창의 비용과 검증 (lab note, not public),
+피어 연결과 전체 비용 (lab note, not public).
 
 ## 열기
 
@@ -120,7 +120,7 @@ on drag.move {
 
 터미널에서도 같은 정의에 `point drag down 90 170`, `point drag move 360 220`,
 `point drag up 410 240`을 보내 재현할 수 있다.
-기능 검증과 범위는 [직접 조작 보고서](../../docs/research/013-authored-pointer-input.md)에 기록했다.
+기능 검증과 범위는 직접 조작 보고서 (lab note, not public)에 기록했다.
 
 ## 배치를 저장하고 다시 열기
 
@@ -167,7 +167,7 @@ on drag.move use move(green)
 규칙은 레코드 매개변수 하나를 받는다. 레코드당 필드는 1~8개이며 모든 대상의 필드는
 기존 상태 32개 한도에 포함된다. 실행 중 대상 생성·삭제는 아직 없다.
 전체 작성물은 [shared-layout.pure](examples/shared-layout.pure), 결과와 한계는
-[공유 규칙 보고서](../../docs/research/015-shared-rules.md)에 있다.
+공유 규칙 보고서 (lab note, not public)에 있다.
 
 ## 여러 도형을 하나의 포인터 입력으로 연결하기
 
@@ -189,7 +189,7 @@ on drag.cancel use cancel(drag.target)
 
 배치 파일은 이전과 같은 방식으로 저장·복원한다. 마지막 입력에는 대상 도형도 표시한다.
 CLI에서는 `point-target drag green_box down 90 130`을 사용한다.
-[전체 작성물](examples/routed-layout.pure), [구현 결과와 한계](../../docs/research/016-pointer-routing.md).
+[전체 작성물](examples/routed-layout.pure), 구현 결과와 한계 (lab note, not public).
 
 ## 일반 코드와 비교하기
 
@@ -200,7 +200,7 @@ Pure 컴파일러나 실행기를 가져오지 않는다.
 
 JS 모델은 고정된 앱이다. 일반 프로그램의 실행 중 교체나 상태 이전은 제공하지 않는다.
 두 파일의 길이만으로 개발 생산성을 비교하지 않는다. 자세한 실행 비용과 범위는
-[연구 보고서 004](../../docs/research/004-authoring.md)에 있다.
+연구 보고서 004 (lab note, not public)에 있다.
 
 ## 터미널에서 같은 작업 실행하기
 
@@ -227,7 +227,7 @@ quit
 
 ## 계산 기록과 작업량 제한
 
-표시 계산에 [기록을 버릴 수 있는 실행 계약](../../docs/research/009-bounded-display-integration.md)을
+표시 계산에 기록을 버릴 수 있는 실행 계약 (lab note, not public)을
 연결했다. 모든 도형에 하나의 작업 한도를 적용한다. 한도를 넘으면 장면 전체를
 표시하지 않고 오류를 알린다. 그 전에 성공한 입력 이벤트의 상태는 유지된다.
 기본값은 작업량 2,048, 캐시 꺼짐이다. 터미널에서 다음처럼 사용할 수 있다.
@@ -301,7 +301,7 @@ Playwright CLI 0.1.21의 `run-code`에 함수 전체를 전달하고,
 
 현재 화면 갱신은 `present(target)`으로 계산 결과를 기존 DOM 요소에 전달한다.
 매 입력마다 전체 장면 스냅샷이나 도형·상태·비용 요소를 다시 만들지 않는다.
-CLI·검사용 `snapshot()`은 유지한다. [입력→출력 구현 보고서](../../docs/research/011-direct-presentation.md)에
+CLI·검사용 `snapshot()`은 유지한다. 입력→출력 구현 보고서 (lab note, not public)에
 구조 변경, 추가 공간, 속도 측정의 한계를 기록했다.
 직접 출력 통합 당시의 [52개 JS/CLI/Wasm 검사](results/2026-09-23-presentation/verification.json),
 [브라우저 경로 비교](results/2026-09-23-presentation/browser.json),
@@ -317,7 +317,7 @@ python3 prototypes/workbench/qa-presentation.py --cli /path/to/playwright-cli.js
 
 후속으로 실행 입력과 코드 편집의 갱신 경로를 분리했다. 실행 중인 값이 바뀌어도 소스의
 줄 번호·크기·커서 정보를 다시 계산하지 않는다. 실제 소스 변경과 적용 상태는 계속 갱신한다.
-[결과 보고서](../../docs/research/012-refresh-ownership.md),
+결과 보고서 (lab note, not public),
 [브라우저 비교](results/2026-09-23-refresh/browser.json),
 [작성 흐름](results/2026-09-23-refresh/browser-authoring.json),
 [표시 한도](results/2026-09-23-refresh/browser-limit.json)를 보존했다.
@@ -342,7 +342,7 @@ python3 prototypes/workbench/qa-refresh.py --cli /path/to/playwright-cli.js --se
 작성하게 된 것은 아니다. 레이아웃·텍스트·IME·선택을 VM에 복제하지 않고, 필요한
 숫자 조작만 전달한다. 파일은 2 MiB까지, UTF-8을 사용하며 저장 시 줄바꿈은 LF다.
 현재 읽기 화면은 문서 편집 시 텍스트 전체를 갱신한다. 전체 앱의 메모리 절감이나
-큰 문서 성능 우위는 주장하지 않는다. [결과와 한계](../../docs/research/017-web-layout-boundary.md).
+큰 문서 성능 우위는 주장하지 않는다. 결과와 한계 (lab note, not public).
 
 ```text
 state ratio = 50

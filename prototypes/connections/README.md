@@ -13,7 +13,7 @@
 이 구현은 저장·전송의 수명을 확인하는 최소 경로다. 객체별 파일이나 전체 교체 방식을
 Pure의 최종 데이터 모델로 정한 것은 아니다. 필드 배치·상수 구간·별칭은 준비 단계에서
 처리하고, 입력 값에 의존하는 구간은 요청 때 계산한다.
-[구현 결과와 한계](../../docs/research/021-field-connections.md).
+구현 결과와 한계 (lab note, not public).
 
 ## 실행 코어의 현재 상태
 
@@ -21,7 +21,7 @@ Pure의 최종 데이터 모델로 정한 것은 아니다. 필드 배치·상�
 입력/출력 어댑터다. 다른 실행 영역에 결과를 전달할 때 코어가 원본을 유지하며, 수신 영역의
 효과와 응답 소비가 끝나면 회수한다. `test-runtime.c`는 수명·예산 단위 계약을,
 선택형 `make check-mirror`는 실제 1 MiB 문서가 한 프로세스의 두 저장 영역으로
-전달되는 것을 검사한다. [실제 연결 비용과 한계](../../docs/research/063-real-in-process-routing.md).
+전달되는 것을 검사한다. 실제 연결 비용과 한계 (lab note, not public).
 
 `make all`은 파서 없는 고정 정의 CLI와 실행 전용 `build/libpure-execution.a`를 만든다.
 빌드 시 `.pure` 정의를 준비하는 컴파일러도 생성하지만 CLI에는 링크되지 않는다.
@@ -31,18 +31,18 @@ Pure의 최종 데이터 모델로 정한 것은 아니다. 필드 배치·상�
 `store-port.c`에 연결된다. 서버는 소스 파일을 읽으므로 파서를 별도로 포함한다.
 기본 호스트 효과는 동기식이고 작성 문법은 아직 get/put 저장 프로필이다.
 전체 앱 런타임·자체 보안 RPC·스레드 간 안전성·강제 메모리 격리를 구현한 것은 아니다.
-[구현·비용·검증 보고서](../../docs/research/022-execution-core.md),
+구현·비용·검증 보고서 (lab note, not public),
 [첫 공개 체크포인트](../../CHECKPOINT.md).
 
 인증 문서 피어가 필요한 경우 `make document-peer`는 서버·클라이언트 명령을
 한 실행물에 넣는다. 서버만 배치할 때는 `make document-server`를 선택할 수 있다.
 `make check-document-server`는 서버 전용 코드·의존성 상한과 기존 C/Python TLS
 문서 시나리오를 검사한다. 이 선택 빌드는 기본 코어·CLI에 TLS를 추가하지 않는다.
-루프백의 [직접 서버 비교와 전송 지연 결과](../../docs/research/055-authenticated-peer-transport-cost.md)는
+루프백의 직접 서버 비교와 전송 지연 결과 (lab note, not public)는
 전체 프로세스 비용과 아직 남은 다중 연결 한계를 함께 기록한다.
 이동 가능한 서버 전용 묶음은 `package_native.py --with-peer-server --output FILE`로
 만들고 `check_package.py FILE`로 검증한다. CLI+TLS 아카이브 전체 상한과
-[이동 후 인증·문서 작업 결과](../../docs/research/056-server-only-document-package.md)를
+이동 후 인증·문서 작업 결과 (lab note, not public)를
 별도로 공개한다.
 
 ## 필요한 구성만 빌드하기
@@ -54,10 +54,10 @@ release 빌드의 `make check-core`는 코어 코드 섹션 4,864 B, data/BSS 0 
 `text` 4,632 B / 영역 120 B / 작업 216 B다. 누적 계수가 필요한 HTTP 호스트와
 테스트는 `PURE_RUNTIME_METRICS`를 선택한다. 이 프로필의 영역은 192 B다.
 코어에서 문서 해석을 분리하기 전의 `text` 5,980 B / 영역 128 B와 구분한다.
-[현재 경계와 전체 앱 비용](../../docs/research/068-opaque-app-core.md)에 기록했다.
-[해제 콜백 재진입 방어 비용](../../docs/research/064-release-callback-reentrancy.md)을
+현재 경계와 전체 앱 비용 (lab note, not public)에 기록했다.
+해제 콜백 재진입 방어 비용 (lab note, not public)을
 기본 코어 상한 안에서 검증했다.
-[실제 앱 1,000개 비교](../../docs/research/051-optional-runtime-metrics.md)에서 두 비용을
+실제 앱 1,000개 비교 (lab note, not public)에서 두 비용을
 분리했다. 전체 앱의 RAM 수치는 아니다. GNU 호환 도구를 사용하는 현재 프로필의 회귀 검사다.
 `make check-profile`은 기본 CLI·HTTP 실행물의 링크된 섹션과 직접 동적 의존성을 검사한다.
 두 검사를 실제 동작·CLI 전체 프로세스 RSS 검사와 함께 실행할 때는 release 빌드에서
@@ -66,25 +66,25 @@ release 빌드의 `make check-core`는 코어 코드 섹션 4,864 B, data/BSS 0 
 이 검사에는 파서 없는 고정 정의 CLI·HTTP 실행물의 크기·RSS 상한도 포함된다.
 `make check-service-scale`은 같은 문서 앱의 1,024개 객체를 8개 클라이언트가
 생성·읽기·수정·복원하여 두 HTTP 호스트의 결과, 서버 RSS, 버퍼 회수를 확인한다.
-[검사 범위와 결과](../../docs/research/040-document-service-capacity.md).
+검사 범위와 결과 (lab note, not public).
 `make check-async`는 선택형 비동기 완료 코어와 실제 저장 효과를 검사한다.
 유휴 동기 앱은 `pure_runtime_bind()`로 작업 슬롯을 분리할 수 있다. 진행 중인
 작업·대여가 남으면 분리를 거절하며, 슬롯 재결합에도 티켓 세대는 유지된다.
-[실제 네이티브 앱 1,000개의 메모리 비용](../../docs/research/049-idle-app-work-slots.md).
+실제 네이티브 앱 1,000개의 메모리 비용 (lab note, not public).
 기본 코어·CLI·HTTP에는 작업자 스레드나 비동기 완료 코드가 링크되지 않는다.
 선택형 코어 자체는 작업자를 만들지 않으며, 효과를 가져온 호스트가 I/O를 실행하고
 같은 소유 스레드에서 완료해야 한다. 기본 서비스 호스트는 이 경로를 사용하지
-않는다. [계약·비용·한계](../../docs/research/045-owner-thread-async-effects.md).
+않는다. 계약·비용·한계 (lab note, not public).
 `make async-server`는 이 계약을 기존 문서 HTTP 앱에 선택적으로 연결한다.
 `make check-async-server`는 크기 상한과 쓰기가 멈춘 동안 기존 문서 읽기·기한·
 종료를 검사하고, `make check-async-service-scale`은 기존 1,024개 문서 작업을
 같은 소스 정의 앱으로 다시 실행한다. 이 선택 호스트는 읽기 작업자 하나와
 쓰기 작업자 하나를 사용하고, 모든 쓰기는 한 작업자에서 직렬화한다.
-[현재 동작과 비용](../../docs/research/048-immutable-read-write-overlap.md).
+현재 동작과 비용 (lab note, not public).
 GTK·TLS를 선택하지 않아도 기본 실행물에 섞이면 검사가 실패한다. 예산은
 [`profile-budget.json`](profile-budget.json)에 기록했으며, 호스트·컴파일러가 바뀌면
 측정값을 다시 검토해야 한다. 이 검사만으로 전체 앱 RAM이 작다고 증명하지는 않는다.
-[현재 비용과 제한](../../docs/research/023-document-edits.md).
+현재 비용과 제한 (lab note, not public).
 
 Linux AArch64의 기본 시험 묶음에는 CLI와 `.pure` 정의만 넣는다. `make check-micro-memory`로
 빌드한 뒤 첫 명령을 실행한다. 전체 교차 검증 묶음은 `make all server document-peer window`
@@ -97,9 +97,9 @@ Linux AArch64의 기본 시험 묶음에는 CLI와 `.pure` 정의만 넣는다. 
 고정 정의 묶음은 선택한 CLI·HTTP·TUI 조합의 압축 아카이브 전체 크기 상한도
 [`fixed-package-budget.json`](fixed-package-budget.json)으로 검사한다. 초과하면 패키지를
 만들지 않는다. 이 값은 libc·터미널·저장 파일을 포함한 실행 메모리 값은 아니다.
-[현재 터미널 편집기](../../docs/research/044-terminal-viewport-cost.md)는 여러 행·탭 문서의
+현재 터미널 편집기 (lab note, not public)는 여러 행·탭 문서의
 재열기를 처리하며, 1 MiB 화면의 반복 입력은 문서 전체를 매번 스캔하지 않는다.
-[문서 이름 접두어 탐색](../../docs/research/050-bounded-document-prefix-find.md)은 이미 정렬된
+문서 이름 접두어 탐색 (lab note, not public)은 이미 정렬된
 목록을 사용하며, 목록을 연 상태에서 이름을 입력하고 Enter로 연다. Backspace는
 접두어를 줄이고 화살표는 검색어를 지운 뒤 목록을 이동한다.
 
@@ -119,7 +119,7 @@ python3 prototypes/connections/check_package.py \
 필요한 호스트만 선택할 수도 있다. 예를 들어 `--with-window`만 주면 HTTP·TLS 없이
 CLI와 GTK 창만 포함하며, 창의 외부 변경·충돌은 CLI를 통해 검증한다.
 
-[기본·선택 묶음, 메모리 비용과 한계](../../docs/research/032-micro-native-authoring-boundary.md).
+기본·선택 묶음, 메모리 비용과 한계 (lab note, not public).
 
 동일한 문서 인터페이스에 인라인/16 KiB 페이지 혼합 저장소를 **선택형 연구 경로**로 붙여볼 수 있다.
 작은 기존 `PUREB001` 값은 그대로 읽지만, 큰 값을 `PUREP001`로 바꾼 뒤에는 기본 저장기로
@@ -146,15 +146,15 @@ python3 prototypes/connections/export_flat_store.py \
   --flat-editor prototypes/connections/build/pure-edit-fixed
 ```
 
-[실제 큰·작은 문서 쓰기량과 전체 제한](../../docs/research/034-hybrid-document-storage.md),
-[기본 형식으로 내보내는 검증](../../docs/research/062-paged-store-rollback.md).
+실제 큰·작은 문서 쓰기량과 전체 제한 (lab note, not public),
+기본 형식으로 내보내는 검증 (lab note, not public).
 
 선택형 영속 트리 저장소(`store-tree.c`)는 모든 문서를 추가 전용 파일 하나에 불변 익스텐트
 트리로 둔다. 편집은 바뀐 leaf와 경로만 기록하고, 읽기는 잠그지 않는다. 기존 런타임·부분 수정·
 비동기·실제 PTY 검사와 자체 고장·오라클 검사를 함께 실행한다. 형식이 달라 별도 `--store`
-디렉터리를 쓴다. [설계·측정·한계](../../docs/research/073-single-file-persistent-tree.md).
-같은 저장소에서 런타임이 앱의 작업 버전을 소유하는 draft API는 [`state.h`](state.h)이며,
-설계와 측정은 [074](../../docs/research/074-runtime-owned-drafts.md)에 있다.
+디렉터리를 쓴다. 설계·측정·한계 (lab note, not public).
+같은 저장소에서 런타임이 앱의 작업 버전을 소유하는 draft API는 [`state.h`](../../core/state.h)이며,
+설계와 측정은 074 (lab note, not public)에 있다.
 
 ```sh
 make -C prototypes/connections check-tree
@@ -178,14 +178,14 @@ python3 prototypes/connections/check_package.py \
   dist/pure-document-hybrid-cli-tui-linux-aarch64.tar.gz
 ```
 
-[실제 Ctrl+S 완료 시간·코드·RSS 비용](../../docs/research/065-native-save-latency.md)을
+실제 Ctrl+S 완료 시간·코드·RSS 비용 (lab note, not public)을
 함께 검토해야 한다. 큰 문서의 `PUREP001` 형식은 기본 저장기가 직접 열 수 없다.
 
 기본 `PUREB001` 형식을 유지하며 큰 수정의 사용자 공간 복사 호출을 줄이는
 Linux 전용 선택형 실험은 `make -C prototypes/connections check-copy-range`로
 검사한다. `strace`·`findmnt`와 GNU 크기 도구가 필요하며, 기본 `make editor`에는
-이 경로가 들어가지 않는다. [같은 1 MiB 문서의 시스템 호출·전체 RSS·코드 비용과
-지원 범위](../../docs/research/059-immutable-file-copy-path.md)를 분리해 공개한다.
+이 경로가 들어가지 않는다. 같은 1 MiB 문서의 시스템 호출·전체 RSS·코드 비용과
+지원 범위는 따로 적었다 (lab note, not public).
 
 ## 네이티브 CLI로 문서 일부 바꾸기
 
@@ -236,7 +236,7 @@ prototypes/connections/build/pure-document-peer call 127.0.0.1 9443 localhost \
 실제 C·Python 클라이언트, 1 MiB 문서, 실패·재시작을 검사하려면
 `make -C prototypes/connections check-document-peer`를 실행한다. 이 대상은 선택형
 실행물의 코드·직접 의존성 [예산](peer-budget.json)도 검사한다.
-[형식·비용·한계](../../docs/research/030-authenticated-document-peer.md).
+형식·비용·한계 (lab note, not public).
 
 ## 네이티브 문서 창
 
@@ -265,7 +265,7 @@ Ctrl+Shift+D로 같은 `.pure` 소스를 편집하고 **Apply & save** 또는 Ct
 초안을 확인한다. 창은 UTF-8 텍스트만 열며 이진 데이터는 CLI로 다룬다.
 
 실제 창·CLI·HTTP 교차 검증, 정의 적용·실패 복구, 1 MiB 문서 수정과 전체 메모리 비용은
-[032 보고서](../../docs/research/032-micro-native-authoring-boundary.md)에 있다. 화면 없이
+032 보고서 (lab note, not public)에 있다. 화면 없이
 같은 시나리오를 재현하려면 Xvfb·xdotool·xclip을 설치하고 다음을 실행한다.
 
 ```sh
@@ -290,7 +290,7 @@ python3 prototypes/connections/package_native.py --fixed --with-tui \
 ```
 
 실제 PTY 조작·1 MiB 편집·프로세스 메모리·패키지의 범위는
-[042 보고서](../../docs/research/042-micro-native-terminal-editor.md)에 있다.
+042 보고서 (lab note, not public)에 있다.
 
 실행 시 `.pure` 정의를 읽는 TUI가 필요하면 `source-tui`를 선택한다. 기존 고정 TUI와
 달리 파서가 선택한 실행물에 포함된다. 정의를 고친 뒤 새 세션을 열어야 적용되며,
@@ -305,7 +305,7 @@ python3 prototypes/connections/package_native.py --with-tui \
   --output dist/pure-document-source-cli-tui-linux-aarch64.tar.gz
 ```
 
-구체적인 지원 범위와 전체 비용은 [소스 TUI 검증](../../docs/research/053-source-loaded-native-terminal-editor.md)에 기록한다.
+구체적인 지원 범위와 전체 비용은 소스 TUI 검증 (lab note, not public)에 기록한다.
 
 ## 실행
 
@@ -489,7 +489,7 @@ Workbench JSON의 의미 검증은 클라이언트가 맡는다. 이 JSON이나 
 HTTP를 Pure 간 기본 통신 모델로 확정한 것은 아니다.
 [자체 통신 형식 설계](../../docs/design/006-native-protocol.md)는 작성된 연결에서 바이너리
 형식을 준비하고 보안 전송을 별도로 선택하는 방향이다. 같은 get/put 효과를 실행하는
-[선택형 인증 문서 피어](../../docs/research/030-authenticated-document-peer.md)가 별도로 있다.
+선택형 인증 문서 피어 (lab note, not public)가 별도로 있다.
 이 평문·요청당 연결 종료 HTTP 경로로 QUIC과 성능을 비교하지 않는다.
 
 ## 한도와 남은 비용
@@ -534,14 +534,14 @@ make -C prototypes/connections check BUILD=build/sanitized CFLAGS='-std=c17 -O1 
 RSS 상한 검사를 요구하지 않는다. `check-portable-tui`는 고정·소스 정의 편집기를
 실제 PTY에서 검사하며 `/proc` RSS를 읽지 않는다. `check-native-checkpoint`는
 둘을 실행하고 고정·소스 CLI의 실제 1 MiB 생성·읽기·1 B 수정 RSS를 호스트
-단위에 맞춰 기록한다. [기록된 Linux 결과](../../docs/research/060-host-native-checkpoint.md)는
+단위에 맞춰 기록한다. 기록된 Linux 결과 (lab note, not public)는
 코어 코드 증가 없이 기존 RSS 상한 검사를 통과했다. 현재 통과 결과는
 Linux AArch64에만 해당한다. 기존 `check-tui`·`check-source-tui`의 Linux
 4,096 KiB RSS 상한 검사는 그대로 유지한다. Apple Silicon 실행과
 디렉터리 동기화·전원 장애 내구성은 별도 검증이 필요하다.
 `check-portable-peer`는 OpenSSL이 준비된 경우에만 선택해서 실행한다. C 피어
 클라이언트·두 서버를 실제 TLS 소켓으로 검증하지만 `/proc` RSS는 수집하지 않는다.
-[휴대형 피어 검사와 Linux 비용](../../docs/research/058-portable-authenticated-peer-check.md)을
+휴대형 피어 검사와 Linux 비용 (lab note, not public)을
 별도로 기록했으며 macOS에서의 통과 결과는 아직 없다.
 
 임시 디렉터리와 실제 루프백 TCP 소켓을 사용한다. 단위 검사에는 범위 접근·페이지 경계·

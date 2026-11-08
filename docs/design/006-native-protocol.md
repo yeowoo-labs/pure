@@ -4,8 +4,8 @@
 성능 결과나 QUIC 구현은 아니다.
 
 2026-09-24 구현 상태: 선택한 scalar 앱과 `editor.pure` 문서 앱에 자체 이진 형식을
-TLS 1.3/TCP 위에 실은 피어 호스트를 검증했다. [026 — scalar 피어](../research/026-secure-peer-link.md)와
-[030 — 문서 피어·출력 소비 선택](../research/030-authenticated-document-peer.md)을 본다.
+TLS 1.3/TCP 위에 실은 피어 호스트를 검증했다. 026 — scalar 피어 (lab note, not public)와
+030 — 문서 피어·출력 소비 선택 (lab note, not public)을 본다.
 이 설계의 일반 RPC·QUIC·새 전송 후보가 구현된 것은 아니다.
 
 2026-09-28: 노드 사이 전달의 새 UDP 전송 후보는 [011 — 연결 없는 전송](011-pure-transport.md)이다. 링크의 전송
@@ -120,8 +120,8 @@ QUIC의 보안은 TLS 1.3을 통한 인증·키 설정과 패킷 보호를 포�
 HTTP와 자체 형식은 같은 조건부 저장·응답 동작으로 연결한다. 별도의 범용 메시지 객체를
 항상 만들도록 강제하지 않는다. 기존 CLI와 저장·충돌·실패·수명 검증은 유지한다.
 
-첫 TLS 1.3 지속 연결은 [026](../research/026-secure-peer-link.md)에, 실제 문서 작업의
-연결과 선택 빌드·메모리 비용은 [030](../research/030-authenticated-document-peer.md)에
+첫 TLS 1.3 지속 연결은 026 (lab note, not public)에, 실제 문서 작업의
+연결과 선택 빌드·메모리 비용은 030 (lab note, not public)에
 기록했다. 다음에는 전체 앱의 실패망·혼합 작업 비용과 병목을 확인한다. 보안 없는 임시 소켓 경로를
 인터넷용 완료물로 보고하지 않는다.
 새 UDP 전송은 이 단계에서 확인된 구체적인 병목을 기존 전송의 설정·연결 방식으로

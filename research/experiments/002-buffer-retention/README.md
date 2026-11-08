@@ -2,7 +2,7 @@
 
 This is a native C17 comparison apparatus, **not an implementation of the Pure
 runtime and not a Sonic, Node.js, or .NET benchmark**. It follows
-[research question 006](../../../docs/research/006-problem-landscape.md).
+research question 006 (lab note, not public).
 
 Question: when a producer selects part of each record and a delayed consumer
 retains that selection, what costs remain after applying ordinary copy policies,
@@ -162,4 +162,4 @@ Linux documents [VmHWM as approximate](https://man7.org/linux/man-pages/man5/pro
 requested storage counters remain the precise apparatus accounting used here.
 
 The first result and its interpretation are recorded in
-[report 007](../../../docs/research/007-buffer-retention-results.md).
+report 007 (lab note, not public).

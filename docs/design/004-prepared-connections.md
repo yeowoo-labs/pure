@@ -1,7 +1,7 @@
 # 실행 준비에서 연결을 정하는 첫 범위
 
 현재 필드·동적 입력 범위 확장은 [005](005-field-connections.md)를 따른다. 아래는 첫 상수 구간 프로파일의 기준이다.
-조건부 바이트 부분 변경 `store.splice`와 네이티브 자동화 경로는 [023](../research/023-document-edits.md)에 추가했다.
+조건부 바이트 부분 변경 `store.splice`와 네이티브 자동화 경로는 023 (lab note, not public)에 추가했다.
 
 2026-09-23 착수 기준:
 

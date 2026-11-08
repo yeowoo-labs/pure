@@ -35,4 +35,4 @@ node prototypes/workbench/native/check.mjs --sanitize
 ```
 
 CLI의 직접 공유 라이브러리 의존성은 libc 하나였다. GTK 작성 창에는 GTK/Pango/Cairo/GLib가
-추가된다. 문서의 해석과 남은 범위는 [025 보고서](../../../../docs/research/025-native-authoring-shell.md)에 있다.
+추가된다. 문서의 해석과 남은 범위는 025 보고서 (lab note, not public)에 있다.

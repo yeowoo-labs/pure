@@ -8,11 +8,11 @@
 현재 검증 환경은 Linux AArch64다. GTK 창은 실행 전용 프로그램에 들어가지 않는다.
 고정 정의 CLI·피어는 검증된 `.pure`의 불변 프로그램을 한 번 링크하고 인스턴스마다
 가변 상태만 둔다. 새 정의를 사용하려면 다시 빌드한다. 작성 창과 브라우저는 정의 교체가
-가능한 전체 작성 용량을 유지한다. [반복 메모리와 실행물 전체 비용](../../../docs/research/028-shared-fixed-program.md)을
+가능한 전체 작성 용량을 유지한다. 반복 메모리와 실행물 전체 비용 (lab note, not public)을
 구분해서 확인했다.
 고정 실행 앱은 유휴 중 작업 슬롯을 예약하지 않는다. 입력·저장·복원 호출 동안만
 코어 슬롯을 스택에서 대여하고, 1,000개 실제 앱의 반복 RSS 절감과 추가 스택·코드
-비용을 [측정했다](../../../docs/research/049-idle-app-work-slots.md).
+비용을 측정했다 (lab note, not public).
 
 저장소 루트에서:
 
@@ -72,7 +72,7 @@ GSK_RENDERER=cairo GDK_DISABLE=gl,vulkan \
 
 이 설정은 모든 호스트의 기본값이 아니다. 이 환경의 유휴 GTK 작성 창은 약 36 MiB RSS,
 기본 소프트웨어 GPU 경로는 약 174 MiB였으며 CLI는 약 1.5 MiB였다. **편집 도구 전체를
-마이크로 런타임 크기라고 부르지 않는다.** [실제 창 검증·전체 비용](../../../docs/research/025-native-authoring-shell.md).
+마이크로 런타임 크기라고 부르지 않는다.** 실제 창 검증·전체 비용 (lab note, not public).
 
 `scalar.h`는 호출자가 제공한 메모리의 명시적인 인스턴스 API다. `plan.h`는 빌드 시 준비한
 읽기 전용 데이터, `app.h`는 같은 코어에서 입력·스냅샷·저장을 연결하는 호스트다.
@@ -112,7 +112,7 @@ python3 prototypes/workbench/native/peer-check.py prototypes/workbench/build/nat
 입력 소유권을 해제한다. 응답을 잃은 부작용 작업은 자동 재시도하지 않는다.
 정의 identity가 다르면 Pure 클라이언트가 연결 직후 거절한다. 연결은 현재 한 번에 한
 클라이언트만 처리한다. 서버와 클라이언트 모두 인증 실패 시 평문으로 낮추지 않는다.
-프로토콜 길이·크기·전체 호스트 RSS와 한계는 [026 보고서](../../../docs/research/026-secure-peer-link.md)에 있다.
+프로토콜 길이·크기·전체 호스트 RSS와 한계는 026 보고서 (lab note, not public)에 있다.
 
 현재 저장 스냅샷은 이 실행물의 준비 정의에 묶여 있다. 정의를 바꾼 뒤 다른 정의의 스냅샷을
 묵시적으로 적용하지 않는다. 작성 창에는 실시간 정의 교체가 있지만 CLI의 실시간 소스 편집과
@@ -132,5 +132,5 @@ node --test *.test.mjs
 프로세스와 파일 저장이 필요하다. Zig 0.15.2가 `PATH`에 없다면 각 명령에
 `--zig /path/to/zig`를 준다. `--fixed`는 작성물별 공유 불변 프로그램을 빌드해 같은 동작을
 대조한다. Zig 오브젝트는 ReleaseSafe이며 C 호스트만 ASan/UBSan으로 계측한다.
-[전체 용량 기준](../../../docs/research/024-native-app-instances.md),
-[공유 고정 정의 결과](../../../docs/research/028-shared-fixed-program.md).
+전체 용량 기준 (lab note, not public),
+공유 고정 정의 결과 (lab note, not public).

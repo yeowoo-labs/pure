@@ -8,7 +8,7 @@ The implementation now lives in explicit `Engine` instances in `engine.zig`.
 `core.zig` retains the browser ABI and tests; `native.zig` exposes caller-owned
 instances through the selected C module. Native prepared definitions, host input
 ownership and conditional snapshots are documented in [native/README.md](native/README.md)
-and [024](../../docs/research/024-native-app-instances.md). Existing scalar limits
+and 024 (lab note, not public). Existing scalar limits
 remain. This does not make the selected scalar VM mandatory for every Pure domain.
 
 ## Source language

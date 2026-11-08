@@ -45,6 +45,6 @@ order, cannot control host I/O scheduling, cache state, storage firmware, or
 clock changes. The byte digest proves this workload's result equality, not
 full behavioral equivalence in failures or concurrency.
 
-The [result and interpretation](../../../docs/research/054-direct-document-path.md)
+The result and interpretation (lab note, not public)
 distinguish linked executable size from the 5,908-byte standalone core and
 avoid a speed claim unsupported by the samples.

@@ -105,7 +105,7 @@ node prototypes/live-rules/measure.mjs prototypes/live-rules/results/my-run
 
 측정 출력 폴더의 상위 `results/`는 있어야 하며, 이미 있는 출력 폴더를 덮어쓰지 않는다.
 측정 스크립트는 처리 속도·입력 지연을 측정하지 않는다. 브라우저를 통한 실제 조작 확인은
-이 자동 검사와 별도로 수행한다. 자세한 결과는 [연구 보고서 003](../../docs/research/003-live-rules.md)에 있다.
+이 자동 검사와 별도로 수행한다. 자세한 결과는 연구 보고서 003 (lab note, not public)에 있다.
 
 브라우저 검증용 `qa-browser.js`는 Playwright CLI의 `run-code`에 전달하는 함수 표현식이다.
 서버를 실행하고 CLI로 해당 페이지를 연 뒤 다음처럼 파일 내용을 인수로 전달할 수 있다.

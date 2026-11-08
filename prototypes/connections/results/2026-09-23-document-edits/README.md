@@ -24,4 +24,4 @@ GNU 호환 ar/nm/size를 사용한다. ASan 계측물에는 release 크기 상�
 
 1 MiB 문서 편집의 11 B는 입력 크레딧이다. 파일을 재작성하는 4 KiB 호스트 스택 버퍼,
 커널·파일·allocator·파서·서버 비용을 포함한 전체 메모리라고 해석하지 않는다.
-[구현, 수치 범위와 한계](../../../../docs/research/023-document-edits.md).
+구현, 수치 범위와 한계 (lab note, not public).

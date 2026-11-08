@@ -33,4 +33,4 @@ Zig 0.15.2 및 로컬 자식 프로세스 실행이 필요하다. 비용 확인�
 
 sanitizer는 C 호스트에 적용됐다. Zig 모듈은 두 빌드 모두 ReleaseSafe다. 네이티브 창·macOS·
 스레드 간 동시 실행·처리량·RSS 검증 자료는 아니다.
-[구현과 남은 범위](../../../../docs/research/024-native-app-instances.md).
+구현과 남은 범위 (lab note, not public).
