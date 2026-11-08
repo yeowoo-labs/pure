@@ -1,0 +1,44 @@
+# One check for the three repositories, on both Linux architectures, with gcc and clang. The two old
+# workflows (prototypes/connections) are disabled_manually and last ran 2026-09-28 (failure); this replaces
+# them for the product tree. Committed disabled: turning it on (and the arm runners) is the maintainer's call.
+name: check
+
+"on":
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        cc: [gcc, clang]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v5
+        with: {path: pure}
+      - uses: actions/checkout@v5
+        with: {repository: yeowoo-labs/aup, path: aup}
+      - uses: actions/checkout@v5
+        with: {repository: yeowoo-labs/vega, path: vega}
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev python3
+      - name: aup
+        run: make -C aup -j"$(nproc)" && make -C aup check
+      - name: pure
+        run: make -C pure -j"$(nproc)" && make -C pure check AUP=../aup
+      - name: vega
+        run: make -C vega -j"$(nproc)" PURE=../pure && make -C vega check PURE=../pure
