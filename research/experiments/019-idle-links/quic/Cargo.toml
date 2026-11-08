@@ -5,10 +5,13 @@ edition = "2021"
 publish = false
 
 # The QUIC side of M1 (../run.py, docs/design/011-pure-transport.md): quinn
-# 0.11 with rustls and ring, as a Rust service would use it.
+# 0.11 with rustls and ring, as a Rust service would use it. Measured on
+# 2026-09-28 with quinn 0.11.11, rustls 0.23.43, ring 0.17.14 and tokio
+# 1.53.1 (the Cargo.lock of then, no longer kept in the tree: cargo update
+# --precise rebuilds those); a build now takes rustls 0.23.46 or later.
 [dependencies]
 quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "sync", "io-util", "io-std"] }
 ring = "0.17"
 

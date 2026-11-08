@@ -7,6 +7,7 @@ __pycache__/
 /prototypes/*/node_modules/
 /benchmarks/http/axum-baseline/target/
 /research/experiments/*/quic/target/
+/research/experiments/*/quic/Cargo.lock
 /benchmarks/http/load
 /benchmarks/sample
 /benchmarks/bank/sqlite-bank
