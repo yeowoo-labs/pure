@@ -67,8 +67,10 @@ $(BUILD)/libpure-link.a: $(LINK_OBJECTS)
 # The runtime's tickets and budgets, with effects completed off the owner thread.
 # It links after the library, last as it always was, so code keeps its place.
 # The app model's functions are exported for a surface it maps (serve/surface.h).
-$(BUILD)/pure-serve: $(SERVE) core/runtime.c $(BUILD)/libpure.a $(BUILD)/libpure-link.a $(HEADERS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) -Ilink -Iserve -DPURE_ASYNC_EFFECTS $(SERVE) $(BUILD)/libpure-link.a \
+# The version pure-run and pure-serve say (--version): the VERSION file's line.
+VERSION := $(shell cat VERSION)
+$(BUILD)/pure-serve: $(SERVE) core/runtime.c $(BUILD)/libpure.a $(BUILD)/libpure-link.a $(HEADERS) VERSION
+	$(CC) $(CPPFLAGS) -DPURE_VERSION='"$(VERSION)"' $(CFLAGS) $(INCLUDES) -Ilink -Iserve -DPURE_ASYNC_EFFECTS $(SERVE) $(BUILD)/libpure-link.a \
 		$(BUILD)/libpure.a core/runtime.c \
 		$(LDFLAGS) -Wl,--export-dynamic-symbol='pure_*' -lm -pthread $(LDLIBS) -o $@
 
@@ -76,8 +78,8 @@ $(BUILD)/pure-crypto.so: link/crypto-openssl.c $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared link/crypto-openssl.c $(LDFLAGS) -lssl -lcrypto \
 		$(LDLIBS) -o $@
 
-$(BUILD)/pure-run: cli/pure-run.c $(BUILD)/libpure.a $(HEADERS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(INCLUDES) cli/pure-run.c $(BUILD)/libpure.a $(LDFLAGS) -lm $(LDLIBS) -o $@
+$(BUILD)/pure-run: cli/pure-run.c $(BUILD)/libpure.a $(HEADERS) VERSION
+	$(CC) $(CPPFLAGS) -DPURE_VERSION='"$(VERSION)"' $(CFLAGS) $(INCLUDES) cli/pure-run.c $(BUILD)/libpure.a $(LDFLAGS) -lm $(LDLIBS) -o $@
 
 # Tests build their own copies: the store's fault hooks exist only under PURE_STORE_TEST.
 $(BUILD)/test-module: core/test-module.c $(MODEL) $(STORE) $(HEADERS)

@@ -202,6 +202,15 @@ static int hex(char c) {
 
 int main(int argc, char **argv) {
     static PureModule modules[2];
+    static const char called[] = "pure-run MODULE [--views] [--store PATH [--batch N]] < commands\npure-run --version | --help\n";
+    if (argc == 2 && !strcmp(argv[1], "--version")) { /* the version (the VERSION file's), and the module format it loads */
+        puts("pure-run " PURE_VERSION "\nmodule format 7");
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--help")) {
+        fputs(called, stdout);
+        return 0;
+    }
     if (argc >= 3 && !strcmp(argv[2], "--views")) { /* MODULE --views ...: the rest as without it */
         views_only = true;
         for (int i = 2; i + 1 < argc; ++i) argv[i] = argv[i + 1];
@@ -211,7 +220,7 @@ int main(int argc, char **argv) {
     long batch = argc == 6 && stored && !strcmp(argv[4], "--batch") ? strtol(argv[5], NULL, 10) : 0;
     bool usage = argc != 2 && !(stored && argc == 4) && !(batch > 0 && batch <= 100000);
     if (usage || !load(argv[1], &modules[0])) {
-        if (usage) fputs("pure-run MODULE [--views] [--store PATH [--batch N]] < commands\n", stderr);
+        if (usage) fputs(called, stderr);
         return 2;
     }
     if (stored && pure_store_init(argv[3]) != PURE_OK) { fprintf(stderr, "cannot open store %s\n", argv[3]); return 2; }

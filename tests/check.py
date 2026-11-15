@@ -7293,6 +7293,23 @@ def server_tokens(aup, pure, work):
             'unauthorized': stats['unauthorized'], 'forbidden': stats['forbidden']}
 
 
+def versions(aup, pure, work):
+    """pure-run and pure-serve say their name with the VERSION file's line, then the module format they load: the
+    eighth byte of a module aup built. --help says how each is called, on standard output; called another way each
+    says so on standard error with status 2."""
+    module = work / 'versions.pmod'
+    format_byte = chr(compile_module(aup, EXAMPLES / 'counter.aup', module)[7])
+    version = (pure / 'VERSION').read_text().strip()
+    for name in ('pure-run', 'pure-serve'):
+        said = run(pure / 'build' / name, '--version').stdout.splitlines()
+        assert said == [f'{name} {version}', f'module format {format_byte}'], said
+        helped = run(pure / 'build' / name, '--help')
+        assert helped.stdout.startswith(name) and not helped.stderr, helped
+        refused = run(pure / 'build' / name, check=False)
+        assert refused.returncode == 2 and refused.stderr.startswith(name) and not refused.stdout, refused
+    return 2
+
+
 def main():
     global EXAMPLES
     parser = argparse.ArgumentParser()
@@ -7305,6 +7322,7 @@ def main():
     report = {}
     with tempfile.TemporaryDirectory(prefix='pure-check-') as directory:
         work = Path(directory)
+        report['versions'] = versions(aup, pure, work)
         report['module_ranges'] = module_ranges(aup, pure, work)
         report['module_assumptions'] = module_assumptions(aup, pure, work)
         report['module_event_lists'] = module_event_lists(aup, pure, work)

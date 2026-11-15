@@ -4781,8 +4781,54 @@ static int make_token(const char *grant) {
     return 0;
 }
 
+/* How pure-serve is called: on standard error with status 2 when it was called another way, on standard output when
+ * asked. */
+static int usage(FILE *to) {
+    fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
+          "[--connections 1024] [--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--view-workers N] [--send OUTPUT=URL ...] [--name NAME] "
+          "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
+          "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] [--work N] "
+          "[--window 4194304] [--tokens FILE] [--surface LIBRARY [-- ARGUMENTS]]\n"
+          "pure-serve --apps FILE [--port 8767] [--threads 1|N|auto] [--workers N] [--app-slots 256] [--budget BYTES] [--connections 1024] "
+          "[--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--view-workers N] [--key FILE] [--sealed-only] [--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] "
+          "[--send-ca FILE] [--window BYTES]\n"
+          "  --apps FILE: a host of apps (docs/design/017-apps-on-one-host.md), a line each:\n"
+          "      NAME MODULE.pmod STORE [memory=BYTES] [work=N] [queue=N] [send=OUTPUT=URL ...] [seal=OUTPUT=KEY ...]\n"
+          "      [reply=OUTPUT=INPUT ...] [tokens=FILE]; its routes start /NAME/, its sends' sources are NAME.OUTPUT, and a\n"
+          "      --link-port takes its inputs as NAME/INPUT. On SIGHUP the host reads FILE again: the apps of lines\n"
+          "      gone stop, those of new lines start, those of changed lines change in place (their states kept in\n"
+          "      memory) unless their store moved; a line out says what it did\n"
+          "  --app-slots N: the apps a host of apps holds at most, those started later included\n"
+          "  --tokens FILE (tokens=FILE for an app of --apps): its routes take only requests bearing a token\n"
+          "      (Authorization: Bearer TOKEN) the file grants, a line each: read|write|input=NAME[,NAME] SHA256-HEX;\n"
+          "      a delivery sealed by a key --sender names needs none (docs/design/017-apps-on-one-host.md, 3b)\n"
+          "pure-serve --make-token read|write|input=NAME[,NAME]: a new token and its line for a tokens file\n"
+          "  --workers N: the threads the apps' owners take turns on (1 for one app; for apps, one a CPU at most)\n"
+          "  --view-workers N: the threads that show views with a body, asked and pushed, off the connection threads\n"
+          "      (a CPU each; 0: on the connection threads, docs/design/020); past an app's queue=N, 503 busy\n"
+          "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
+          "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"
+          "  --send OUTPUT=http[s]://host:port/path: to anything else, over HTTP\n"
+          "  --senders FILE: more senders the --link-port takes, a line each: NAME KEY\n"
+          "  --name NAME: the node's name, its sends' sources being NAME.OUTPUT (the module file's name without\n"
+          "      .pmod unless given; the first line out says it)\n"
+          "  --memory BYTES: what the app's states may hold (lists' items, texts, sends not yet stored): an event\n"
+          "      past it is refused, 503 memory (docs/design/013-memory-budget.md)\n"
+          "  --work N: what an event, or one evaluation of a view, may run, in instructions counted as written: past\n"
+          "      it the event is refused and the view has no value, 422 work (docs/design/017-apps-on-one-host.md)\n"
+          "  --window BYTES: what each --send holds of its sends beyond what its receiver has (and 65,536 sends);\n"
+          "      the outbox keeps the rest\n"
+          "pure-serve --version | --help\n", to);
+    return to == stdout ? 0 : 2;
+}
+
 int main(int argc, char **argv) {
     static PureSurfaceHost surface;
+    if (argc == 2 && !strcmp(argv[1], "--version")) { /* the version (the VERSION file's), and the module format it loads */
+        puts("pure-serve " PURE_VERSION "\nmodule format 7");
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--help")) return usage(stdout);
     /* What follows -- is the surface's: its library first, then its arguments. */
     int options = argc, surface_argc = 0;
     char *surface_argv[64];
@@ -5134,39 +5180,5 @@ int main(int argc, char **argv) {
     free(workers_made);
     return 0;
 usage:
-    fputs("pure-serve --module FILE.pmod --store DIRECTORY [--port 8767] [--threads 1|N|auto] [--budget BYTES] "
-          "[--connections 1024] [--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--view-workers N] [--send OUTPUT=URL ...] [--name NAME] "
-          "[--send-ca FILE] [--reply OUTPUT=INPUT ...] [--seal OUTPUT=KEY ...] [--key FILE] [--sealed-only] "
-          "[--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] [--link-idle-ms 30000] [--memory BYTES] [--work N] "
-          "[--window 4194304] [--tokens FILE] [--surface LIBRARY [-- ARGUMENTS]]\n"
-          "pure-serve --apps FILE [--port 8767] [--threads 1|N|auto] [--workers N] [--app-slots 256] [--budget BYTES] [--connections 1024] "
-          "[--timeout-ms 10000] [--subscribers 65536] [--push-every-ms 10] [--view-workers N] [--key FILE] [--sealed-only] [--sender NAME=KEY ...] [--link-port PORT] [--senders FILE] "
-          "[--send-ca FILE] [--window BYTES]\n"
-          "  --apps FILE: a host of apps (docs/design/017-apps-on-one-host.md), a line each:\n"
-          "      NAME MODULE.pmod STORE [memory=BYTES] [work=N] [queue=N] [send=OUTPUT=URL ...] [seal=OUTPUT=KEY ...]\n"
-          "      [reply=OUTPUT=INPUT ...] [tokens=FILE]; its routes start /NAME/, its sends' sources are NAME.OUTPUT, and a\n"
-          "      --link-port takes its inputs as NAME/INPUT. On SIGHUP the host reads FILE again: the apps of lines\n"
-          "      gone stop, those of new lines start, those of changed lines change in place (their states kept in\n"
-          "      memory) unless their store moved; a line out says what it did\n"
-          "  --app-slots N: the apps a host of apps holds at most, those started later included\n"
-          "  --tokens FILE (tokens=FILE for an app of --apps): its routes take only requests bearing a token\n"
-          "      (Authorization: Bearer TOKEN) the file grants, a line each: read|write|input=NAME[,NAME] SHA256-HEX;\n"
-          "      a delivery sealed by a key --sender names needs none (docs/design/017-apps-on-one-host.md, 3b)\n"
-          "pure-serve --make-token read|write|input=NAME[,NAME]: a new token and its line for a tokens file\n"
-          "  --workers N: the threads the apps' owners take turns on (1 for one app; for apps, one a CPU at most)\n"
-          "  --view-workers N: the threads that show views with a body, asked and pushed, off the connection threads\n"
-          "      (a CPU each; 0: on the connection threads, docs/design/020); past an app's queue=N, 503 busy\n"
-          "  --send OUTPUT=pure://host:port/INPUT: to a Pure node's --link-port, the way between nodes (UDP, no\n"
-          "      connection, docs/design/012-link-protocol.md; its key by --seal OUTPUT=KEY)\n"
-          "  --send OUTPUT=http[s]://host:port/path: to anything else, over HTTP\n"
-          "  --senders FILE: more senders the --link-port takes, a line each: NAME KEY\n"
-          "  --name NAME: the node's name, its sends' sources being NAME.OUTPUT (the module file's name without\n"
-          "      .pmod unless given; the first line out says it)\n"
-          "  --memory BYTES: what the app's states may hold (lists' items, texts, sends not yet stored): an event\n"
-          "      past it is refused, 503 memory (docs/design/013-memory-budget.md)\n"
-          "  --work N: what an event, or one evaluation of a view, may run, in instructions counted as written: past\n"
-          "      it the event is refused and the view has no value, 422 work (docs/design/017-apps-on-one-host.md)\n"
-          "  --window BYTES: what each --send holds of its sends beyond what its receiver has (and 65,536 sends);\n"
-          "      the outbox keeps the rest\n", stderr);
-    return 2;
+    return usage(stderr);
 }
