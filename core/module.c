@@ -1626,7 +1626,7 @@ PURE_COLD static bool function_names(PureModule *m, uint32_t fn, uint64_t *calls
             if (op->op != PURE_OP_LOOP && (arg >> 8 & 0xFF) == 1) list = arg >> 16; /* an index's list */
             break;
         case PURE_OP_BYTES_LOAD: case PURE_OP_BYTES_STORE: f->held |= UINT32_C(1) << (arg & 31); break;
-        case PURE_OP_CALL: if (arg < PURE_MODULE_FUNCTIONS) *calls |= UINT64_C(1) << arg; break;
+        case PURE_OP_CALL: if (arg < m->functions) *calls |= UINT64_C(1) << arg; break; /* one the module has: its row is read */
         default: break;
         }
         if (event_list_state(m, list)) states_add(bound_list(m, list) ? registers : lists, list);

@@ -6904,6 +6904,9 @@ static void functions_and_characters(void) {
         {{IC(0), IC(1), IC(0), IC(1), {PURE_OP_LOOP, PURE_LOOP_INTEGER, 0}, {RET, 0, 0}}, 6,
          {0, 6, 0, 0, {0}, {0}}, "loop above values"},
         {{{RET, 0, 0}}, 1, {0, 1, 0, 0, {6}, {0}}, "function signature"},
+        /* a call of a function the module has not (its one function is 0): refused, and what the functions change is
+         * not read past the module's own functions before it is */
+        {{{CALL, 63, 0}, {RET, 0, 0}}, 2, {0, 2, 0, 0, {0}, {0}}, "operand names no such state, field, constant or unit"},
     };
     for (size_t k = 0; k < LEN(refused); ++k) {
         FN fn = refused[k].fn;
