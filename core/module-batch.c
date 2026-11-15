@@ -233,6 +233,7 @@ typedef struct {
     const uint32_t *sel;        /* a selection running (NULL: none): its lanes */
     Selection selection;
     unsigned low_buffers, low_masks; /* the fewest left since a round began (tide) */
+    uint64_t room;              /* the most the nested loops' work may come to: what the event's budget has left for them */
 } Batch;
 
 static _Thread_local Batch batch;
@@ -2481,6 +2482,11 @@ static void nested(Batch *b, const PureOp *op, uint32_t pc) {
         }
         if (!alive) break;
         b->work += alive * per; /* each lane's round: its block and its LOOP, as written */
+        if (b->work > b->room) { /* past the event's budget: the batch's rounds are the executor's (which stops at the round that
+                                  * passes it), so no more of them are run here: the budget bounds the time too */
+            b->failed = true;
+            break;
+        }
         set_slot(b, slot, &low, t, live, alive);
         b->active = alive == n ? NULL : live == entry ? outer : new_mask(b, live, outer, alive);
         b->none = false;
@@ -2587,6 +2593,10 @@ static void walk_nested(Batch *b, const PureOp *op, uint32_t pc) {
         b->work += length * count[l]; /* as the walk opens: its block for each of its items */
     }
     release(b, &high), release(b, &low);
+    if (b->work > b->room) { /* past the event's budget (as in nested): its items are not walked here */
+        b->failed = true;
+        return;
+    }
     if (op->plan & PLAN_SPREAD) {
         spread(b, start, end, count, rows);
         return;
@@ -3301,6 +3311,7 @@ static int batch_run(Frame *frame, Loop *loop, unsigned *done) {
     b->slot = walking ? LOCALS : (uint32_t)(loop->slot - frame->ev->locals), b->end = loop->end;
     b->walk = walking ? (int)loop->walk.list : -1;
     b->failed = b->none = false, b->active = NULL, b->nest = (Nest){0}, b->work = 0, b->var = NULL;
+    b->room = budget - app->work - (n - 1) * per; /* (n rounds are paid for: this is not below 0) */
     b->plan = plan, b->sets = plan->sets, b->items = plan->items;
     b->sp = b->split_count = b->buffers = b->masks = b->read_count = b->store_count = b->spare_count = 0;
     b->mask_free_count = b->reduce_count = b->append_count = b->filter_count = b->known_count = b->cells_count = 0;

@@ -1916,6 +1916,43 @@ on go {
 }
 """
 
+def module_bounded_batches(aup, pure, work):
+    """The work budget bounds an event's time on every path. A loop in a batch's block whose rounds a message
+    counts (2^30 and more) ends as soon as its work passes the budget, with the fault and the work the
+    interpreter's rounds give; a batch ran such a loop's rounds to their end before it looked at the budget
+    (hours: the 60 s here are its failure)."""
+    import os
+    source, module = work / 'bounded.aup', work / 'bounded.pmod'
+    source.write_text("""state out = 0
+input go = message {
+  n: u32
+}
+on go {
+  let total = 0
+  for j in 0 .. go.n {
+    let s = 0
+    for k in 0 .. go.n {
+      s = s + s / 1000000000 + 1
+    }
+    total = total + s
+  }
+  out = total
+}
+""")
+    compile_module(aup, source, module)
+    given = 'budget 100000\nmessage go 04000050\nwork\n'  # n = 0x50000004
+    outputs = {name: subprocess.run([str(pure / 'build/pure-run'), str(module), '--views'], input=given, capture_output=True, text=True,
+                                    timeout=60, env=dict(os.environ, **env)).stdout
+               for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    said = [json.loads(line) for line in outputs['rounds'].splitlines()]
+    used = [line['work'] for line in said if 'work' in line]
+    failed = [line for line in said if line.get('error') == 'event failed']
+    assert len(failed) == 1 and failed[0]['fault'] == 'work' and len(used) == 1 and 0 < used[0] <= 100000, outputs['rounds']
+    for name in ('batches', 'all'):
+        assert outputs[name] == outputs['rounds'], (name, outputs[name])
+    return used[0]
+
+
 def module_specs(aup, pure, work):
     """Specs written in aup (docs/research/140), checked by their own cases
     on Pure's three paths, each path's output the same byte for byte: SHA-256
@@ -7331,6 +7368,7 @@ def main():
         report['module_moved_values'] = module_moved_values(aup, pure, work)
         report['module_store_restarts'] = module_store_restarts(aup, pure, work)
         report['module_specs'] = module_specs(aup, pure, work)
+        report['module_bounded_batches'] = module_bounded_batches(aup, pure, work)
         report['module_tier'] = module_tier(aup, pure, work)
         report['server_documents_requests'] = sum(server_documents(aup, pure, work, range(args.seeds), threads=threads)
                                                   for threads in (1, 3))
