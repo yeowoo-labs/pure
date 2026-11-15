@@ -31,7 +31,7 @@ HEADERS = $(wildcard core/*.h) $(wildcard link/*.h) $(wildcard serve/*.h) $(wild
 OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(MODEL) $(STORE))
 LINK_OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(LINK))
 
-.PHONY: all check
+.PHONY: all check fuzz fuzz-corpus
 all: $(BUILD)/libpure.a $(BUILD)/libpure-link.a $(BUILD)/pure-serve $(BUILD)/pure-crypto.so $(BUILD)/pure-run
 
 $(BUILD)/obj/%.o: %.c $(HEADERS)
@@ -132,6 +132,23 @@ $(BUILD)/test-tree-store-sanitized: store/test-tree-store.c $(STORE) $(HEADERS)
 # The HTTP host's checks build their apps with aup (the sibling checkout) and
 # compare documents with the earlier document server.
 AUP ?= ../aup
+# Coverage fuzzing of the loader, the verifier and events on a loaded module (tests/fuzz-load.c, tests/fuzz-run.c,
+# tests/fuzz.sh): clang's libFuzzer under ASan and UBSan, whatever CC is. Not part of check: it runs as long as
+# it is given.
+# (pointer-overflow is left out: its check of a null pointer plus zero, which C23 defines and the model does on empty
+# values, has no switch of its own.)
+FUZZ = clang -g -O1 -fno-omit-frame-pointer -fsanitize=fuzzer,address,undefined -fno-sanitize=pointer-overflow \
+	-fno-sanitize-recover=all $(INCLUDES)
+fuzz: $(BUILD)/fuzz-load $(BUILD)/fuzz-run
+$(BUILD)/fuzz-load: tests/fuzz-load.c $(MODEL) $(STORE) $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(FUZZ) tests/fuzz-load.c $(MODEL) $(STORE) -pthread -lm -o $@
+$(BUILD)/fuzz-run: tests/fuzz-run.c cli/pure-run.c $(MODEL) $(STORE) $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(FUZZ) -DPURE_VERSION='"fuzz"' tests/fuzz-run.c $(MODEL) $(STORE) -pthread -lm -o $@
+fuzz-corpus:
+	sh tests/fuzz.sh corpus $(AUP) $(AUP)/../vega
+
 check: all $(BUILD)/test-module $(BUILD)/test-module-sanitized $(BUILD)/test-tree-store $(BUILD)/test-tree-store-sanitized \
 		$(BUILD)/test-log $(BUILD)/test-link $(BUILD)/test-message-json $(BUILD)/module-probe $(BUILD)/clock-back.so
 	$(BUILD)/test-tree-store

@@ -4906,7 +4906,11 @@ static inline __attribute__((always_inline)) void open_frame(Frame *frame, const
     frame->end = block.start + block.length;
 }
 
-/* A block run by its compiled code. */
+/* A block run by its compiled code. The code is machine code a tier emitted: it has no type written before its entry
+ * for clang's function sanitizer to read (reading there may leave the code's mapping). */
+#if defined(__clang__)
+__attribute__((no_sanitize("function")))
+#endif
 static __attribute__((noinline)) PureResult run_compiled(PureCompiled code, const PureModule *m, PureValue *values,
                                                          PureBlock block, Event *ev, Slot *result) {
     Slot stack[PURE_MODULE_STACK];
