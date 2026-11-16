@@ -319,6 +319,27 @@ static void torn_head(const char *path) {
     expect(path, "torn", &o);
 }
 
+/* A commit whose bytes were torn counts again once the file has them again
+ * (written back from a copy), to the process that saw it torn too: what a
+ * process keeps of a file's heads is not that one was broken. It reads the
+ * commit, and as a writer it builds on it instead of writing over it. */
+static void mended(const char *path) {
+    unsigned char first[] = "first", second[] = "second";
+    int64_t revision;
+    CHECK(pure_store_put(path, "mend", 0, (PureSpan){first, 5}, &revision) == PURE_OK);
+    Oracle o = {first, 5, revision};
+    uint64_t record = published_end(path, "mend"); /* where the next commit's link goes */
+    CHECK(pure_store_put(path, "mend", o.revision, (PureSpan){second, 6}, &revision) == PURE_OK);
+    pure_tree_test_forget();              /* as a process that starts now */
+    tear(path, record + RECORD_SIZE + 3); /* a byte of the commit's bytes: its link is whole */
+    expect(path, "mend", &o);
+    tear(path, record + RECORD_SIZE + 3); /* and the same byte back */
+    expect(path, "mend", &(Oracle){second, 6, revision});
+    CHECK(pure_store_put(path, "mend", o.revision, (PureSpan){first, 1}, &revision) == PURE_CONFLICT);
+    pure_tree_test_forget();
+    expect(path, "mend", &(Oracle){second, 6, o.revision + 1});
+}
+
 /* Commits are found along their records: from a slot's head, which every
  * CHECKPOINT commits moves on, by a new process too; a damaged record ends
  * the walk at the commit before it, which the next writer builds on. */
@@ -1831,7 +1852,7 @@ static void clean(const char *path) {
 }
 
 int main(void) {
-    void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head, earlier_records, swept_pending,
+    void (*checks[])(const char *) = {oracle, amplification, faults, crashes, torn_head, mended, earlier_records, swept_pending,
                                       isolation, corruption, many_keys, revision_limit, keys,
                                       drafts, typing, draft_conflict, draft_relocation, draft_faults,
                                       draft_versions, anonymous_draft, batch, store_handle, frozen_path_draft, owner_lock, unsynced_compaction, threads, grouped,
@@ -1844,7 +1865,7 @@ int main(void) {
         clean(path);
     }
     puts("{\"tree_store\":\"random-oracle-balance-held-views-one-byte-amplification-faults-"
-         "process-crash-torn-head-earlier-records-swept-pending-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
+         "process-crash-torn-head-mended-earlier-records-swept-pending-lockless-isolation-compaction-corruption-1024-keys-revision-limit-key-listing-"
          "draft-oracle-typing-arena-conflict-relocation-commit-faults-held-versions-anonymous-"
          "atomic-batch-runtime-keys-store-handle-frozen-path-draft-owner-lock-unsynced-compaction-threads-group-commit-lost-commit-pending-head-publishing-apart-stores-apart-one-sync-records-"
          "stale-slot-passed-over-slot-before-held-torn-head-held-records-cycles-ring-reuse-ring-twice-ring-torn-ring-pins\"}");

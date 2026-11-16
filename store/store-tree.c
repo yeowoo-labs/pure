@@ -400,8 +400,15 @@ static bool decode_head(const unsigned char in[SLOT], bool record, Head *head) {
  * such luck. A writer builds only on a durable head, so the newer head was
  * written after the older one's commit was complete on the device.
  * The process remembers the heads it published or checked, so it reads a
- * commit's bytes at most once, and which of them it made durable. */
-enum { UNKNOWN, BROKEN, CHECKED, DURABLE, PUBLISHING };
+ * commit's bytes at most once, and which of them it made durable. A commit
+ * whose bytes do not match is not remembered: it is looked at again at each
+ * open. The file may be given the bytes back (written over from a copy), or
+ * be another file under the same numbers (a store removed and built again
+ * by the same events has the same heads, and a file system may give its file
+ * the removed one's device and inode); a process that went on holding the
+ * commit for broken would pass over a whole one, and as the writer write
+ * over it. */
+enum { UNKNOWN, CHECKED, DURABLE, PUBLISHING };
 enum { KNOWN = 32 };
 typedef struct { dev_t device; ino_t inode; uint64_t seq, check; int state; } Known;
 /* The newest head that counts per file, to follow records from. */
@@ -541,12 +548,11 @@ static bool pick(int fd, const struct stat *file, const unsigned char *slots[2],
         int state = recall(file, head);
         if (state == PUBLISHING && !writer) continue;
         if (state == UNKNOWN) {
-            state = whole(fd, head) ? CHECKED : BROKEN;
-            remember(file, head, state);
-        }
-        if (state == BROKEN) {
-            if (sequences) sequences[slot] = 0;
-            continue;
+            if (!whole(fd, head)) {
+                if (sequences) sequences[slot] = 0;
+                continue;
+            }
+            remember(file, head, CHECKED);
         }
         *out = *head;
         return true;
@@ -576,11 +582,10 @@ static bool follow(int fd, const struct stat *file, bool writer, const Head *hea
          next.seq != head->seq + 1 || next.start != head->end + SLOT)) return false;
     if (next.end > size) return false;
     int state = recall(file, &next);
-    if (state == BROKEN || (state == PUBLISHING && !writer)) return false;
+    if (state == PUBLISHING && !writer) return false;
     if (state == UNKNOWN) {
-        bool counts = whole(fd, &next);
-        remember(file, &next, counts ? CHECKED : BROKEN);
-        if (!counts) return false;
+        if (!whole(fd, &next)) return false;
+        remember(file, &next, CHECKED);
     }
     *out = next;
     return true;
