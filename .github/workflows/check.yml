@@ -1,6 +1,9 @@
-# One check for the three repositories, on both Linux architectures, with gcc and clang. The two old
-# workflows (prototypes/connections) are disabled_manually and last ran 2026-09-28 (failure); this replaces
-# them for the product tree. Committed disabled: turning it on (and the arm runners) is the maintainer's call.
+# One check for the three repositories, on both Linux architectures, with gcc and clang, in Debian 13: the system the
+# numbers are measured on (its OpenSSL seals, and its HarfBuzz is the one Vega's shaping is compared with). Each job
+# builds and checks aup, pure and vega, then runs the READMEs' commands from clean clones (tests/first-hour.sh).
+# A fifth job builds and checks aup and pure on the runner's own Ubuntu 24.04, whose OpenSSL (3.0) has no HPKE: the
+# plug-in is built without sealing and the checks that seal are left out by name.
+# aup's and vega's pushes do not start this workflow: it also runs once a day.
 name: check
 
 "on":
@@ -8,6 +11,8 @@ name: check
     branches: [master]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -24,21 +29,43 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
         cc: [gcc, clang]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    container: debian:trixie
+    timeout-minutes: 60
     env:
       CC: ${{ matrix.cc }}
     steps:
+      - name: Tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git make gcc clang libc6-dev python3 xxd curl \
+            pkg-config libssl-dev zlib1g-dev libfreetype-dev libharfbuzz-dev libegl-dev libgles-dev iproute2 procps
+          git config --global --add safe.directory '*'
       - uses: actions/checkout@v5
         with: {path: pure}
       - uses: actions/checkout@v5
         with: {repository: yeowoo-labs/aup, path: aup}
       - uses: actions/checkout@v5
         with: {repository: yeowoo-labs/vega, path: vega}
-      - name: Tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev python3
       - name: aup
         run: make -C aup -j"$(nproc)" && make -C aup check
       - name: pure
         run: make -C pure -j"$(nproc)" && make -C pure check AUP=../aup
       - name: vega
         run: make -C vega -j"$(nproc)" PURE=../pure && make -C vega check PURE=../pure
+      - name: The READMEs' commands, from clean clones
+        run: bash pure/tests/first-hour.sh "$PWD"
+
+  stock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with: {path: pure}
+      - uses: actions/checkout@v5
+        with: {repository: yeowoo-labs/aup, path: aup}
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zlib1g-dev libssl-dev python3
+      - name: aup
+        run: make -C aup -j"$(nproc)" && make -C aup check
+      - name: pure (its plug-in built without sealing)
+        run: make -C pure -j"$(nproc)" && make -C pure check AUP=../aup
