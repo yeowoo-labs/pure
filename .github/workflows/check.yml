@@ -1,6 +1,10 @@
 # One check for the three repositories, on both Linux architectures, with gcc and clang, in Debian 13: the system the
 # numbers are measured on (its OpenSSL seals, and its HarfBuzz is the one Vega's shaping is compared with). Each job
-# builds and checks aup, pure and vega, then runs the READMEs' commands from clean clones (tests/first-hour.sh).
+# builds and checks aup, pure and vega, runs the READMEs' commands from clean clones (tests/first-hour.sh), and records
+# what pure-run answered in the checks' 486 runs (research/experiments/029-across-machines); the job after the four
+# fails unless the four records hold the same runs with the same bytes: the answers do not depend on the machine or
+# the compiler. Node is there for aup's comparison with the workbench, and the fonts for Vega's glyphs, pixels and
+# shaping; what needs Chromium (Vega's page), a display's card and the accessibility bus is left out by Vega's check.
 # A fifth job builds and checks aup and pure on the runner's own Ubuntu 24.04, whose OpenSSL (3.0) has no HPKE: the
 # plug-in is built without sealing and the checks that seal are left out by name.
 # aup's and vega's pushes do not start this workflow: it also runs once a day.
@@ -37,8 +41,9 @@ jobs:
       - name: Tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates git make gcc clang libc6-dev python3 xxd curl \
-            pkg-config libssl-dev zlib1g-dev libfreetype-dev libharfbuzz-dev libegl-dev libgles-dev iproute2 procps
+          apt-get install -y --no-install-recommends ca-certificates git make gcc clang libclang-rt-dev libc6-dev python3 xxd curl \
+            pkg-config libssl-dev zlib1g-dev libfreetype-dev libharfbuzz-dev libegl-dev libgles-dev iproute2 procps \
+            nodejs python3-fonttools fonts-dejavu-core fonts-dejavu-mono fonts-noto-cjk fonts-freefont-ttf
           git config --global --add safe.directory '*'
       - uses: actions/checkout@v5
         with: {path: pure}
@@ -54,6 +59,31 @@ jobs:
         run: make -C vega -j"$(nproc)" PURE=../pure && make -C vega check PURE=../pure
       - name: The READMEs' commands, from clean clones
         run: bash pure/tests/first-hour.sh "$PWD"
+      - name: What pure-run answered, run by run
+        run: python3 pure/research/experiments/029-across-machines/record_all.py aup pure "$PWD/record.jsonl"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: record-${{ matrix.os }}-${{ matrix.cc }}
+          path: record.jsonl
+          if-no-files-found: error
+
+  same:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: record-*
+          path: records
+      - name: The four builds answered the same, byte for byte
+        run: |
+          ls records
+          test "$(ls records | wc -l)" = 4
+          for other in records/*/record.jsonl; do
+            python3 research/experiments/029-across-machines/compare.py --whole records/record-ubuntu-24.04-gcc/record.jsonl "$other"
+          done
 
   stock:
     runs-on: ubuntu-24.04
