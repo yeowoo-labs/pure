@@ -32,7 +32,14 @@ OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(MODEL) $(STORE))
 LINK_OBJECTS = $(patsubst %.c,$(BUILD)/obj/%.o,$(LINK))
 
 .PHONY: all check fuzz fuzz-corpus
-all: $(BUILD)/libpure.a $(BUILD)/libpure-link.a $(BUILD)/pure-serve $(BUILD)/pure-crypto.so $(BUILD)/pure-run
+# OpenSSL comes in by a plug-in (pure-crypto.so) that pure-serve maps the first time it needs it. Where OpenSSL's
+# headers are not installed the plug-in is not built: the rest is, pure-serve says so when it is asked for https, keys
+# or links, and make check leaves out the checks that need it, by name. Against an OpenSSL older than 3.2 the
+# plug-in is built without sealing (link/crypto-openssl.c).
+OPENSSL := $(shell printf '\#include <openssl/ssl.h>\n' | $(CC) $(CPPFLAGS) -E -x c - > /dev/null 2>&1 && echo yes)
+CRYPTO := $(if $(OPENSSL),$(BUILD)/pure-crypto.so)
+all: $(BUILD)/libpure.a $(BUILD)/libpure-link.a $(BUILD)/pure-serve $(CRYPTO) $(BUILD)/pure-run
+	@$(if $(OPENSSL),:,echo "pure-crypto.so is left out: OpenSSL's headers are not installed (https receivers, keys and links need it)")
 
 $(BUILD)/obj/%.o: %.c $(HEADERS)
 	@mkdir -p $(dir $@)
@@ -150,13 +157,13 @@ fuzz-corpus:
 	sh tests/fuzz.sh corpus $(AUP) $(AUP)/../vega
 
 check: all $(BUILD)/test-module $(BUILD)/test-module-sanitized $(BUILD)/test-tree-store $(BUILD)/test-tree-store-sanitized \
-		$(BUILD)/test-log $(BUILD)/test-link $(BUILD)/test-message-json $(BUILD)/module-probe $(BUILD)/clock-back.so
+		$(BUILD)/test-log $(if $(OPENSSL),$(BUILD)/test-link) $(BUILD)/test-message-json $(BUILD)/module-probe $(BUILD)/clock-back.so
 	$(BUILD)/test-tree-store
 	ASAN_OPTIONS=detect_leaks=1 $(BUILD)/test-tree-store-sanitized > /dev/null
 	$(BUILD)/test-log
 	$(BUILD)/test-module
 	ASAN_OPTIONS=detect_leaks=1 $(BUILD)/test-module-sanitized > /dev/null
-	$(BUILD)/test-link
+	$(if $(OPENSSL),$(BUILD)/test-link,@echo "test-link is left out: no pure-crypto.so (OpenSSL's headers are not installed)")
 	$(BUILD)/test-message-json
 	$(MAKE) -C $(AUP) build/aup
 	$(MAKE) -C prototypes/connections BUILD=build/tree STORE=store-tree.c build/tree/pure-connections

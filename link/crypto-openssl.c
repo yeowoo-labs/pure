@@ -1,8 +1,16 @@
 #define _GNU_SOURCE
 /* pure-crypto.so: what pure-serve asks of OpenSSL (link/crypto.h), mapped
  * only when a server seals, opens a seal or reaches an https receiver. It
- * exports one table, pure_crypto. */
+ * exports one table, pure_crypto.
+ *
+ * Sealing is HPKE, which OpenSSL has from 3.2 (openssl/hpke.h). Built against an older OpenSSL the plug-in has all
+ * but sealing: a sealer or an opener is not made (as for a suite it does not know), and pure_crypto_seals is 0. */
 #include "crypto.h"
+#if !defined(PURE_NO_HPKE) && defined(__has_include)
+#if __has_include(<openssl/hpke.h>)
+#define PURE_HPKE 1
+#endif
+#endif
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -10,7 +18,9 @@
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
+#ifdef PURE_HPKE
 #include <openssl/hpke.h>
+#endif
 #include <openssl/kdf.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
@@ -93,6 +103,8 @@ static void tls_close(PureTls *tls) { SSL_free((SSL *)tls); }
  * suite names; auth mode when the sender seals with a key of its own. A
  * session is one encapsulation, its seals numbered by the context. */
 struct PureSealKey { EVP_PKEY *key; };
+#ifdef PURE_HPKE
+const int pure_crypto_seals = 1;
 struct PureSealer { OSSL_HPKE_CTX *context; };
 struct PureOpener { OSSL_HPKE_CTX *context; };
 
@@ -106,6 +118,9 @@ static bool suite_named(const char *name, OSSL_HPKE_SUITE *out) {
     *out = suite;
     return true;
 }
+#else
+const int pure_crypto_seals = 0;
+#endif
 
 static pthread_once_t secure_once = PTHREAD_ONCE_INIT;
 static void secure_heap(void) { CRYPTO_secure_malloc_init(16384, 32); }
@@ -156,6 +171,30 @@ static void seal_key_free(PureSealKey *key) {
     free(key);
 }
 
+#ifndef PURE_HPKE /* no HPKE in this OpenSSL: nothing is sealed or opened here */
+static PureSealer *sealer(const char *suite_name, const unsigned char peer[PURE_SEAL_KEY], const PureSealKey *own,
+                          unsigned char enc[PURE_SEAL_KEY]) {
+    (void)suite_name, (void)peer, (void)own, (void)enc;
+    return NULL;
+}
+static bool seal(PureSealer *s, const char *aad, const unsigned char *plain, size_t size, unsigned char *out,
+                 uint64_t *n) {
+    (void)s, (void)aad, (void)plain, (void)size, (void)out, (void)n;
+    return false;
+}
+static void sealer_free(PureSealer *s) { (void)s; }
+static PureOpener *opener(const PureSealKey *key, const char *suite_name, const unsigned char enc[PURE_SEAL_KEY],
+                          const unsigned char *from) {
+    (void)key, (void)suite_name, (void)enc, (void)from;
+    return NULL;
+}
+static bool unseal(PureOpener *o, uint64_t n, const char *aad, const unsigned char *sealed, size_t size,
+                   unsigned char *plain) {
+    (void)o, (void)n, (void)aad, (void)sealed, (void)size, (void)plain;
+    return false;
+}
+static void opener_free(PureOpener *o) { (void)o; }
+#else
 static PureSealer *sealer(const char *suite_name, const unsigned char peer[PURE_SEAL_KEY], const PureSealKey *own,
                           unsigned char enc[PURE_SEAL_KEY]) {
     OSSL_HPKE_SUITE suite;
@@ -218,6 +257,7 @@ static void opener_free(PureOpener *o) {
     OSSL_HPKE_CTX_free(o->context);
     free(o);
 }
+#endif
 
 /* ---- Links: X25519 between two nodes' keys, HKDF-SHA256, AES-128-GCM with
  * the caller's nonce (one context sealing and one opening, each keeping its

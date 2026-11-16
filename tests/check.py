@@ -7330,6 +7330,17 @@ def server_tokens(aup, pure, work):
             'unauthorized': stats['unauthorized'], 'forbidden': stats['forbidden']}
 
 
+def crypto_of(pure):
+    """What OpenSSL's plug-in offers here (build/pure-crypto.so, or where PURE_CRYPTO names it, as pure-serve
+    looks): None when it is not there (OpenSSL's headers were not installed when Pure was built), else whether it
+    seals (HPKE: OpenSSL 3.2 or later)."""
+    import ctypes, os
+    path = Path(os.environ.get('PURE_CRYPTO', pure / 'build' / 'pure-crypto.so'))
+    if not path.exists():
+        return None
+    return bool(ctypes.c_int.in_dll(ctypes.CDLL(str(path)), 'pure_crypto_seals').value)
+
+
 def versions(aup, pure, work):
     """pure-run and pure-serve say their name with the VERSION file's line, then the module format they load: the
     eighth byte of a module aup built. --help says how each is called, on standard output; called another way each
@@ -7359,6 +7370,14 @@ def main():
     report = {}
     with tempfile.TemporaryDirectory(prefix='pure-check-') as directory:
         work = Path(directory)
+        crypto = crypto_of(pure)
+
+        def needing(what, check, *given):  # a check that needs OpenSSL's plug-in, or its sealing: left out, by name, where it is not
+            if crypto is None:
+                return "left out: no pure-crypto.so (OpenSSL's headers were not installed)"
+            if what == 'seals' and not crypto:
+                return 'left out: this OpenSSL does not seal (HPKE came with 3.2)'
+            return check(*given)
         report['versions'] = versions(aup, pure, work)
         report['module_ranges'] = module_ranges(aup, pure, work)
         report['module_assumptions'] = module_assumptions(aup, pure, work)
@@ -7388,17 +7407,17 @@ def main():
         report['server_clocks'] = server_clocks(aup, pure, work)
         report['server_plain_edit'] = server_plain_edit(aup, pure, work)
         report['server_links'] = server_links(aup, pure, work)
-        report['server_links_udp'] = server_links_udp(aup, pure, work)
-        report['server_links_udp_lossy'] = server_links_udp_lossy(aup, pure, work)
-        report['server_links_refused'] = server_links_refused(aup, pure, work)
-        report['server_memory'] = server_memory(aup, pure, work)
-        report['server_windows'] = server_windows(aup, pure, work)
-        report['server_upgrade'] = server_upgrade(aup, pure, work)
-        report['server_fields'] = server_fields(aup, pure, work)
-        report['server_links_independent'] = server_links_independent(aup, pure, work)
-        report['server_links_moved'] = server_links_moved(aup, pure, work)
-        report['server_webhook'] = server_webhook(aup, pure, work)
-        report['server_sealed'] = server_sealed(aup, pure, work)
+        report['server_links_udp'] = needing('crypto', server_links_udp, aup, pure, work)
+        report['server_links_udp_lossy'] = needing('crypto', server_links_udp_lossy, aup, pure, work)
+        report['server_links_refused'] = needing('crypto', server_links_refused, aup, pure, work)
+        report['server_memory'] = needing('crypto', server_memory, aup, pure, work)
+        report['server_windows'] = needing('crypto', server_windows, aup, pure, work)
+        report['server_upgrade'] = needing('crypto', server_upgrade, aup, pure, work)
+        report['server_fields'] = needing('seals', server_fields, aup, pure, work)
+        report['server_links_independent'] = needing('crypto', server_links_independent, aup, pure, work)
+        report['server_links_moved'] = needing('crypto', server_links_moved, aup, pure, work)
+        report['server_webhook'] = needing('crypto', server_webhook, aup, pure, work)
+        report['server_sealed'] = needing('seals', server_sealed, aup, pure, work)
         report['server_surface'] = server_surface(aup, pure, work)
         report['server_queries'] = server_queries(aup, pure, work)
         report['server_rows'] = server_rows(aup, pure, work)
@@ -7406,12 +7425,12 @@ def main():
         report['server_arguments'] = server_arguments(aup, pure, work)
         report['server_answers'] = server_answers(aup, pure, work)
         report['server_answers_memory'] = server_answers_memory(aup, pure, work)
-        report['server_meaning'] = server_meaning(aup, pure, work)
+        report['server_meaning'] = needing('seals', server_meaning, aup, pure, work)
         report['server_work'] = server_work(aup, pure, work)
         report['server_apps'] = server_apps(aup, pure, work)
-        report['server_apps_links'] = server_apps_links(aup, pure, work)
-        report['server_apps_lifecycle'] = server_apps_lifecycle(aup, pure, work)
-        report['server_tokens'] = server_tokens(aup, pure, work)
+        report['server_apps_links'] = needing('crypto', server_apps_links, aup, pure, work)
+        report['server_apps_lifecycle'] = needing('crypto', server_apps_lifecycle, aup, pure, work)
+        report['server_tokens'] = needing('seals', server_tokens, aup, pure, work)
         report['server_transient'] = server_transient(aup, pure, work)
         report['server_runaway'] = server_runaway(aup, pure, work)
         report['server_view_bodies'] = server_view_bodies(aup, pure, work)
