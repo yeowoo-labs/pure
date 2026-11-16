@@ -5336,7 +5336,9 @@ def server_clocks(aup, pure, work):
             share = (cpu_seconds(host.process.pid) - used) / (time.time() - began)
         finally:
             stats = host.stop()[-1]
-        assert stats['ticks'] >= 30 and share < 0.25 and 3 <= stats['delivery_attempts'] <= 12, \
+        # (Ticks: timers that stopped leave 0 or 1. How many there are beyond that is the store's medium, since a
+        # tick is a save: 59 where the store is in RAM, 20 once on a CI runner's disk.)
+        assert stats['ticks'] >= 5 and share < 0.25 and 3 <= stats['delivery_attempts'] <= 12, \
             (shift, stats['ticks'], share, stats['delivery_attempts'])
         seen[f'shift_{shift}'] = {'ticks': stats['ticks'], 'cpu_share': round(share, 3),
                                   'wire_attempts': stats['delivery_attempts']}
