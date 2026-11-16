@@ -33,6 +33,9 @@ load|run)
     minutes=${2:?minutes} workers=${3:-3}
     root=$(pwd)
     mkdir -p build/fuzz-crashes "build/fuzz-corpus/$1" "build/fuzz-logs/$1"
+    # (ASan keeps freed blocks aside, 256 MiB of them by default: with a corpus of thousands that alone passes the
+    # workers' 600 MiB. 32 MiB keeps a use after free seen and the workers near 150 MiB.)
+    export ASAN_OPTIONS="${ASAN_OPTIONS:-quarantine_size_mb=32}"
     cd "build/fuzz-logs/$1"  # each worker's log (fuzz-N.log) lands where it runs
     rm -f fuzz-*.log
     python3 "$root/research/guard.py" --most 2048 -- "$root/build/fuzz-$1" -max_total_time=$((60 * minutes)) -jobs="$workers" \
