@@ -1532,7 +1532,7 @@ bool pure_batch_recurs(const PureModule *m, uint32_t s, uint32_t start, const ui
     unsigned x = m->code[s].arg & 0xFF;
     uint32_t p = s;
     while (p > start && m->height[p]) --p; /* its statement's start: nothing on the stack */
-    if (m->height[p]) return false;
+    if (m->height[p] || m->height[s] != 1) return false; /* and the set its end: e alone is on the stack there */
     for (uint32_t at = p; at < s; ++at) {
         const PureOp *op = &m->code[at];
         unsigned local = op->arg & 0xFF;

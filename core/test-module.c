@@ -7703,7 +7703,7 @@ static void loops(void) {
     constants[1] = page;
     static const I inputs[] = {KEY("sum", "KeyS"), KEY("brk", "KeyB"), KEY("nest", "KeyN"), KEY("seen", "KeyE"),
                                KEY("huge", "KeyH"), KEY("pages", "KeyP"), KEY("wide", "KeyI"), KEY("frac", "KeyF"),
-                               KEY("idle", "KeyZ"), KEY("add", "KeyA")};
+                               KEY("idle", "KeyZ"), KEY("add", "KeyA"), KEY("mid", "KeyM")};
     O code[] = {
         /* sum: s = 0; for i in 0 .. n { s = s + i } (9) */
         {C, 0, 0}, {ST, S_, 0}, {C, 0, 0}, {L, N, 0}, {LOOP, BODY(0, 4), 0}, {L, S_, 0}, {LL, 0, 0}, {ADD, 0, 0}, {ST, S_, 0},
@@ -7732,12 +7732,19 @@ static void loops(void) {
         /* idle at 91: for i in 0 .. 1e15 { } (3); add at 94: xs.append(row { n }); n = n + 1 (6) */
         {C, 0, 0}, {C, 0, 1e15}, {LOOP, BODY(0, 0), 0},
         {L, N, 0}, {LA, XS, 0}, {L, N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, N, 0},
+        /* mid at 100: a = 0; x = 1; for i in 0 .. 40 { t = x * 3 - x, with x = 5 set while x * 3 and x wait on the
+         * stack; a = a + t }; s = a (21). A set that does not end its statement: no source writes one, the format
+         * allows it, and x is no recurrence of the loop's batches (their x = e is a whole statement). */
+        {C, 0, 0}, {PURE_OP_LOCAL_STORE, 3, 0}, {C, 0, 1}, {PURE_OP_LOCAL_STORE, 1, 0}, {C, 0, 0}, {C, 0, 40},
+        {LOOP, BODY(0, 12), 0}, {LL, 1, 0}, {C, 0, 3}, {PURE_OP_MUL, 0, 0}, {LL, 1, 0}, {C, 0, 5}, {PURE_OP_LOCAL_STORE, 1, 0},
+        {PURE_OP_SUB, 0, 0}, {PURE_OP_LOCAL_STORE, 2, 0}, {LL, 3, 0}, {LL, 2, 0}, {ADD, 0, 0}, {PURE_OP_LOCAL_STORE, 3, 0},
+        {LL, 3, 0}, {ST, S_, 0},
     };
     code[77] = IC(INT64_MAX - 3);
     code[78] = IC(INT64_MAX);
     code[85] = IC(INT64_MAX - 1);
     static const H handlers[] = {{1, 0, 9}, {3, 9, 14}, {5, 23, 23}, {7, 46, 15}, {9, 61, 7}, {11, 68, 7},
-                                 {13, 75, 13}, {15, 88, 3}, {17, 91, 3}, {19, 94, 6}};
+                                 {13, 75, 13}, {15, 88, 3}, {17, 91, 3}, {19, 94, 6}, {21, 100, 21}};
     Spec spec = {nums, 2, inputs, LEN(inputs), NULL, 0, handlers, LEN(handlers), code, LEN(code), NULL, 0, states, 3,
                  constants, 2, NULL, 0, records, 2, NULL, 0};
     CHECK(load(spec, &module_a) == PURE_OK);
@@ -7753,6 +7760,8 @@ static void loops(void) {
     CHECK(press(&app, 3) == PURE_OK && app.values[S_].num == 3 && !pure_list_count(app.lists[SEEN]));
     CHECK(press(&app, 3) == PURE_OK && app.values[S_].num == 3); /* each event's own */
     CHECK(press(&app, 6) == PURE_OK && app.values[S_].num == 3);
+    CHECK(press(&app, 10) == PURE_OK && app.values[S_].num == 2 + 39 * 10); /* x: 1, then 5 */
+    CHECK(press(&app, 3) == PURE_OK && app.values[S_].num == 3);
     /* A loop that would not end runs out of work, by default too, and changes nothing. */
     CHECK(press(&app, 4) == PURE_LIMIT && app.fault == PURE_FAULT_WORK && app.values[S_].num == 3);
     CHECK(app.work <= PURE_WORK_DEFAULT && app.work > PURE_WORK_DEFAULT - 5);
@@ -7768,6 +7777,17 @@ static void loops(void) {
     pure_app_memory(&app, 0);
     pure_app_work(&app, 10); /* a budget of its own: the sum's 9, and not one time round */
     CHECK(press(&app, 0) == PURE_LIMIT && app.values[S_].num == 3);
+    pure_app_stop(&app);
+    /* Without the tier's machine code the executor runs the loops, by batches where the load planned them: the
+     * same answers ("mid", of 40 rounds where a batch takes 16 or more, by rounds: its x is not a batch's
+     * recurrence). */
+    pure_jit_free(module_a.jit);
+    module_a.jit = NULL;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    for (int k = 0; k < 10; ++k) CHECK(press(&app, 9) == PURE_OK);
+    CHECK(press(&app, 0) == PURE_OK && app.values[S_].num == 45);
+    CHECK(press(&app, 10) == PURE_OK && app.values[S_].num == 2 + 39 * 10);
+    CHECK(press(&app, 2) == PURE_OK && app.values[S_].num == 100 + 3 * 2 * 100);
     pure_app_stop(&app);
 
     /* What the verifier refuses. */
