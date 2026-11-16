@@ -96,10 +96,14 @@ $(BUILD)/test-module: core/test-module.c $(MODEL) $(STORE) $(HEADERS)
 # The same, under AddressSanitizer and UndefinedBehaviorSanitizer with leaks
 # counted: snapshots are read and let go on other threads (eebdeea left a
 # race on their register and leaks that the plain build passes).
+# (Under clang pointer-overflow is left out: clang counts a null pointer plus zero there, with no switch of its own.
+# The model forms an empty value's span so, from an arena or a payload that has no bytes yet; C2y defines it (N3322),
+# and gcc's sanitizer, which keeps the check, passes it.)
+NULL_PLUS_ZERO := $(if $(findstring clang,$(shell $(CC) --version 2> /dev/null)),-fno-sanitize=pointer-overflow)
 $(BUILD)/test-module-sanitized: core/test-module.c $(MODEL) $(STORE) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -std=c17 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
-		-fsanitize=address,undefined -fno-sanitize-recover=all $(INCLUDES) -DPURE_STORE_TEST core/test-module.c \
+		-fsanitize=address,undefined $(NULL_PLUS_ZERO) -fno-sanitize-recover=all $(INCLUDES) -DPURE_STORE_TEST core/test-module.c \
 		$(MODEL) $(STORE) $(LDFLAGS) -pthread -lm $(LDLIBS) -o $@
 
 # A link's two sides through a network of the test's own (pure-crypto.so beside it).
@@ -133,7 +137,7 @@ $(BUILD)/test-tree-store: store/test-tree-store.c $(STORE) $(HEADERS)
 $(BUILD)/test-tree-store-sanitized: store/test-tree-store.c $(STORE) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -std=c17 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer \
-		-fsanitize=address,undefined -fno-sanitize-recover=all $(INCLUDES) -DPURE_STORE_TEST store/test-tree-store.c \
+		-fsanitize=address,undefined $(NULL_PLUS_ZERO) -fno-sanitize-recover=all $(INCLUDES) -DPURE_STORE_TEST store/test-tree-store.c \
 		$(STORE) $(LDFLAGS) -pthread $(LDLIBS) -o $@
 
 # The HTTP host's checks build their apps with aup (the sibling checkout) and
@@ -142,8 +146,7 @@ AUP ?= ../aup
 # Coverage fuzzing of the loader, the verifier and events on a loaded module (tests/fuzz-load.c, tests/fuzz-run.c,
 # tests/fuzz.sh): clang's libFuzzer under ASan and UBSan, whatever CC is. Not part of check: it runs as long as
 # it is given.
-# (pointer-overflow is left out: its check of a null pointer plus zero, which C23 defines and the model does on empty
-# values, has no switch of its own.)
+# (pointer-overflow is left out, as in the sanitized tests under clang: NULL_PLUS_ZERO above.)
 FUZZ = clang -g -O1 -fno-omit-frame-pointer -fsanitize=fuzzer,address,undefined -fno-sanitize=pointer-overflow \
 	-fno-sanitize-recover=all $(INCLUDES)
 fuzz: $(BUILD)/fuzz-load $(BUILD)/fuzz-run
