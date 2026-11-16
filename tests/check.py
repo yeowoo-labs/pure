@@ -6303,8 +6303,8 @@ def server_apps_lifecycle(aup, pure, work):
         host.stop()
     module = {name: work / f'{name}.pmod' for name in ('life', 'life-next', 'life-sender', 'life-taker', 'life-taker-next')}
     store = {name: work / f'life-store-{name}' for name in ('a', 'b', 'c', 'src', 'dst', 'dstl', 'e', 'srcf')}
-    (work / 'life-ro').mkdir()
-    store['e'] = work / 'life-ro' / 'e'
+    (work / 'life-held').write_text('')  # a file where e's store's folder will be: see "cannot be made yet" below
+    store['e'] = work / 'life-held' / 'e'
     lines = {'a': f"a {module['life']} {store['a']}", 'b': f"b {module['life']} {store['b']}",
              'src': f"src {module['life-sender']} {store['src']} send=here=dst/take",
              'dst': f"dst {module['life-taker']} {store['dst']}", 'dstl': f"dstl {module['life-taker']} {store['dstl']}"}
@@ -6450,14 +6450,14 @@ def server_apps_lifecycle(aup, pure, work):
         lines['c'] = f"c {module['life']} {work / 'life-store-c2'}"
         _, did = reading(['a', 'src', 'dst', 'dstl', 'c'])
         assert did['c']['did'] == 'restarted' and number(host.port, '/c/views/total') == 0, did
-        # An app whose store cannot be made yet stops alone; once it can, the next reading starts it.
+        # An app whose store cannot be made yet stops alone; once it can, the next reading starts it. (A file stands
+        # where the store's folder would be: no one makes a store under a file, root either, which a folder without
+        # write permission would let through.)
         lines['e'] = f"e {module['life']} {store['e']}"
-        os.chmod(work / 'life-ro', 0o500)
-        try:
-            _, did = reading(['a', 'src', 'dst', 'dstl', 'c', 'e'])
-        finally:
-            os.chmod(work / 'life-ro', 0o700)
+        _, did = reading(['a', 'src', 'dst', 'dstl', 'c', 'e'])
         assert not did['e']['running'] and 'store' in did['e']['why'] and did['c']['did'] == 'kept', did
+        (work / 'life-held').unlink()
+        (work / 'life-held').mkdir()
         _, did = reading()
         assert did['e'] == {'name': 'e', 'running': True, 'did': 'started'}, did
         assert http(host.port, 'POST', '/e/inputs/add?step=3')[0] == 200
