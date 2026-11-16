@@ -124,9 +124,10 @@ TPC-C, 140의 명세 앱)으로 다시 써야 한다. 그 표의 미완료(실�
 변경을 주고받는다. CLI의 자동화와 네이티브 UI가 같은 앱 로직을 사용해야 한다.
 현재 브라우저 UI나 Python 요청 클라이언트를 네이티브 앱 완성으로 대체하지 않는다.
 
-검증 기기는 로컬 Raspberry Pi 5(Linux AArch64)다(2026-09-25 변경). 아래의 macOS 관련
-기록과 [Apple Silicon CI 작업](.github/workflows/native-macos-arm64.yml)은 선택적인 이식성
-확인으로 남기며 완료 조건이 아니다. macOS 지원을 주장하지도 않는다.
+검증 기기는 로컬 Raspberry Pi 5(Linux AArch64)다(2026-09-25 변경). CI([check](.github/workflows/check.yml),
+2026-11-15부터)는 x86-64와 arm의 리눅스 러너에서 세 저장소의 검사를 gcc와 clang으로 돈다. 아래의 macOS 관련
+기록은 문서 앱 시기의 선택적인 이식성 확인이고 완료 조건이 아니다(그때 쓴 Apple Silicon CI 작업과 4 KiB 페이지 작업은
+2026-11-16에 지웠다: 한 번도 통과한 적이 없고, 페이지 저장 검사는 check의 한 걸음으로 옮겼다). macOS 지원을 주장하지도 않는다.
 114 (lab note, not public)에서 코어, 실행, 저장소를 x86_64의 WSL2(4 KiB 페이지, gcc 13)와 M3의
 macOS(clang 21)에서 한 번 돌렸다. aup의 검사가 돌리는 `pure-run` 1,053번이 세 기계에서 같은 출력을 내고, 같은 사건으로
 만든 저장소가 세 기계에서 바이트까지 같다. 호스트와 링크는 리눅스에서만 봤다.
@@ -156,7 +157,7 @@ macOS 저장 어댑터의 `O_NOFOLLOW` 헤더 노출 문제를 고쳤고, Linux 
 추가했다. Linux AArch64에서 통과했으며 Apple Silicon 빌드·실행은 아직 확인하지 않았다.
 실제 터미널 작업을 검사하는 `check-portable-tui`도 Linux AArch64에서 통과했다.
 이 경로는 메모리 수치를 수집하지 않으므로 기존 Linux RSS 상한 검사를 대신하지 않는다.
-[Apple Silicon CI 작업](.github/workflows/native-macos-arm64.yml)은 네이티브 앱·
+Apple Silicon CI 작업(`.github/workflows/native-macos-arm64.yml`, 2026-11-16에 지움)은 네이티브 앱·
 터미널·1 MiB RSS·프로세스 내 전달을 실제 macOS arm64에서 검사하도록 작성했다.
 현재 Git 원격은 로컬 저장소라 작업 실행 결과가 없으며, macOS 통과로 표기하지 않는다.
 일반 OS 전체·모든 미디어 코덱·클러스터 운영기를 한꺼번에 만드는 것도 이 체크포인트의
