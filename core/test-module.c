@@ -7778,19 +7778,22 @@ static void loops(void) {
     static const O flagged[] = {{C, 0, 0}, {C, 0, 1}, {LOOP, BODY(0, 0) | 1u << 9, 0}};
     static const O two_ways[] = {{C, 0, 0}, {C, 0, 1}, {LOOP, BODY(0, 0), 0}, {XF, XS, 0}, {PURE_OP_LOCAL_STORE, 0 | 1 << 8 | XS << 16, 0}};
     static const O into_outer[] = {{EACH_, WALKING(XS, 5), 0}, {C, 0, 0}, {C, 0, 1}, {LOOP, BODY(0, 2), 0}, {C, 0, 1}, {LA, XS, 0}};
+    /* A loop's slot is its own while it runs: its block does not store to it, and no loop within counts in it. */
+    static const O slot_stored[] = {{C, 0, 0}, {C, 0, 3}, {LOOP, BODY(0, 2), 0}, {C, 0, 7}, {PURE_OP_LOCAL_STORE, 0, 0}};
+    static const O slot_shared[] = {{C, 0, 0}, {C, 0, 3}, {LOOP, BODY(0, 3), 0}, {C, 0, 0}, {C, 0, 2}, {LOOP, BODY(0, 0), 0}};
     O deep[8 * 3 + 2];
     for (unsigned d = 0; d < 9; ++d) {
         if (d == 8) { deep[24] = (O){C, 0, 1}; deep[25] = (O){ST, S_, 0}; break; }
         deep[3 * d] = (O){C, 0, 0};
         deep[3 * d + 1] = (O){C, 0, 1};
-        deep[3 * d + 2] = (O){LOOP, BODY(0, 26 - 3 * d - 3), 0};
+        deep[3 * d + 2] = (O){LOOP, BODY(d, 26 - 3 * d - 3), 0}; /* (each counts in a slot of its own) */
     }
     enum { DEEPER = 40 }; /* nested past what a run keeps on its stack (027's 4f-4): its app's room */
     O deeper[DEEPER * 3 + 4];
     for (unsigned d = 0; d < DEEPER; ++d) {
         deeper[3 * d] = (O){C, 0, 0};
         deeper[3 * d + 1] = (O){C, 0, 2}; /* each twice: the innermost 2^40 times past any budget, so its first fault */
-        deeper[3 * d + 2] = (O){LOOP, BODY(0, DEEPER * 3 + 4 - 3 * d - 3), 0};
+        deeper[3 * d + 2] = (O){LOOP, BODY(d, DEEPER * 3 + 4 - 3 * d - 3), 0};
     }
     deeper[3 * DEEPER] = (O){PURE_OP_LOAD, S_, 0};
     deeper[3 * DEEPER + 1] = (O){C, 0, 1};
@@ -7804,6 +7807,8 @@ static void loops(void) {
         {flagged, LEN(flagged), "no such state"},
         {two_ways, LEN(two_ways), "local used as two things"},
         {into_outer, LEN(into_outer), "insert into the list walked"},
+        {slot_stored, LEN(slot_stored), "loop's slot set in its block"},
+        {slot_shared, LEN(slot_shared), "loop's slot set in its block"},
     };
     for (size_t i = 0; i < LEN(refused); ++i) {
         H one[] = {{1, 0, (uint32_t)refused[i].count}};

@@ -1373,6 +1373,22 @@ PURE_COLD static bool locals_agree(const PureModule *m, PureBlock block) {
     return true;
 }
 
+/* A count's loop counts in a slot that is its own while it runs: nothing in its block stores to the slot and no loop
+ * within counts in it. So the rounds a loop runs, and the number each round reads as its count, are the loop's on
+ * every path that runs it (a batch of its rounds takes the slot's values as the count's). */
+PURE_COLD static bool loops_own_slots(const PureModule *m, PureBlock block) {
+    uint32_t until[PURE_MODULE_LOCALS] = {0}; /* a slot a loop counts in: where that loop's block ends */
+    for (uint32_t pc = block.start; pc < block.start + block.length; ++pc) {
+        const PureOp *op = &m->code[pc];
+        bool loop = op->op == PURE_OP_LOOP;
+        if (op->op != PURE_OP_LOCAL_STORE && !loop) continue;
+        uint32_t slot = op->arg & 0xFF;
+        if (until[slot] > pc) return false;
+        if (loop) until[slot] = pc + 1 + (op->arg >> 16);
+    }
+    return true;
+}
+
 /* Whether a node's subtree cannot fault: no division, no overflow of a sum
  * or product, no key or item that may be missing (an item read through the
  * item itself or the column's row is there). */
@@ -2313,6 +2329,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
                                 computes, 0, NULL, 0, -1, &bad)))
             goto refused;
         if (computes && !locals_agree(out, out->view_code[i])) { why = "local used as two things"; goto refused; }
+        if (computes && !loops_own_slots(out, out->view_code[i])) { why = "loop's slot set in its block"; goto refused; }
         for (uint32_t pc = out->view_code[i].start; computes && pc < out->view_code[i].start + out->view_code[i].length; ++pc) {
             const PureOp *op = &out->code[pc];
             if (op->op == PURE_OP_LOCAL_LOAD || op->op == PURE_OP_LOCAL_STORE || op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH)
@@ -2346,6 +2363,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         PureFunction *f = &out->function[i];
         if ((why = verify_block(out, f->code, FUNCTION, -1, -1, 0, true, 0, NULL, 0, (int)i, &bad))) goto refused;
         if (!locals_agree(out, f->code)) { why = "local used as two things"; goto refused; }
+        if (!loops_own_slots(out, f->code)) { why = "loop's slot set in its block"; goto refused; }
         for (uint32_t pc = f->code.start; pc < f->code.start + f->code.length; ++pc) /* its frame's stack: as the verifier went */
             if (out->height[pc] >= f->height) f->height = (uint8_t)(out->height[pc] + 1);
     }
@@ -2354,6 +2372,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event + 1, true, 0, NULL, 0, -1, &bad)))
             goto refused;
         if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
+        if (!loops_own_slots(out, out->handler[i].code)) { why = "loop's slot set in its block"; goto refused; }
     }
     /* A handler's or a function's instruction is its block's alone: what the load proves of it (its height, its plan)
      * is that block's (one shared gave a function a handler's plan: a list lent there was the call's, emptied at its
