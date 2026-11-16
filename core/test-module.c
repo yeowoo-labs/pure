@@ -7733,8 +7733,9 @@ static void loops(void) {
         {C, 0, 0}, {C, 0, 1e15}, {LOOP, BODY(0, 0), 0},
         {L, N, 0}, {LA, XS, 0}, {L, N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, N, 0},
         /* mid at 100: a = 0; x = 1; for i in 0 .. 40 { t = x * 3 - x, with x = 5 set while x * 3 and x wait on the
-         * stack; a = a + t }; s = a (21). A set that does not end its statement: no source writes one, the format
-         * allows it, and x is no recurrence of the loop's batches (their x = e is a whole statement). */
+         * stack; a = a + t }; s = a (21). A set that does not end its statement, as all but the last set of a
+         * statement of several are (u, t = 5, t * 3): x is no recurrence of the loop's batches (their x = e is a
+         * whole statement). */
         {C, 0, 0}, {PURE_OP_LOCAL_STORE, 3, 0}, {C, 0, 1}, {PURE_OP_LOCAL_STORE, 1, 0}, {C, 0, 0}, {C, 0, 40},
         {LOOP, BODY(0, 12), 0}, {LL, 1, 0}, {C, 0, 3}, {PURE_OP_MUL, 0, 0}, {LL, 1, 0}, {C, 0, 5}, {PURE_OP_LOCAL_STORE, 1, 0},
         {PURE_OP_SUB, 0, 0}, {PURE_OP_LOCAL_STORE, 2, 0}, {LL, 3, 0}, {LL, 2, 0}, {ADD, 0, 0}, {PURE_OP_LOCAL_STORE, 3, 0},

@@ -1916,6 +1916,67 @@ on go {
 }
 """
 
+def module_several_sets(aup, pure, work):
+    """A statement that sets several locals at once (u, t = 5, t * 3 - t) runs alike on every path, in a loop of
+    more rounds than a batch's least too. Its sets but the last take their values with others waiting on the
+    stack: such a set is no x = e of a batch's recurrence, though the local is read before it is set in the
+    round. (The load planned it as one, and the executor's batches ended the process: where there is no machine
+    code tier, an ordinary source did it.) A sum set so (v, w = 9, w + i) is still the batch's reduction."""
+    import os
+    source, module = work / 'several.aup', work / 'several.pmod'
+    source.write_text("""state first = 0
+state second = 0
+state third = 0
+state fourth = 0
+input go = key Space
+on go.down {
+  let t = 1
+  let u = 0
+  let a = 0
+  for i in 0 .. 40 {
+    u, t = 5, t * 3 - t
+    a = a + t
+  }
+  first = a + u
+  let x = 1
+  let y = 0
+  let b = 0
+  for i in 0 .. 40 {
+    x, y = x * 3 - x, 7
+    b = b + x
+  }
+  second = b + y
+  let p = 1
+  let q = 2
+  let r = 0
+  let c = 0
+  for i in 0 .. 40 {
+    r, p, q = i, p + 2, q + q
+    c = c + p
+  }
+  third = c + q + r
+  let v = 0
+  let w = 0
+  for i in 0 .. 40 {
+    v, w = 9, w + i
+  }
+  fourth = w + v
+}
+""")
+    compile_module(aup, source, module)
+    given = 'down go\nshow\n'
+    runs = {name: subprocess.run([str(pure / 'build/pure-run'), str(module)], input=given, capture_output=True, text=True,
+                                 timeout=60, env=dict(os.environ, **env))
+            for name, env in (('batches', {'PURE_JIT': '0'}), ('rounds', {'PURE_JIT': '0', 'PURE_BATCH': '0'}), ('all', {'PURE_JIT': 'all'}))}
+    assert all(run.returncode == 0 for run in runs.values()), {name: (run.returncode, run.stderr[-200:]) for name, run in runs.items()}
+    states = json.loads(runs['rounds'].stdout.splitlines()[-1])['states']
+    doubled = 2 ** 41 - 2  # 2 + 4 + .. + 2^40
+    assert states == {'first': doubled + 5, 'second': doubled + 7, 'third': sum(1 + 2 * k for k in range(1, 41)) + 2 ** 41 + 39,
+                      'fourth': sum(range(40)) + 9}, states
+    assert runs['batches'].stdout == runs['rounds'].stdout == runs['all'].stdout, {name: run.stdout[-300:] for name, run in runs.items()}
+    return {'loops': 4, 'paths': len(runs)}
+
+
 def module_bounded_batches(aup, pure, work):
     """The work budget bounds an event's time on every path. A loop in a batch's block whose rounds a message
     counts (2^30 and more) ends as soon as its work passes the budget, with the fault and the work the
@@ -7390,6 +7451,7 @@ def main():
         report['module_store_restarts'] = module_store_restarts(aup, pure, work)
         report['module_specs'] = module_specs(aup, pure, work)
         report['module_bounded_batches'] = module_bounded_batches(aup, pure, work)
+        report['module_several_sets'] = module_several_sets(aup, pure, work)
         report['module_tier'] = module_tier(aup, pure, work)
         report['server_documents_requests'] = sum(server_documents(aup, pure, work, range(args.seeds), threads=threads)
                                                   for threads in (1, 3))
