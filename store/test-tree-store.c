@@ -649,18 +649,61 @@ static void earlier_records(const char *path) {
     expect(path, "chain", &(Oracle){(unsigned char *)"7", 1, 8});
 }
 
-/* What a dead writer's compaction left goes when this process's writer first
- * takes the lock; other names stay. */
+/* What a dead writer's compaction left (the one name a compaction writes
+ * under) goes when a writer next takes the lock, each time: the process
+ * keeps no word of having looked (it knew a store by its directory's
+ * numbers, which a file system gives to the next directory once the store is
+ * removed; a store made there was never looked at). One left while the
+ * writer is held goes at the next compaction, which makes its own: a file
+ * found under the name is not written. Other names stay. */
 static void swept_pending(const char *path) {
-    char name[512], other[512];
-    snprintf(name, sizeof(name), "%s/.pending-999999-1", path);
-    snprintf(other, sizeof(other), "%s/pending-999999-1", path);
-    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0600), kept = open(other, O_RDWR | O_CREAT | O_EXCL, 0600);
-    CHECK(fd >= 0 && close(fd) == 0 && kept >= 0 && close(kept) == 0);
-    int64_t revision;
-    CHECK(pure_store_put(path, "swept", 0, (PureSpan){(const unsigned char *)"s", 1}, &revision) == PURE_OK);
+    char name[512], other[512], tree[512];
+    snprintf(name, sizeof(name), "%s/.pending", path);
+    snprintf(other, sizeof(other), "%s/pending", path);
+    snprintf(tree, sizeof(tree), "%s/pure.tree", path);
+    int kept = open(other, O_RDWR | O_CREAT | O_EXCL, 0600);
+    CHECK(kept >= 0 && close(kept) == 0);
+    int64_t revision = 0;
     struct stat info;
-    CHECK(stat(name, &info) && errno == ENOENT && !stat(other, &info) && !unlink(other));
+    for (unsigned round = 0; round < 2; ++round) {
+        int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        CHECK(fd >= 0 && write(fd, "left", 4) == 4 && close(fd) == 0);
+        CHECK(pure_store_put(path, "swept", revision, (PureSpan){(const unsigned char *)"s", 1}, &revision) == PURE_OK);
+        CHECK(stat(name, &info) && errno == ENOENT && !stat(other, &info));
+    }
+    unsigned char *big = malloc(100000);
+    uint32_t seed = 13;
+    CHECK(big);
+    fill(big, 100000, &seed);
+    PureStore *store;
+    PureDraft *draft;
+    CHECK(pure_store_open(path, &store) == PURE_OK && pure_store_draft(store, "big", &draft) == PURE_OK);
+    CHECK(pure_draft_splice(draft, 0, pure_draft_size(draft), (PureSpan){big, 100000}) == PURE_OK);
+    CHECK(pure_draft_commit(draft, &revision) == PURE_OK); /* the writer is held from here */
+    char linked[512]; /* the left file has another name: what it holds is seen after the compaction */
+    snprintf(linked, sizeof(linked), "%s/left", path);
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    CHECK(fd >= 0 && pwrite(fd, big, 100000, 0) == 100000 && close(fd) == 0 && !link(name, linked));
+    struct stat before, after;
+    CHECK(stat(tree, &before) == 0);
+    unsigned commits = 0;
+    do {
+        CHECK(pure_draft_splice(draft, 0, pure_draft_size(draft), (PureSpan){big, 100000}) == PURE_OK);
+        CHECK(pure_draft_commit(draft, &revision) == PURE_OK && stat(tree, &after) == 0);
+    } while (after.st_ino == before.st_ino && ++commits < 40);
+    CHECK(after.st_ino != before.st_ino && stat(name, &info) && errno == ENOENT);
+    unsigned char *left = malloc(100000);
+    fd = open(linked, O_RDONLY);
+    CHECK(left && fd >= 0 && !fstat(fd, &info) && info.st_size == 100000 && info.st_ino != after.st_ino);
+    CHECK(pread(fd, left, 100000, 0) == 100000 && !memcmp(left, big, 100000) && close(fd) == 0 && !unlink(linked));
+    free(left);
+    pure_draft_close(draft);
+    pure_store_close(store);
+    pure_tree_test_forget();
+    expect(path, "big", &(Oracle){big, 100000, revision});
+    expect(path, "swept", &(Oracle){(unsigned char *)"s", 1, 2});
+    CHECK(!unlink(other));
+    free(big);
 }
 
 /* A reader's view stays byte-identical while another process commits and
@@ -1781,7 +1824,7 @@ static void clean(const char *path) {
     struct dirent *entry;
     while ((entry = readdir(entries))) {
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        CHECK(strncmp(entry->d_name, ".pending-", 9));
+        CHECK(strcmp(entry->d_name, ".pending"));
         CHECK(unlinkat(dirfd(entries), entry->d_name, 0) == 0);
     }
     CHECK(closedir(entries) == 0 && rmdir(path) == 0);

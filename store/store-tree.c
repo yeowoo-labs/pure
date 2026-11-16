@@ -17,10 +17,8 @@
 #include "wait.h"
 #include "state.h"
 #include "digest.h"
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,7 +84,6 @@ typedef struct Turns {
     bool leading;
     unsigned long groups, requests;
     struct Holding *holding; /* the process's writer on the store (below) */
-    bool swept; /* this process cleared what dead writers left (sweep, below) */
     struct Turns *next;
 } Turns;
 static struct { pthread_mutex_t lock; Turns *first; } stores = {PTHREAD_MUTEX_INITIALIZER, NULL};
@@ -118,7 +115,6 @@ static Turns *turns_of(int directory) {
     struct stat info;
     return fstat(directory, &info) ? NULL : turns_for(&info);
 }
-static uint64_t temporary_sequence;
 
 /* A reference is a file offset, or an index into this edit's node arena.
  * bytes is the size of the whole subtree. Leaves hold raw document bytes. */
@@ -1171,17 +1167,17 @@ static bool find(const Tree *tree, Entry catalog, const char *key, uint64_t *ind
     return true;
 }
 
-static int create_temporary(int directory, char name[96]) {
-    for (unsigned attempt = 0; attempt < 64; ++attempt) {
-        uint64_t sequence = __atomic_add_fetch(&temporary_sequence, 1, __ATOMIC_RELAXED); /* writers of other stores too */
-        if (sequence == UINT64_MAX) break;
-        snprintf(name, 96, ".pending-%ld-%" PRIu64, (long)getpid(), sequence);
-        int fd = openat(directory, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        if (fd >= 0) return fd;
-        if (errno != EEXIST) break;
-    }
-    name[0] = 0; /* Never remove an existing file on a name collision. */
-    return -1;
+/* The file a store's next tree is written in before it takes the tree's
+ * name. One name: it is made with the writer's lock held only, and the lock
+ * has one holder, so no other's is ever there but a dead writer's. That one
+ * goes by its name (here, and when a writer next takes the lock: hold); a
+ * file found under the name is never written. Nothing of this is kept in the
+ * process, which knows a store by its directory's numbers only while it has
+ * it open. */
+static const char pending_name[] = ".pending";
+static int create_pending(int directory) {
+    unlinkat(directory, pending_name, 0);
+    return openat(directory, pending_name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
 }
 
 /* Where a fresh file's written zeros should reach: past everything the cycle
@@ -1199,7 +1195,7 @@ static uint64_t cycle_end(const Head *head, uint64_t replaced) {
 /* Publish a fresh file with both slots pointing at head. It is synced whole
  * before it is renamed into place, so its head names no commit bytes.
  * replaced: the size of the file it replaces (0 for none). */
-static bool install(int directory, char temporary[96], int fd, Head *head, uint64_t replaced) {
+static bool install(int directory, int fd, Head *head, uint64_t replaced) {
     unsigned char slot[SLOT];
     struct stat file;
     head->start = head->end;
@@ -1208,8 +1204,7 @@ static bool install(int directory, char temporary[96], int fd, Head *head, uint6
     zero_fill(fd, head->end, cycle_end(head, replaced));
     bool ok = write_at(fd, slot, SLOT, 0) && write_at(fd, slot, SLOT, BLOCK) && sync_fd(fd) && !fstat(fd, &file);
     if (close(fd)) ok = false;
-    ok = ok && !renameat(directory, temporary, directory, tree_name);
-    if (ok) temporary[0] = 0;
+    ok = ok && !renameat(directory, pending_name, directory, tree_name);
     ok = ok && !fault(PURE_INSTALL_BEFORE_DIR_SYNC) && sync_fd(directory);
     if (ok) remember(&file, head, DURABLE);
     return ok;
@@ -1222,8 +1217,7 @@ static bool install(int directory, char temporary[96], int fd, Head *head, uint6
 static bool compact(int directory, Mapping *mapping, uint64_t replaced, const Head *head, bool ring) {
     __atomic_add_fetch(&mapping->refs, 1, __ATOMIC_RELAXED);
     Tree tree = {.map = mapping->map, .end = head->end, .shared = mapping};
-    char temporary[96];
-    int fd = create_temporary(directory, temporary);
+    int fd = create_pending(directory);
     Writer *writer = fd >= 0 ? malloc(sizeof(*writer)) : NULL;
     uint64_t count = head->catalog_bytes / RECORD;
     unsigned char *records = count ? malloc((size_t)(count * RECORD)) : NULL;
@@ -1245,11 +1239,11 @@ static bool compact(int directory, Mapping *mapping, uint64_t replaced, const He
          write_root(&tree, writer, &fresh, false) && flush(writer);
     if (ok) {
         Head compacted = {head->seq + 1, writer->at, fresh.ref, fresh.bytes, writer->at - DATA, 0, 0, ring};
-        ok = install(directory, temporary, fd, &compacted, replaced);
+        ok = install(directory, fd, &compacted, replaced);
         fd = -1;
     }
     if (fd >= 0) close(fd);
-    if (*temporary) unlinkat(directory, temporary, 0);
+    if (!ok) unlinkat(directory, pending_name, 0); /* no such name once the rename took place */
     free(records);
     free(writer);
     release_tree(&tree);
@@ -1307,11 +1301,10 @@ PureResult pure_store_init(const char *path) {
         for (int tries = 0; fd < 0 && errno == ENOENT; ++tries) {
             if (lock_writer(lock)) {
                 if ((fd = openat(directory, tree_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)) < 0 && errno == ENOENT) {
-                    char temporary[96];
-                    int created_fd = create_temporary(directory, temporary);
+                    int created_fd = create_pending(directory);
                     Head head = {.seq = 1, .end = DATA};
-                    if (created_fd >= 0 && install(directory, temporary, created_fd, &head, 0)) made = PURE_OK;
-                    if (*temporary) unlinkat(directory, temporary, 0);
+                    if (created_fd >= 0 && install(directory, created_fd, &head, 0)) made = PURE_OK;
+                    else unlinkat(directory, pending_name, 0);
                 }
                 break;
             }
@@ -1903,20 +1896,6 @@ static void settle_uncertain(Turns *turns, Holding *holding) {
     show_newest(turns, holding);
 }
 
-/* What dead writers' compactions left (their temporary files): under the
- * lock no other writer can be making one. */
-static void sweep(int directory) {
-    int listing = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    DIR *entries = listing >= 0 ? fdopendir(listing) : NULL;
-    if (!entries) {
-        if (listing >= 0) close(listing);
-        return;
-    }
-    for (struct dirent *entry; (entry = readdir(entries));)
-        if (!strncmp(entry->d_name, ".pending-", 9)) unlinkat(directory, entry->d_name, 0);
-    closedir(entries);
-}
-
 /* With turns->writer held: one more holder of the process's writer on the
  * store at path, which opens it, or reads its head again when a commit left
  * it unsure. A forked child lets its copy of the parent's go first (the lock
@@ -1961,8 +1940,7 @@ static PureResult hold(Turns *turns, const char *path) {
     PureResult result = PURE_STORE_ERROR;
     if (session->lock >= 0 && !fstat(session->lock, &info) && S_ISREG(info.st_mode)) {
         if (lock_writer(session->lock)) {
-            if (!turns->swept) sweep(session->directory); /* once a process (another's crash meanwhile: the next start's) */
-            turns->swept = true;
+            unlinkat(session->directory, pending_name, 0); /* what a dead writer's compaction left: none is being made */
             result = reopen(session, false);
         } else result = errno == EACCES || errno == EAGAIN ? PURE_BUSY : PURE_STORE_ERROR;
     }
