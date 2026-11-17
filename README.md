@@ -32,6 +32,9 @@ security audit.
 ## Quick start
 
 A C17 toolchain and `make` are enough. Tested on Linux aarch64 (Raspberry Pi 5) and x86-64.
+OpenSSL's headers are optional: with them `make` also builds `pure-crypto.so` (https receivers,
+keys and links; sealing needs OpenSSL 3.2 or later). `make check` needs Python 3 and an aup
+checkout beside this one. On Debian or Ubuntu: `apt install make gcc libc6-dev libssl-dev python3 xxd curl`.
 
 ```sh
 git clone https://github.com/yeowoo-labs/pure.git
