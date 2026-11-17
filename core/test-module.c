@@ -7790,6 +7790,20 @@ static void loops(void) {
     CHECK(press(&app, 10) == PURE_OK && app.values[S_].num == 2 + 39 * 10);
     CHECK(press(&app, 2) == PURE_OK && app.values[S_].num == 100 + 3 * 2 * 100);
     pure_app_stop(&app);
+    /* The plan and the pass made to disagree (test-only: "mid"'s set taken for a recurrence's, as it was before):
+     * the batch finds its stack short, fails, and the rounds answer. Before, it read and wrote outside its stack. */
+    extern bool pure_batch_test_loose;
+    pure_batch_test_loose = true;
+    CHECK(load(spec, &module_a) == PURE_OK);
+    pure_jit_free(module_a.jit);
+    module_a.jit = NULL;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    CHECK(press(&app, 10) == PURE_OK && app.values[S_].num == 2 + 39 * 10);
+    for (int k = 0; k < 10; ++k) CHECK(press(&app, 9) == PURE_OK);
+    CHECK(press(&app, 0) == PURE_OK && app.values[S_].num == 45);
+    pure_app_stop(&app);
+    pure_batch_test_loose = false;
+    CHECK(load(spec, &module_a) == PURE_OK);
 
     /* What the verifier refuses. */
     static const O outside[] = {{BREAK, 0, 0}};

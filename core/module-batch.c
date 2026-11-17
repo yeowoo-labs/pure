@@ -249,6 +249,29 @@ static const uint32_t no_lanes[BATCH]; /* a mask's when there were no lanes left
 
 static Val uniform(double value, uint16_t owner) { return (Val){.kind = UNIFORM, .value = value, .owner = owner}; }
 
+/* The batch's stack is as high as the verifier proved the block's, unless the plan and the pass disagree about some
+ * instruction (PSA-2026-018, 019). Then a take or a look finds no value, or a put no room: the batch fails, so the
+ * executor's rounds run its rounds, and the stack is made to hold what the move needs (an empty value at its bottom,
+ * or its top value given up), so that no move reads or writes outside it. Every move of sp is one of these three,
+ * or looks at the count first (PICK, SLIDE, an append's cells). */
+static inline __attribute__((always_inline)) void short_of(Batch *b) {
+    b->failed = true;
+    b->stack[0] = (Val){.kind = UNIFORM};
+    b->sp = 1;
+}
+static inline __attribute__((always_inline)) Val *take(Batch *b) {
+    if (__builtin_expect(!b->sp, 0)) short_of(b);
+    return &b->stack[--b->sp];
+}
+static inline __attribute__((always_inline)) Val *top(Batch *b) {
+    if (__builtin_expect(!b->sp, 0)) short_of(b);
+    return &b->stack[b->sp - 1];
+}
+static inline __attribute__((always_inline)) Val *put(Batch *b) {
+    if (__builtin_expect(b->sp >= PURE_MODULE_STACK, 0)) b->failed = true, b->sp = PURE_MODULE_STACK - 1;
+    return &b->stack[b->sp++];
+}
+
 /* Whole, within 2^52 and not -0: what an affine value's parts are (each lane's value then exact, and as the rounds compute it). */
 static bool whole(double x) { return x == floor(x) && fabs(x) <= 0x1p52 && !(x == 0 && signbit(x)); }
 static bool whole32(double x) { return x >= 0 && x < 4294967296.0 && x == floor(x) && !(x == 0 && signbit(x)); }
@@ -586,7 +609,7 @@ static void number_lanes(Batch *b, uint8_t op, Val *x, const Val *y) {
 static void reduce_step(Batch *b, Reduce *r, const Val *e);
 
 static void binary(Batch *b, uint8_t op) {
-    Val y = b->stack[--b->sp], *x = &b->stack[b->sp - 1];
+    Val y = *take(b), *x = top(b);
     if (x->kind == REDUCE) { /* x = x op e: e into each running lane's */
         reduce_step(b, &b->reduce[(unsigned)x->value], &y);
         release(b, &y);
@@ -604,7 +627,7 @@ static void binary(Batch *b, uint8_t op) {
 
 /* NEG, NOT, FLOOR of the top. */
 static void unary(Batch *b, uint8_t op) {
-    Val *x = &b->stack[b->sp - 1];
+    Val *x = top(b);
     if (x->kind == UNIFORM) {
         *x = uniform(op == PURE_OP_NEG ? -x->value : op == PURE_OP_NOT ? x->value == 0 : floor(x->value), 0);
         return;
@@ -634,7 +657,7 @@ static void unary(Batch *b, uint8_t op) {
 
 /* CLAMP and INDEX_MOVE: lane by lane as the executor computes them. */
 static void clamp(Batch *b) {
-    Val high = b->stack[--b->sp], low = b->stack[--b->sp], *x = &b->stack[b->sp - 1];
+    Val high = *take(b), low = *take(b), *x = top(b);
     double *out = fresh(b);
     if (!out) return;
     uint8_t bad[BATCH];
@@ -648,7 +671,7 @@ static void clamp(Batch *b) {
 }
 
 static void index_move(Batch *b) {
-    Val by = b->stack[--b->sp], *x = &b->stack[b->sp - 1];
+    Val by = *take(b), *x = top(b);
     size_t count = pure_list_count(b->app->lists[x->owner]);
     double last = count ? (double)(count - 1) : 0;
     if (x->kind != LANES && by.kind != LANES) { /* uniform or affine both: affine too, while every lane's place is within the list */
@@ -796,7 +819,7 @@ static const PureCells *cells_of(Batch *b, uint32_t list) {
 }
 
 static void item_get(Batch *b, uint32_t list, uint32_t field) {
-    Val *x = &b->stack[b->sp - 1];
+    Val *x = top(b);
     PureList *items = b->app->lists[list];
     size_t count = pure_list_count(items);
     if (stored(b, list, field) || !rows_in(b, x, count)) {
@@ -829,7 +852,7 @@ static bool find(Batch *b, const PureOp *op, uint32_t pc) {
     bool has = op->op == PURE_OP_LIST_HAS, joined = !has && op->plan & PLAN_JOINED, found;
     if (joined) field = item_field(m->code[pc + 1].arg);
     if (joined && stored(b, list, field)) return false;
-    Val *x = &b->stack[b->sp - 1];
+    Val *x = top(b);
     const PureCells *cells = cells_of(b, list);
     bool dense = cells && cells->width[key] == 0; /* DENSE with every key below its count: a key its row */
     if (x->kind == UNIFORM) {
@@ -960,7 +983,7 @@ static bool find(Batch *b, const PureOp *op, uint32_t pc) {
 
 /* ITEM_SET: kept for the end (the value's lanes kept with it). */
 static void item_set(Batch *b, uint32_t list, uint32_t field) {
-    Val value = b->stack[--b->sp], rows = b->stack[--b->sp];
+    Val value = *take(b), rows = *take(b);
     if (b->store_count == STORES || (int)field == b->m->state_key[list] - 1) {
         b->failed = true;
         return;
@@ -976,7 +999,7 @@ static void item_set(Batch *b, uint32_t list, uint32_t field) {
 
 static void local_store(Batch *b, uint32_t arg) {
     unsigned at = arg & 0xFF;
-    Val v = b->stack[--b->sp];
+    Val v = *take(b);
     if (v.kind == REDUCE) return; /* x = x op e: in its lanes already */
     if (b->parent && !(b->own[at / 64] >> (at % 64) & 1)) /* a spread item's own: fresh in these lanes */
         b->own[at / 64] |= UINT64_C(1) << (at % 64), b->state[at] = 0;
@@ -1130,7 +1153,7 @@ static inline __attribute__((always_inline)) void local_load(Batch *b, uint32_t 
     if (b->sets[at / 64] >> (at % 64) & 1 && !b->state[at] && at != b->slot && b->plan->at[pc - b->plan->start].by) {
         by = pc + b->plan->at[pc - b->plan->start].by; /* x = x op e's op */
         Reduce *r = reduction(b, at, b->m->code[by].op); /* not set yet: an earlier round's, as x = x op e reads it */
-        if (r) b->stack[b->sp++] = (Val){.kind = REDUCE, .value = (double)(r - b->reduce)};
+        if (r) *put(b) = (Val){.kind = REDUCE, .value = (double)(r - b->reduce)};
         return;
     }
     if (b->sel && !(b->selection.set[at / 64] >> (at % 64) & 1)) { /* the space around the selection's, in its lanes */
@@ -1147,7 +1170,7 @@ static inline __attribute__((always_inline)) void local_load(Batch *b, uint32_t 
             }
             v = outer_through(b, &v); /* an outer lane's value in each of these lanes, by its item's outer lane */
             v.owner = (uint16_t)(arg >> 16);
-            b->stack[b->sp++] = v;
+            *put(b) = v;
             return;
         } else if (!(b->sets[at / 64] >> (at % 64) & 1)) v = uniform(b->ev->locals[at].num, (uint16_t)(arg >> 16));
         else if (b->state[at] == 1) v = b->local[at];
@@ -1166,7 +1189,7 @@ static inline __attribute__((always_inline)) void local_load(Batch *b, uint32_t 
         }
         v = gather(b, &v);
         v.owner = (uint16_t)(arg >> 16);
-        b->stack[b->sp++] = v;
+        *put(b) = v;
         return;
     }
     if (b->parent && (at == b->slot || (b->sets[at / 64] >> (at % 64) & 1 && !(b->own[at / 64] >> (at % 64) & 1)))) {
@@ -1201,7 +1224,7 @@ static inline __attribute__((always_inline)) void local_load(Batch *b, uint32_t 
         v = b->local[at];
     }
     v.owner = (uint16_t)(arg >> 16);
-    b->stack[b->sp++] = v;
+    *put(b) = v;
 }
 
 /* Lanes (mask: NULL every lane) sent to pc. */
@@ -1234,7 +1257,7 @@ static bool selects(Batch *b, unsigned count, uint32_t jz);
 static void select_arm(Batch *b, const uint32_t *on, unsigned count, uint32_t jz);
 
 static void branch(Batch *b, uint32_t pc, bool invert, uint32_t jz) {
-    Val c = b->stack[--b->sp];
+    Val c = *take(b);
     if (c.kind == UNIFORM) {
         if ((c.value == 0) != invert) send(b, pc, b->active), b->none = true;
         return;
@@ -1528,11 +1551,20 @@ static void reduce_step(Batch *b, Reduce *r, const Val *e) {
 
 /* ---- Recurrences */
 
+#ifdef PURE_STORE_TEST
+/* Test-only: a set in the middle of a statement is taken for a recurrence's (as before PSA-2026-019's fix), so that
+ * the plan and the pass disagree and the pass's stack comes short: what take, top and put are for. */
+bool pure_batch_test_loose;
+#define LOOSE pure_batch_test_loose
+#else
+#define LOOSE false
+#endif
+
 bool pure_batch_recurs(const PureModule *m, uint32_t s, uint32_t start, const uint64_t *set, unsigned slot, uint32_t *from) {
     unsigned x = m->code[s].arg & 0xFF;
     uint32_t p = s;
     while (p > start && m->height[p]) --p; /* its statement's start: nothing on the stack */
-    if (m->height[p] || m->height[s] != 1) return false; /* and the set its end: e alone is on the stack there */
+    if (m->height[p] || (m->height[s] != 1 && !LOOSE)) return false; /* and the set its end: e alone is on the stack there */
     for (uint32_t at = p; at < s; ++at) {
         const PureOp *op = &m->code[at];
         unsigned local = op->arg & 0xFF;
@@ -2001,7 +2033,7 @@ static bool segment(Batch *b, uint32_t from, const Segment *sg) {
         }
     }
     for (unsigned i = 0; i < read_count; ++i) read_of(b, read_list[i], read_field[i], true, &reads[i]);
-    b->stack[b->sp++] = r[0];
+    *put(b) = r[0];
     if (sg->store) local_store(b, m->code[sg->to].arg);
     return true;
 }
@@ -2023,7 +2055,7 @@ static void branched(Batch *b, uint32_t jz) {
 
 /* The value at the top, computed at pc, kept for later copies of its code (never a spare while the batch runs). */
 static void keep_known(Batch *b, uint32_t pc) {
-    Val *v = &b->stack[b->sp - 1];
+    Val *v = top(b);
     if (v->kind == REDUCE) return;
     unsigned k = 0;
     while (k < b->known_count && b->known[k].pc != pc) ++k;
@@ -2044,7 +2076,7 @@ static bool open_filter(Batch *b, const PureOp *op, uint32_t pc) {
         b->filters[b->filter_count++] = (Filter){.has = pc, .end = b->m->code[pc + 2].arg, .list = op->arg, .key = uniform(0, 0)};
     }
     Filter *fl = &b->filters[f];
-    Val *k = &b->stack[b->sp - 1];
+    Val *k = top(b);
     own(b, k);
     k->temp = false; /* the filter keeps it (HAS gives a new value) */
     fl->key = *k, fl->mask = NULL, fl->sel = NULL, fl->none = false, fl->spread = b->parent != NULL, fl->first = b->append_count, fl->appends = 0;
@@ -2147,7 +2179,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
                 }
                 Scatter *sc = &b->scatters[b->scatter_count++];
                 sc->list = list_of(set->arg), sc->field = item_field(set->arg), sc->add = sum->add, sc->set = sum->set;
-                sc->e = b->stack[--b->sp], sc->rows = b->stack[--b->sp], sc->mask = b->sel ? b->selection.active : b->active;
+                sc->e = *take(b), sc->rows = *take(b), sc->mask = b->sel ? b->selection.active : b->active;
                 if (b->sel) sc->e = expand(b, &sc->e), sc->rows = expand_rows(b, &sc->rows);
                 own(b, &sc->e), own(b, &sc->rows);
                 sc->e.temp = sc->rows.temp = false;
@@ -2159,7 +2191,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
             unsigned k = 0;
             while (k < b->known_count && b->known[k].pc != root) ++k;
             if (k < b->known_count && b->known[k].parent == b->parent && (b->known[k].sel == b->sel || !b->known[k].sel)) {
-                b->stack[b->sp++] = b->known[k].sel == b->sel ? b->known[k].v : gather(b, &b->known[k].v); /* kept around: in these lanes */
+                *put(b) = b->known[k].sel == b->sel ? b->known[k].v : gather(b, &b->known[k].v); /* kept around: in these lanes */
                 pc += m->reuse_length[pc];
                 continue;
             }
@@ -2169,16 +2201,16 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
         unsigned was = b->sp;
         ++pc;
         switch (op->op) {
-        case PURE_OP_CONST: b->stack[b->sp++] = uniform(op->value, 0); break;
-        case PURE_OP_LOAD: b->stack[b->sp++] = uniform(b->frame->values[arg].num, 0); break;
+        case PURE_OP_CONST: *put(b) = uniform(op->value, 0); break;
+        case PURE_OP_LOAD: *put(b) = uniform(b->frame->values[arg].num, 0); break;
         case PURE_OP_FIELD: {
             const PureField *field = &m->field[ev->shape->field_start + arg];
             const unsigned char *given = (ev->arguments ? app->arguments.data : app->payload.data) + field->offset;
-            b->stack[b->sp++] = uniform(field->type == PURE_FIELD_U32 ? read32(given) : field->type == PURE_FIELD_BOOL ? given[0]
+            *put(b) = uniform(field->type == PURE_FIELD_U32 ? read32(given) : field->type == PURE_FIELD_BOOL ? given[0]
                                                                                                                    : read_double(given), 0);
             break;
         }
-        case PURE_OP_INDEX_LOAD: b->stack[b->sp++] = uniform(b->frame->values[arg].num, m->state_ref[arg]); break;
+        case PURE_OP_INDEX_LOAD: *put(b) = uniform(b->frame->values[arg].num, m->state_ref[arg]); break;
         case PURE_OP_ROW:
             if (b->sel) { /* a selection's lanes: the rows around, in them */
                 Val v;
@@ -2188,28 +2220,28 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
                     if (!rows) break;
                     for (unsigned j = 0, t = b->nest.t; j < b->n; ++j) rows[j] = b->nest.rows[b->sel[j]] + t;
                     v = lanes_val(rows, true), v.owner = (uint16_t)arg;
-                    b->stack[b->sp++] = v;
+                    *put(b) = v;
                     break;
                 } else if ((int)arg == b->walk)
                     v = (Val){.kind = AFFINE, .value = b->reverse ? b->first + (b->selection.n - 1) : b->first, .step = b->reverse ? -1 : 1};
                 else {
-                    b->stack[b->sp++] = uniform((double)ev->row, (uint16_t)arg);
+                    *put(b) = uniform((double)ev->row, (uint16_t)arg);
                     break;
                 }
                 v = gather(b, &v);
                 v.owner = (uint16_t)arg;
-                b->stack[b->sp++] = v;
+                *put(b) = v;
             } else if (b->parent) { /* spread items: each lane's */
                 Val v = lanes_val((void *)b->item_rows, true);
                 v.temp = false, v.owner = (uint16_t)arg;
-                b->stack[b->sp++] = v;
+                *put(b) = v;
             } else if (b->nest.rows) { /* in a nested walk: each lane's item in round t (ROW reads the innermost walk's) */
                 uint32_t *rows = fresh(b);
                 if (!rows) break;
                 for (unsigned l = 0, t = b->nest.t; l < b->n; ++l) rows[l] = b->nest.rows[l] + t;
                 Val v = lanes_val(rows, true);
                 v.owner = (uint16_t)arg;
-                b->stack[b->sp++] = v;
+                *put(b) = v;
             } else if ((int)arg == b->walk) { /* the walk's item: each lane's place */
                 Val v;
                 if (!affine_of(b, b->reverse ? b->first + (b->n - 1) : b->first, b->reverse ? -1 : 1, &v)) {
@@ -2217,25 +2249,33 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
                     break;
                 }
                 v.owner = (uint16_t)arg;
-                b->stack[b->sp++] = v;
+                *put(b) = v;
             } else
-                b->stack[b->sp++] = uniform((double)ev->row, (uint16_t)arg);
+                *put(b) = uniform((double)ev->row, (uint16_t)arg);
             break;
-        case PURE_OP_OUTER_ROW: b->stack[b->sp++] = uniform((double)ev->outer, (uint16_t)arg); break;
-        case PURE_OP_LIST_COUNT: b->stack[b->sp++] = uniform((double)pure_list_count(app->lists[arg]), 0); break;
+        case PURE_OP_OUTER_ROW: *put(b) = uniform((double)ev->outer, (uint16_t)arg); break;
+        case PURE_OP_LIST_COUNT: *put(b) = uniform((double)pure_list_count(app->lists[arg]), 0); break;
         case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST: {
             size_t count = op->op == PURE_OP_INDEX_LAST ? pure_list_count(app->lists[arg]) : 0;
-            b->stack[b->sp++] = uniform(count ? (double)(count - 1) : 0, (uint16_t)arg);
+            *put(b) = uniform(count ? (double)(count - 1) : 0, (uint16_t)arg);
             break;
         }
         case PURE_OP_INDEX_NUM: break;
         case PURE_OP_PICK: {
+            if (b->sp <= arg) {
+                b->failed = true;
+                break;
+            }
             Val *v = &b->stack[b->sp - 1 - arg];
             v->temp = false;
-            b->stack[b->sp++] = *v;
+            *put(b) = *v;
             break;
         }
         case PURE_OP_SLIDE:
+            if (b->sp <= arg) {
+                b->failed = true;
+                break;
+            }
             for (unsigned d = b->sp - 1 - arg; d + 1 < b->sp; ++d) release(b, &b->stack[d]);
             b->stack[b->sp - 1 - arg] = b->stack[b->sp - 1], b->sp -= arg;
             break;
@@ -2246,7 +2286,7 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
                 v.temp = false;
                 if (b->sel) v = gather(b, &v);
                 v.owner = (uint16_t)(arg >> 16);
-                b->stack[b->sp++] = v;
+                *put(b) = v;
             }
             break;
         }
@@ -2279,6 +2319,10 @@ static bool pass(Batch *b, uint32_t start, uint32_t end) {
                     if (fl->appends == FILTER_APPENDS) b->failed = true;
                     else fl->pc[fl->appends] = pc - 1, fl->to[fl->appends] = arg, fl->cells[fl->appends] = count, ++fl->appends;
                 }
+            if (b->sp < count) {
+                b->failed = true;
+                break;
+            }
             b->sp -= count;
             for (unsigned f = 0; f < count; ++f) {
                 a->cells[f] = b->stack[b->sp + f];
@@ -2432,7 +2476,7 @@ static void set_slot(Batch *b, unsigned slot, const Val *low, uint32_t t, const 
  * here together, round t for the lanes with more than t rounds that did not
  * break out, its work counted for each (the batch's end checks it). */
 static void nested(Batch *b, const PureOp *op, uint32_t pc) {
-    Val high = b->stack[--b->sp], low = b->stack[--b->sp];
+    Val high = *take(b), low = *take(b);
     uint32_t start = pc + 1, end = start + (op->arg >> 16);
     unsigned slot = op->arg & 0xFF, n = b->n;
     uint32_t *count = fresh(b), *broken = fresh(b);
@@ -2569,7 +2613,7 @@ static void walk_nested(Batch *b, const PureOp *op, uint32_t pc) {
     size_t items = pure_list_count(walked), from = 0, to = items;
     Val high = uniform(0, 0), low = uniform(0, 0);
     bool sliced = arg & PURE_EACH_SLICED;
-    if (sliced) high = b->stack[--b->sp], low = b->stack[--b->sp];
+    if (sliced) high = *take(b), low = *take(b);
     uint32_t *count = fresh(b), *broken = fresh(b), *rows = fresh(b);
     if (!count || !broken || !rows) return;
     const uint32_t *entry = running(b);
