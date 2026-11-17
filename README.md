@@ -7,9 +7,9 @@ and memory budgets — before a single instruction executes. The same bytes are 
 in-memory representation, the on-disk record and the replication unit: there is no ORM, no query
 planner and no serialisation layer between a request and a stored value.
 
-**Status: pre-1.0, not for deployment.** No release, no package, no ABI promise. The app contract
-is being frozen for 1.0; anything can change in the next commit. There has been no external
-security audit.
+**Status: pre-1.0, not for deployment.** Preview release 0.9: no compatibility promise, no package,
+no ABI promise. The app contract is being frozen for 1.0; anything can change in the next commit.
+There has been no external security audit.
 
 ## What it is
 
