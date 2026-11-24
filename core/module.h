@@ -403,7 +403,7 @@ typedef struct {
     uint8_t *state_key;
     bool *state_indexed; /* list: an index state refers to it (set at load) */
     uint8_t *height;    /* the operand stack's height at each instruction, from its block's start (the verifier's) */
-    uint8_t *list_buffer; /* per state: an event's list that could be a typed buffer (judged at load; nothing runs by it yet) */
+    uint8_t *list_buffer; /* per state: an event's list that is a typed buffer (judged at load; module-list-shape.h) */
     /* In a batch's block (module-batch.c), a value computed again by the same code as an earlier one whose operands
      * nothing changed between: at its code's first instruction, the earlier root + 1 and its code's length (reuse_from,
      * reuse_length; 0: none); at such an earlier root, reuse_from PURE_REUSE_KEPT (its value kept for them). */
@@ -604,6 +604,9 @@ typedef struct {
      * sets it, so a script can replay any time; views never see it. */
     double now;
     uint64_t changes; /* counts every change of states, never back: what a filter's rows are fresh for */
+    /* The lists of typed buffers (the module's list_buffer) let go, at an event's end, a call's or a binding's, holding
+     * items and not held as a buffer (module-list-shape.h): the judgment or the pin went wrong. 0, tests hold. */
+    uint64_t buffers_missed;
     /* A filtered list view's items, or a computed one's list (kept: its lists in stored form). */
     struct PureRows { uint32_t table; uint64_t changes, given; size_t *items, count, capacity; PureFault fault; PureList *list; } *rows;
     unsigned row_tables;

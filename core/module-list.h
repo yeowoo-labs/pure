@@ -204,6 +204,16 @@ size_t pure_list_extra(const PureList *);
  * gets allow; a clear makes it FLAT again. Answers are the tree's. False
  * when the list cannot (it stays a tree). */
 bool pure_list_arrays(PureList *);
+/* An empty event's list of one number, bool or integer, not keyed, pinned as a typed buffer (module.h's list_buffer;
+ * what reads one where it lies: module-list-shape.h): in arrays, and from now until it is freed its cells are 8 bytes
+ * whatever they hold (never narrowed) and it stays FLAT whatever its size (its column grows to PURE_LIST_ITEMS cells).
+ * What it answers is what any list answers. Its items must not be moved by more than a FLAT list bears (inserts and
+ * removes before its end: it would be made a tree, as any list, and read the general way): the load pins those alone
+ * that grow and shrink at their end. false when it is no such list (as it was). */
+bool pure_list_pin(PureList *);
+/* An empty list in arrays lets them go when their room is more than bytes (a call's list, kept for the next call,
+ * keeps no more than a frame counts for it). */
+void pure_list_slim(PureList *, size_t bytes);
 /* A list's cells as a batch reads and sets them (docs/design/024): FLAT (a
  * position its row) or DENSE with every key below its count (a key its
  * position and its row); each field's column and its cells' bytes (0: a

@@ -3,6 +3,7 @@
 #define _DARWIN_C_SOURCE /* mkdtemp, which _POSIX_C_SOURCE hides there */
 #endif
 #include "module.h"
+#include "module-list-shape.h"
 #include "module-run.h"
 #include "module-save.h"
 #include "module-store.h"
@@ -7304,6 +7305,15 @@ static void reader_bindings(void) {
         CHECK(!reader.bound_count && !reader.unbound[REG]); /* nothing the round before bound is left */
         CHECK(pure_app_view(&reader, 0, &value) && value == 1 && reader.bound_count == 1);
         CHECK(pure_app_view(&reader, 0, &value) && value == 1);
+        /* xs is a typed buffer (it goes nowhere but r): the reader's own list of it is pinned as the app's is. Not
+         * held as one (its pin taken off here), it is counted where the view lets it go, and so is what r was bound
+         * to (xs itself, lent) where the next view lets the binding go. */
+        CHECK(module_a.list_buffer[XS] && module_a.list_buffer[REG] && app.lists[XS]->pinned && reader.own[XS] &&
+              reader.own[XS]->pinned && !reader.buffers_missed);
+        reader.own[XS]->pinned = false;
+        CHECK(pure_app_view(&reader, 0, &value) && value == 1 && reader.buffers_missed == 1);
+        CHECK(pure_app_view(&reader, 0, &value) && value == 1 && reader.buffers_missed == 3);
+        reader.own[XS]->pinned = true, reader.buffers_missed = 0;
         pure_snapshot_release(made);
         pure_app_stop(&app); /* its snapshot let go too: the lists the reader's register held are freed */
     }
@@ -7988,6 +7998,234 @@ static void view_bodies(void) {
     puts("{\"view_bodies\":\"locals-loops-own-lists-readers-work-memory-refusals\"}");
 }
 
+/* Typed buffers (module-list-shape.h): a pinned list holds what a list not pinned holds after the same changes at
+ * their ends, whatever the values (those a list not pinned keeps in 1 or 4 bytes, and those it widens for), while it
+ * stays FLAT with 8 bytes a cell, its column the items' bits. It stays so past the size at which another list
+ * becomes a tree; its copy is one; a message's rows are not lent to it; a call's keeps no more than slim leaves it.
+ * The load pins the lists it judged buffers, and a list an insert names is none (aup writes no insert into such a
+ * list: a module by hand); a list of a buffer's let go not held as one is counted. */
+static void typed_buffers(void) {
+    static const uint8_t number[] = {PURE_CELL_NUMBER}, integer[] = {PURE_CELL_INTEGER}, flag[] = {PURE_CELL_BOOL},
+                         text[] = {PURE_CELL_TEXT}, two[] = {PURE_CELL_NUMBER, PURE_CELL_NUMBER};
+    static const double values[] = {0, 1, 7, 255, 256, 65535, 4294967295.0, 4294967296.0, 0.5, -1, -0.0, 1e300, 9007199254740993.0};
+    PureList *t = pure_list_new(1, text), *w = pure_list_new(2, two), *k = pure_list_new(1, number), *held = pure_list_new(1, number);
+    CHECK(t && w && k && held && !pure_list_pin(t) && !pure_list_pin(w)); /* a text; two fields */
+    CHECK(pure_list_keyed(k, 0) == PURE_OK && !pure_list_pin(k)); /* a key */
+    CHECK(pure_list_insert(held, 0, &(PureCell){.num = 1}, NULL) == PURE_OK && !pure_list_pin(held)); /* not empty */
+    CHECK(!pure_buffer_cells(t) && !pure_buffer_cells(held));
+    pure_list_clear(held); /* (in arrays, holding an item in a byte: not pinned, and its item as it was) */
+    CHECK(pure_list_arrays(held) && pure_list_insert(held, 0, &(PureCell){.num = 3}, NULL) == PURE_OK && !pure_list_pin(held) &&
+          held->width[0] == 1 && pure_list_get(held, 0, 0).num == 3);
+    pure_list_free(t), pure_list_free(w), pure_list_free(k), pure_list_free(held);
+    uint32_t seed = 20261124;
+    size_t steps = 0;
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        const uint8_t *cell = kind == 0 ? number : kind == 1 ? integer : flag;
+        PureList *a = pure_list_new(1, cell), *b = pure_list_new(1, cell);
+        CHECK(a && b && pure_list_pin(a) && pure_list_pin(a) && pure_list_arrays(b) && pure_list_form(a) == 1 && !pure_buffer_cells(a));
+        for (unsigned step = 0; step < 30000; ++step, ++steps) {
+            uint32_t r = next_random(&seed), what = r % 16;
+            PureCell v = {0};
+            if (kind == 1) v.i64 = (int64_t)((uint64_t)next_random(&seed) << 32 | next_random(&seed)) >> (r >> 8) % 64;
+            else v.num = kind == 2 ? (double)(r >> 8 & 1) : values[(r >> 8) % LEN(values)];
+            size_t count = pure_list_count(a), at = count ? next_random(&seed) % count : 0;
+            if (what < 9) { /* an item at its end */
+                CHECK(pure_list_insert(a, count, &v, NULL) == PURE_OK && pure_list_insert(b, count, &v, NULL) == PURE_OK);
+            } else if (what < 12 && count) {
+                CHECK(pure_list_set(a, at, 0, v, NULL) == PURE_OK && pure_list_set(b, at, 0, v, NULL) == PURE_OK);
+            } else if (what < 15 && count) {
+                CHECK(pure_list_remove(a, count - 1, NULL) == PURE_OK && pure_list_remove(b, count - 1, NULL) == PURE_OK);
+            } else if (what == 15 && !(r >> 8 & 15)) {
+                pure_list_clear(a), pure_list_clear(b);
+            }
+            count = pure_list_count(a);
+            const int64_t *cells = pure_buffer_cells(a);
+            CHECK(count == pure_list_count(b) && pure_list_size(a) == pure_list_size(b) && a->version == b->version);
+            CHECK(pure_list_form(a) == 1 && a->width[0] == 8 && (cells || !a->room) && count <= a->room);
+            for (size_t i = count > 3 ? count - 3 : 0; i < count; ++i) { /* its end, and now and then all of it */
+                PureCell in_a = pure_list_get(a, i, 0), in_b = pure_list_get(b, i, 0);
+                CHECK(!memcmp(&in_a.i64, &in_b.i64, 8) && !memcmp(&cells[i], &in_b.i64, 8));
+            }
+            for (size_t i = 0; !(step % 997) && i < count; ++i) CHECK(!memcmp(&cells[i], &(PureCell){.i64 = pure_list_get(b, i, 0).i64}.i64, 8));
+        }
+        /* Its copy is a buffer with its cells; a message's rows are lent to the list not pinned alone. */
+        pure_list_clear(a), pure_list_clear(b);
+        for (unsigned i = 0; i < 40; ++i) {
+            PureCell v = {.i64 = kind == 1 ? (int64_t)i * 1000003 : 0};
+            if (kind != 1) v.num = kind == 2 ? i % 2 : values[i % LEN(values)];
+            CHECK(pure_list_insert(a, i, &v, NULL) == PURE_OK);
+        }
+        PureList *copy = pure_list_copied(a);
+        CHECK(copy && pure_list_count(copy) == 40 && pure_buffer_cells(copy) && pure_buffer_cells(copy) != pure_buffer_cells(a) &&
+              !memcmp(pure_buffer_cells(copy), pure_buffer_cells(a), 40 * 8));
+        pure_list_free(copy);
+        pure_list_clear(a);
+        static _Alignas(8) unsigned char rows[16];
+        CHECK(!pure_list_borrow(a, rows, 16) && pure_list_borrow(b, rows, 16) && pure_list_count(b) == 2);
+        pure_list_clear(b);
+        /* slim: an empty one's column let go when it is more than the bytes given. */
+        for (unsigned i = 0; i < 200; ++i) CHECK(pure_list_insert(a, i, &(PureCell){0}, NULL) == PURE_OK);
+        pure_list_clear(a);
+        CHECK(a->room >= 200);
+        pure_list_slim(a, 8 * a->room);
+        CHECK(a->room >= 200);
+        pure_list_slim(a, 1024);
+        CHECK(!a->room && !pure_buffer_cells(a) && a->width[0] == 8 && pure_list_form(a) == 1);
+        CHECK(pure_list_insert(a, 0, &(PureCell){.i64 = 1}, NULL) == PURE_OK && pure_buffer_cells(a)[0] == 1);
+        pure_list_free(a), pure_list_free(b);
+    }
+    /* Past the size at which a list not pinned becomes a tree (64 MiB of cells), it is FLAT still. */
+    PureList *large = pure_list_new(1, integer);
+    CHECK(large && pure_list_pin(large));
+    size_t many = ((size_t)1 << 23) + 5;
+    for (size_t i = 0; i < many; ++i) CHECK(pure_list_insert(large, i, &(PureCell){.i64 = (int64_t)i}, NULL) == PURE_OK);
+    CHECK(pure_list_count(large) == many && pure_list_form(large) == 1 && pure_buffer_cells(large)[many - 1] == (int64_t)many - 1 &&
+          pure_list_size(large) == 8 * many && pure_list_get(large, many / 2, 0).i64 == (int64_t)(many / 2));
+    pure_list_free(large);
+
+    /* The load: xs grows and shrinks at its end (a buffer); ys takes an insert (none); zs is removed from at its first
+     * item (none). run: xs = [5, 300, 0.5] less its last, xs[0] = 7; ys = [9]; zs = [1, 2] less its first;
+     * n = xs[1] + xs.count + xs[0] + zs[0]. */
+    enum { N, XS, YS, ZS, AT = PURE_OP_INDEX_AT };
+    static const S nums[] = {{"n", 0}};
+    static const T states[] = {{"let.xs", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}, {"let.ys", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0},
+                               {"let.zs", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}};
+    static const RF fields[] = {{"v", 0, 0}};
+    static const R records[] = {{"One", fields, 1}};
+    static const I inputs[] = {KEY("run", "KeyR"), KEY("peek", "KeyP")};
+    static const O code[] = {
+        {C, 0, 5}, {LA, XS, 0}, {C, 0, 300}, {LA, XS, 0}, {C, 0, 0.5}, {LA, XS, 0},
+        {LC, XS, 0}, {C, 0, 1}, {PURE_OP_SUB, 0, 0}, {AT, XS, 0}, {LR, XS, 0},
+        {C, 0, 0}, {AT, XS, 0}, {C, 0, 7}, {IS, ITEM(XS, 0), 0},
+        {C, 0, 1}, {AT, XS, 0}, {IG, ITEM(XS, 0), 0}, {LC, XS, 0}, {ADD, 0, 0},
+        {XF, XS, 0}, {IG, ITEM(XS, 0), 0}, {ADD, 0, 0},
+        {XF, YS, 0}, {C, 0, 9}, {LI, YS, 0}, {C, 0, 1}, {LA, ZS, 0}, {C, 0, 2}, {LA, ZS, 0}, {XF, ZS, 0}, {LR, ZS, 0},
+        {XF, ZS, 0}, {IG, ITEM(ZS, 0), 0}, {ADD, 0, 0}, {ST, N, 0},
+        {LC, XS, 0}, {ST, N, 0}, /* peek: n = xs.count */
+    };
+    static const H handlers[] = {{1, 0, LEN(code) - 2}, {3, LEN(code) - 2, 2}};
+    Spec spec = {nums, 1, inputs, 2, NULL, 0, handlers, 2, code, LEN(code), NULL, 0, states, 3, NULL, 0, NULL, 0, records, 1, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK);
+    CHECK(module_a.list_buffer[XS] == 1 && !module_a.list_buffer[YS] && !module_a.list_buffer[ZS]);
+    for (uint32_t pc = 0; pc < module_a.code_count; ++pc) { /* xs's instructions are a buffer's, the others' not */
+        const PureOp *op = &module_a.code[pc];
+        bool of_list = op->op == LA || op->op == LI || op->op == LR || op->op == LC || op->op == IG || op->op == IS || op->op == AT ||
+                       op->op == XF;
+        if (of_list) CHECK(!(op->plan & PLAN_BUFFER) == ((op->arg & 0xFFFF) != XS));
+    }
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    CHECK(app.lists[XS]->pinned && !app.lists[YS]->pinned && !app.lists[ZS]->pinned);
+    /* (a buffer that held nothing, with no column yet, is let go as one: nothing counted) */
+    CHECK(press(&app, 1) == PURE_OK && app.values[N].num == 0 && !pure_buffer_cells(app.lists[XS]) && !app.buffers_missed);
+    for (int k = 0; k < 3; ++k) CHECK(press(&app, 0) == PURE_OK && app.values[N].num == 300 + 2 + 7 + 2 && !app.buffers_missed);
+    CHECK(app.lists[XS]->pinned && pure_list_form(app.lists[XS]) == 1 && app.lists[XS]->width[0] == 8 && app.lists[XS]->room);
+    /* A buffer's list not held as one (its pin taken off here) answers the same, and is counted as the event lets it
+     * go holding its two items; a pinned list that is no buffer (zs, by hand) answers as any list, its first item removed. */
+    app.lists[XS]->pinned = false;
+    CHECK(pure_list_pin(app.lists[ZS]));
+    for (uint64_t k = 1; k <= 2; ++k) CHECK(press(&app, 0) == PURE_OK && app.values[N].num == 300 + 2 + 7 + 2 && app.buffers_missed == k);
+    app.buffers_missed = 0;
+    pure_app_stop(&app);
+    pure_module_release(&module_a);
+    /* A call's list: big() appends 300 items to its own and returns their count. The call's list is pinned as it is
+     * made, and let go it keeps no column past what a frame counts for a list. */
+    enum { OWN = 1 };
+    static const T owned[] = {{"let.own", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}};
+    static const O calling[] = {
+        {C, 0, 0}, {C, 0, 300}, {PURE_OP_LOOP, 0 | 2u << 16, 0}, {PURE_OP_LOCAL_LOAD, 0, 0}, {LA, OWN, 0}, {LC, OWN, 0}, {RET, 0, 0},
+        {CALL, 0, 0}, {ST, N, 0},
+    };
+    static const H calls[] = {{1, 7, 2}};
+    static const FN big = {0, 7, 0, 1, {0}, {0}};
+    Spec called = {nums, 1, inputs, 1, NULL, 0, calls, 1, calling, LEN(calling), NULL, 0, owned, 1, NULL, 0, NULL, 0, records, 1, NULL, 0};
+    CHECK(load_functions(called, &big, 1, &module_a) == PURE_OK && module_a.list_buffer[OWN] == 1);
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    for (int k = 0; k < 3; ++k) {
+        CHECK(press(&app, 0) == PURE_OK && app.values[N].num == 300 && !app.buffers_missed);
+        CHECK(app.spare[OWN].count == 1 && app.spare[OWN].lists[0]->pinned && !pure_list_count(app.spare[OWN].lists[0]) &&
+              app.spare[OWN].lists[0]->room * 8 <= PURE_CALL_LIST);
+    }
+    app.spare[OWN].lists[0]->pinned = false; /* the call's list not held as a buffer: counted as the call lets it go */
+    CHECK(press(&app, 0) == PURE_OK && app.values[N].num == 300 && app.buffers_missed == 1);
+    app.buffers_missed = 0;
+    pure_app_stop(&app);
+    pure_module_release(&module_a);
+    printf("{\"typed_buffers\":%zu,\"large\":%zu}\n", steps, many);
+}
+
+/* A typed buffer's instructions fail where any list's do, for the reason they do, having counted the work they do: a
+ * memory budget at an append, a work budget at a loop of appends and at one of sets and gets, an index gone past the
+ * end at a get and at a set, a position past the end at its making, a remove of nothing, a walk that removes. The
+ * numbers are those of the executor before a buffer's list was pinned (pure 7f6c84c), which this was run on: what
+ * comes to read a buffer's cells where they lie is held to them. */
+static void buffer_budgets(void) {
+    enum { N, XS, FILL = 0, SETS, PAST, STALE_GET, STALE_SET, EMPTY, WALKED, LOOP = PURE_OP_LOOP, LL = PURE_OP_LOCAL_LOAD,
+           AT = PURE_OP_INDEX_AT };
+    static const S nums[] = {{"n", 0}};
+    static const T states[] = {{"let.xs", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}};
+    static const RF fields[] = {{"v", 0, 0}};
+    static const R records[] = {{"One", fields, 1}};
+    static const I inputs[] = {KEY("fill", "KeyF"), KEY("sets", "KeyS"), KEY("past", "KeyP"), KEY("get", "KeyG"), KEY("set", "KeyT"),
+                               KEY("empty", "KeyE"), KEY("walked", "KeyW")};
+    static const O code[] = {
+        /* fill at 0: for i in 0 .. 1e6 { xs.append(i) }; n = xs.count (7) */
+        {C, 0, 0}, {C, 0, 1e6}, {LOOP, 0 | 2u << 16, 0}, {LL, 0, 0}, {LA, XS, 0}, {LC, XS, 0}, {ST, N, 0},
+        /* sets at 7: xs.append(0); for i in 0 .. 1e15 { xs[0] = xs[0] + 1 } (13) */
+        {C, 0, 0}, {LA, XS, 0}, {C, 0, 0}, {C, 0, 1e15}, {LOOP, 0 | 8u << 16, 0},
+        {C, 0, 0}, {AT, XS, 0}, {C, 0, 0}, {AT, XS, 0}, {IG, ITEM(XS, 0), 0}, {C, 0, 1}, {ADD, 0, 0}, {IS, ITEM(XS, 0), 0},
+        /* past at 20: xs.append(1); xs.append(2); n = xs[2] (8) */
+        {C, 0, 1}, {LA, XS, 0}, {C, 0, 2}, {LA, XS, 0}, {C, 0, 2}, {AT, XS, 0}, {IG, ITEM(XS, 0), 0}, {ST, N, 0},
+        /* get at 28: xs.append(1); the last item's index, kept while the item is removed, read (10) */
+        {C, 0, 1}, {LA, XS, 0}, {XE, XS, 0}, {LC, XS, 0}, {C, 0, 1}, {PURE_OP_SUB, 0, 0}, {AT, XS, 0}, {LR, XS, 0},
+        {IG, ITEM(XS, 0), 0}, {ST, N, 0},
+        /* set at 38: the same, set (10) */
+        {C, 0, 1}, {LA, XS, 0}, {XE, XS, 0}, {LC, XS, 0}, {C, 0, 1}, {PURE_OP_SUB, 0, 0}, {AT, XS, 0}, {LR, XS, 0},
+        {C, 0, 9}, {IS, ITEM(XS, 0), 0},
+        /* empty at 48: xs.remove(xs.last), xs holding nothing (2) */
+        {XE, XS, 0}, {LR, XS, 0},
+        /* walked at 50: xs = [1, 2, 3, 4]; for x in xs { xs.remove(xs.last) }; n = xs.count (13): the walk ends where the list does */
+        {C, 0, 1}, {LA, XS, 0}, {C, 0, 2}, {LA, XS, 0}, {C, 0, 3}, {LA, XS, 0}, {C, 0, 4}, {LA, XS, 0},
+        {PURE_OP_EACH, WALKING(XS, 2), 0}, {XE, XS, 0}, {LR, XS, 0}, {LC, XS, 0}, {ST, N, 0},
+    };
+    static const H handlers[] = {{1, 0, 7}, {3, 7, 13}, {5, 20, 8}, {7, 28, 10}, {9, 38, 10}, {11, 48, 2}, {13, 50, 13}};
+    Spec spec = {nums, 1, inputs, LEN(inputs), NULL, 0, handlers, LEN(handlers), code, LEN(code), NULL, 0, states, 1,
+                 NULL, 0, NULL, 0, records, 1, NULL, 0};
+    CHECK(load(spec, &module_a) == PURE_OK && module_a.list_buffer[XS]);
+    PureApp app;
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+    /* An event's budgets, and what it ends as: its result, its fault, the instruction at fault, the work counted, n. */
+    static const struct { uint32_t input; size_t memory; uint64_t budget; PureResult result; PureFault fault; uint32_t pc; uint64_t work; double n; } runs[] = {
+        {FILL, 8 * 1000, 0, PURE_BUDGET, PURE_FAULT_MEMORY, 4, 3010, 0},     /* the 1,001st item */
+        {FILL, 8 * 1000 + 7, 0, PURE_BUDGET, PURE_FAULT_MEMORY, 4, 3010, 0}, /* (an item is 8 bytes or none) */
+        {FILL, 8, 0, PURE_BUDGET, PURE_FAULT_MEMORY, 4, 13, 0},
+        {FILL, 0, 3000, PURE_LIMIT, PURE_FAULT_WORK, 2, 2998, 0},            /* a round is 3: the loop and its block */
+        {FILL, 0, 3001, PURE_LIMIT, PURE_FAULT_WORK, 2, 3001, 0},
+        {FILL, 0, 3002, PURE_LIMIT, PURE_FAULT_WORK, 2, 3001, 0},
+        {SETS, 0, 5000, PURE_LIMIT, PURE_FAULT_WORK, 11, 4999, 0},           /* a round is 9 */
+        {SETS, 0, 5001, PURE_LIMIT, PURE_FAULT_WORK, 11, 4999, 0},
+        {SETS, 8, 100, PURE_LIMIT, PURE_FAULT_WORK, 11, 94, 0},              /* (a set adds nothing to what the event holds) */
+        {PAST, 0, 0, PURE_NOT_FOUND, PURE_FAULT_NOT_FOUND, 25, 8, 0},        /* where the position is made an index */
+        {STALE_GET, 0, 0, PURE_NOT_FOUND, PURE_FAULT_NOT_FOUND, 36, 10, 0},  /* at the get */
+        {STALE_SET, 0, 0, PURE_NOT_FOUND, PURE_FAULT_NOT_FOUND, 47, 10, 0},  /* at the set */
+        {FILL, 1 << 20, 0, PURE_BUDGET, PURE_FAULT_MEMORY, 4, 393226, 0},    /* the 131,073rd item: its column grown 14 times */
+        {EMPTY, 0, 0, PURE_NOT_FOUND, PURE_FAULT_NOT_FOUND, 49, 2, 0},       /* at the remove: no item to take */
+        {WALKED, 0, 0, PURE_OK, PURE_FAULT_NONE, UINT32_MAX, 21, 2},         /* two rounds: the walk's end comes to meet it */
+        {WALKED, 0, 15, PURE_LIMIT, PURE_FAULT_WORK, 58, 13, 2},             /* (n as the run before left it) */
+        {WALKED, 24, 0, PURE_BUDGET, PURE_FAULT_MEMORY, 57, 13, 2},          /* the fourth item */
+    };
+    for (size_t r = 0; r < LEN(runs); ++r) {
+        pure_app_memory(&app, runs[r].memory);
+        pure_app_work(&app, runs[r].budget);
+        CHECK(press(&app, runs[r].input) == runs[r].result && app.fault == runs[r].fault && app.fault_pc == runs[r].pc &&
+              app.work == runs[r].work);
+        CHECK(app.values[N].num == runs[r].n && pure_list_count(app.lists[XS]) == 0 && !app.buffers_missed);
+    }
+    printf("{\"buffer_budgets\":%zu}\n", LEN(runs));
+    pure_app_stop(&app);
+    pure_module_release(&module_a);
+}
+
 int main(void) {
     number_texts();
     behaviour();
@@ -8018,6 +8256,8 @@ int main(void) {
     view_arguments();
     locals();
     loops();
+    typed_buffers();
+    buffer_budgets();
     view_bodies();
     ranges();
     keyed();

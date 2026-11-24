@@ -1,4 +1,5 @@
 #include "module.h"
+#include "module-list-shape.h"
 #include "module-run.h"
 #include "module-save.h"
 #include "log.h"
@@ -490,8 +491,10 @@ static bool same_stack(const Join *join, int height, const unsigned char *types,
 PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int view, int row, int outer, uint32_t event,
                                           bool locals, unsigned nest, uint32_t *walked, unsigned walks, int fn, uint32_t *at);
 
-/* Typed buffers (an event's list held as its numbers alone, with no cells; this is the judgment only, nothing runs by
- * it yet): where the value of an event's list goes. While the load verifies a module that has a candidate (an event's
+/* Typed buffers (an event's list held as its numbers alone, 8 bytes each side by side: module-list-shape.h; this is
+ * the judgment, by which a list is pinned as one where it is made; the executor reads it as any list, by the list's
+ * functions, and its instructions are marked PLAN_BUFFER for what will read the cells where they lie): where the
+ * value of an event's list goes. While the load verifies a module that has a candidate (an event's
  * list of one number, i64 or bool, with no key, bound to nothing; 63 at most), the verifier's walk (verify_code)
  * carries with each list value on the operand stack what it may be: the candidates it was taken from (a bit each;
  * FLOW_OTHER for any other list) and the carrier it was read from. What carries values past an instruction is a local
@@ -527,6 +530,18 @@ static void flow_edge(Flow *flow, uint32_t from, uint32_t to) {
         flow->edge_room = room;
     }
     flow->from[flow->edges] = from, flow->to[flow->edges++] = to;
+}
+
+/* Whether the LIST_REMOVE at op takes its list's last item (or none, the list empty): the position it takes is made
+ * just before it, the list's last (INDEX_LAST) or the item at its count less 1 (LIST_COUNT, 1, SUB, INDEX_AT), in the
+ * run instructions before op that ran one after another with nothing joining them (the walk's: no branch comes in
+ * between, and none is a loop's block). The first fact about a value the load holds; whatever ranges it comes to prove
+ * say this too. */
+static bool removes_last(const PureOp *op, uint32_t run) {
+    uint32_t list = op->arg;
+    if (run >= 1 && op[-1].op == PURE_OP_INDEX_LAST && op[-1].arg == list) return true;
+    return run >= 4 && op[-1].op == PURE_OP_INDEX_AT && op[-1].arg == list && op[-2].op == PURE_OP_SUB &&
+           op[-3].op == PURE_OP_CONST && !op[-3].arg && op[-3].value == 1 && op[-4].op == PURE_OP_LIST_COUNT && op[-4].arg == list;
 }
 
 /* A value goes to a carrier. */
@@ -633,6 +648,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
     unsigned open = 0;
     int height = 0;
     bool reachable = true;
+    uint32_t straight = 0; /* from this instruction of the block to the one walked, each ran after the one before and nothing else */
     if (view == FUNCTION) /* its parameters */
         for (const PureFunction *f = &m->function[fn]; height < f->params; ++height) {
             types[height] = signature_stack_type(m, f->first + (uint32_t)height);
@@ -656,10 +672,12 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             joins[join] = joins[--open];
             if (flow && join != open) memcpy(join_origins[join], join_origins[open], (size_t)joins[join].height * sizeof(Origin));
             reachable = true;
+            straight = i;
         } else if (target[i]) {
             if (reachable && height) REFUSE("join with different stacks");
             height = 0;
             reachable = true;
+            straight = i;
         }
         if (i == block.length) break;
         if (!reachable) REFUSE("unreachable instruction");
@@ -824,6 +842,12 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         for (unsigned k = 0; k < pops; ++k) /* a list value goes where a list of its record goes */
             if (need[k] == T_LIST && owners[height + (int)k] != list_wanted(m, op, k)) REFUSE("list of another record");
         if (flow) flow_consume(flow, m, op, origins + height, pops);
+        /* A typed buffer grows and shrinks at its end alone (so its items never move, and it need never be a tree to
+         * bound what a change moves): a candidate an insert names is none, nor one a remove names unless the item
+         * removed is seen to be its last. */
+        if (flow && (op->op == PURE_OP_LIST_INSERT || op->op == PURE_OP_LIST_REMOVE) && flow->bit[arg] && flow->bit[arg] != UINT32_MAX &&
+            !(op->op == PURE_OP_LIST_REMOVE && removes_last(op, i - straight)))
+            flow->value[FLOW_ESCAPED] |= UINT64_C(1) << (flow->bit[arg] - 1);
         unsigned owner = of == O_ARG ? arg : of == O_REF ? m->state_ref[arg] : of == O_LIST ? list_of(arg) : 0;
         if (kind == A_LOCAL && arg >> 8 & 0xFF) { /* an index local belongs to its list */
             owner = arg >> 16;
@@ -894,6 +918,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         }
         if (op->op == PURE_OP_RETURN) reachable = false; /* the rest of its stack let go */
         i += skip;
+        if (skip) straight = i + 1; /* (what follows a loop's block follows its last round, or a break) */
     }
     for (int k = 0; flow && !handler && reachable && k < height; ++k) /* a view's value */
         if (origins[k].bits || origins[k].node) flow_into(flow, origins[k], FLOW_ESCAPED);
@@ -1963,10 +1988,11 @@ PURE_COLD static void flow_end(Flow *flow) {
     *flow = (Flow){0};
 }
 
-/* Which event lists could be typed buffers (how they run is not changed yet): a candidate
- * whose value the verifier's walks never found escaping (Flow, above), put in a list's items, or meeting another list's
- * value in one local, parameter, result or bound list (a function called with a buffer and a list: one form a place); a
- * list bound only to such values is one as well. list_buffer gets 1 for each. Which lists reach a carrier: those put
+/* Which event lists are typed buffers: a candidate whose value the verifier's walks never found escaping (Flow, above),
+ * put in a list's items, or meeting another list's value in one local, parameter, result or bound list (a function
+ * called with a buffer and a list: one form a place), and which grows and shrinks at its end alone (no insert names
+ * it, and each remove that does takes its last item: removes_last; the walk marks the others as escaped); a list bound
+ * only to such values is one as well. list_buffer gets 1 for each. Which lists reach a carrier: those put
  * there and those of every carrier with an edge to it, a carrier taken again whenever it gains one (64 times at
  * most). false out of memory. */
 PURE_COLD static bool buffer_lists(PureModule *m, Flow *flow) {
@@ -2751,7 +2777,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         PureOp *op = &out->code[pc];
         uint32_t list = op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET ? list_of(op->arg) : op->arg;
         switch (op->op) {
-        case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE:
+        case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: case PURE_OP_LIST_APPEND: case PURE_OP_LIST_REMOVE: /* (no insert names one) */
         case PURE_OP_LIST_COUNT: case PURE_OP_BYTES_OF: case PURE_OP_INDEX_AT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
             if (list < out->states && out->list_buffer[list]) op->plan |= PLAN_BUFFER;
             break;
@@ -3191,12 +3217,20 @@ static uint64_t nest(PureApp *app, uint32_t record, const PureList *from) {
     return ++app->nested.count;
 }
 
+/* A typed buffer's list as it is let go (an event's end, a call's, a binding's): one that holds items is held as a
+ * buffer (module-list-shape.h), or it is counted. From when it is made until then it is so or empty, the load's
+ * judgment and the pin being right; what will read its cells where they lie stands on this count being 0, which
+ * tests hold. */
+static inline void buffer_ends(PureApp *app, uint32_t state, const PureList *list) {
+    if (app->module->list_buffer[state] && pure_list_count(list) && !pure_buffer_cells(list)) ++app->buffers_missed;
+}
+
 /* The bound lists given back their own, and the event's lists in records let go (an event or a view begins): those
  * bound since the last time (LIST_BIND keeps them), not every state. */
 static void unbind(PureApp *app) {
     for (uint32_t k = 0; k < app->bound_count; ++k) {
         uint32_t i = app->bound[k];
-        if (app->unbound[i]) app->lists[i] = app->unbound[i], app->unbound[i] = NULL;
+        if (app->unbound[i]) buffer_ends(app, i, app->lists[i]), app->lists[i] = app->unbound[i], app->unbound[i] = NULL;
     }
     app->bound_count = 0;
 }
@@ -5231,16 +5265,19 @@ static void *frame_room(PureApp *app, size_t bytes, unsigned *block, size_t *use
 
 /* An empty list of an event's list state for a call: one a call let go, or a new one (NULL: out of memory). Inline where
  * a call opens: with moved() its second caller, the compiler called it there, and UAX #14's executor ran 0.15% more. */
+PURE_COLD static PureList *call_list(PureApp *app, uint32_t state);
 static inline __attribute__((always_inline)) PureList *spare_list(PureApp *app, uint32_t state) {
     __typeof__(app->spare[0]) *spare = &app->spare[state];
-    return spare->count ? spare->lists[--spare->count] : new_list(app->module, app->module->state_ref[state], false);
+    return spare->count ? spare->lists[--spare->count] : call_list(app, state);
 }
 
 /* A call's list let go: emptied (what it held no longer counted) and kept for the next calls, unless what it keeps
  * when empty passes what a frame counts for it. */
 static void let_list_go(PureApp *app, uint32_t state, PureList *list) {
+    buffer_ends(app, state, list);
     Held before = list_held(app, list);
     pure_list_clear(list);
+    pure_list_slim(list, PURE_CALL_LIST); /* (a typed buffer's column: an empty list's arrays are not counted) */
     (void)grows(app, before, list_held(app, list));
     __typeof__(app->spare[0]) *spare = &app->spare[state];
     if (pure_list_extra(list) > PURE_CALL_LIST) { pure_list_free(list); return; }
@@ -5555,6 +5592,14 @@ PURE_COLD static PureList *new_list(const PureModule *m, uint32_t record, bool k
     return pure_list_new(r->count, kinds);
 }
 
+/* A new list of an event's list state for a call (a tree, as a call's lists are); a typed buffer's is pinned (in
+ * arrays, then). */
+PURE_COLD static PureList *call_list(PureApp *app, uint32_t state) {
+    PureList *list = new_list(app->module, app->module->state_ref[state], false);
+    if (list && app->module->list_buffer[state]) (void)pure_list_pin(list);
+    return list;
+}
+
 void pure_app_finish(PureApp *app) {
     free(app->copied);
     app->copied = NULL;
@@ -5741,6 +5786,12 @@ static bool lay_app(PureApp *app, uint32_t states) {
 }
 
 void pure_app_stop(PureApp *app) {
+    /* A test's switch (PURE_BUFFERS set): an app that let go of a typed buffer's list holding items and not held as
+     * one stops the process here, so that every run of a test's programs holds the count at 0. */
+    if (app->buffers_missed && getenv("PURE_BUFFERS")) {
+        fprintf(stderr, "pure: %" PRIu64 " lists of typed buffers were not held as buffers\n", app->buffers_missed);
+        abort();
+    }
     unbind(app); /* a register's own list goes with the lists, the bound one with the event's */
     pure_app_finish(app);
     close_burst(app, true); /* unsaved changes are dropped with the app */
@@ -5870,7 +5921,11 @@ static void clear_rows(PureApp *app, uint32_t input) {
     unbind(app);
     const uint64_t *clears = m->event_clears + (size_t)input * m->state_words;
     for (uint32_t w = 0; w < m->state_words; ++w)
-        for (uint64_t left = clears[w]; left; left &= left - 1) pure_list_clear(app->lists[w * 64 + (uint32_t)__builtin_ctzll(left)]);
+        for (uint64_t left = clears[w]; left; left &= left - 1) {
+            uint32_t list = w * 64 + (uint32_t)__builtin_ctzll(left);
+            buffer_ends(app, list, app->lists[list]);
+            pure_list_clear(app->lists[list]);
+        }
 }
 
 void pure_app_memory(PureApp *app, size_t bytes) { app->memory = bytes; }
@@ -6168,6 +6223,7 @@ static bool own_lists(PureApp *app, const uint64_t *lists) {
             (void)pure_list_keyed(app->own[i], m->state_key[i] ? (int)m->state_key[i] - 1 : -1);
             if (m->state_key[i]) (void)pure_list_hashed(app->own[i]);
             (void)pure_list_arrays(app->own[i]); /* in arrays, not a tree, while it can (021) */
+            if (m->list_buffer[i]) (void)pure_list_pin(app->own[i]);
         }
         app->lists[i] = app->own[i];
     }
@@ -6206,8 +6262,11 @@ static PureResult evaluate(PureApp *app, uint32_t view, size_t row, Slot *out) {
                                 * event's end empties them); only a body has any (a table's columns, a row at a time, none) */
         const uint64_t *lists = m->view_lists + (size_t)view * m->state_words;
         for (uint32_t w = 0; w < m->state_words; ++w)
-            for (uint64_t left = lists[w]; left; left &= left - 1)
-                pure_list_clear(app->lists[w * 64 + (uint32_t)__builtin_ctzll(left)]);
+            for (uint64_t left = lists[w]; left; left &= left - 1) {
+                uint32_t list = w * 64 + (uint32_t)__builtin_ctzll(left);
+                buffer_ends(app, list, app->lists[list]);
+                pure_list_clear(app->lists[list]);
+            }
     }
     return result;
 }
@@ -7185,6 +7244,7 @@ PURE_COLD static PureResult open_module(PureApp *app, const PureModule *module) 
             (void)pure_list_hashed(lists[i]);
         if (module->state_type[i] == PURE_STATE_LIST && module->state_flags[i] & PURE_LIST_ROWS >> 8)
             (void)pure_list_arrays(lists[i]); /* in arrays, not a tree, while it can (021) */
+        if (module->state_type[i] == PURE_STATE_LIST && module->list_buffer[i]) (void)pure_list_pin(lists[i]); /* a typed buffer */
     }
     if (old) remap_outputs(app, old, module, true, NULL, NULL, numbers);
     if (recast) { /* in the place of the outbox, its sends now the new module's */

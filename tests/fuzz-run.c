@@ -6,7 +6,7 @@
  * starts on it without a store, a small work budget (100,000 instructions an event) and memory budget (1 MiB); each
  * message is delivered, whatever comes of the one before; then every state and view is shown as pure-run shows
  * them (its own code, its output thrown away). A message may fail; nothing may crash, read outside what it was
- * given or leak. The module and each payload are copied into blocks of their exact sizes, so a read past either's
+ * given or leak, and no typed buffer's list may end an event not held as one (the app's buffers_missed). The module and each payload are copied into blocks of their exact sizes, so a read past either's
  * end is seen, and they are aligned as a host's buffers are.
  *
  *   make fuzz && sh tests/fuzz.sh run MINUTES       (PURE_JIT=0 PURE_BATCH=0 for the interpreter alone) */
@@ -48,6 +48,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
                 at += given, ++events;
             }
             show(&app, NULL);
+            if (app.buffers_missed) abort(); /* a typed buffer's list let go holding items and not held as one */
             pure_app_stop(&app);
         }
         pure_module_release(&module);

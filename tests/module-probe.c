@@ -11,8 +11,8 @@
  * clock (now): the two runs are not at the same time. Prints a line of
  * JSON: the inputs applied, the ops ranged, and each number state's value;
  * exits 1 at the first difference, naming the state. With --buffers, it prints
- * each event list of one number, i64 or bool with no key as the load judged it
- * (nothing runs by it yet): those that could be typed buffers, and the others. */
+ * each event list of one number, i64 or bool with no key as the load judged it:
+ * those that are typed buffers, and the others. */
 #include "module.h"
 #include <stdio.h>
 #include <stdlib.h>

@@ -30,6 +30,7 @@ tests are core/test-module.c and store/test-tree-store.c.
 """
 import argparse
 import json
+import os
 import random
 import subprocess
 import sys
@@ -41,6 +42,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 # aup's examples (its checkout beside this one, or --aup-root).
 EXAMPLES = ROOT.parent / 'aup' / 'examples'
+# Every program these checks run holds its typed buffers as buffers: an app that let go of one's list holding items and
+# not held so stops its process as it stops (core/module.c's pure_app_stop).
+os.environ.setdefault('PURE_BUFFERS', 'held')
 
 
 def run(*args, stdin=None, check=True):
@@ -2756,6 +2760,40 @@ on go {
   c = local_bags.count + f.count
 }
 """
+# A buffer grows and shrinks at its end alone: a list a remove names is none unless the item removed is seen to be its
+# last (its count less 1, or its last, made just before the remove with no branch between). (An insert makes it none
+# too: aup writes none into such a list, so core/test-module.c's buffer_ends holds that.)
+BUFFER_ENDS_SOURCE = """record One {
+  v = 0
+}
+state c = 0
+input go = message { n: u32 }
+on go {
+  let popped: list of number = [1, 2, 3]
+  popped.remove(popped.count - 1)
+  let dropped: list of One
+  dropped.append(One { v: 1 })
+  dropped.append(One { v: 2 })
+  dropped.remove(dropped.last)
+  let front: list of One
+  front.append(One { v: 1 })
+  front.append(One { v: 2 })
+  front.remove(front.first)
+  let valued: list of number = [1, 2, 3]
+  valued.remove(valued.last)
+  let named: list of number = [1, 2, 3]
+  let at = named.count - 1
+  named.remove(at)
+  let second: list of number = [1, 2, 3]
+  second.remove(second.count - 2)
+  let branched: list of number = [1, 2, 3]
+  branched.remove((if go.n > 0 { 2 } else { branched.count }) - 1)
+  let other: list of number = [1, 2, 3]
+  let another: list of number = [1, 2, 3, 4]
+  other.remove(another.count - 1)
+  c = popped.count + dropped.count + front.count + valued.count + named.count + second.count + branched.count + other.count
+}
+"""
 # What the load judges: the event lists of one number, i64 or bool with no key that could be
 # typed buffers, those that could have been and are not, and how many bound lists are buffers with them (a bound list's
 # name is the compiler's register, so its count).
@@ -2776,20 +2814,25 @@ BUFFER_LISTS = {
     'flows_twice': (['let.mixed', 'let.out'], ['let.kept', 'let.held', 'let.fine'], 3),
     'view_value': ([], ['let.out'], 0),  # a view's value
     'joins': (['let.f'], ['let.a', 'let.b', 'let.e', 'let.g', 'let.h'], 0),  # e into an item, the others into a kept list's field
+    # popped and dropped lose their last item; front its first; valued the item at its last item's value (a list of
+    # numbers' last is the number); named's position comes through a local; second's is the count less 2; branched's
+    # count is one branch of an if; other's count is another list's.
+    'ends': (['let.popped', 'let.dropped', 'let.another'],
+             ['let.front', 'let.valued', 'let.named', 'let.second', 'let.branched', 'let.other'], 0),
 }
 
 
 def module_buffers(aup, pure, work):
-    """Which of an event's lists could be typed buffers, as the load judges it (nothing runs by it yet): the list's
-    value must not leave the event (a state, a kept list, a view's value, an output), must not go into a list's items,
-    and must not meet a list of another form in one local, parameter, result or bound list. module-probe --buffers
-    prints the judgment; here it is held to what was read off aup's examples and to four programs written for the
-    ways of losing it."""
+    """Which of an event's lists are typed buffers, as the load judges it: the list's value must not leave the event
+    (a state, a kept list, a view's value, an output), must not go into a list's items, must not meet a list of
+    another form in one local, parameter, result or bound list, and the list must grow and shrink at its end alone.
+    module-probe --buffers prints the judgment; here it is held to what was read off aup's examples and to five
+    programs written for the ways of losing it."""
     judged = {}
     for name, (buffers, others, bound) in BUFFER_LISTS.items():
         source, module = EXAMPLES / f'{name}.aup', work / f'buffers_{name}.pmod'
         written = {'view_value': BUFFER_VIEW_SOURCE, 'joins': BUFFER_JOINS_SOURCE, 'flows': BUFFER_FLOWS_SOURCE % '',
-                   'flows_twice': BUFFER_FLOWS_SOURCE % BUFFER_FLOWS_TWICE}
+                   'flows_twice': BUFFER_FLOWS_SOURCE % BUFFER_FLOWS_TWICE, 'ends': BUFFER_ENDS_SOURCE}
         if name in written:
             source = work / f'buffers_{name}.aup'
             source.write_text(written[name])

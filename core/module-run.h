@@ -74,8 +74,9 @@ static inline bool number_op(uint8_t op, double a, double b, double *out) {
  * a HAS in a batch's block beginning if !L.has(k) { ... } whose code only adds to L (a filter: L only grows, so a batch asks
  * each round as it opens and again, in the rounds' order, at its end). */
 enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_HOLDS = 2, PLAN_ROW = 4, PLAN_BATCH = 8, PLAN_RECUR = 16, PLAN_GUARD = 32, PLAN_SPREAD = 64, PLAN_FILTER = 128 };
-/* An item's, a count's or a change's of an event's list that could be a typed buffer (a list held as its numbers alone,
- * with no cells: the judgment only, how it runs is not changed yet; RECUR's bit, which only a LOCAL_STORE's plan has). */
+/* An item's, a count's or a change's of an event's list that is a typed buffer (a list held as its numbers alone, 8
+ * bytes each in one column: module-list-shape.h). Nothing reads the mark yet: the executor, the batches and the tier
+ * read the list as any FLAT one, by the list's functions (RECUR's bit, which only a LOCAL_STORE's plan has). */
 enum { PLAN_BUFFER = PLAN_RECUR };
 #define PURE_REUSE_KEPT UINT32_MAX /* reuse_from at a root whose value later copies of its code take */
 
