@@ -5,11 +5,14 @@
  * tests/check.py.
  *
  *   module-probe FILE.pmod INPUT...
+ *   module-probe --buffers FILE.pmod
  *
  * Each INPUT is a key input's name, pressed (its message, no fields). The module must not read the
  * clock (now): the two runs are not at the same time. Prints a line of
  * JSON: the inputs applied, the ops ranged, and each number state's value;
- * exits 1 at the first difference, naming the state. */
+ * exits 1 at the first difference, naming the state. With --buffers, it prints
+ * each event list of one number, i64 or bool with no key as the load judged it
+ * (nothing runs by it yet): those that could be typed buffers, and the others. */
 #include "module.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,8 +70,33 @@ int main(int argc, char **argv) {
     PureApp apps[2] = {0};
     char error[256];
     unsigned ranged = 0;
+    if (argc == 3 && !strcmp(argv[1], "--buffers")) { /* each event list of one number, i64 or bool with no key, as typed buffer or not */
+        if (pure_module_read(argv[2], &modules[0], error, sizeof(error)) != PURE_OK) {
+            fprintf(stderr, "module-probe: %s\n", error);
+            return 2;
+        }
+        const PureModule *m = &modules[0];
+        printf("{\"buffer\":[");
+        for (int buffer = 1; buffer >= 0; --buffer) {
+            bool first = true;
+            for (uint32_t s = 0; s < m->states; ++s) {
+                const PureRecord *record = &m->record[m->state_ref[s]];
+                uint8_t type = record->count == 1 ? m->record_field_type[record->first] : PURE_RECORD_TEXT;
+                bool candidate = m->state_type[s] == PURE_STATE_LIST && m->state_flags[s] & PURE_LIST_ROWS >> 8 &&
+                                 !(m->state_flags[s] & PURE_LIST_BOUND >> 8) && !m->state_key[s] &&
+                                 (type == PURE_RECORD_NUMBER || type == PURE_RECORD_I64 || type == PURE_RECORD_BOOL);
+                if ((candidate || m->list_buffer[s]) && m->list_buffer[s] == buffer) {
+                    printf("%s\"%s\"", first ? "" : ",", m->state_names[s]);
+                    first = false;
+                }
+            }
+            if (buffer) printf("],\"not\":[");
+        }
+        puts("]}");
+        return 0;
+    }
     if (argc < 2) {
-        fputs("module-probe FILE.pmod INPUT...\n", stderr);
+        fputs("module-probe FILE.pmod INPUT...\n       module-probe --buffers FILE.pmod\n", stderr);
         return 2;
     }
     for (int k = 0; k < 2; ++k) {

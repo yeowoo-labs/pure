@@ -490,6 +490,108 @@ static bool same_stack(const Join *join, int height, const unsigned char *types,
 PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int view, int row, int outer, uint32_t event,
                                           bool locals, unsigned nest, uint32_t *walked, unsigned walks, int fn, uint32_t *at);
 
+/* Typed buffers (an event's list held as its numbers alone, with no cells; this is the judgment only, nothing runs by
+ * it yet): where the value of an event's list goes. While the load verifies a module that has a candidate (an event's
+ * list of one number, i64 or bool, with no key, bound to nothing; 63 at most), the verifier's walk (verify_code)
+ * carries with each list value on the operand stack what it may be: the candidates it was taken from (a bit each;
+ * FLOW_OTHER for any other list) and the carrier it was read from. What carries values past an instruction is a local
+ * (its frame's: each function's, the handlers', the views'), an event's list (the lists in its items' fields, or the
+ * value a bound list is bound to), and a function's parameters and results; anything else that takes a list value
+ * takes it past the event (a state, a kept list, a view's value, an output): escaped. The walk notes each move as an
+ * edge between carriers (a node each; a join of two carriers' values makes one more), and which lists reach which
+ * carrier is solved on those edges once the module is verified (buffer_lists, below): the code is walked once, by the
+ * verifier, with the arguments it verified. */
+#define FLOW_OTHER (UINT64_C(1) << 63)
+enum { FLOW_NONE, FLOW_ESCAPED, FLOW_LISTS }; /* nodes: none, past the event, then each state's list, each frame's locals,
+                                                 each signature item (a function's parameters, then its results), the joins' */
+typedef struct { uint64_t bits; uint32_t node; } Origin; /* a list value: the lists it is, and the carrier whose values it is too */
+typedef struct {
+    uint64_t *value;     /* per node: the lists its values may be (those put there; all that reach it once solved) */
+    uint32_t *from, *to; /* the edges */
+    uint32_t *bit;       /* per state: a candidate's bit + 1, else 0 */
+    uint32_t nodes, node_room, edges, edge_room, locals, items, frame, candidates; /* locals, items: their first nodes */
+    bool failed;         /* out of memory while it walked */
+} Flow;
+static _Thread_local Flow *flowing; /* the load's, while it verifies */
+
+static void flow_edge(Flow *flow, uint32_t from, uint32_t to) {
+    if (flow->edges == flow->edge_room) {
+        uint32_t room = flow->edge_room ? flow->edge_room * 2 : 256;
+        uint32_t *f = realloc(flow->from, room * sizeof(*f)), *t = f ? realloc(flow->to, room * sizeof(*t)) : NULL;
+        if (f) flow->from = f;
+        if (t) flow->to = t;
+        if (!f || !t) {
+            flow->failed = true;
+            return;
+        }
+        flow->edge_room = room;
+    }
+    flow->from[flow->edges] = from, flow->to[flow->edges++] = to;
+}
+
+/* A value goes to a carrier. */
+static void flow_into(Flow *flow, Origin value, uint32_t to) {
+    flow->value[to] |= value.bits;
+    if (value.node) flow_edge(flow, value.node, to);
+}
+
+/* The value a join's two branches bring to one stack slot. */
+static Origin flow_join(Flow *flow, Origin a, Origin b) {
+    Origin both = {a.bits | b.bits, a.node ? a.node : b.node};
+    if (!a.node || !b.node || a.node == b.node) return both;
+    if (flow->nodes == flow->node_room) {
+        uint32_t room = flow->node_room * 2;
+        uint64_t *value = realloc(flow->value, room * sizeof(*value));
+        if (!value) {
+            flow->failed = true;
+            return both;
+        }
+        memset(value + flow->node_room, 0, (room - flow->node_room) * sizeof(*value));
+        flow->value = value, flow->node_room = room;
+    }
+    both.node = flow->nodes++;
+    flow_edge(flow, a.node, both.node), flow_edge(flow, b.node, both.node);
+    return both;
+}
+
+static bool event_list_state(const PureModule *m, uint32_t list);
+
+/* What op takes (in: its operands, bottom to top; the verifier found their types right) goes where it carries. */
+static void flow_consume(Flow *flow, const PureModule *m, const PureOp *op, const Origin *in, unsigned pops) {
+    uint32_t arg = op->arg, to = FLOW_ESCAPED; /* anything not named here: past the event */
+    switch (op->op) {
+    case PURE_OP_LOCAL_STORE: to = flow->locals + flow->frame * PURE_MODULE_LOCALS + (arg & 0xFF); break;
+    case PURE_OP_LIST_BIND: to = FLOW_LISTS + arg; break;
+    case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_ITEM_SET: case PURE_OP_APPEND_IN: {
+        uint32_t list = op->op == PURE_OP_LIST_APPEND || op->op == PURE_OP_LIST_INSERT ? arg : arg & 0xFFFF;
+        if (event_list_state(m, list)) to = FLOW_LISTS + list; /* (a kept list's items: past the event) */
+        break;
+    }
+    case PURE_OP_CALL: case PURE_OP_RETURN: {
+        const PureFunction *f = &m->function[arg];
+        uint32_t first = flow->items + f->first + (op->op == PURE_OP_RETURN ? f->params : 0);
+        for (unsigned k = 0; k < pops; ++k)
+            if (in[k].bits || in[k].node) flow_into(flow, in[k], first + k);
+        return;
+    }
+    default: break;
+    }
+    for (unsigned k = 0; k < pops; ++k)
+        if (in[k].bits || in[k].node) flow_into(flow, in[k], to);
+}
+
+/* The value op pushes (out: its type). */
+static Origin flow_produce(const Flow *flow, const PureModule *m, const PureOp *op, unsigned char out) {
+    if (out != T_LIST) return (Origin){0};
+    uint32_t arg = op->arg;
+    switch (op->op) {
+    case PURE_OP_LIST_VALUE: return (Origin){flow->bit[arg] ? UINT64_C(1) << (flow->bit[arg] - 1) : FLOW_OTHER, FLOW_LISTS + arg};
+    case PURE_OP_LOCAL_LOAD: return (Origin){0, flow->locals + flow->frame * PURE_MODULE_LOCALS + (arg & 0xFF)};
+    case PURE_OP_ITEM_GET: return event_list_state(m, arg & 0xFFFF) ? (Origin){0, FLOW_LISTS + (arg & 0xFFFF)} : (Origin){FLOW_OTHER, 0};
+    default: return (Origin){FLOW_OTHER, 0};
+    }
+}
+
 /* Whether a walk among walks walks list. */
 static bool walking(const uint32_t *walked, unsigned walks, uint32_t list) {
     for (unsigned k = 0; k < walks; ++k)
@@ -525,6 +627,9 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
     if (fn >= 0) where |= IN_FUNCTION;
     unsigned char types[PURE_MODULE_STACK], owners[PURE_MODULE_STACK];
     Join joins[PURE_MODULE_JOINS];
+    Flow *flow = flowing; /* (a module with a candidate for a typed buffer: what each list value may be, joins' too) */
+    Origin origin_room[PURE_MODULE_STACK], join_origins[PURE_MODULE_JOINS][PURE_MODULE_STACK];
+    Origin *origins = flow ? memset(origin_room, 0, sizeof(origin_room)) : NULL;
     unsigned open = 0;
     int height = 0;
     bool reachable = true;
@@ -532,6 +637,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         for (const PureFunction *f = &m->function[fn]; height < f->params; ++height) {
             types[height] = signature_stack_type(m, f->first + (uint32_t)height);
             owners[height] = (unsigned char)(types[height] == T_LIST ? m->signature_record[f->first + height] : 0);
+            if (flow) origins[height] = (Origin){0, flow->items + f->first + (uint32_t)height};
         }
     for (uint32_t i = 0; i <= block.length; ++i) {
         uint32_t pc = block.start + i;
@@ -541,10 +647,14 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (join < open) {
             if (target[i] || (reachable && !same_stack(&joins[join], height, types, owners)))
                 REFUSE("join with different stacks");
+            if (flow)
+                for (int k = 0; k < joins[join].height; ++k)
+                    origins[k] = reachable ? flow_join(flow, origins[k], join_origins[join][k]) : join_origins[join][k];
             height = joins[join].height;
             memcpy(types, joins[join].types, (size_t)height);
             memcpy(owners, joins[join].owners, (size_t)height);
             joins[join] = joins[--open];
+            if (flow && join != open) memcpy(join_origins[join], join_origins[open], (size_t)joins[join].height * sizeof(Origin));
             reachable = true;
         } else if (target[i]) {
             if (reachable && height) REFUSE("join with different stacks");
@@ -615,6 +725,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             int from = height - 1 - (int)arg, to = pick ? height++ : from;
             types[to] = pick ? types[from] : types[height - 1];
             owners[to] = pick ? owners[from] : owners[height - 1];
+            if (flow) origins[to] = pick ? origins[from] : origins[height - 1];
             if (!pick) height = from + 1;
             continue;
         }
@@ -712,6 +823,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             if (types[height + (int)k] != need[k]) REFUSE("operand type");
         for (unsigned k = 0; k < pops; ++k) /* a list value goes where a list of its record goes */
             if (need[k] == T_LIST && owners[height + (int)k] != list_wanted(m, op, k)) REFUSE("list of another record");
+        if (flow) flow_consume(flow, m, op, origins + height, pops);
         unsigned owner = of == O_ARG ? arg : of == O_REF ? m->state_ref[arg] : of == O_LIST ? list_of(arg) : 0;
         if (kind == A_LOCAL && arg >> 8 & 0xFF) { /* an index local belongs to its list */
             owner = arg >> 16;
@@ -744,6 +856,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
                 if (height == PURE_MODULE_STACK) REFUSE("stack overflow");
                 types[height] = signature_stack_type(m, first + k);
                 owners[height] = (unsigned char)(types[height] == T_LIST ? m->signature_record[first + k] : 0);
+                if (flow) origins[height] = (Origin){0, flow->items + first + k};
                 ++height;
             }
         if (out) {
@@ -752,6 +865,7 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
             if (out == T_LIST) /* the record of its items */
                 owners[height] = (unsigned char)(op->op == PURE_OP_LIST_VALUE ? m->state_ref[arg] : op->op == PURE_OP_LOCAL_LOAD ? arg >> 16 :
                                                  nested_record(m, m->record[m->state_ref[list_of(arg)]].first + item_field(arg)));
+            if (flow) origins[height] = flow_produce(flow, m, op, out);
             types[height++] = out;
         }
         if (kind == A_TARGET) {
@@ -763,11 +877,13 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
                 target[arg - block.start] = 1;
             } else if (join < open) {
                 if (!same_stack(&joins[join], height, types, owners)) REFUSE("join with different stacks");
+                for (int k = 0; flow && k < height; ++k) join_origins[join][k] = flow_join(flow, join_origins[join][k], origins[k]);
             } else {
                 if (target[arg - block.start]) REFUSE("join with different stacks");
                 if (open == PURE_MODULE_JOINS) REFUSE("more than 8 joins ahead");
                 joins[open] = (Join){.target = arg, .height = height};
                 memcpy(joins[open].types, types, (size_t)height);
+                if (flow) memcpy(join_origins[open], origins, (size_t)height * sizeof(Origin));
                 memcpy(joins[open++].owners, owners, (size_t)height);
             }
             if (op->op == PURE_OP_JMP) reachable = false;
@@ -779,6 +895,8 @@ PURE_COLD static const char *verify_code(const PureModule *m, PureBlock block, i
         if (op->op == PURE_OP_RETURN) reachable = false; /* the rest of its stack let go */
         i += skip;
     }
+    for (int k = 0; flow && !handler && reachable && k < height; ++k) /* a view's value */
+        if (origins[k].bits || origins[k].node) flow_into(flow, origins[k], FLOW_ESCAPED);
     if (view == FUNCTION) return reachable ? "function ends without return" : NULL;
     if (!reachable && fn < 0) return "block end is unreachable";
     if (!reachable) return NULL; /* a loop's block in a function that returns */
@@ -1810,6 +1928,101 @@ PURE_COLD static void lend_values(PureModule *m) {
     }
 }
 
+/* Begins a load's flow (Flow, above): the candidates for typed buffers, each event's list of one number, i64 or bool
+ * with no key, bound to nothing and not a message's rows (those the runtime fills, and may borrow). With one at least,
+ * the verifier's walks note where list values go until flow_end. false out of memory. */
+PURE_COLD static bool flow_begin(PureModule *m, Flow *flow) {
+    if (!(m->list_buffer = calloc(m->states + 1, 1)) || !(flow->bit = calloc(m->states + 1, sizeof(*flow->bit)))) return false;
+    for (uint32_t i = 0; i < m->inputs; ++i)
+        for (uint32_t f = 0; f < m->input[i].field_count; ++f) {
+            const PureField *field = &m->field[m->input[i].field_start + f];
+            if (field->type == PURE_FIELD_ROWS && field->rows < m->states) flow->bit[field->rows] = UINT32_MAX;
+        }
+    for (uint32_t s = 0; s < m->states; ++s) {
+        unsigned char type = flow->bit[s] != UINT32_MAX && event_list_state(m, s) && !bound_list(m, s) && !m->state_key[s] &&
+                             m->record[m->state_ref[s]].count == 1 ? field_type(m, s, 0) : 0;
+        flow->bit[s] = (type == T_NUM || type == T_I64 || type == T_BOOL) && flow->candidates < 63 ? ++flow->candidates : 0;
+    }
+    if (!flow->candidates) return true;
+    uint32_t items = 0;
+    for (uint32_t f = 0; f < m->functions; ++f)
+        if ((uint32_t)m->function[f].first + m->function[f].params + m->function[f].results > items)
+            items = (uint32_t)m->function[f].first + m->function[f].params + m->function[f].results;
+    flow->locals = FLOW_LISTS + m->states;
+    flow->items = flow->locals + (m->functions + 2) * PURE_MODULE_LOCALS; /* each function's frame, the handlers', the views' */
+    flow->nodes = flow->items + items;
+    flow->node_room = flow->nodes + 64;
+    if (!(flow->value = calloc(flow->node_room, sizeof(*flow->value)))) return false;
+    flowing = flow;
+    return true;
+}
+
+PURE_COLD static void flow_end(Flow *flow) {
+    flowing = NULL;
+    free(flow->value), free(flow->from), free(flow->to), free(flow->bit);
+    *flow = (Flow){0};
+}
+
+/* Which event lists could be typed buffers (how they run is not changed yet): a candidate
+ * whose value the verifier's walks never found escaping (Flow, above), put in a list's items, or meeting another list's
+ * value in one local, parameter, result or bound list (a function called with a buffer and a list: one form a place); a
+ * list bound only to such values is one as well. list_buffer gets 1 for each. Which lists reach a carrier: those put
+ * there and those of every carrier with an edge to it, a carrier taken again whenever it gains one (64 times at
+ * most). false out of memory. */
+PURE_COLD static bool buffer_lists(PureModule *m, Flow *flow) {
+    if (!flow->candidates) return true;
+    if (flow->failed) return false;
+    uint64_t *value = flow->value;
+    uint32_t nodes = flow->nodes, places = flow->items;
+    for (uint32_t f = 0; f < m->functions; ++f)
+        if (flow->items + m->function[f].first + m->function[f].params + m->function[f].results > places)
+            places = flow->items + m->function[f].first + m->function[f].params + m->function[f].results; /* (the joins' nodes follow) */
+    uint32_t *first = calloc((size_t)nodes + 2, sizeof(*first)), *to = malloc(((size_t)flow->edges + 1) * sizeof(*to)),
+             *taken = malloc(((size_t)nodes + 1) * sizeof(*taken));
+    unsigned char *waits = calloc((size_t)nodes + 1, 1);
+    if (!first || !to || !taken || !waits) {
+        free(first), free(to), free(taken), free(waits);
+        return false;
+    }
+    for (uint32_t e = 0; e < flow->edges; ++e) ++first[flow->from[e] + 1]; /* the edges by the node they leave */
+    for (uint32_t n = 0; n < nodes; ++n) first[n + 1] += first[n];
+    for (uint32_t e = 0; e < flow->edges; ++e) to[first[flow->from[e]]++] = flow->to[e];
+    for (uint32_t n = nodes; n > 0; --n) first[n] = first[n - 1];
+    first[0] = 0;
+    uint32_t count = 0;
+    for (uint32_t n = 0; n < nodes; ++n)
+        if (value[n]) taken[count++] = n, waits[n] = 1;
+    while (count) {
+        uint32_t n = taken[--count];
+        waits[n] = 0;
+        for (uint32_t e = first[n]; e < first[n + 1]; ++e)
+            if ((value[to[e]] | value[n]) != value[to[e]]) {
+                value[to[e]] |= value[n];
+                if (!waits[to[e]]) taken[count++] = to[e], waits[to[e]] = 1;
+            }
+    }
+    free(first), free(to), free(taken), free(waits);
+    /* Lost: escaped, put in a list's items, or in a place with a list of another form (one lost counts as one). */
+    uint64_t lost = value[FLOW_ESCAPED] & ~FLOW_OTHER;
+    for (uint32_t s = 0; s < m->states; ++s)
+        if (event_list_state(m, s) && !bound_list(m, s)) lost |= value[FLOW_LISTS + s] & ~FLOW_OTHER;
+    for (bool more = true; more;) {
+        more = false;
+        uint64_t other = FLOW_OTHER | lost;
+        for (uint32_t c = FLOW_LISTS; c < places; ++c) { /* a bound list, a local, a parameter or a result */
+            uint64_t held = c < flow->locals && !bound_list(m, c - FLOW_LISTS) ? 0 : value[c];
+            if (held & other && held & ~other) {
+                lost |= held & ~other;
+                more = true;
+            }
+        }
+    }
+    for (uint32_t s = 0; s < m->states; ++s)
+        m->list_buffer[s] = flow->bit[s] ? !(lost >> (flow->bit[s] - 1) & 1)
+                                         : bound_list(m, s) && value[FLOW_LISTS + s] && !(value[FLOW_LISTS + s] & (FLOW_OTHER | lost));
+    return true;
+}
+
 PURE_COLD PureResult pure_module_read(const char *path, PureModule *out, char *error, size_t error_size) {
     FILE *file = fopen(path, "rb");
     unsigned char *bytes = NULL;
@@ -1900,6 +2113,8 @@ void pure_module_release(PureModule *m) {
     m->runner = 0;
     free(m->height);
     m->height = NULL;
+    free(m->list_buffer);
+    m->list_buffer = NULL;
     free(m->reuse_from), free(m->reuse_length);
     m->reuse_from = m->reuse_length = NULL;
     free(m->keeps), free(m->keep_start);
@@ -1949,6 +2164,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     const char *why;
     uint32_t bad = 0;
     PureResult result = PURE_INVALID;
+    Flow flow = {0}; /* where its event lists' values go, noted while it is verified (typed buffers) */
 #define REFUSE(message, index) do { why = message; bad = (uint32_t)(index); goto refused; } while (0)
     if (error_size) error[0] = 0;
     pure_module_release(out);
@@ -2318,6 +2534,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         for (uint32_t k = 0; k < i; ++k)
             if (out->view_table[i] && out->view_table[k] == out->view_table[i] &&
                 !strcmp(out->view_names[i], out->view_names[k])) REFUSE("duplicate column", i);
+    if (!flow_begin(out, &flow)) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
+    flow.frame = out->functions + 1; /* the views' locals */
     for (uint32_t i = 0; i < out->views; ++i) {
         bad = i;
         bool table = over_state(out, i);
@@ -2361,12 +2582,14 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
     for (uint32_t i = 0; i < out->functions; ++i) {
         bad = i;
         PureFunction *f = &out->function[i];
+        flow.frame = i;
         if ((why = verify_block(out, f->code, FUNCTION, -1, -1, 0, true, 0, NULL, 0, (int)i, &bad))) goto refused;
         if (!locals_agree(out, f->code)) { why = "local used as two things"; goto refused; }
         if (!loops_own_slots(out, f->code)) { why = "loop's slot set in its block"; goto refused; }
         for (uint32_t pc = f->code.start; pc < f->code.start + f->code.length; ++pc) /* its frame's stack: as the verifier went */
             if (out->height[pc] >= f->height) f->height = (uint8_t)(out->height[pc] + 1);
     }
+    flow.frame = out->functions; /* the handlers' locals */
     for (uint32_t i = 0; i < out->handlers; ++i) {
         bad = i;
         if ((why = verify_block(out, out->handler[i].code, -1, -1, -1, out->handler[i].event + 1, true, 0, NULL, 0, -1, &bad)))
@@ -2374,6 +2597,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         if (!locals_agree(out, out->handler[i].code)) { why = "local used as two things"; goto refused; }
         if (!loops_own_slots(out, out->handler[i].code)) { why = "loop's slot set in its block"; goto refused; }
     }
+    flowing = NULL; /* every block is verified: the flow is whole */
     /* A handler's or a function's instruction is its block's alone: what the load proves of it (its height, its plan)
      * is that block's (one shared gave a function a handler's plan: a list lent there was the call's, emptied at its
      * return); views may share a block. One in no block never runs and was never verified: it becomes CONST 0, so the
@@ -2396,6 +2620,11 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         REFUSE("out of memory", 0);
     }
     lend_values(out);
+    if (!buffer_lists(out, &flow)) {
+        result = PURE_ALLOCATION;
+        REFUSE("out of memory", 0);
+    }
+    flow_end(&flow);
     for (uint32_t i = 0; i < out->views; ++i) {
         int given = (int)out->view_arguments[i] - 1;
         plan_folds(out, out->view_code[i], given);
@@ -2518,11 +2747,23 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         REFUSE("out of memory", 0);
     }
     out->runner = out->calls || out->nesting > PURE_MODULE_NESTING ? 2 : out->batches ? 1 : 0;
+    for (uint32_t pc = 0; pc < out->code_count; ++pc) { /* the typed buffers' instructions, once every plan is set */
+        PureOp *op = &out->code[pc];
+        uint32_t list = op->op == PURE_OP_ITEM_GET || op->op == PURE_OP_ITEM_SET ? list_of(op->arg) : op->arg;
+        switch (op->op) {
+        case PURE_OP_ITEM_GET: case PURE_OP_ITEM_SET: case PURE_OP_LIST_APPEND: case PURE_OP_LIST_INSERT: case PURE_OP_LIST_REMOVE:
+        case PURE_OP_LIST_COUNT: case PURE_OP_BYTES_OF: case PURE_OP_INDEX_AT: case PURE_OP_INDEX_FIRST: case PURE_OP_INDEX_LAST:
+            if (list < out->states && out->list_buffer[list]) op->plan |= PLAN_BUFFER;
+            break;
+        default: break;
+        }
+    }
     out->jit = pure_jit_make(out); /* none: the executor runs it all */
     static uint64_t loads;
     out->serial = __atomic_add_fetch(&loads, 1, __ATOMIC_RELAXED);
     return PURE_OK;
 refused:
+    flow_end(&flow);
     if (error_size) snprintf(error, error_size, "%s (%u)", why, bad);
     pure_module_release(out);
     return result;

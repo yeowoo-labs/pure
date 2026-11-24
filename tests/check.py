@@ -2686,6 +2686,121 @@ def module_list_values(aup, pure, work):
     return {'events': 4, 'paths': 3}
 
 
+BUFFER_FLOWS_SOURCE = """record Bag {
+  xs: list of number
+}
+state bags: list of Bag
+state a = 0
+state b = 0
+state c = 0
+input go = message { n: u32 }
+fn total(xs) = sum(x for x in xs)
+fn doubled(ys) {
+  let out: list of number
+  for y in ys { out.append(2 * y) }
+  return out
+}
+on go {
+  let kept: list of number = [1, 2]
+  bags.append(Bag { xs: kept })
+  let mixed: list of number = [3]
+  a = total(mixed)
+  if bags.count > 0 { b = total(bags[0].xs) }
+  let held: list of number = [4]
+  let local_bags: list of Bag
+  local_bags.append(Bag { xs: held })
+  let fine: list of number = [5, 6]
+  let d = doubled(fine)
+  c = total(d) + local_bags.count
+%s}
+"""
+# The same with doubled called once more, with a kept list's value: its parameter now takes two forms of list.
+BUFFER_FLOWS_TWICE = """  if bags.count > 0 {
+    let e = doubled(bags[0].xs)
+    c = c + e.count
+  }
+"""
+# A view whose value is a list its body made: the list goes out of the event as the view's value.
+BUFFER_VIEW_SOURCE = """state n = 3
+input go = message { k: u32 }
+on go { n = go.k }
+view squares {
+  let out: list of number
+  for i in 0 .. n { out.append(i * i) }
+  return out
+}
+"""
+# Two lists that meet at a join (an if's two branches) and then leave the event, or go into an item: both are lost,
+# as lists themselves (a, b) and as what two parameters carry (g, h, through pick's result).
+BUFFER_JOINS_SOURCE = """record Bag {
+  xs: list of number
+}
+state bags: list of Bag
+state c = 0
+input go = message { n: u32 }
+fn pick(n, xs, ys) {
+  return if n > 0 { xs } else { ys }
+}
+on go {
+  let a: list of number = [1]
+  let b: list of number = [2, 3]
+  let e: list of number = [4]
+  let f: list of number = [5]
+  let g: list of number = [6]
+  let h: list of number = [7]
+  bags.append(Bag { xs: if go.n > 0 { a } else { b } })
+  let local_bags: list of Bag
+  local_bags.append(Bag { xs: if go.n > 1 { e } else { e } })
+  let p = pick(go.n, g, h)
+  bags.append(Bag { xs: p })
+  c = local_bags.count + f.count
+}
+"""
+# What the load judges: the event lists of one number, i64 or bool with no key that could be
+# typed buffers, those that could have been and are not, and how many bound lists are buffers with them (a bound list's
+# name is the compiler's register, so its count).
+BUFFER_LISTS = {
+    'sha256': (['let.k', 'let.w'], [], 0),
+    'inflate': (['let.length_base', 'let.length_extra', 'let.distance_base', 'let.distance_extra', 'let.order', 'let.out',
+                 'let.lengths', 'let.distances', 'let.small', 'let.both', 'let.counts', 'let.symbols'], [], 7),
+    'layout': (['let.kids', 'let.pads', 'let.crosses', 'let.bases', 'let.sizes', 'let.frozen'], [], 0),
+    'linebreak': (['let.out'], ['line.points'], 0),  # a message's rows: the runtime fills them, and may borrow them
+    'json': (['let.open'], [], 0),
+    'json_tree': ([], [], 0),
+    'http': ([], [], 0),
+    'dns': ([], [], 0),
+    # kept goes into a kept list's field and held into an event list's item; mixed meets no other list (total is one
+    # expression, written out at each call); fine goes to doubled's parameter and out comes back as its result.
+    'flows': (['let.mixed', 'let.fine', 'let.out'], ['let.kept', 'let.held'], 3),
+    # doubled's parameter takes fine and a kept list's value: one place, two forms, so fine is not one (out still is).
+    'flows_twice': (['let.mixed', 'let.out'], ['let.kept', 'let.held', 'let.fine'], 3),
+    'view_value': ([], ['let.out'], 0),  # a view's value
+    'joins': (['let.f'], ['let.a', 'let.b', 'let.e', 'let.g', 'let.h'], 0),  # e into an item, the others into a kept list's field
+}
+
+
+def module_buffers(aup, pure, work):
+    """Which of an event's lists could be typed buffers, as the load judges it (nothing runs by it yet): the list's
+    value must not leave the event (a state, a kept list, a view's value, an output), must not go into a list's items,
+    and must not meet a list of another form in one local, parameter, result or bound list. module-probe --buffers
+    prints the judgment; here it is held to what was read off aup's examples and to four programs written for the
+    ways of losing it."""
+    judged = {}
+    for name, (buffers, others, bound) in BUFFER_LISTS.items():
+        source, module = EXAMPLES / f'{name}.aup', work / f'buffers_{name}.pmod'
+        written = {'view_value': BUFFER_VIEW_SOURCE, 'joins': BUFFER_JOINS_SOURCE, 'flows': BUFFER_FLOWS_SOURCE % '',
+                   'flows_twice': BUFFER_FLOWS_SOURCE % BUFFER_FLOWS_TWICE}
+        if name in written:
+            source = work / f'buffers_{name}.aup'
+            source.write_text(written[name])
+        compile_module(aup, source, module)
+        done = json.loads(run(pure / 'build/module-probe', '--buffers', module).stdout)
+        named = [n for n in done['buffer'] if not n.startswith('bound.')]
+        assert (named, done['not'], len(done['buffer']) - len(named)) == (buffers, others, bound), (name, done)
+        judged[name] = len(done['buffer'])
+    return {'modules': len(judged), 'buffers': sum(judged.values())}
+
+
 def module_assumptions(aup, pure, work):
     """The compiled code's integers (Pure docs/design/022) where they stop
     holding: a loop whose columns hold small whole numbers until, halfway,
@@ -7447,6 +7562,7 @@ def main():
         report['module_event_lists'] = module_event_lists(aup, pure, work)
         report['module_lent_values'] = module_lent_values(aup, pure, work)
         report['module_list_values'] = module_list_values(aup, pure, work)
+        report['module_buffers'] = module_buffers(aup, pure, work)
         report['module_moved_values'] = module_moved_values(aup, pure, work)
         report['module_store_restarts'] = module_store_restarts(aup, pure, work)
         report['module_specs'] = module_specs(aup, pure, work)
