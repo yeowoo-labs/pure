@@ -492,9 +492,8 @@ PURE_COLD static const char *verify_block(const PureModule *, PureBlock, int vie
                                           bool locals, unsigned nest, uint32_t *walked, unsigned walks, int fn, uint32_t *at);
 
 /* Typed buffers (an event's list held as its numbers alone, 8 bytes each side by side: module-list-shape.h; this is
- * the judgment, by which a list is pinned as one where it is made; the executor reads it as any list, by the list's
- * functions, and its instructions are marked PLAN_BUFFER for what will read the cells where they lie): where the
- * value of an event's list goes. While the load verifies a module that has a candidate (an event's
+ * the judgment, by which a list is pinned as one where it is made and its instructions, marked PLAN_BUFFER, are given
+ * the buffer's steps where the executor alone runs them: buffer_steps): where the value of an event's list goes. While the load verifies a module that has a candidate (an event's
  * list of one number, i64 or bool, with no key, bound to nothing; 63 at most), the verifier's walk (verify_code)
  * carries with each list value on the operand stack what it may be: the candidates it was taken from (a bit each;
  * FLOW_OTHER for any other list) and the carrier it was read from. What carries values past an instruction is a local
@@ -1953,6 +1952,42 @@ PURE_COLD static void lend_values(PureModule *m) {
     }
 }
 
+/* The instructions of typed buffers given the buffer's steps (PURE_OP_BUFFER_*: the runtime's own, as a kept list's
+ * lists' are, so that the others' steps stay as they were), the last thing a load does and only where step alone
+ * runs them, for what else runs a module's code reads its instructions as it goes and knows none of these: so in a
+ * handler's code, a function's and a view's body (a table's filter and columns are run in lanes), and there not in
+ * a block the tier made code of (its code is of the instructions as they were, and what it does not do itself it
+ * gives to their steps), nor in a loop planned as batches (the batch executor's), nor in a fold's block (run in
+ * lanes too). An item's get and set whose plan says nothing else; an append and a remove of a list no index state is
+ * in, the remove in no walk of its list (those move the indexes and the walk's place). */
+PURE_COLD static void buffer_steps(PureModule *m) {
+    uint32_t handlers = (uint32_t)m->handlers, functions = (uint32_t)m->functions, views = (uint32_t)m->views;
+    for (uint32_t k = 0; k < handlers + functions + views; ++k) {
+        PureBlock block = k < handlers ? m->handler[k].code :
+                          k < handlers + functions ? m->function[k - handlers].code : m->view_code[k - handlers - functions];
+        uint32_t end = block.start + block.length, apart = 0; /* apart: the end of the batch's loops and folds' blocks begun */
+        if (!block.length || pure_jit_code(m->jit, block) || (k >= handlers + functions && !m->view_body[k - handlers - functions]))
+            continue;
+        for (uint32_t pc = block.start; pc < end; ++pc) {
+            PureOp *op = &m->code[pc];
+            if ((((op->op == PURE_OP_LOOP || op->op == PURE_OP_EACH) && op->plan & PLAN_BATCH) || op->op == PURE_OP_FOLD) &&
+                pc + 1 + (op->arg >> 16) > apart)
+                apart = pc + 1 + (op->arg >> 16);
+            if (pc < apart || !(op->plan & PLAN_BUFFER)) continue;
+            bool walked = false; /* a remove in a walk of its list */
+            for (uint32_t q = block.start; op->op == PURE_OP_LIST_REMOVE && q < pc; ++q)
+                walked = walked || (m->code[q].op == PURE_OP_EACH && q + 1 + (m->code[q].arg >> 16) > pc && (m->code[q].arg >> 8 & 0xFF) == op->arg);
+            switch (op->op) {
+            case PURE_OP_ITEM_GET: if (!(op->plan & (PLAN_TEXT | PLAN_HOLDS))) op->op = PURE_OP_BUFFER_GET; break;
+            case PURE_OP_ITEM_SET: if (!(op->plan & (PLAN_TEXT | PLAN_ROW))) op->op = PURE_OP_BUFFER_SET; break;
+            case PURE_OP_LIST_APPEND: if (!m->state_indexed[op->arg]) op->op = PURE_OP_BUFFER_APPEND; break;
+            case PURE_OP_LIST_REMOVE: if (!m->state_indexed[op->arg] && !walked) op->op = PURE_OP_BUFFER_DROP; break;
+            default: break;
+            }
+        }
+    }
+}
+
 /* Begins a load's flow (Flow, above): the candidates for typed buffers, each event's list of one number, i64 or bool
  * with no key, bound to nothing and not a message's rows (those the runtime fills, and may borrow). With one at least,
  * the verifier's walks note where list values go until flow_end. false out of memory. */
@@ -2785,6 +2820,7 @@ PURE_COLD PureResult pure_module_load(const void *bytes, size_t size, PureModule
         }
     }
     out->jit = pure_jit_make(out); /* none: the executor runs it all */
+    buffer_steps(out);
     static uint64_t loads;
     out->serial = __atomic_add_fetch(&loads, 1, __ATOMIC_RELAXED);
     return PURE_OK;
@@ -3423,20 +3459,90 @@ static __attribute__((cold, noinline)) int append_kept(PureApp *app, PureArena *
 /* How many values a kept step takes off the stack (net: KEPT_GET's value takes its index's place). */
 static size_t kept_pops(const PureModule *m, const PureOp *op) {
     switch (op->op) {
-    case PURE_OP_KEPT_GET: return 0;
-    case PURE_OP_KEPT_SET: return 2;
+    case PURE_OP_KEPT_GET: case PURE_OP_BUFFER_GET: return 0; /* (a typed buffer's steps take what their instructions do) */
+    case PURE_OP_KEPT_SET: case PURE_OP_BUFFER_SET: return 2;
+    case PURE_OP_BUFFER_APPEND: case PURE_OP_BUFFER_DROP: return 1;
     case PURE_OP_KEPT_APPEND: case PURE_OP_KEPT_INSERT: return m->record[m->state_ref[op->arg]].count + (op->op == PURE_OP_KEPT_INSERT);
     default: return m->record[nested_record(m, m->record[m->state_ref[list_of(op->arg)]].first + item_field(op->arg))].count + 1u;
     }
 }
 
-/* A kept step on the stack below sp: 0 done, else how it stopped and why: 1 a fault, 2 refused, 3 stopped (a result),
- * the fault or the result in the bits above. */
-static __attribute__((cold, noinline)) int kept_step(PureApp *app, PureArena *arena, PureValue *values, const PureOp *op, Slot *stack,
-                                                     size_t sp) {
 #define KEPT_FAULT(f) return (int)(f) << 2 | 1
 #define KEPT_REFUSED(r) return (int)(r) << 2 | 2
 #define KEPT_STOPPED(r) return (int)(r) << 2 | 3
+
+/* A typed buffer's steps (PURE_OP_BUFFER_*), each done on the list's column where the list is held as a buffer and the
+ * column has the item or the room (module-list-shape.h), else by the list's functions, as the instruction it was made
+ * of does it for an event's list of one number with no key (nothing to undo, no index state's place to move, no walk
+ * of it around it: buffer_steps gives these steps to no other). step comes to them by the case and the call it has
+ * for a kept list's steps (kept_step, below), and its code is otherwise as it was: step is built into the executor's
+ * three loops, where a case added moves what the compiler makes of the other instructions' paths (cases of their own
+ * for these moved the suite's works that have no buffer by up to 0.9 % of instructions), and a call that takes the
+ * frame's address there costs a fifth of their instructions. */
+
+/* BUFFER_GET's item where the list is not held as a buffer (the general way's answer). */
+static __attribute__((noinline, cold)) int buffer_got(const PureList *list, uint32_t field, Slot *top) {
+    size_t at = (size_t)top->num;
+    if (at >= pure_list_count(list)) return PURE_FAULT_NOT_FOUND;
+    top->i64 = pure_list_get(list, at, field).i64;
+    return PURE_FAULT_NONE;
+}
+
+/* BUFFER_GET: the item at the index in top, in its place: its 8 bytes where they are. PURE_FAULT_NONE, or the fault. */
+static inline __attribute__((always_inline)) int buffer_get(const PureApp *app, uint32_t arg, Slot *top) {
+    const PureList *list = app->lists[list_of(arg)];
+    const int64_t *cells = pure_buffer_cells(list);
+    size_t at = (size_t)top->num;
+    if (__builtin_expect(!cells, 0)) return buffer_got(list, item_field(arg), top);
+    if (at >= list->count) return PURE_FAULT_NOT_FOUND;
+    top->i64 = cells[at];
+    return PURE_FAULT_NONE;
+}
+
+/* BUFFER_SET, BUFFER_APPEND and BUFFER_DROP on the stack below sp, as a kept step answers (below): 0 done, a fault or
+ * the result that refused it. What the event holds is counted as the instruction counts it. */
+static __attribute__((noinline)) int buffer_step(PureApp *app, const PureOp *op, Slot *stack, size_t sp) {
+    uint32_t arg = op->arg;
+    PureList *list = app->lists[op->op == PURE_OP_BUFFER_SET ? list_of(arg) : arg];
+    int64_t *cells = pure_buffer_cells(list);
+    size_t size = list->bytes;
+    PureResult status;
+    if (op->op == PURE_OP_BUFFER_SET) {
+        size_t at = (size_t)stack[sp - 2].num;
+        if (cells && at < list->count) pure_buffer_set(list, cells, at, stack[sp - 1].i64);
+        else if ((status = pure_list_set(list, at, item_field(arg), (PureCell){.i64 = stack[sp - 1].i64}, NULL)) != PURE_OK)
+            KEPT_REFUSED(status);
+    } else if (op->op == PURE_OP_BUFFER_APPEND) {
+        if (!(cells && pure_buffer_append(list, cells, stack[sp - 1].i64)) &&
+            (status = pure_list_insert(list, list->count, &(PureCell){.i64 = stack[sp - 1].i64}, NULL)) != PURE_OK)
+            KEPT_REFUSED(status);
+    } else { /* BUFFER_DROP */
+        size_t at = (size_t)stack[sp - 1].num;
+        if (cells && at + 1 == list->count) pure_buffer_drop(list);
+        else if ((status = pure_list_remove(list, at, NULL)) != PURE_OK) KEPT_REFUSED(status);
+    }
+    if (!grows(app, (Held){size, 0}, (Held){list->bytes, 0})) KEPT_FAULT(PURE_FAULT_MEMORY);
+    return 0;
+}
+
+static int kept_lists_step(PureApp *app, PureArena *arena, PureValue *values, const PureOp *op, Slot *stack, size_t sp);
+
+/* A kept step, or a typed buffer's, on the stack below sp: 0 done, else how it stopped and why: 1 a fault, 2 refused,
+ * 3 stopped (a result), the fault or the result in the bits above. The way in for both: a buffer's get is done here,
+ * its other steps and a kept list's go on to their own. */
+static __attribute__((cold, noinline)) int kept_step(PureApp *app, PureArena *arena, PureValue *values, const PureOp *op, Slot *stack,
+                                                     size_t sp) {
+    if (op->op == PURE_OP_BUFFER_GET) {
+        int fault = buffer_get(app, op->arg, &stack[sp - 1]);
+        return fault ? fault << 2 | 1 : 0;
+    }
+    if (op->op > PURE_OP_BUFFER_GET) return buffer_step(app, op, stack, sp);
+    return kept_lists_step(app, arena, values, op, stack, sp);
+}
+
+/* A kept list's lists' steps (027's stage 3). */
+static __attribute__((cold, noinline)) int kept_lists_step(PureApp *app, PureArena *arena, PureValue *values, const PureOp *op,
+                                                           Slot *stack, size_t sp) {
     const PureModule *m = app->module;
     uint32_t arg = op->arg, list = op->op == PURE_OP_KEPT_APPEND || op->op == PURE_OP_KEPT_INSERT ? arg : list_of(arg), field = item_field(arg);
     PureList *items = app->lists[list];
@@ -5033,8 +5139,9 @@ static inline __attribute__((always_inline)) int step(Frame *frame, const PureOp
         if (!grows(app, before, (Held){0, pure_list_size(in)})) { kind = PURE_FAULT_MEMORY; FAILED; }
         NEXT;
     }
-    case PURE_OP_KEPT_GET: case PURE_OP_KEPT_SET: case PURE_OP_KEPT_APPEND: case PURE_OP_KEPT_INSERT: case PURE_OP_KEPT_APPEND_IN: {
-        int how = kept_step(app, arena, values, op, stack, sp); /* a kept list's lists (027's stage 3): out of the way */
+    case PURE_OP_KEPT_GET: case PURE_OP_KEPT_SET: case PURE_OP_KEPT_APPEND: case PURE_OP_KEPT_INSERT: case PURE_OP_KEPT_APPEND_IN:
+    case PURE_OP_BUFFER_GET: case PURE_OP_BUFFER_SET: case PURE_OP_BUFFER_APPEND: case PURE_OP_BUFFER_DROP: {
+        int how = kept_step(app, arena, values, op, stack, sp); /* a kept list's lists (027's stage 3), a typed buffer's steps: out of the way */
         sp -= kept_pops(m, op);
         if (how & 3) {
             if ((how & 3) == 1) { kind = (PureFault)(how >> 2); FAILED; }

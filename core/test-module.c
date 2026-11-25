@@ -8018,7 +8018,7 @@ static void typed_buffers(void) {
           held->width[0] == 1 && pure_list_get(held, 0, 0).num == 3);
     pure_list_free(t), pure_list_free(w), pure_list_free(k), pure_list_free(held);
     uint32_t seed = 20261124;
-    size_t steps = 0;
+    size_t steps = 0, direct = 0;
     for (unsigned kind = 0; kind < 3; ++kind) {
         const uint8_t *cell = kind == 0 ? number : kind == 1 ? integer : flag;
         PureList *a = pure_list_new(1, cell), *b = pure_list_new(1, cell);
@@ -8029,12 +8029,19 @@ static void typed_buffers(void) {
             if (kind == 1) v.i64 = (int64_t)((uint64_t)next_random(&seed) << 32 | next_random(&seed)) >> (r >> 8) % 64;
             else v.num = kind == 2 ? (double)(r >> 8 & 1) : values[(r >> 8) % LEN(values)];
             size_t count = pure_list_count(a), at = count ? next_random(&seed) % count : 0;
+            int64_t *own = pure_buffer_cells(a); /* three times in four by the buffer's own functions, where it has a column */
             if (what < 9) { /* an item at its end */
-                CHECK(pure_list_insert(a, count, &v, NULL) == PURE_OK && pure_list_insert(b, count, &v, NULL) == PURE_OK);
+                if (own && r >> 30 && pure_buffer_append(a, own, v.i64)) ++direct;
+                else CHECK(pure_list_insert(a, count, &v, NULL) == PURE_OK);
+                CHECK(pure_list_insert(b, count, &v, NULL) == PURE_OK);
             } else if (what < 12 && count) {
-                CHECK(pure_list_set(a, at, 0, v, NULL) == PURE_OK && pure_list_set(b, at, 0, v, NULL) == PURE_OK);
+                if (own && r >> 30) pure_buffer_set(a, own, at, v.i64), ++direct;
+                else CHECK(pure_list_set(a, at, 0, v, NULL) == PURE_OK);
+                CHECK(pure_list_set(b, at, 0, v, NULL) == PURE_OK);
             } else if (what < 15 && count) {
-                CHECK(pure_list_remove(a, count - 1, NULL) == PURE_OK && pure_list_remove(b, count - 1, NULL) == PURE_OK);
+                if (own && r >> 30) pure_buffer_drop(a), ++direct;
+                else CHECK(pure_list_remove(a, count - 1, NULL) == PURE_OK);
+                CHECK(pure_list_remove(b, count - 1, NULL) == PURE_OK);
             } else if (what == 15 && !(r >> 8 & 15)) {
                 pure_list_clear(a), pure_list_clear(b);
             }
@@ -8085,7 +8092,7 @@ static void typed_buffers(void) {
 
     /* The load: xs grows and shrinks at its end (a buffer); ys takes an insert (none); zs is removed from at its first
      * item (none). run: xs = [5, 300, 0.5] less its last, xs[0] = 7; ys = [9]; zs = [1, 2] less its first;
-     * n = xs[1] + xs.count + xs[0] + zs[0]. */
+     * n = xs[1] + xs.count + xs[0] + zs[0] + sum(x for x in xs). */
     enum { N, XS, YS, ZS, AT = PURE_OP_INDEX_AT };
     static const S nums[] = {{"n", 0}};
     static const T states[] = {{"let.xs", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}, {"let.ys", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0},
@@ -8100,31 +8107,54 @@ static void typed_buffers(void) {
         {C, 0, 1}, {AT, XS, 0}, {IG, ITEM(XS, 0), 0}, {LC, XS, 0}, {ADD, 0, 0},
         {XF, XS, 0}, {IG, ITEM(XS, 0), 0}, {ADD, 0, 0},
         {XF, YS, 0}, {C, 0, 9}, {LI, YS, 0}, {C, 0, 1}, {LA, ZS, 0}, {C, 0, 2}, {LA, ZS, 0}, {XF, ZS, 0}, {LR, ZS, 0},
-        {XF, ZS, 0}, {IG, ITEM(ZS, 0), 0}, {ADD, 0, 0}, {ST, N, 0},
+        {XF, ZS, 0}, {IG, ITEM(ZS, 0), 0}, {ADD, 0, 0},
+        {PURE_OP_FOLD, FOLDING(PURE_FOLD_SUM, XS, 3), 0}, {PURE_OP_ROW, XS, 0}, {IG, ITEM(XS, 0), 0}, {C, 1, 1}, {ADD, 0, 0}, {ST, N, 0},
         {LC, XS, 0}, {ST, N, 0}, /* peek: n = xs.count */
+        {XF, XS, 0}, {IG, ITEM(XS, 0), 0}, /* the view first: xs's first item (no body: it changes nothing) */
     };
-    static const H handlers[] = {{1, 0, LEN(code) - 2}, {3, LEN(code) - 2, 2}};
-    Spec spec = {nums, 1, inputs, 2, NULL, 0, handlers, 2, code, LEN(code), NULL, 0, states, 3, NULL, 0, NULL, 0, records, 1, NULL, 0};
+    static const H handlers[] = {{1, 0, LEN(code) - 4}, {3, LEN(code) - 4, 2}};
+    static const V viewed[] = {{"first", LEN(code) - 2, 2}};
+    Spec spec = {nums, 1, inputs, 2, viewed, 1, handlers, 2, code, LEN(code), NULL, 0, states, 3, NULL, 0, NULL, 0, records, 1, NULL, 0};
     CHECK(load(spec, &module_a) == PURE_OK);
     CHECK(module_a.list_buffer[XS] == 1 && !module_a.list_buffer[YS] && !module_a.list_buffer[ZS]);
+    unsigned gets = 0, sets = 0, appends = 0, drops = 0, folded = 0;
     for (uint32_t pc = 0; pc < module_a.code_count; ++pc) { /* xs's instructions are a buffer's, the others' not */
         const PureOp *op = &module_a.code[pc];
         bool of_list = op->op == LA || op->op == LI || op->op == LR || op->op == LC || op->op == IG || op->op == IS || op->op == AT ||
                        op->op == XF;
         if (of_list) CHECK(!(op->plan & PLAN_BUFFER) == ((op->arg & 0xFFFF) != XS));
+        /* and its get, set, append and remove have the buffer's steps (no loop here: the executor alone runs it) */
+        if (op->op >= PURE_OP_BUFFER_GET && op->op <= PURE_OP_BUFFER_DROP) CHECK((op->arg & 0xFFFF) == XS && op->plan & PLAN_BUFFER);
+        gets += op->op == PURE_OP_BUFFER_GET, sets += op->op == PURE_OP_BUFFER_SET, appends += op->op == PURE_OP_BUFFER_APPEND,
+        drops += op->op == PURE_OP_BUFFER_DROP;
+        /* (a count, a position and a first item are read as any list's; and the get in the fold's block, and the one
+         * in the view that is no body, are the instructions as they were: those are run in lanes, or may be, which
+         * read the instructions themselves) */
+        if (of_list && (op->arg & 0xFFFF) == XS)
+            CHECK(op->op == LC || op->op == AT || op->op == XF || (op->op == IG && (op[-1].op == PURE_OP_ROW || pc == LEN(code) - 1)));
+        folded += op->op == IG && (op->arg & 0xFFFF) == XS;
     }
+    CHECK(gets == 2 && sets == 1 && appends == 3 && drops == 1 && folded == 2 && !module_a.view_body[0]);
     PureApp app;
     CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     CHECK(app.lists[XS]->pinned && !app.lists[YS]->pinned && !app.lists[ZS]->pinned);
     /* (a buffer that held nothing, with no column yet, is let go as one: nothing counted) */
     CHECK(press(&app, 1) == PURE_OK && app.values[N].num == 0 && !pure_buffer_cells(app.lists[XS]) && !app.buffers_missed);
-    for (int k = 0; k < 3; ++k) CHECK(press(&app, 0) == PURE_OK && app.values[N].num == 300 + 2 + 7 + 2 && !app.buffers_missed);
+    for (int k = 0; k < 3; ++k) CHECK(press(&app, 0) == PURE_OK && app.values[N].num == 300 + 2 + 7 + 2 + 307 && !app.buffers_missed);
     CHECK(app.lists[XS]->pinned && pure_list_form(app.lists[XS]) == 1 && app.lists[XS]->width[0] == 8 && app.lists[XS]->room);
     /* A buffer's list not held as one (its pin taken off here) answers the same, and is counted as the event lets it
      * go holding its two items; a pinned list that is no buffer (zs, by hand) answers as any list, its first item removed. */
     app.lists[XS]->pinned = false;
     CHECK(pure_list_pin(app.lists[ZS]));
-    for (uint64_t k = 1; k <= 2; ++k) CHECK(press(&app, 0) == PURE_OK && app.values[N].num == 300 + 2 + 7 + 2 && app.buffers_missed == k);
+    for (uint64_t k = 1; k <= 2; ++k) CHECK(press(&app, 0) == PURE_OK && app.values[N].num == 300 + 2 + 7 + 2 + 307 && app.buffers_missed == k);
+    /* And were the judgment wrong (zs's instructions given the buffer's steps here, by hand), the remove takes the item
+     * it was asked for, its first, by the list's function: the same answer. */
+    for (uint32_t pc = 0; pc < module_a.code_count; ++pc) {
+        PureOp *op = &module_a.code[pc];
+        if ((op->arg & 0xFFFF) != ZS) continue;
+        op->op = (uint8_t)(op->op == LA ? PURE_OP_BUFFER_APPEND : op->op == LR ? PURE_OP_BUFFER_DROP : op->op == IG ? PURE_OP_BUFFER_GET : op->op);
+    }
+    CHECK(press(&app, 0) == PURE_OK && app.values[N].num == 300 + 2 + 7 + 2 + 307 && app.buffers_missed == 3);
     app.buffers_missed = 0;
     pure_app_stop(&app);
     pure_module_release(&module_a);
@@ -8151,7 +8181,40 @@ static void typed_buffers(void) {
     app.buffers_missed = 0;
     pure_app_stop(&app);
     pure_module_release(&module_a);
-    printf("{\"typed_buffers\":%zu,\"large\":%zu}\n", steps, many);
+    /* Where the buffer's steps are not given: a block the tier made code of (its code is of the instructions as they
+     * were), and an append or a remove of a list an index state is in (they move the index's place). */
+    enum { TS = 1, IX = 2 };
+    static const T tiered[] = {{"let.ts", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}};
+    static const O looping[] = { /* ts.append(1); for i in 0 .. 10 { n = n + 1 }; n = n + ts.count */
+        {C, 0, 1}, {LA, TS, 0}, {C, 0, 0}, {C, 0, 10}, {PURE_OP_LOOP, 0 | 4u << 16, 0}, {L, N, 0}, {C, 0, 1}, {ADD, 0, 0}, {ST, N, 0},
+        {L, N, 0}, {LC, TS, 0}, {ADD, 0, 0}, {ST, N, 0},
+    };
+    static const H loops_[] = {{1, 0, LEN(looping)}};
+    Spec with_loop = {nums, 1, inputs, 1, NULL, 0, loops_, 1, looping, LEN(looping), NULL, 0, tiered, 1, NULL, 0, NULL, 0, records, 1, NULL, 0};
+    CHECK(load(with_loop, &module_a) == PURE_OK && module_a.list_buffer[TS] == 1);
+    bool made = pure_jit_code(module_a.jit, module_a.handler[0].code) != NULL;
+    CHECK(made == (module_a.code[1].op == LA) && (made || module_a.code[1].op == PURE_OP_BUFFER_APPEND));
+    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && press(&app, 0) == PURE_OK && app.values[N].num == 11 &&
+          !app.buffers_missed);
+    pure_app_stop(&app);
+    pure_module_release(&module_a);
+    static const T indexed[] = {{"let.ts", 3 | (uint32_t)PURE_LIST_ROWS << 8, 0}, {"at", PURE_STATE_INDEX, TS}};
+    static const O pointing_[] = { /* ts.append(1); ts.append(2); ts.remove(ts.last); n = ts[0] + ts.count */
+        {C, 0, 1}, {LA, TS, 0}, {C, 0, 2}, {LA, TS, 0}, {XE, TS, 0}, {LR, TS, 0},
+        {XF, TS, 0}, {IG, ITEM(TS, 0), 0}, {LC, TS, 0}, {ADD, 0, 0}, {ST, N, 0},
+    };
+    static const H points_[] = {{1, 0, LEN(pointing_)}};
+    Spec with_index = {nums, 1, inputs, 1, NULL, 0, points_, 1, pointing_, LEN(pointing_), NULL, 0, indexed, 2, NULL, 0, NULL, 0, records, 1, NULL, 0};
+    if (load(with_index, &module_a) == PURE_OK) { /* (an index state in an event's list, where the load takes one) */
+        CHECK(module_a.list_buffer[TS] == 1 && module_a.state_indexed[TS]);
+        CHECK(module_a.code[1].op == LA && module_a.code[3].op == LA && module_a.code[5].op == LR && module_a.code[7].op == PURE_OP_BUFFER_GET);
+        CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK && press(&app, 0) == PURE_OK && app.values[N].num == 2 &&
+              !app.buffers_missed);
+        pure_app_stop(&app);
+        pure_module_release(&module_a);
+        ++steps; /* (counted, so the line below says it ran) */
+    }
+    printf("{\"typed_buffers\":%zu,\"by_the_buffers_own\":%zu,\"large\":%zu}\n", steps, direct, many);
 }
 
 /* A typed buffer's instructions fail where any list's do, for the reason they do, having counted the work they do: a
@@ -8191,9 +8254,6 @@ static void buffer_budgets(void) {
     static const H handlers[] = {{1, 0, 7}, {3, 7, 13}, {5, 20, 8}, {7, 28, 10}, {9, 38, 10}, {11, 48, 2}, {13, 50, 13}};
     Spec spec = {nums, 1, inputs, LEN(inputs), NULL, 0, handlers, LEN(handlers), code, LEN(code), NULL, 0, states, 1,
                  NULL, 0, NULL, 0, records, 1, NULL, 0};
-    CHECK(load(spec, &module_a) == PURE_OK && module_a.list_buffer[XS]);
-    PureApp app;
-    CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
     /* An event's budgets, and what it ends as: its result, its fault, the instruction at fault, the work counted, n. */
     static const struct { uint32_t input; size_t memory; uint64_t budget; PureResult result; PureFault fault; uint32_t pc; uint64_t work; double n; } runs[] = {
         {FILL, 8 * 1000, 0, PURE_BUDGET, PURE_FAULT_MEMORY, 4, 3010, 0},     /* the 1,001st item */
@@ -8214,16 +8274,42 @@ static void buffer_budgets(void) {
         {WALKED, 0, 15, PURE_LIMIT, PURE_FAULT_WORK, 58, 13, 2},             /* (n as the run before left it) */
         {WALKED, 24, 0, PURE_BUDGET, PURE_FAULT_MEMORY, 57, 13, 2},          /* the fourth item */
     };
-    for (size_t r = 0; r < LEN(runs); ++r) {
-        pure_app_memory(&app, runs[r].memory);
-        pure_app_work(&app, runs[r].budget);
-        CHECK(press(&app, runs[r].input) == runs[r].result && app.fault == runs[r].fault && app.fault_pc == runs[r].pc &&
-              app.work == runs[r].work);
-        CHECK(app.values[N].num == runs[r].n && pure_list_count(app.lists[XS]) == 0 && !app.buffers_missed);
+    /* Three times: as the module loads (where the tier makes code of a block, its instructions stay as they are);
+     * loaded for the executor alone (every block but a batch's loop given the buffer's steps); and so with the list
+     * not held as a buffer (its pin taken off by hand: the steps do it by the list's functions, and each event that
+     * lets it go holding items counts it). */
+    char *jit = getenv("PURE_JIT") ? strdup(getenv("PURE_JIT")) : NULL;
+    unsigned steps[3] = {0, 0, 0};
+    for (int alone = 0; alone < 3; ++alone) {
+        if (alone) setenv("PURE_JIT", "0", 1);
+        CHECK(load(spec, &module_a) == PURE_OK && module_a.list_buffer[XS]);
+        if (alone) CHECK(!module_a.jit);
+        for (uint32_t pc = 0; pc < module_a.code_count; ++pc)
+            steps[alone] += module_a.code[pc].op >= PURE_OP_BUFFER_GET && module_a.code[pc].op <= PURE_OP_BUFFER_DROP;
+        CHECK(module_a.code[60].op == LR); /* the walk's remove: its list is the walk's, so the instruction as it was */
+        /* fill's append: in a loop planned as batches it is the instruction as it was (the batch executor reads it) */
+        CHECK(module_a.code[2].op == LOOP && !(module_a.code[2].plan & PLAN_BATCH) == (module_a.code[4].op == PURE_OP_BUFFER_APPEND) &&
+              (module_a.code[4].op == PURE_OP_BUFFER_APPEND || module_a.code[4].op == LA));
+        PureApp app;
+        CHECK(pure_app_start(&app, &module_a, (PureData){0}) == PURE_OK);
+        if (alone == 2) app.lists[XS]->pinned = false;
+        for (size_t r = 0; r < LEN(runs); ++r) {
+            pure_app_memory(&app, runs[r].memory);
+            pure_app_work(&app, runs[r].budget);
+            CHECK(press(&app, runs[r].input) == runs[r].result && app.fault == runs[r].fault && app.fault_pc == runs[r].pc &&
+                  app.work == runs[r].work);
+            CHECK(app.values[N].num == runs[r].n && pure_list_count(app.lists[XS]) == 0 && (alone == 2 || !app.buffers_missed));
+        }
+        CHECK(alone < 2 || app.buffers_missed >= 12); /* (the events that ended with items in it) */
+        app.buffers_missed = 0;
+        pure_app_stop(&app);
+        pure_module_release(&module_a);
     }
-    printf("{\"buffer_budgets\":%zu}\n", LEN(runs));
-    pure_app_stop(&app);
-    pure_module_release(&module_a);
+    if (jit) setenv("PURE_JIT", jit, 1);
+    else unsetenv("PURE_JIT");
+    free(jit);
+    CHECK(steps[1] >= steps[0] && steps[1] >= 12 && steps[2] == steps[1]);
+    printf("{\"buffer_budgets\":%zu,\"steps\":[%u,%u]}\n", LEN(runs), steps[0], steps[1]);
 }
 
 int main(void) {

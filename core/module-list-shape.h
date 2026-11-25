@@ -3,9 +3,9 @@
 
 #include "module-list.h"
 
-/* A list as it lies in memory. It is module-list.c's own, and is shown here for one reader besides: what reads a
- * typed buffer's cells where they lie (the function at the end of this file; today the executor's count of lists not
- * held as buffers, and the tests). Nothing else outside module-list.c reads a field of it. */
+/* A list as it lies in memory. It is module-list.c's own, and is shown here for one reader besides: what reads and
+ * writes a typed buffer's cells where they lie, through the functions at the end of this file (the executor's steps
+ * of a buffer, core/module.c's buffer_step). Nothing else outside module-list.c reads a field of it. */
 struct Node;
 
 /* Where a leaf keeps each field's cells, and what an item stores. */
@@ -96,6 +96,29 @@ struct PureList {
  * a snapshot's copy; and any list the judgment or the pin got wrong. */
 static inline int64_t *pure_buffer_cells(const PureList *list) {
     return list->pinned && list->form == PURE_FORM_FLAT ? (int64_t *)list->columns[0] : NULL;
+}
+
+/* The item at a position within it set to bits (a number's, a bool's or an i64's): as pure_list_set of it. */
+static inline void pure_buffer_set(PureList *list, int64_t *cells, size_t at, int64_t bits) {
+    cells[at] = bits;
+    ++list->version;
+}
+
+/* An item of bits at its end, as pure_list_insert there; false where its column has no room for one more (the list's
+ * own function grows it, or refuses the item past PURE_LIST_ITEMS). */
+static inline bool pure_buffer_append(PureList *list, int64_t *cells, int64_t bits) {
+    if (list->count >= list->room || list->count >= PURE_LIST_ITEMS) return false;
+    cells[list->count++] = bits;
+    list->bytes += list->layout.number_bytes;
+    ++list->version;
+    return true;
+}
+
+/* Its last item taken off (it has one), as pure_list_remove of it. */
+static inline void pure_buffer_drop(PureList *list) {
+    --list->count;
+    list->bytes -= list->layout.number_bytes;
+    ++list->version;
 }
 
 #endif

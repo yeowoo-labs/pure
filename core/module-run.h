@@ -15,6 +15,9 @@ enum {
     PURE_OP_CUR_COUNT, PURE_OP_CUR_AT, PURE_OP_INDEX_LOAD, PURE_OP_INDEX_STORE, PURE_OP_INDEX_MOVE, PURE_OP_INDEX_FIRST,
     PURE_OP_INDEX_LAST, PURE_OP_INDEX_NUM, PURE_OP_INDEX_AT,
     PURE_OP_KEPT_GET, PURE_OP_KEPT_SET, PURE_OP_KEPT_APPEND, PURE_OP_KEPT_INSERT, PURE_OP_KEPT_APPEND_IN,
+    /* A typed buffer's steps (module-list-shape.h): what the load makes of its ITEM_GET, ITEM_SET, LIST_APPEND and
+     * LIST_REMOVE where the executor alone runs them (the same arguments). */
+    PURE_OP_BUFFER_GET, PURE_OP_BUFFER_SET, PURE_OP_BUFFER_APPEND, PURE_OP_BUFFER_DROP,
     PURE_OP_STEPS
 };
 _Static_assert(PURE_OP_STEPS <= 256, "an instruction's op is a byte");
@@ -75,8 +78,9 @@ static inline bool number_op(uint8_t op, double a, double b, double *out) {
  * each round as it opens and again, in the rounds' order, at its end). */
 enum { PLAN_TEXT = 1, PLAN_JOINED = 2, PLAN_HOLDS = 2, PLAN_ROW = 4, PLAN_BATCH = 8, PLAN_RECUR = 16, PLAN_GUARD = 32, PLAN_SPREAD = 64, PLAN_FILTER = 128 };
 /* An item's, a count's or a change's of an event's list that is a typed buffer (a list held as its numbers alone, 8
- * bytes each in one column: module-list-shape.h). Nothing reads the mark yet: the executor, the batches and the tier
- * read the list as any FLAT one, by the list's functions (RECUR's bit, which only a LOCAL_STORE's plan has). */
+ * bytes each in one column: module-list-shape.h). The load reads the mark once, to give the executor's own blocks the
+ * buffer's steps (PURE_OP_BUFFER_*); the batches and the tier read the list as any FLAT one (RECUR's bit, which only
+ * a LOCAL_STORE's plan has). */
 enum { PLAN_BUFFER = PLAN_RECUR };
 #define PURE_REUSE_KEPT UINT32_MAX /* reuse_from at a root whose value later copies of its code take */
 
